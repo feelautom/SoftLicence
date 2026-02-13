@@ -5,7 +5,7 @@
 RSA-4096 cryptographic licensing with hardware fingerprinting, admin dashboard, and built-in security.
 
 [![.NET](https://img.shields.io/badge/.NET-9.0-512BD4)](https://dotnet.microsoft.com/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Elastic%202.0-blue.svg)](LICENSE)
 [![FR](https://img.shields.io/badge/lang-FR-blue.svg)](README.fr.md)
 
 ![Dashboard](screens/Dashboard.png)
@@ -134,4 +134,6 @@ See the [Protection Guide](docs/en/PROTECTION_GUIDE.md) for a complete step-by-s
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+Elastic License 2.0 - see [LICENSE](LICENSE) for details.
+
+You are free to use, modify, and self-host this software. You may **not** offer it as a hosted/managed service (SaaS).
