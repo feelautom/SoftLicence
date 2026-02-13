@@ -1,0 +1,374 @@
+@page "/licenses"
+@inject SoftLicence.Server.Services.AuthService Auth
+@inject LicenseDbContext Db
+@inject IJSRuntime JS
+@inject SoftLicence.Server.Services.ToastService Toast
+@inject SoftLicence.Server.Services.EmailService Mailer
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@using SoftLicence.Core
+@using Microsoft.EntityFrameworkCore
+@using SoftLicence.Server.Components.Shared
+@using SoftLicence.Server.Data
+
+<div class="container-fluid animate-fade">
+    @if (!isAuthorized)
+    {
+        <div class="text-center py-5">
+            <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-danger mb-4"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
+            <h2 class="text-white">Accès Refusé</h2>
+            <p class="text-muted">Vous n'avez pas les permissions nécessaires pour gérer les licences.</p>
+        </div>
+    }
+    else
+    {
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h3>Gestion des licences</h3>
+            <button class="btn btn-primary" @onclick="() => showCreate = !showCreate">
+                @(showCreate ? "Annuler" : "Générer une licence")
+            </button>
+        </div>
+
+        @if (showCreate)
+        {
+            <div class="card p-3 mb-4 animate-fade">
+                <h5>Nouvelle licence</h5>
+                <div class="row g-2 mt-2">
+                    <div class="col-md-2">
+                        <label class="small text-muted">Logiciel</label>
+                        <select class="form-select form-select-sm" @bind="SelectedProductId">
+                            <option value="">-- Choisir --</option>
+                            @foreach (var p in Products)
+                            {
+                                <option value="@p.Id">@p.Name</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-md-2">
+                        <label class="small text-muted">Client</label>
+                        <input class="form-control form-control-sm" placeholder="Nom..." @bind="NewClientName" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="small text-muted">Email</label>
+                        <input class="form-control form-control-sm" type="email" placeholder="Optionnel..." @bind="NewClientEmail" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="small text-muted">Type</label>
+                        <select class="form-select form-select-sm" @bind="SelectedTypeId">
+                            <option value="">-- Choisir --</option>
+                            @foreach (var t in LicenseTypes)
+                            {
+                                <option value="@t.Id">@t.Name</option>
+                            }
+                        </select>
+                    </div>
+                    <div class="col-md-1">
+                        <label class="small text-muted">Jours</label>
+                        <input class="form-control form-control-sm" type="number" placeholder="365" @bind="newValidityDays" />
+                    </div>
+                    <div class="col-md-1">
+                        <label class="small text-muted">Postes</label>
+                        <input class="form-control form-control-sm" type="number" @bind="newMaxSeats" />
+                    </div>
+                    <div class="col-md-2 d-flex align-items-end">
+                        <button class="btn btn-success btn-sm w-100" @onclick="CreateLicense">Générer Clé</button>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @if (GeneratedKey != null)
+        {
+            <div class="alert alert-success border-success animate-pop">
+                <strong>Licence créée ! Voici la clé :</strong>
+                <div class="input-group mt-2">
+                    <input class="form-control fw-bold bg-dark text-success font-monospace" value="@GeneratedKey" readonly />
+                    <button class="btn btn-outline-secondary" @onclick="() => GeneratedKey = null">Fermer</button>
+                </div>
+            </div>
+        }
+
+        <div class="table-responsive">
+            <table class="table table-hover align-middle">
+                <thead>
+                    <tr>
+                        <th>Logiciel</th>
+                        <th>Client</th>
+                        <th>Clé (ID)</th>
+                        <th>Type</th>
+                        <th>Statut</th>
+                        <th class="text-center">Recov.</th>
+                        <th>Réf. / Custom</th>
+                        <th class="text-center">Postes</th>
+                        <th class="text-end">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var l in LicensesList)
+                    {
+                        <tr>
+                            <td class="fw-bold">@l.Product?.Name</td>
+                            <td>
+                                <div class="d-flex flex-column">
+                                    <span>@l.CustomerName</span>
+                                    <small class="text-muted">@l.CustomerEmail</small>
+                                </div>
+                            </td>
+                            <td><code class="text-muted small">@l.LicenseKey.Substring(0, 8)...</code></td>
+                            <td><span class="badge border border-secondary text-info">@l.Type?.Slug</span></td>
+                            <td>
+                                @if (l.IsActive) { <span class="text-success small">● Actif</span> }
+                                else { 
+                                    <div class="d-flex flex-column">
+                                        <span class="text-danger small">● Révoqué</span>
+                                        @if(!string.IsNullOrEmpty(l.RevocationReason)) {
+                                            <small class="text-muted" style="font-size: 0.65rem; max-width: 150px;">@l.RevocationReason</small>
+                                        }
+                                    </div>
+                                }
+                            </td>
+                            <td class="text-center">
+                                @if (l.RecoveryCount > 0)
+                                {
+                                    <span class="badge rounded-pill bg-warning text-dark">@l.RecoveryCount</span>
+                                }
+                                else { <span class="text-muted small">-</span> }
+                            </td>
+                            <td>
+                                <span class="text-muted small">@(string.IsNullOrEmpty(l.Reference) ? "-" : l.Reference)</span>
+                            </td>
+                            <td class="text-center">
+                                @{
+                                    var used = l.Seats?.Count ?? 0;
+                                    var color = used >= l.MaxSeats ? "text-warning" : "text-success";
+                                }
+                                <div class="d-flex flex-column align-items-center" style="cursor: pointer" @onclick="() => ToggleSeats(l.Id)">
+                                    <span class="fw-bold @color">@used / @l.MaxSeats</span>
+                                    <small class="text-muted" style="font-size: 0.7rem">Détails ▾</small>
+                                </div>
+                            </td>
+                            <td class="text-end">
+                                <div class="d-flex gap-2 justify-content-end">
+                                    @if (l.IsActive)
+                                    {
+                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => Revoke(l)" title="Révoquer">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-slash-circle" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M11.354 4.646a.5.5 0 0 0-.708 0l-6 6a.5.5 0 0 0 .708.708l6-6a.5.5 0 0 0 0-.708z"/></svg>
+                                        </button>
+                                    }
+                                    else
+                                    {
+                                        <button class="btn btn-sm btn-outline-success" @onclick="() => Reactivate(l)">Réactiver</button>
+                                    }
+                                </div>
+                            </td>
+                        </tr>
+                        @if (ExpandedLicenseId == l.Id)
+                        {
+                            <tr class="bg-dark bg-opacity-25 animate-fade">
+                                <td colspan="9" class="p-3 border-start border-4 border-primary">
+                                    <div class="d-flex justify-content-between align-items-center mb-2">
+                                        <h6 class="mb-0 text-primary">Postes activés (@(l.Seats?.Count ?? 0))</h6>
+                                        <button class="btn btn-sm btn-outline-warning" @onclick="() => ResetAllSeats(l)">Reset Global</button>
+                                    </div>
+                                    @if (l.Seats == null || !l.Seats.Any())
+                                    {
+                                        <p class="text-muted small italic m-0">Aucun poste activé pour le moment.</p>
+                                    }
+                                    else
+                                    {
+                                        <div class="row row-cols-1 row-cols-md-2 g-2">
+                                            @foreach (var seat in l.Seats)
+                                            {
+                                                <div class="col">
+                                                    <div class="card bg-dark border-secondary p-2 d-flex flex-row justify-content-between align-items-center shadow-sm">
+                                                        <div>
+                                                            <code class="text-info small">@seat.HardwareId</code>
+                                                            <div class="text-muted" style="font-size: 0.7rem;">
+                                                                Activé : @TZ.ToLocal(seat.FirstActivatedAt).ToString("dd/MM/yyyy") |
+                                                                Dernier vu : @(DateTime.UtcNow.Subtract(seat.LastCheckInAt).TotalMinutes < 5 ? "En ligne" : TZ.ToLocal(seat.LastCheckInAt).ToString("dd/MM/yyyy"))
+                                                            </div>
+                                                        </div>
+                                                        <button class="btn btn-sm btn-link text-danger p-0" @onclick="() => DeleteSeat(seat)" title="Délier ce poste">
+                                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-trash" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            }
+                                        </div>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        @if (TotalCount > 0)
+        {
+            <div class="d-flex justify-content-between align-items-center mt-3">
+                <div class="d-flex align-items-center gap-2">
+                    <small class="text-muted">Afficher</small>
+                    <select class="form-select form-select-sm" style="width: 80px;" @bind:get="PageSize" @bind:set="ChangePageSize">
+                        <option value="10">10</option>
+                        <option value="25">25</option>
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                    </select>
+                    <small class="text-muted">sur @TotalCount entrées</small>
+                </div>
+                <nav>
+                    <ul class="pagination pagination-sm mb-0">
+                        <li class="page-item @(CurrentPage == 1 ? "disabled" : "")">
+                            <button class="page-link" @onclick="() => GoToPage(CurrentPage - 1)">Précédent</button>
+                        </li>
+                        <li class="page-item disabled"><span class="page-link">Page @CurrentPage / @TotalPages</span></li>
+                        <li class="page-item @(CurrentPage >= TotalPages ? "disabled" : "")">
+                            <button class="page-link" @onclick="() => GoToPage(CurrentPage + 1)">Suivant</button>
+                        </li>
+                    </ul>
+                </nav>
+            </div>
+        }
+    }
+</div>
+
+@code {
+    private List<License> LicensesList = new();
+    private List<Product> Products = new();
+    private List<LicenseType> LicenseTypes = new();
+    
+    private bool showCreate = false;
+    private string SelectedProductId = "";
+    private string SelectedTypeId = "";
+    private string NewClientName = "";
+    private string NewClientEmail = "";
+    private int? newValidityDays = 365;
+    private int newMaxSeats = 1;
+    private string? GeneratedKey;
+
+    private Guid? ExpandedLicenseId;
+    
+    private bool isAuthorized = false;
+
+    // Pagination
+    private int CurrentPage = 1;
+    private int PageSize = 25;
+    private int TotalCount = 0;
+    private int TotalPages => (int)Math.Ceiling((double)TotalCount / PageSize);
+
+    protected override async Task OnInitializedAsync()
+    {
+        isAuthorized = await Auth.HasPermissionAsync("licenses.view");
+        if (isAuthorized)
+        {
+            await LoadData();
+        }
+    }
+
+    private void ToggleSeats(Guid id)
+    {
+        if (ExpandedLicenseId == id) ExpandedLicenseId = null;
+        else ExpandedLicenseId = id;
+    }
+
+    private async Task ChangePageSize(int size)
+    {
+        PageSize = size;
+        CurrentPage = 1;
+        await LoadData();
+    }
+
+    private async Task GoToPage(int page)
+    {
+        if (page < 1 || page > TotalPages) return;
+        CurrentPage = page;
+        await LoadData();
+    }
+
+    private async Task LoadData()
+    {
+        try
+        {
+            Products = await Db.Products.ToListAsync();
+            LicenseTypes = await Db.LicenseTypes.OrderBy(t => t.Name).ToListAsync();
+            
+            var query = Db.Licenses.AsQueryable();
+            TotalCount = await query.CountAsync();
+
+            if (CurrentPage > TotalPages && TotalPages > 0) CurrentPage = TotalPages;
+            if (CurrentPage < 1) CurrentPage = 1;
+
+            LicensesList = await query.Include(l => l.Product)
+                                      .Include(l => l.Type)
+                                      .Include(l => l.Seats) // Indispensable pour l'UI
+                                      .OrderByDescending(l => l.CreationDate)
+                                      .Skip((CurrentPage - 1) * PageSize)
+                                      .Take(PageSize)
+                                      .ToListAsync();
+        }
+        catch (Exception ex) { Toast.ShowError($"Erreur : {ex.Message}"); }
+    }
+
+    private async Task CreateLicense()
+    {
+        if (string.IsNullOrEmpty(SelectedProductId) || string.IsNullOrEmpty(SelectedTypeId) || string.IsNullOrEmpty(NewClientName))
+        {
+            Toast.ShowError("Champs manquants."); return;
+        }
+
+        var key = Guid.NewGuid().ToString("D").ToUpper();
+        var lic = new License
+        {
+            ProductId = Guid.Parse(SelectedProductId),
+            LicenseTypeId = Guid.Parse(SelectedTypeId),
+            CustomerName = NewClientName,
+            CustomerEmail = NewClientEmail,
+            LicenseKey = key,
+            IsActive = true,
+            MaxSeats = newMaxSeats,
+            ExpirationDate = (newValidityDays.HasValue && newValidityDays.Value > 0) 
+                ? DateTime.UtcNow.AddDays(newValidityDays.Value) 
+                : null
+        };
+
+        Db.Licenses.Add(lic);
+        await Db.SaveChangesAsync();
+        GeneratedKey = key;
+        
+        if (!string.IsNullOrWhiteSpace(NewClientEmail))
+        {
+            try {
+                var prod = Products.First(p => p.Id == lic.ProductId);
+                await Mailer.SendLicenseEmailAsync(NewClientEmail, NewClientName, prod.Name, key);
+                Toast.ShowSuccess("Email envoyé !");
+            } catch { }
+        }
+
+        NewClientName = ""; NewClientEmail = ""; showCreate = false; newMaxSeats = 1;
+        await LoadData();
+    }
+
+    private async Task Revoke(License l) { l.IsActive = false; await Db.SaveChangesAsync(); Toast.ShowInfo("Révoquée."); await LoadData(); }
+    private async Task Reactivate(License l) { l.IsActive = true; await Db.SaveChangesAsync(); Toast.ShowSuccess("Réactivée."); await LoadData(); }
+    
+    private async Task DeleteSeat(LicenseSeat seat)
+    {
+        Db.LicenseSeats.Remove(seat);
+        await Db.SaveChangesAsync();
+        Toast.ShowSuccess("Poste délié.");
+        await LoadData();
+    }
+
+    private async Task ResetAllSeats(License l)
+    {
+        if (l.Seats != null && l.Seats.Any())
+        {
+            Db.LicenseSeats.RemoveRange(l.Seats);
+            l.HardwareId = null; // Reset v1 compat
+            l.ActivationDate = null;
+            await Db.SaveChangesAsync();
+            Toast.ShowSuccess("Tous les postes ont été déliés.");
+            await LoadData();
+        }
+    }
+}

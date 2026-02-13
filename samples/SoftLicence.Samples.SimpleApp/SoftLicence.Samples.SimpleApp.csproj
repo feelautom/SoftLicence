@@ -1,0 +1,35 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SoftLicence.Core\SoftLicence.Core.csproj" />
+    <ProjectReference Include="..\..\src\SoftLicence.UI\SoftLicence.UI.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Obfuscar" Version="2.2.50">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <Target Name="Obfuscate" AfterTargets="Build" Condition=" '$(Configuration)' == 'Release' ">
+    <PropertyGroup>
+      <ObfuscarXmlPath>$(ProjectDir)obfuscar.xml</ObfuscarXmlPath>
+      <InPath>$(TargetDir)</InPath>
+      <OutPath>$(TargetDir)Obfuscated</OutPath>
+    </PropertyGroup>
+    <Exec Command="$(Obfuscar) $(ObfuscarXmlPath)" WorkingDirectory="$(InPath)" />
+    
+    <Message Text="=== OBFUSCATION TERMINÉE ===" Importance="high" />
+    <Message Text="Sortie protégée dans : $(OutPath)" Importance="high" />
+  </Target>
+
+</Project>

@@ -1,0 +1,112 @@
+@inject SoftLicence.Server.Services.AuthService Auth
+
+<nav class="flex-column nav-scrollable">
+    <AuthorizeView>
+        <Authorized>
+            @if (canViewDashboard)
+            {
+                <div class="nav-item px-3">
+                    <NavLink class="nav-link" href="" Match="NavLinkMatch.All">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-2"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg> Dashboard
+                    </NavLink>
+                </div>
+            }
+
+            @if (canViewProducts)
+            {
+                <div class="nav-item px-3">
+                    <NavLink class="nav-link" href="products">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-2"><path d="M12 3v6"/><path d="M16.76 3a2 2 0 0 1 1.8 1.1l2.23 4.479a2 2 0 0 1 .21.891V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9.472a2 2 0 0 1 .211-.894L5.45 4.1A2 2 0 0 1 7.24 3z"/><path d="M3.054 9.013h17.893"/></svg> Logiciels
+                    </NavLink>
+                </div>
+            }
+
+            @if (canViewLicenses)
+            {
+                <div class="nav-item px-3">
+                    <NavLink class="nav-link" href="licenses">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-2"><path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/></svg> Licences
+                    </NavLink>
+                </div>
+            }
+
+            @if (canViewResets)
+            {
+                <div class="nav-item px-3">
+                    <NavLink class="nav-link" href="resets">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-2"><path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="m9.5 14.5 5-5"/><path d="m9.5 9.5 5 5"/></svg> Réinitialisations
+                    </NavLink>
+                </div>
+            }
+
+            @if (canViewAudit)
+            {
+                <div class="nav-item px-3">
+                    <NavLink class="nav-link" href="audit">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-2"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg> Audit
+                    </NavLink>
+                </div>
+            }
+
+            @if (canViewTelemetry)
+            {
+                <div class="nav-item px-3">
+                    <NavLink class="nav-link" href="telemetry">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg> Télémétrie
+                    </NavLink>
+                </div>
+            }
+
+            @if (canViewBackups)
+            {
+                <div class="nav-item px-3">
+                    <NavLink class="nav-link" href="backups">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-2"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg> Sauvegardes
+                    </NavLink>
+                </div>
+            }
+
+            @if (canViewUsers)
+            {
+                <div class="nav-item px-3">
+                    <NavLink class="nav-link" href="users">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> Utilisateurs
+                    </NavLink>
+                </div>
+            }
+        </Authorized>
+    </AuthorizeView>
+</nav>
+
+@code {
+    private bool canViewDashboard;
+    private bool canViewProducts;
+    private bool canViewLicenses;
+    private bool canViewResets;
+    private bool canViewAudit;
+    private bool canViewTelemetry;
+    private bool canViewBackups;
+    private bool canViewUsers;
+    private bool isRoot;
+
+    protected override async Task OnInitializedAsync()
+    {
+        isRoot = await Auth.IsRootAsync();
+        
+        if (isRoot)
+        {
+            canViewDashboard = canViewProducts = canViewLicenses = canViewResets = canViewAudit = canViewTelemetry = canViewBackups = canViewUsers = true;
+        }
+        else
+        {
+            canViewDashboard = await Auth.HasPermissionAsync("dashboard.view");
+            canViewProducts = await Auth.HasPermissionAsync("products.view");
+            canViewLicenses = await Auth.HasPermissionAsync("licenses.view");
+            canViewResets = await Auth.HasPermissionAsync("resets.view");
+            canViewAudit = await Auth.HasPermissionAsync("audit.view");
+            canViewTelemetry = await Auth.HasPermissionAsync("telemetry.view");
+            canViewBackups = await Auth.HasPermissionAsync("backups.view");
+            canViewUsers = await Auth.HasPermissionAsync("users.view");
+        }
+    }
+}

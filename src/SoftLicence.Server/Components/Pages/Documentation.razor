@@ -1,0 +1,177 @@
+@page "/docs"
+@rendermode RenderMode.InteractiveServer
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h3>Documentation technique</h3>
+    <span class="badge bg-primary">Version 1.1</span>
+</div>
+
+<div class="card p-0 mt-4 overflow-hidden border-0">
+    <div class="bg-dark p-2 border-bottom border-secondary">
+        <ul class="nav nav-pills" id="docTabs" role="tablist">
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "client" ? "active" : "")" @onclick="@(() => activeTab = "client")">Intégration WPF</button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "server" ? "active" : "")" @onclick="@(() => activeTab = "server")">Administration</button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "security" ? "active" : "")" @onclick="@(() => activeTab = "security")">Sécurité & audit</button>
+            </li>
+            <li class="nav-item">
+                <button class="nav-link @(activeTab == "api" ? "active" : "")" @onclick="@(() => activeTab = "api")">API reference</button>
+            </li>
+        </ul>
+    </div>
+
+    <div class="card-body p-4 bg-card">
+        @if (activeTab == "client")
+        {
+            <div class="doc-content animate-fade">
+                <h4>🚀 Intégration dans votre logiciel</h4>
+                <p>Pour protéger une application, suivez ces étapes :</p>
+                <ol>
+                    <li>Récupérez la <strong>Clé Publique XML</strong> du logiciel sur ce dashboard.</li>
+                    <li>Utilisez le <code>LicenseActivationViewModel</code> dans votre <code>App.xaml.cs</code>.</li>
+                    <li>Appelez <code>await vm.InitializeAsync()</code> au démarrage.</li>
+                </ol>
+
+                <h5 class="mt-4">Exemple App.xaml.cs</h5>
+                <pre><code>// Dans OnStartup
+var vm = new LicenseActivationViewModel(PublicKey, "MonApp", "https://votre-serveur.fr");
+await vm.InitializeAsync();
+
+if (vm.IsLicensed) { /* Lancer MainWindow */ }</code></pre>
+
+                <h5 class="mt-4">Vérification en temps réel (Live)</h5>
+                <p>Le client intègre un timer qui vérifie la validité de la licence toutes les 2 heures. Si vous révoquez une licence sur ce dashboard, l'application du client se fermera automatiquement dans ce délai.</p>
+            </div>
+        }
+        else if (activeTab == "server")
+        {
+            <div class="doc-content animate-fade">
+                <h4>🛠 Gestion du parc</h4>
+                <h5 class="mt-3">Logiciels</h5>
+                <p>Chaque logiciel possède son propre couple de clés RSA-4096. Ne partagez jamais la clé privée (stockée en base).</p>
+                
+                <h5 class="mt-3">Licences</h5>
+                <p>Une licence est liée à un <strong>Hardware ID</strong> unique lors de sa première activation. Le client ne pourra pas copier son fichier de licence sur un autre PC.</p>
+                
+                <h5 class="mt-3">Réinitialisation (Reset HWID)</h5>
+                <p>Si un client change de matériel, utilisez le bouton "Reset HWID" pour lui permettre de ré-associer sa licence à sa nouvelle machine.</p>
+            </div>
+        }
+        else if (activeTab == "security")
+        {
+            <div class="doc-content animate-fade">
+                <h4>🛡 Protection & surveillance</h4>
+                
+                <h5 class="mt-3 text-warning">Obfuscation (Obfuscar)</h5>
+                <p>Pour protéger votre code contre la décompilation (dnSpy), utilisez le fichier <code>obfuscar.xml</code> fourni dans les exemples.</p>
+
+                <h5 class="mt-4 text-info">Audit Log (Middleware)</h5>
+                <p>Toutes les requêtes vers l'API sont logguées dans l'onglet <strong>Audit</strong>. Nous capturons l'IP réelle, la durée et le statut HTTP.</p>
+            </div>
+        }
+        else if (activeTab == "api")
+        {
+            <div class="doc-content animate-fade">
+                <h4>📡 API reference</h4>
+                <p>Toutes les requêtes doivent être envoyées avec le header <code>Content-Type: application/json</code>.</p>
+
+                <h5 class="text-info mt-4">1. Activation (Public)</h5>
+                <div class="api-box">
+                    <span class="badge bg-success">POST</span> <code>/api/activation</code>
+                    <p class="mt-2">Active une licence sur une machine.</p>
+                    <strong>Paramètres (JSON) :</strong>
+                    <pre><code>{
+  "LicenseKey": "AAAA-BBBB-CCCC",
+  "HardwareId": "ABC-123-XYZ",
+  "AppName": "MySoftware"
+}</code></pre>
+                </div>
+
+                <h5 class="text-info mt-4">2. Vérification Statut (Public)</h5>
+                <div class="api-box">
+                    <span class="badge bg-success">POST</span> <code>/api/activation/check</code>
+                    <p class="mt-2">Vérifie si une licence est toujours valide.</p>
+                </div>
+
+                <h5 class="text-warning mt-4">3. Gestion (Admin)</h5>
+                <p class="small italic">Nécessite le header <code>X-Admin-Secret</code>.</p>
+                
+                <div class="api-box">
+                    <span class="badge bg-success">POST</span> <code>/api/admin/licenses</code>
+                    <p class="mt-2">Génère une nouvelle licence.</p>
+                    <strong>Paramètres (JSON) :</strong>
+                    <pre><code>{
+  "ProductName": "MySoftware",
+  "CustomerName": "Jean Dupont",
+  "CustomerEmail": "jean@mail.com",
+  "TypeSlug": "PRO",
+  "DaysValidity": 365,
+  "Reference": "STRIPE-123"
+}</code></pre>
+                    <p class="small text-muted mt-1"><code>Reference</code> est optionnel : ID de commande, référence client, etc. Ce champ est inclus dans le fichier de licence signé.</p>
+                </div>
+
+                <h5 class="text-info mt-4">4. Réinitialisation (Public)</h5>
+                <p class="small">Permet à un utilisateur de délier sa licence pour l'utiliser sur un autre poste (Self-Service).</p>
+                
+                <div class="api-box">
+                    <span class="badge bg-success">POST</span> <code>/api/activation/reset-request</code>
+                    <p class="mt-2">Demande l'envoi d'un code de réinitialisation par email.</p>
+                    <strong>Paramètres (JSON) :</strong>
+                    <pre><code>{
+  "LicenseKey": "AAAA-BBBB-CCCC",
+  "AppName": "MySoftware"
+}</code></pre>
+                </div>
+
+                <div class="api-box mt-3">
+                    <span class="badge bg-success">POST</span> <code>/api/activation/reset-confirm</code>
+                    <p class="mt-2">Valide le reset avec le code reçu par email.</p>
+                    <strong>Paramètres (JSON) :</strong>
+                    <pre><code>{
+  "LicenseKey": "AAAA-BBBB-CCCC",
+  "AppName": "MySoftware",
+  "ResetCode": "123456"
+}</code></pre>
+                </div>
+
+                <h5 class="text-info mt-4">5. Lecture Télémétrie (Public / API Key)</h5>
+                <p class="small">Permet de récupérer les données de télémétrie d'un produit pour les afficher sur un site externe.</p>
+                
+                <div class="api-box">
+                    <span class="badge bg-primary">GET</span> <code>/api/telemetry</code>
+                    <p class="mt-2">Récupère la liste paginée des événements.</p>
+                    <strong>Header requis :</strong>
+                    <pre><code>X-Product-Key: &lt;VOTRE_API_SECRET_PRODUIT&gt;</code></pre>
+                    <strong>Paramètres optionnels (Query) :</strong>
+                    <ul>
+                        <li><code>page</code> : Numéro de page (défaut: 1)</li>
+                        <li><code>pageSize</code> : Taille de page (défaut: 50)</li>
+                        <li><code>type</code> : Filtre (Event, Diagnostic, Error)</li>
+                    </ul>
+                </div>
+            </div>
+        }
+    </div>
+</div>
+
+<style>
+    .doc-content h4 { color: var(--accent-color); font-weight: bold; border-bottom: 1px solid #333; padding-bottom: 10px; margin-bottom: 20px; }
+    .doc-content h5 { font-size: 1.1rem; font-weight: 600; margin-top: 25px; }
+    .doc-content li { color: #ffffff !important; }
+    .doc-content p { color: #e0e0e0 !important; }
+    .doc-content pre { background: #000; padding: 15px; border-radius: 8px; border: 1px solid #333; color: #00ff00; font-family: 'Consolas', monospace; font-size: 0.9rem; }
+    .api-box { background: #1a1a1a; padding: 15px; border-left: 4px solid #0d6efd; border-radius: 0 8px 8px 0; margin-top: 10px; }
+    .nav-pills .nav-link { color: #aaa; border-radius: 5px; margin-right: 5px; cursor: pointer; }
+    .nav-pills .nav-link.active { background-color: var(--accent-color) !important; color: #fff; }
+    .animate-fade { animation: fadeIn 0.3s; }
+    @@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+</style>
+
+@code {
+    private string activeTab = "client";
+}

@@ -1,0 +1,218 @@
+using Microsoft.EntityFrameworkCore;
+using SoftLicence.Server.Data;
+using System.Collections.Concurrent;
+using System.Security.Cryptography;
+
+namespace SoftLicence.Server.Services;
+
+public class SecurityService
+{
+    private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
+    private readonly ILogger<SecurityService> _logger;
+    private readonly NotificationService _notifier;
+    private readonly IConfiguration _config;
+    private static readonly ConcurrentDictionary<string, (int Score, DateTime LastHit)> _threatScores = new();
+    private static readonly ConcurrentDictionary<string, DateTime> _bannedCache = new();
+
+    public SecurityService(IDbContextFactory<LicenseDbContext> dbFactory, ILogger<SecurityService> logger, NotificationService notifier, IConfiguration config)
+    {
+        _dbFactory = dbFactory;
+        _logger = logger;
+        _notifier = notifier;
+        _config = config;
+    }
+
+    /// <summary>Vérifie si l'IP est dans la whitelist admin (immunité totale contre le scoring).</summary>
+    public bool IsWhitelisted(string ip)
+    {
+        if (ip == "127.0.0.1" || ip == "::1") return true;
+        var allowedIpsStr = _config["AdminSettings:AllowedIps"];
+        if (string.IsNullOrEmpty(allowedIpsStr)) return false;
+        var allowedIps = allowedIpsStr.Split(',').Select(i => i.Trim()).ToList();
+        return allowedIps.Contains(ip);
+    }
+
+    public async Task<bool> IsBannedAsync(string ip)
+    {
+        if (ip == "127.0.0.1" || ip == "::1") return false;
+
+        if (_bannedCache.TryGetValue(ip, out var expiry))
+        {
+            if (expiry > DateTime.UtcNow) return true;
+            _bannedCache.TryRemove(ip, out _);
+        }
+
+        using var db = await _dbFactory.CreateDbContextAsync();
+        var ban = await db.BannedIps.FirstOrDefaultAsync(b => b.IpAddress == ip);
+        
+        if (ban != null)
+        {
+            if (ban.ExpiresAt == null || ban.ExpiresAt > DateTime.UtcNow)
+            {
+                _bannedCache[ip] = ban.ExpiresAt ?? DateTime.MaxValue;
+                return true;
+            }
+            
+            db.BannedIps.Remove(ban);
+            await db.SaveChangesAsync();
+        }
+
+        return false;
+    }
+
+    public async Task ReportThreatAsync(string ip, int points, string reason)
+    {
+        if (ip == "127.0.0.1" || ip == "::1" || ip == "Unknown") return;
+
+        // Immunité : les IPs whitelisted ne sont jamais scorées
+        if (IsWhitelisted(ip)) return;
+
+        var now = DateTime.UtcNow;
+        var entry = _threatScores.AddOrUpdate(ip,
+            (points, now),
+            (key, old) =>
+            {
+                // Décroissance : si le dernier hit date de plus d'1h, on repart de zéro
+                if (now - old.LastHit > TimeSpan.FromHours(1))
+                    return (points, now);
+                return (old.Score + points, now);
+            });
+
+        if (entry.Score >= 100)
+        {
+            await BanIpAsync(ip, reason + $" (Score: {entry.Score})");
+            _threatScores.TryRemove(ip, out _);
+        }
+    }
+
+    public int GetThreatScore(string ip)
+    {
+        if (_threatScores.TryGetValue(ip, out var entry))
+        {
+            // Score expiré (> 1h sans activité) → on le considère à 0
+            if (DateTime.UtcNow - entry.LastHit > TimeSpan.FromHours(1))
+            {
+                _threatScores.TryRemove(ip, out _);
+                return 0;
+            }
+            return entry.Score;
+        }
+        return 0;
+    }
+
+    public async Task BanIpAsync(string ip, string reason)
+    {
+        using var db = await _dbFactory.CreateDbContextAsync();
+        if (await db.BannedIps.AnyAsync(b => b.IpAddress == ip)) return;
+
+        var ban = new BannedIp
+        {
+            IpAddress = ip,
+            Reason = reason,
+            BannedAt = DateTime.UtcNow,
+            ExpiresAt = DateTime.UtcNow.AddDays(1)
+        };
+
+        db.BannedIps.Add(ban);
+        await db.SaveChangesAsync();
+        _bannedCache[ip] = ban.ExpiresAt.Value;
+
+        _logger.LogCritical("IP BANNIE AUTOMATIQUEMENT : {IP} pour {Reason}", ip, reason);
+        
+        _notifier.Notify(NotificationService.Triggers.SecurityIpBanned, 
+            "🚫 IP BANNIE", 
+            $"IP: {ip}\nRaison: {reason}\nScore dépassé.");
+    }
+
+    public async Task CheckForZombieAsync(string hardwareId, string currentIp)
+    {
+        if (string.IsNullOrEmpty(hardwareId) || hardwareId == "Unknown") return;
+
+        using var db = await _dbFactory.CreateDbContextAsync();
+
+        // 1. Analyse : Combien d'IP différentes pour ce HardwareID depuis 24h ?
+        var recentIps = await db.AccessLogs
+            .Where(l => l.HardwareId == hardwareId && l.Timestamp > DateTime.UtcNow.AddHours(-24))
+            .Select(l => l.ClientIp)
+            .Distinct()
+            .ToListAsync();
+
+        // Si l'IP actuelle n'est pas encore en base (car loggée après), on l'ajoute virtuellement pour le compte
+        if (!recentIps.Contains(currentIp) && currentIp != "Unknown" && currentIp != "127.0.0.1")
+        {
+            recentIps.Add(currentIp);
+        }
+
+        // SEUIL ZOMBIE : Plus de 5 IPs différentes en 24h pour le même matériel
+        if (recentIps.Count > 5)
+        {
+            _logger.LogCritical("ZOMBIE DETECTED : HardwareID {Hwid} seen on {Count} IPs !", hardwareId, recentIps.Count);
+
+            // 2. RIPOSTE : Trouver la licence active liée à ce HardwareID
+            var license = await db.Licenses.FirstOrDefaultAsync(l => l.HardwareId == hardwareId && l.IsActive);
+            
+            if (license != null)
+            {
+                license.IsActive = false;
+                license.RevocationReason = "FRAUDE DETECTEE (ZOMBIE) : Partage de licence suspect (Seuil > 5 IPs/24h).";
+                license.RevokedAt = DateTime.UtcNow;
+                
+                await db.SaveChangesAsync();
+
+                _logger.LogCritical("LICENCE REVOQUEE : {Key} (Fraude Zombie)", license.LicenseKey);
+                
+                _notifier.Notify(NotificationService.Triggers.SecurityZombieDetected,
+                    "🧟 ZOMBIE DETECTED",
+                    $"HardwareID: {hardwareId}\nIPs: {recentIps.Count}\nLICENCE {license.LicenseKey} RÉVOQUÉE.");
+            }
+            else
+            {
+                 _notifier.Notify(NotificationService.Triggers.SecurityZombieDetected,
+                    "🧟 ZOMBIE DETECTED (Sans Licence)",
+                    $"HardwareID: {hardwareId}\nIPs: {recentIps.Count}");
+            }
+        }
+    }
+
+    // --- GESTION DES MOTS DE PASSE ---
+
+    public string HashPassword(string password)
+    {
+        return BCrypt.Net.BCrypt.HashPassword(password, 12);
+    }
+
+    public bool VerifyPassword(string password, string hash)
+    {
+        try { return BCrypt.Net.BCrypt.Verify(password, hash); }
+        catch { return false; }
+    }
+
+    public string GenerateSecurePassword()
+    {
+        const string upper = "ABCDEFGHJKLMNPQRSTUVWXYZ"; // No I, O to avoid confusion
+        const string lower = "abcdefghijkmnopqrstuvwxyz"; // No l
+        const string digits = "23456789"; // No 0, 1
+        const string all = upper + lower + digits;
+
+        var chars = new char[15];
+
+        // Ensure at least one of each for complexity
+        chars[0] = upper[RandomNumberGenerator.GetInt32(upper.Length)];
+        chars[1] = lower[RandomNumberGenerator.GetInt32(lower.Length)];
+        chars[2] = digits[RandomNumberGenerator.GetInt32(digits.Length)];
+
+        for (int i = 3; i < 15; i++)
+        {
+            chars[i] = all[RandomNumberGenerator.GetInt32(all.Length)];
+        }
+
+        // Shuffle (Fisher-Yates with crypto RNG)
+        for (int i = chars.Length - 1; i > 0; i--)
+        {
+            int j = RandomNumberGenerator.GetInt32(i + 1);
+            (chars[i], chars[j]) = (chars[j], chars[i]);
+        }
+
+        return new string(chars);
+    }
+}

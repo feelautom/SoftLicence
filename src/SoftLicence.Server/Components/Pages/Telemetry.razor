@@ -1,0 +1,280 @@
+@page "/telemetry"
+@inject LicenseDbContext Db
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@using SoftLicence.Server.Data
+@using Microsoft.EntityFrameworkCore
+@using System.Text.Json
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h3>Télémétrie des produits</h3>
+    <div class="d-flex gap-2">
+        <select class="form-select form-select-sm" style="width: 150px;" @bind:get="FilterProductId" @bind:set="async (v) => { FilterProductId = v; await Refresh(); }">
+            <option value="">Tous les produits</option>
+            @foreach (var p in Products)
+            {
+                <option value="@p.Id.ToString()">@p.Name</option>
+            }
+        </select>
+        <select class="form-select form-select-sm" style="width: 130px;" @bind:get="FilterType" @bind:set="async (v) => { FilterType = v; await Refresh(); }">
+            <option value="">Tous les types</option>
+            <option value="Event">Événements</option>
+            <option value="Diagnostic">Diagnostics</option>
+            <option value="Error">Erreurs</option>
+        </select>
+        <button class="btn btn-primary btn-sm" @onclick="Refresh">Actualiser</button>
+    </div>
+</div>
+
+<div class="table-responsive">
+    <table class="table table-hover table-sm align-middle" style="font-size: 0.85rem;">
+        <thead>
+            <tr>
+                <th>Date (Locale)</th>
+                <th>Produit</th>
+                <th>Type</th>
+                <th>Événement</th>
+                <th>Version</th>
+                <th>Hardware ID</th>
+                <th class="text-end">Détails</th>
+            </tr>
+        </thead>
+        <tbody>
+            @if (Records != null)
+            {
+                @foreach (var rec in Records)
+                {
+                    <tr>
+                        <td class="text-nowrap">@TZ.ToLocal(rec.Timestamp).ToString("dd/MM HH:mm:ss")</td>
+                        <td class="fw-bold">@(rec.Product?.Name ?? rec.AppName)</td>
+                        <td>
+                            <span class="badge @GetTypeBadgeClass(rec.Type)">@rec.Type</span>
+                        </td>
+                        <td>@rec.EventName</td>
+                        <td><small class="text-muted">@rec.Version</small></td>
+                        <td><code class="small">@rec.HardwareId.Substring(0, Math.Min(8, rec.HardwareId.Length))...</code></td>
+                        <td class="text-end">
+                            <button class="btn btn-outline-info btn-sm" @onclick="() => ShowDetails(rec)">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="bi bi-eye" viewBox="0 0 16 16"><path d="M16 8s-3-5.5-8-5.5S0 80 8 0s8 5.5 8 5.5zM1.173 8a13.133 13.133 0 0 1 1.66-2.043C4.12 4.668 5.88 3.5 8 3.5c2.12 0 3.879 1.168 5.168 2.457A13.133 13.133 0 0 1 14.828 8c-.058.087-.122.183-.195.288-.335.48-.83 1.12-1.465 1.755C11.879 11.332 10.119 12.5 8 12.5c-2.12 0-3.879-1.168-5.168-2.457A13.134 13.134 0 0 1 1.172 8z"/><path d="M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM4.5 8a3.5 3.5 0 1 1 7 0 3.5 3.5 0 0 1-7 0z"/></svg>
+                            </button>
+                        </td>
+                    </tr>
+                }
+            }
+        </tbody>
+    </table>
+</div>
+
+@if (TotalCount > 0)
+{
+    <div class="d-flex justify-content-between align-items-center mt-3">
+        <div class="d-flex align-items-center gap-2">
+            <small class="text-muted">Afficher</small>
+            <select class="form-select form-select-sm" style="width: 80px;" @bind:get="PageSize" @bind:set="ChangePageSize">
+                <option value="10">10</option>
+                <option value="25">25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+            </select>
+            <small class="text-muted">sur @TotalCount entrées</small>
+        </div>
+        <nav>
+            <ul class="pagination pagination-sm mb-0">
+                <li class="page-item @(CurrentPage == 1 ? "disabled" : "")">
+                    <button class="page-link" @onclick="() => GoToPage(CurrentPage - 1)">Précédent</button>
+                </li>
+                <li class="page-item disabled"><span class="page-link">Page @CurrentPage / @TotalPages</span></li>
+                <li class="page-item @(CurrentPage >= TotalPages ? "disabled" : "")">
+                    <button class="page-link" @onclick="() => GoToPage(CurrentPage + 1)">Suivant</button>
+                </li>
+            </ul>
+        </nav>
+    </div>
+}
+
+@if (SelectedRecord != null)
+{
+    <div class="modal fade show d-block" style="background: rgba(0,0,0,0.7);" tabindex="-1">
+        <div class="modal-dialog modal-lg modal-dialog-centered">
+            <div class="modal-content bg-dark border-secondary">
+                <div class="modal-header border-secondary">
+                    <h5 class="modal-title">Détails Télémétrie - @SelectedRecord.EventName</h5>
+                    <button type="button" class="btn-close btn-close-white" @onclick="() => SelectedRecord = null"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <small class="text-muted d-block">App / Version</small>
+                            <span>@SelectedRecord.AppName / @SelectedRecord.Version</span>
+                        </div>
+                        <div class="col-md-6">
+                            <small class="text-muted d-block">Hardware ID</small>
+                            <code>@SelectedRecord.HardwareId</code>
+                        </div>
+                    </div>
+                    
+                    <h6 class="mt-4 mb-2">Données de l'événement (@SelectedRecord.Type)</h6>
+                    <div class="p-3 bg-black text-info rounded border border-secondary" style="font-size: 0.85rem; max-height: 400px; overflow-y: auto;">
+                        @if (SelectedRecord.Type == TelemetryType.Event && SelectedRecord.EventData != null)
+                        {
+                            <pre>@FormatJson(SelectedRecord.EventData.PropertiesJson)</pre>
+                        }
+                        else if (SelectedRecord.Type == TelemetryType.Error && SelectedRecord.ErrorData != null)
+                        {
+                            <div class="text-danger fw-bold">@SelectedRecord.ErrorData.ErrorType</div>
+                            <div class="mb-2">@SelectedRecord.ErrorData.Message</div>
+                            <hr class="border-secondary" />
+                            <pre class="small text-muted">@SelectedRecord.ErrorData.StackTrace</pre>
+                        }
+                        else if (SelectedRecord.Type == TelemetryType.Diagnostic && SelectedRecord.DiagnosticData != null)
+                        {
+                            <div class="mb-3">Score Global : <span class="badge bg-info">@SelectedRecord.DiagnosticData.Score / 100</span></div>
+                            
+                            <h6>Résultats :</h6>
+                            <ul class="list-unstyled">
+                                @foreach (var r in SelectedRecord.DiagnosticData.Results)
+                                {
+                                    <li class="mb-2">
+                                        <span class="badge @(r.Success ? "bg-success" : "bg-danger") me-2">@(r.Success ? "OK" : "KO")</span>
+                                        <strong>@r.ModuleName</strong> : @r.Message
+                                    </li>
+                                }
+                            </ul>
+
+                            @if (SelectedRecord.DiagnosticData.Ports.Any())
+                            {
+                                <h6 class="mt-3">Ports :</h6>
+                                <table class="table table-sm table-dark">
+                                    <thead><tr><th>Nom</th><th>Port</th><th>Proto</th></tr></thead>
+                                    <tbody>
+                                        @foreach (var p in SelectedRecord.DiagnosticData.Ports)
+                                        {
+                                            <tr><td>@p.Name</td><td>@p.ExternalPort</td><td>@p.Protocol</td></tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        }
+                        else
+                        {
+                            <span class="text-muted italic">Aucune donnée supplémentaire.</span>
+                        }
+                    </div>
+                </div>
+                <div class="modal-footer border-secondary">
+                    <button type="button" class="btn btn-secondary" @onclick="() => SelectedRecord = null">Fermer</button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+<style>
+    .bg-black { background-color: #000 !important; }
+</style>
+
+@code {
+    [SupplyParameterFromQuery]
+    public string? ProductId { get; set; }
+
+    private List<TelemetryRecord> Records = new();
+    private List<Product> Products = new();
+    private string FilterProductId = "";
+    private string FilterType = "";
+    private TelemetryRecord? SelectedRecord;
+
+    // Pagination
+    private int CurrentPage = 1;
+    private int PageSize = 25;
+    private int TotalCount = 0;
+    private int TotalPages => (int)Math.Ceiling((double)TotalCount / PageSize);
+
+    protected override async Task OnInitializedAsync()
+    {
+        Products = await Db.Products.OrderBy(p => p.Name).ToListAsync();
+        
+        if (!string.IsNullOrEmpty(ProductId))
+        {
+            FilterProductId = ProductId;
+        }
+        
+        await Refresh();
+    }
+
+    private async Task ChangePageSize(int size)
+    {
+        PageSize = size;
+        CurrentPage = 1;
+        await Refresh();
+    }
+
+    private async Task GoToPage(int page)
+    {
+        if (page < 1 || page > TotalPages) return;
+        CurrentPage = page;
+        await Refresh();
+    }
+
+    private string GetTypeBadgeClass(TelemetryType type) => type switch
+    {
+        TelemetryType.Event => "bg-primary",
+        TelemetryType.Diagnostic => "bg-success",
+        TelemetryType.Error => "bg-danger",
+        _ => "bg-secondary"
+    };
+
+    private async Task Refresh()
+    {
+        try
+        {
+            var query = Db.TelemetryRecords
+                .AsSplitQuery()
+                .Include(t => t.Product)
+                .Include(t => t.EventData)
+                .Include(t => t.DiagnosticData).ThenInclude(d => d!.Results)
+                .Include(t => t.DiagnosticData).ThenInclude(d => d!.Ports)
+                .Include(t => t.ErrorData)
+                .AsQueryable();
+
+            if (!string.IsNullOrEmpty(FilterProductId) && Guid.TryParse(FilterProductId, out var pid))
+            {
+                query = query.Where(t => t.ProductId == pid);
+            }
+
+            if (!string.IsNullOrEmpty(FilterType) && Enum.TryParse<TelemetryType>(FilterType, out var type))
+            {
+                query = query.Where(t => t.Type == type);
+            }
+
+            TotalCount = await query.CountAsync();
+
+            if (CurrentPage > TotalPages && TotalPages > 0) CurrentPage = TotalPages;
+            if (CurrentPage < 1) CurrentPage = 1;
+
+            Records = await query.OrderByDescending(t => t.Timestamp)
+                                 .Skip((CurrentPage - 1) * PageSize)
+                                 .Take(PageSize)
+                                 .ToListAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error refreshing telemetry: {ex.Message}");
+        }
+    }
+
+    private void ShowDetails(TelemetryRecord rec)
+    {
+        SelectedRecord = rec;
+    }
+
+    private string FormatJson(string? json)
+    {
+        if (string.IsNullOrEmpty(json)) return "{}";
+        try
+        {
+            var options = new JsonSerializerOptions { WriteIndented = true };
+            var element = JsonSerializer.Deserialize<JsonElement>(json);
+            return JsonSerializer.Serialize(element, options);
+        }
+        catch { return json; }
+    }
+}

@@ -1,0 +1,40 @@
+## [Visual Studio]
+.vs/
+[Bb]in/
+[Oo]bj/
+*.user
+*.userosscache
+*.sln.docstates
+
+## [Core]
+project.lock.json
+project.assets.json
+
+## [Databases]
+*.db
+*.db-shm
+*.db-wal
+
+## [OS]
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+## [Secrets & Keys]
+*.key
+*.pem
+*.pfx
+*.p12
+.env
+.env.*
+secrets.json
+src/SoftLicence.Server/Data/keys/
+
+## [User specific]
+*.log
+*.err
+gen_*.xml
+test_*.xml
+*.lic
+docker-compose.dev.yml
+src/SoftLicence.Server/softlicence.db.pre-migration.bak

@@ -1,0 +1,1087 @@
+@page "/products"
+@inject SoftLicence.Server.Services.AuthService Auth
+@inject LicenseDbContext Db
+@inject SoftLicence.Server.Services.ToastService Toast
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@inject SoftLicence.Server.Services.EncryptionService Encryption
+@inject SoftLicence.Server.Services.BackupService Backup
+@inject IJSRuntime JS
+@inject IWebHostEnvironment Env
+@using SoftLicence.Core
+@using Microsoft.EntityFrameworkCore
+@using SoftLicence.Server.Components.Shared
+@using SoftLicence.Server.Data
+
+<div class="container-fluid animate-fade">
+    @if (!isAuthorized)
+    {
+        <div class="text-center py-5">
+            <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-danger mb-4"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
+            <h2 class="text-white">Accès Refusé</h2>
+            <p class="text-muted">Vous n'avez pas les permissions nécessaires pour gérer les logiciels.</p>
+        </div>
+    }
+    else
+    {
+        @if (isCreating)
+        {
+            <div style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 9999; display: flex; flex-direction: column; align-items: center; justify-content: center; backdrop-filter: blur(8px);">
+                <div class="card p-4 bg-dark border-primary shadow-lg text-center animate-pop" style="min-width: 350px;">
+                    @if (creationStep < 4)
+                    {
+                        <div class="spinner-border text-primary mb-4" style="width: 3rem; height: 3rem;" role="status"></div>
+                        <h4 class="text-white mb-4">Création en cours...</h4>
+                        
+                        <div class="text-start w-100 px-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <div class="me-3">@(creationStep > 1 ? "✅" : (creationStep == 1 ? "⏳" : "○"))</div>
+                                <div class="@(creationStep == 1 ? "text-primary fw-bold" : "text-muted")">Génération RSA-4096</div>
+                            </div>
+                            <div class="d-flex align-items-center mb-2">
+                                <div class="me-3">@(creationStep > 2 ? "✅" : (creationStep == 2 ? "⏳" : "○"))</div>
+                                <div class="@(creationStep == 2 ? "text-primary fw-bold" : "text-muted")">Chiffrement de sécurité</div>
+                            </div>
+                            <div class="d-flex align-items-center mb-2">
+                                <div class="me-3">@(creationStep > 3 ? "✅" : (creationStep == 3 ? "⏳" : "○"))</div>
+                                <div class="@(creationStep == 3 ? "text-primary fw-bold" : "text-muted")">Enregistrement en base</div>
+                            </div>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="text-success mb-3" style="font-size: 3rem;">🛡️</div>
+                        <h4 class="text-white">Sécurité & Sauvegarde</h4>
+                        <p class="text-light mt-3 small">
+                            Le logiciel <strong>@NewProductName</strong> a été créé avec succès.<br/>
+                            Sa clé privée est désormais <strong>chiffrée en base de données</strong>.
+                        </p>
+
+                        <div class="alert alert-warning text-start mt-3 border-warning bg-dark">
+                            <div class="fw-bold mb-1">⚠️ IMPORTANT</div>
+                            <div class="small">
+                                En cas de corruption du serveur ou de perte des clés de protection système, vous ne pourrez plus signer de nouvelles licences.
+                            </div>
+                        </div>
+
+                        <div class="mt-4 d-grid gap-2">
+                            <button class="btn btn-outline-info" @onclick="DownloadPrivateKey">
+                                📥 Télécharger la clé privée (XML)
+                            </button>
+                            <button class="btn btn-primary mt-2" @onclick="FinishCreation">
+                                J'ai effectué ma sauvegarde
+                            </button>
+                        </div>
+                        
+                        <p class="text-muted mt-3 mb-0" style="font-size: 0.7rem;">
+                            Note : La clé téléchargée est en clair. Gardez-la dans un coffre-fort numérique.
+                        </p>
+                    }
+                </div>
+            </div>
+        }
+
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h3>Gestion des logiciels</h3>
+            @if (selectedProduct == null)
+            {
+                <button class="btn btn-primary" @onclick="() => showCreate = !showCreate">
+                    @(showCreate ? "Annuler" : "Nouveau logiciel")
+                </button>
+            }
+            else
+            {
+                <button class="btn btn-outline-secondary" @onclick="() => { selectedProduct = null; }">Retour à la liste</button>
+            }
+        </div>
+
+        @if (selectedProduct == null)
+        {
+            <!-- LISTE DES LOGICIELS -->
+            @if (showCreate)
+            {
+                <div class="card p-3 mb-4 animate-fade">
+                    <div class="input-group mb-2">
+                        <input class="form-control" placeholder="Nom du logiciel (ex: Feeling v1.0)..." @bind="NewProductName" />
+                        <button class="btn btn-success" @onclick="CreateProduct">Créer le logiciel</button>
+                        @if (Env.IsDevelopment())
+                        {
+                            <button class="btn btn-outline-warning" @onclick="() => showImport = !showImport" title="DEV ONLY - Importer depuis des clés existantes">Importer des clés (DEV)</button>
+                        }
+                    </div>
+                    @if (showImport && Env.IsDevelopment())
+                    {
+                        <div class="mt-2 p-3 bg-dark rounded border border-warning animate-fade">
+                            <div class="d-flex align-items-center gap-2 mb-2">
+                                <span class="badge bg-warning text-dark">DEV ONLY</span>
+                                <label class="form-label small text-warning mb-0">Collez votre clé privée RSA (XML) :</label>
+                            </div>
+                            <textarea class="form-control font-monospace bg-black text-info border-secondary" rows="6"
+                                      style="font-size: 0.7rem;"
+                                      placeholder="<RSAKeyValue>...</RSAKeyValue>"
+                                      @bind="importPrivateKeyXml"></textarea>
+                            <div class="text-end mt-2">
+                                <button class="btn btn-warning btn-sm" @onclick="ImportProduct" disabled="@isImporting">
+                                    @if (isImporting) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Importer le produit
+                                </button>
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+
+            <!-- TYPES DE LICENCES -->
+            <div class="card shadow-sm mb-4">
+                <div class="card-body">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <h5 class="text-white mb-0">Types de licences</h5>
+                        <button class="btn btn-sm @(showTypes ? "btn-outline-secondary" : "btn-outline-success")" @onclick="() => showTypes = !showTypes">
+                            @(showTypes ? "Masquer" : "Gérer les types")
+                        </button>
+                    </div>
+                    @if (!showTypes)
+                    {
+                        <div class="d-flex flex-wrap gap-2 mt-2">
+                            @foreach (var type in LicenseTypes)
+                            {
+                                <span class="badge bg-dark border border-secondary px-2 py-1">
+                                    <code class="text-info me-1">@type.Slug</code> @type.Name
+                                    <span class="text-muted ms-1">(@type.DefaultDurationDays j / @type.DefaultMaxSeats poste@(type.DefaultMaxSeats > 1 ? "s" : ""))</span>
+                                    <span class="badge @(type.IsRecurring ? "bg-primary" : "bg-secondary") ms-1" style="font-size: 0.6rem;">@(type.IsRecurring ? "ABO" : "FIXE")</span>
+                                </span>
+                            }
+                            @if (!LicenseTypes.Any())
+                            {
+                                <span class="text-muted small">Aucun type défini.</span>
+                            }
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="input-group mb-3 mt-3">
+                            <input class="form-control" placeholder="Nom (ex: Professionnelle)" @bind="newTypeName" />
+                            <input class="form-control" placeholder="SLUG (ex: PRO)" @bind="newTypeSlug" />
+                            <input class="form-control" type="number" style="max-width: 100px;" title="Durée (jours)" @bind="newTypeDuration" />
+                            <input class="form-control" type="number" style="max-width: 80px;" title="Postes autorisés" @bind="newMaxSeats" />
+                            <div class="input-group-text bg-dark border-secondary">
+                                <input class="form-check-input mt-0" type="checkbox" @bind="isRecurring" title="Abonnement récurrent" />
+                                <span class="ms-2 small text-muted">Abo?</span>
+                            </div>
+                            <button class="btn btn-success" @onclick="CreateLicenseType">Ajouter</button>
+                        </div>
+
+                        <table class="table table-sm table-hover align-middle">
+                            <thead>
+                                <tr>
+                                    <th>Nom</th>
+                                    <th>Slug</th>
+                                    <th class="text-center">Durée</th>
+                                    <th class="text-center">Postes</th>
+                                    <th class="text-center">Mode</th>
+                                    <th class="text-end">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var type in LicenseTypes)
+                                {
+                                    <tr>
+                                        <td>
+                                            @if (editingTypeId == type.Id) { <input class="form-control form-control-sm" @bind="type.Name" /> }
+                                            else { @type.Name }
+                                        </td>
+                                        <td><code class="text-info">@type.Slug</code></td>
+                                        <td class="text-center">
+                                            @if (editingTypeId == type.Id) { <input class="form-control form-control-sm mx-auto" type="number" style="width: 70px" @bind="type.DefaultDurationDays" /> }
+                                            else { @type.DefaultDurationDays }
+                                        </td>
+                                        <td class="text-center">
+                                            @if (editingTypeId == type.Id) { <input class="form-control form-control-sm mx-auto" type="number" style="width: 60px" @bind="type.DefaultMaxSeats" /> }
+                                            else { @type.DefaultMaxSeats }
+                                        </td>
+                                        <td class="text-center">
+                                            @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.IsRecurring" /> }
+                                            else { <span class="badge @(type.IsRecurring ? "bg-primary" : "bg-secondary")">@(type.IsRecurring ? "ABONNEMENT" : "FIXE")</span> }
+                                        </td>
+                                        <td class="text-end">
+                                            @if (editingTypeId == type.Id)
+                                            {
+                                                <button class="btn btn-sm btn-success" @onclick="() => SaveTypeEdit(type)">Sauver</button>
+                                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => editingTypeId = null">Annuler</button>
+                                            }
+                                            else
+                                            {
+                                                <button class="btn btn-sm btn-outline-info" @onclick="() => editingTypeId = type.Id">Modifier</button>
+                                                <button class="btn btn-sm btn-outline-danger" @onclick="() => RequestDeleteType(type)">Supprimer</button>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    }
+                </div>
+            </div>
+
+            <div class="table-responsive mt-4">
+                <table class="table table-hover align-middle">
+                    <thead>
+                        <tr>
+                            <th>Nom du logiciel</th>
+                            <th>ID</th>
+                            <th class="text-center">Licences</th>
+                            <th class="text-end">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var p in ProductsList)
+                        {
+                            <tr style="cursor:pointer" @onclick="() => SelectProduct(p)">
+                                <td class="fw-bold">@p.Name</td>
+                                <td><small class="text-muted">@p.Id</small></td>
+                                <td class="text-center">
+                                    <span class="badge bg-primary">@p.Licenses.Count</span>
+                                </td>
+                                <td class="text-end" @onclick:stopPropagation="true">
+                                    <div class="d-flex gap-2 justify-content-end">
+                                        <button class="btn btn-sm btn-outline-info" @onclick="() => ShowPublicKey(p)" title="Voir Clé XML">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-key" viewBox="0 0 16 16"><path d="M0 8a4 4 0 0 1 7.465-2H14a.5.5 0 0 1 .354.146l1.5 1.5a.5.5 0 0 1 0 .708l-1.5 1.5a.5.5 0 0 1-.708 0L13 9.207l-.646.647a.5.5 0 0 1-.708 0L11 9.207l-.646.647a.5.5 0 0 1-.708 0L9 9.207l-.646.647A.5.5 0 0 1 8 10h-.535A4 4 0 0 1 0 8zm4-3a3 3 0 1 0 2.712 4.285A.5.5 0 0 1 7.163 9h.63l.853-.854a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.793-.793-1-1h-6.63a.5.5 0 0 1-.451-.285A3 3 0 0 0 4 5z"/><path d="M4 8a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/></svg>
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => RequestDelete(p)" title="Supprimer">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-trash" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        else
+        {
+            <!-- VUE DÉTAILLÉE / STATISTIQUES -->
+            <div class="animate-fade">
+                <div class="row g-3 mb-4">
+                    <div class="col-md-8">
+                        <div class="card h-100 p-4">
+                            <div class="d-flex justify-content-between">
+                                <h4 class="text-white">Analyse : @selectedProduct.Name</h4>
+                                <span class="badge bg-dark border border-secondary p-2">Télémétrie API</span>
+                            </div>
+                            
+                            <div class="row mt-4 text-center">
+                                <div class="col-3">
+                                    <h3 class="text-primary">@licTotal</h3>
+                                    <p class="text-muted small">Clés créées</p>
+                                </div>
+                                <div class="col-3 border-start border-secondary">
+                                    <h3 class="text-info">@prodActivations</h3>
+                                    <p class="text-muted small">Activations</p>
+                                </div>
+                                <div class="col-3 border-start border-secondary">
+                                    <h3 class="text-success">@prodChecks</h3>
+                                    <p class="text-muted small">Checks (24h)</p>
+                                </div>
+                                <div class="col-3 border-start border-secondary">
+                                    <h3 class="text-danger">@selectedProduct.Licenses.Count(l => !l.IsActive)</h3>
+                                    <p class="text-muted small">Révoqués</p>
+                                </div>
+                            </div>
+                            
+                            <!-- Tunnel de conversion -->
+                            <div class="mt-4 p-3 bg-dark rounded">
+                                <label class="small text-muted mb-2 fw-bold text-uppercase">Tunnel de conversion (Clés -> Activation)</label>
+                                @{
+                                    var rate = licTotal > 0 ? (prodActivations * 100 / licTotal) : 0;
+                                }
+                                <div class="progress bg-black" style="height: 12px; border-radius: 10px;">
+                                    <div class="progress-bar bg-info progress-bar-striped progress-bar-animated" style="width: @(rate)%"></div>
+                                </div>
+                                <div class="d-flex justify-content-between mt-1">
+                                    <span class="small text-muted">@prodActivations licences actives sur @licTotal générées</span>
+                                    <span class="small fw-bold text-info">@rate %</span>
+                                </div>
+                            </div>
+
+                            <!-- Camembert -->
+                            <div class="mt-4 d-flex justify-content-around align-items-center">
+                                @{
+                                    var activeCount = selectedProduct.Licenses.Count(l => l.IsActive);
+                                    var activePercent = licTotal > 0 ? (activeCount * 100 / licTotal) : 0;
+                                }
+                                <div class="pie-chart" style="background: conic-gradient(#198754 @(activePercent)%, #dc3545 0);">
+                                    <div class="pie-label">@(activePercent)% OK</div>
+                                </div>
+                                <div class="text-muted small">
+                                    <div><span class="badge bg-success me-2">&nbsp;</span> Actif / Valide</div>
+                                    <div class="mt-1"><span class="badge bg-danger me-2">&nbsp;</span> Révoqué / Expiré</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card h-100 p-4 bg-dark border-info shadow-lg">
+                            <h6>Clé publique XML</h6>
+                            <p class="small text-muted mt-2">Obligatoire pour l'intégration du logiciel client.</p>
+                            <textarea class="form-control mt-3 font-monospace text-info border-info" style="font-size: 0.65rem; background:#000;" rows="12" readonly>@selectedProduct.PublicKeyXml</textarea>
+                            <button class="btn btn-sm btn-outline-info mt-3 w-100" @onclick="() => ShowPublicKey(selectedProduct)">Afficher en grand</button>
+                            
+                            <hr class="my-4 border-secondary" />
+                            
+                            <h6>Clé API Produit</h6>
+                            <p class="small text-muted">Utilisez cette clé pour récupérer la télémétrie via l'API (header <code>X-Product-Key</code>).</p>
+                            <div class="input-group">
+                                <input class="form-control form-control-sm font-monospace text-warning" value="@selectedProduct.ApiSecret" readonly />
+                                <button class="btn btn-sm btn-outline-warning" @onclick="() => modalRegen.Show()" title="Régénérer la clé">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-arrow-clockwise" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/><path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/></svg>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TABLEAU LICENCES -->
+                <!-- ONGLETS DE DÉTAILS -->
+                <div class="card p-0 overflow-hidden border-0 shadow-lg">
+                    <div class="bg-dark p-2 border-bottom border-secondary">
+                        <ul class="nav nav-pills" id="productTabs" role="tablist">
+                            <li class="nav-item">
+                                <button class="nav-link @(activeTab == "lic" ? "active" : "")" @onclick="@(() => activeTab = "lic")">Dernières licences</button>
+                            </li>
+                            <li class="nav-item">
+                                <button class="nav-link @(activeTab == "tel" ? "active" : "")" @onclick="@(() => activeTab = "tel")">Télémétrie</button>
+                            </li>
+                            <li class="nav-item">
+                                <button class="nav-link @(activeTab == "log" ? "active" : "")" @onclick="@(() => activeTab = "log")">Journal d'accès</button>
+                            </li>
+                        </ul>
+                    </div>
+
+                    <div class="card-body p-4 bg-card">
+                        @if (activeTab == "lic")
+                        {
+                            <div class="animate-fade">
+                                <div class="table-responsive">
+                                    <table class="table table-sm table-hover align-middle">
+                                        <thead>
+                                            <tr>
+                                                <th>Client</th>
+                                                <th>Type</th>
+                                                <th>Status</th>
+                                                <th class="text-center">Recovery</th>
+                                                <th>Date création</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var lic in prodLicenses)
+                                            {
+                                                <tr>
+                                                    <td>@lic.CustomerName</td>
+                                                    <td><span class="text-muted small">@lic.Type?.Name</span></td>
+                                                    <td>
+                                                        @if (lic.IsActive) { <span class="text-success small">● Actif</span> }
+                                                        else { <span class="text-danger small">● Révoqué</span> }
+                                                    </td>
+                                                    <td class="text-center">
+                                                        @if (lic.RecoveryCount > 0)
+                                                        {
+                                                            <span class="badge rounded-pill bg-warning text-dark">@lic.RecoveryCount</span>
+                                                        }
+                                                        else
+                                                        {
+                                                            <span class="text-muted small">-</span>
+                                                        }
+                                                    </td>
+                                                    <td><small class="text-muted">@TZ.ToLocal(lic.CreationDate).ToString("dd/MM/yyyy")</small></td>
+                                                </tr>
+                                            }
+                                            @if (!prodLicenses.Any()) { <tr><td colspan="5" class="text-center py-4 text-muted">Aucune licence trouvée.</td></tr> }
+                                        </tbody>
+                                    </table>
+                                </div>
+                                
+                                <div class="d-flex justify-content-between align-items-center mt-3">
+                                    <div class="d-flex align-items-center gap-2">
+                                        <small class="text-muted">Afficher</small>
+                                        <select class="form-select form-select-sm" style="width: 75px;" @bind:get="licPageSize" @bind:set="async (v) => { licPageSize = v; licPage = 1; await LoadProductData(); }">
+                                            <option value="10">10</option>
+                                            <option value="25">25</option>
+                                            <option value="50">50</option>
+                                        </select>
+                                        <small class="text-muted">sur @licTotal</small>
+                                    </div>
+                                    <ul class="pagination pagination-sm mb-0">
+                                        <li class="page-item @(licPage == 1 ? "disabled" : "")">
+                                            <button class="page-link" @onclick="() => GoToLicPage(licPage - 1)">Précédent</button>
+                                        </li>
+                                        <li class="page-item disabled"><span class="page-link">@licPage / @(licTotalPages == 0 ? 1 : licTotalPages)</span></li>
+                                        <li class="page-item @(licPage >= licTotalPages ? "disabled" : "")">
+                                            <button class="page-link" @onclick="() => GoToLicPage(licPage + 1)">Suivant</button>
+                                        </li>
+                                    </ul>
+                                </div>
+                            </div>
+                        }
+                        else if (activeTab == "tel")
+                        {
+                            <div class="animate-fade">
+                                <div class="table-responsive">
+                                    <table class="table table-sm table-hover align-middle">
+                                        <thead>
+                                            <tr>
+                                                <th>Date (Locale)</th>
+                                                <th>Événement</th>
+                                                <th>Type</th>
+                                                <th>Version</th>
+                                                <th class="text-end">Détails</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var tel in recentTelemetry)
+                                            {
+                                                <tr>
+                                                    <td><small class="text-muted">@TZ.ToLocal(tel.Timestamp).ToString("dd/MM HH:mm")</small></td>
+                                                    <td>@tel.EventName</td>
+                                                    <td><span class="badge @GetTypeBadgeClass(tel.Type) font-monospace" style="font-size: 0.6rem;">@tel.Type</span></td>
+                                                    <td><small>@tel.Version</small></td>
+                                                    <td class="text-end">
+                                                        <button class="btn btn-outline-info btn-sm" @onclick="() => SelectedRecord = tel" style="padding: 2px 6px;">
+                                                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="bi bi-eye" viewBox="0 0 16 16"><path d="M16 8s-3-5.5-8-5.5S0 80 8 0s8 5.5 8 5.5zM1.173 8a13.133 13.133 0 0 1 1.66-2.043C4.12 4.668 5.88 3.5 8 3.5c2.12 0 3.879 1.168 5.168 2.457A13.133 13.133 0 0 1 14.828 8c-.058.087-.122.183-.195.288-.335.48-.83 1.12-1.465 1.755C11.879 11.332 10.119 12.5 8 12.5c-2.12 0-3.879-1.168-5.168-2.457A13.134 13.134 0 0 1 1.172 8z"/><path d="M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM4.5 8a3.5 3.5 0 1 1 7 0 3.5 3.5 0 0 1-7 0z"/></svg>
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            }
+                                            @if (!recentTelemetry.Any()) { <tr><td colspan="5" class="text-center py-4 text-muted">Aucune donnée de télémétrie.</td></tr> }
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                <div class="d-flex justify-content-between align-items-center mt-3">
+                                    <div class="d-flex align-items-center gap-2">
+                                        <small class="text-muted">Afficher</small>
+                                        <select class="form-select form-select-sm" style="width: 75px;" @bind:get="telPageSize" @bind:set="async (v) => { telPageSize = v; telPage = 1; await LoadProductData(); }">
+                                            <option value="10">10</option>
+                                            <option value="25">25</option>
+                                            <option value="50">50</option>
+                                        </select>
+                                        <small class="text-muted">sur @telTotal</small>
+                                    </div>
+                                    <ul class="pagination pagination-sm mb-0">
+                                        <li class="page-item @(telPage == 1 ? "disabled" : "")">
+                                            <button class="page-link" @onclick="() => GoToTelPage(telPage - 1)">Précédent</button>
+                                        </li>
+                                        <li class="page-item disabled"><span class="page-link">@telPage / @(telTotalPages == 0 ? 1 : telTotalPages)</span></li>
+                                        <li class="page-item @(telPage >= telTotalPages ? "disabled" : "")">
+                                            <button class="page-link" @onclick="() => GoToTelPage(telPage + 1)">Suivant</button>
+                                        </li>
+                                    </ul>
+                                </div>
+                            </div>
+                        }
+                        else if (activeTab == "log")
+                        {
+                            <div class="animate-fade">
+                                <div class="table-responsive">
+                                    <table class="table table-sm table-hover align-middle" style="font-size: 0.85rem;">
+                                        <thead>
+                                            <tr>
+                                                <th>Date (Locale)</th>
+                                                <th>Méthode</th>
+                                                <th>Endpoint</th>
+                                                <th>Statut</th>
+                                                <th>Durée</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var log in prodLogs)
+                                            {
+                                                <tr>
+                                                    <td><small class="text-muted">@TZ.ToLocal(log.Timestamp).ToString("dd/MM HH:mm:ss")</small></td>
+                                                    <td><span class="badge bg-secondary">@log.Method</span></td>
+                                                    <td><code>@log.Endpoint</code></td>
+                                                    <td><span class="badge @GetStatusBadgeClass(log.StatusCode)">@log.StatusCode</span></td>
+                                                    <td class="text-muted">@log.DurationMs ms</td>
+                                                </tr>
+                                            }
+                                            @if (!prodLogs.Any()) { <tr><td colspan="5" class="text-center py-4 text-muted">Aucun log d'accès.</td></tr> }
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                <div class="d-flex justify-content-between align-items-center mt-3">
+                                    <div class="d-flex align-items-center gap-2">
+                                        <small class="text-muted">Afficher</small>
+                                        <select class="form-select form-select-sm" style="width: 75px;" @bind:get="logPageSize" @bind:set="async (v) => { logPageSize = v; logPage = 1; await LoadProductData(); }">
+                                            <option value="10">10</option>
+                                            <option value="25">25</option>
+                                            <option value="50">50</option>
+                                        </select>
+                                        <small class="text-muted">sur @logTotal</small>
+                                    </div>
+                                    <ul class="pagination pagination-sm mb-0">
+                                        <li class="page-item @(logPage == 1 ? "disabled" : "")">
+                                            <button class="page-link" @onclick="() => GoToLogPage(logPage - 1)">Précédent</button>
+                                        </li>
+                                        <li class="page-item disabled"><span class="page-link">@logPage / @(logTotalPages == 0 ? 1 : logTotalPages)</span></li>
+                                        <li class="page-item @(logPage >= logTotalPages ? "disabled" : "")">
+                                            <button class="page-link" @onclick="() => GoToLogPage(logPage + 1)">Suivant</button>
+                                        </li>
+                                    </ul>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+        }
+    }
+</div>
+
+@if (ShowKey != null)
+{
+    <div class="alert alert-info border-info animate-pop fixed-bottom m-4 shadow-lg" style="z-index: 10001">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <strong class="text-dark">Clé publique : @ShowKeyName</strong>
+            <button class="btn btn-sm btn-outline-dark" @onclick="() => ShowKey = null">Fermer</button>
+        </div>
+        <textarea class="form-control bg-dark text-info font-monospace" rows="8" readonly>@ShowKey</textarea>
+    </div>
+}
+
+<ConfirmModal @ref="modalDelete" Title="Supprimer logiciel" Message="@deleteMessage" OnClose="OnDeleteConfirm" />
+<ConfirmModal @ref="modalRegen" Title="Régénérer Clé API" Message="Voulez-vous vraiment générer une nouvelle clé API ? L'ancienne clé ne fonctionnera plus immédiatement." OnClose="OnRegenConfirm" />
+<ConfirmModal @ref="modalDeleteType" Title="Supprimer type de licence" Message="@deleteTypeMsg" OnClose="OnDeleteTypeConfirm" />
+
+@if (SelectedRecord != null)
+{
+    <div class="modal fade show d-block" style="background: rgba(0,0,0,0.8); z-index: 10002;" tabindex="-1">
+        <div class="modal-dialog modal-lg modal-dialog-centered">
+            <div class="modal-content bg-dark border-secondary shadow-lg">
+                <div class="modal-header border-secondary">
+                    <h5 class="modal-title">Détails Télémétrie - @SelectedRecord.EventName</h5>
+                    <button type="button" class="btn-close btn-close-white" @onclick="() => SelectedRecord = null"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <small class="text-muted d-block">App / Version</small>
+                            <span>@SelectedRecord.AppName / @SelectedRecord.Version</span>
+                        </div>
+                        <div class="col-md-6">
+                            <small class="text-muted d-block">Hardware ID</small>
+                            <code>@SelectedRecord.HardwareId</code>
+                        </div>
+                    </div>
+                    
+                    <h6 class="mt-4 mb-2">Données de l'événement (@SelectedRecord.Type)</h6>
+                    <div class="p-3 bg-black text-info rounded border border-secondary" style="font-size: 0.85rem; max-height: 400px; overflow-y: auto;">
+                        @if (SelectedRecord.Type == TelemetryType.Event && SelectedRecord.EventData != null)
+                        {
+                            <pre>@FormatJson(SelectedRecord.EventData.PropertiesJson)</pre>
+                        }
+                        else if (SelectedRecord.Type == TelemetryType.Error && SelectedRecord.ErrorData != null)
+                        {
+                            <div class="text-danger fw-bold">@SelectedRecord.ErrorData.ErrorType</div>
+                            <div class="mb-2">@SelectedRecord.ErrorData.Message</div>
+                            <hr class="border-secondary" />
+                            <pre class="small text-muted">@SelectedRecord.ErrorData.StackTrace</pre>
+                        }
+                        else if (SelectedRecord.Type == TelemetryType.Diagnostic && SelectedRecord.DiagnosticData != null)
+                        {
+                            <div class="mb-3">Score Global : <span class="badge bg-info">@SelectedRecord.DiagnosticData.Score / 100</span></div>
+                            
+                            <h6>Résultats :</h6>
+                            <ul class="list-unstyled">
+                                @foreach (var r in SelectedRecord.DiagnosticData.Results)
+                                {
+                                    <li class="mb-2">
+                                        <span class="badge @(r.Success ? "bg-success" : "bg-danger") me-2">@(r.Success ? "OK" : "KO")</span>
+                                        <strong>@r.ModuleName</strong> : @r.Message
+                                    </li>
+                                }
+                            </ul>
+
+                            @if (SelectedRecord.DiagnosticData.Ports.Any())
+                            {
+                                <h6 class="mt-3">Ports :</h6>
+                                <table class="table table-sm table-dark">
+                                    <thead><tr><th>Nom</th><th>Port</th><th>Proto</th></tr></thead>
+                                    <tbody>
+                                        @foreach (var p in SelectedRecord.DiagnosticData.Ports)
+                                        {
+                                            <tr><td>@p.Name</td><td>@p.ExternalPort</td><td>@p.Protocol</td></tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        }
+                        else
+                        {
+                            <span class="text-muted italic">Aucune donnée supplémentaire.</span>
+                        }
+                    </div>
+                </div>
+                <div class="modal-footer border-secondary">
+                    <button type="button" class="btn btn-secondary" @onclick="() => SelectedRecord = null">Fermer</button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+<style>
+    .pie-chart {
+        width: 120px; height: 120px; border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        box-shadow: 0 0 20px rgba(0,0,0,0.5); border: 4px solid #1e1e1e;
+    }
+    .pie-label {
+        background: #1e1e1e; padding: 5px 10px; border-radius: 20px; font-weight: bold; font-size: 0.75rem; color: #fff;
+    }
+    .animate-fade { animation: fadeIn 0.3s ease-out; }
+    @@keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+    .bg-black { background-color: #000 !important; }
+</style>
+
+@code {
+    private List<Product> ProductsList = new();
+    private string NewProductName = "";
+    private string? ShowKey;
+    private string? ShowKeyName;
+    private bool showCreate = false;
+    private bool isCreating = false;
+    private int creationStep = 0;
+    private string? generatedPrivateKey;
+
+    // Import
+    private bool showImport = false;
+    private bool isImporting = false;
+    private string importPrivateKeyXml = "";
+
+    private Product? selectedProduct;
+    private string activeTab = "lic";
+    private TelemetryRecord? SelectedRecord;
+    
+    private int prodActivations = 0;
+    private int prodChecks = 0;
+    
+    private bool isAuthorized = false;
+
+    // Pagination LOGICIELS (Liste principale)
+    private int CurrentPage = 1;
+    private int PageSize = 25;
+    private int TotalCount = 0;
+    private int TotalPages => (int)Math.Ceiling((double)TotalCount / PageSize);
+
+    // Pagination LICENCES (Détails produit)
+    private List<License> prodLicenses = new();
+    private int licPage = 1;
+    private int licPageSize = 10;
+    private int licTotal = 0;
+    private int licTotalPages => (int)Math.Ceiling((double)licTotal / licPageSize);
+
+    // Pagination TELEMETRIE (Détails produit)
+    private List<TelemetryRecord> recentTelemetry = new();
+    private int telPage = 1;
+    private int telPageSize = 10;
+    private int telTotal = 0;
+    private int telTotalPages => (int)Math.Ceiling((double)telTotal / telPageSize);
+
+    // Pagination AUDIT (Détails produit)
+    private List<AccessLog> prodLogs = new();
+    private int logPage = 1;
+    private int logPageSize = 10;
+    private int logTotal = 0;
+    private int logTotalPages => (int)Math.Ceiling((double)logTotal / logPageSize);
+
+    private async Task ChangePageSize(int size)
+    {
+        PageSize = size;
+        CurrentPage = 1;
+        await LoadData();
+    }
+
+    private async Task GoToPage(int page)
+    {
+        if (page < 1 || page > TotalPages) return;
+        CurrentPage = page;
+        await LoadData();
+    }
+
+    // Handlers pour les tables internes
+    private async Task GoToLicPage(int p) { licPage = p; await LoadProductData(); }
+    private async Task GoToTelPage(int p) { telPage = p; await LoadProductData(); }
+    private async Task GoToLogPage(int p) { logPage = p; await LoadProductData(); }
+
+    private ConfirmModal modalDelete = default!;
+    private ConfirmModal modalRegen = default!;
+    private ConfirmModal modalDeleteType = default!;
+    private Product? productToDelete;
+    private string deleteMessage = "";
+
+    // Types de licences
+    private List<LicenseType> LicenseTypes = new();
+    private string newTypeName = "";
+    private string newTypeSlug = "";
+    private int newTypeDuration = 30;
+    private int newMaxSeats = 1;
+    private bool isRecurring = false;
+    private bool showTypes = false;
+    private Guid? editingTypeId;
+    private LicenseType? typeToDelete;
+    private string deleteTypeMsg = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        isAuthorized = await Auth.HasPermissionAsync("products.view");
+        if (isAuthorized)
+        {
+            await LoadData();
+        }
+    }
+
+    private async Task OnRegenConfirm(bool confirmed)
+    {
+        if (confirmed && selectedProduct != null)
+        {
+            selectedProduct.ApiSecret = Guid.NewGuid().ToString("N");
+            await Db.SaveChangesAsync();
+            Toast.ShowSuccess("Clé API régénérée avec succès.");
+            StateHasChanged();
+        }
+    }
+
+    private async Task LoadData()
+    {
+        LicenseTypes = await Db.LicenseTypes.Include(t => t.Licenses).OrderBy(t => t.Name).ToListAsync();
+
+        var query = Db.Products.AsQueryable();
+        TotalCount = await query.CountAsync();
+
+        if (CurrentPage > TotalPages && TotalPages > 0) CurrentPage = TotalPages;
+        if (CurrentPage < 1) CurrentPage = 1;
+
+        ProductsList = await query
+            .Include(p => p.Licenses).ThenInclude(l => l.Type)
+            .OrderBy(p => p.Name)
+            .Skip((CurrentPage - 1) * PageSize)
+            .Take(PageSize)
+            .ToListAsync();
+
+        if (selectedProduct != null) 
+        {
+            var updated = ProductsList.FirstOrDefault(p => p.Id == selectedProduct.Id);
+            if (updated != null) 
+            {
+                selectedProduct = updated;
+                await LoadProductData();
+            }
+        }
+    }
+
+    private async Task SelectProduct(Product p)
+    {
+        selectedProduct = p;
+        licPage = 1; telPage = 1; logPage = 1;
+        await LoadProductData();
+    }
+
+    private async Task LoadProductData()
+    {
+        if (selectedProduct == null) return;
+
+        // Stats KPIs
+        prodActivations = await Db.AccessLogs.CountAsync(l => l.AppName == selectedProduct.Name && l.Endpoint == "ACTIVATE" && l.IsSuccess);
+        prodChecks = await Db.AccessLogs.CountAsync(l => l.AppName == selectedProduct.Name && l.Endpoint == "CHECK" && l.Timestamp >= DateTime.UtcNow.AddDays(-1));
+        
+        // Licences
+        var licQuery = Db.Licenses.Where(l => l.ProductId == selectedProduct.Id);
+        licTotal = await licQuery.CountAsync();
+        prodLicenses = await licQuery.Include(l => l.Type).OrderByDescending(l => l.CreationDate)
+                                     .Skip((licPage - 1) * licPageSize).Take(licPageSize).ToListAsync();
+
+        // Télémétrie
+        var telQuery = Db.TelemetryRecords.Where(t => t.ProductId == selectedProduct.Id);
+        telTotal = await telQuery.CountAsync();
+        recentTelemetry = await telQuery
+            .Include(t => t.EventData)
+            .Include(t => t.DiagnosticData).ThenInclude(d => d!.Results)
+            .Include(t => t.DiagnosticData).ThenInclude(d => d!.Ports)
+            .Include(t => t.ErrorData)
+            .OrderByDescending(t => t.Timestamp)
+            .Skip((telPage - 1) * telPageSize).Take(telPageSize).ToListAsync();
+
+        // Audit Logs (Basé sur AppName)
+        var logQuery = Db.AccessLogs.Where(l => l.AppName == selectedProduct.Name);
+        logTotal = await logQuery.CountAsync();
+        prodLogs = await logQuery.OrderByDescending(l => l.Timestamp)
+                                 .Skip((logPage - 1) * logPageSize).Take(logPageSize).ToListAsync();
+        
+        StateHasChanged();
+    }
+
+    private string FormatJson(string? json)
+    {
+        if (string.IsNullOrEmpty(json)) return "{}";
+        try
+        {
+            var options = new System.Text.Json.JsonSerializerOptions { WriteIndented = true };
+            var element = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(json);
+            return System.Text.Json.JsonSerializer.Serialize(element, options);
+        }
+        catch { return json ?? "{}"; }
+    }
+
+    private string GetTypeBadgeClass(TelemetryType type) => type switch
+    {
+        TelemetryType.Event => "bg-primary",
+        TelemetryType.Diagnostic => "bg-success",
+        TelemetryType.Error => "bg-danger",
+        _ => "bg-secondary"
+    };
+
+    private string GetStatusBadgeClass(int code)
+    {
+        if (code < 300) return "bg-success";
+        if (code < 400) return "bg-info";
+        if (code == 401 || code == 403) return "bg-primary";
+        if (code == 404) return "bg-secondary";
+        if (code < 500) return "bg-warning text-dark";
+        return "bg-danger";
+    }
+
+    // --- TYPES DE LICENCES ---
+
+    private async Task CreateLicenseType()
+    {
+        if (string.IsNullOrWhiteSpace(newTypeName) || string.IsNullOrWhiteSpace(newTypeSlug))
+        {
+            Toast.ShowError("Nom et Slug requis."); return;
+        }
+
+        var slug = newTypeSlug.Trim().ToUpper().Replace(" ", "_");
+        if (await Db.LicenseTypes.AnyAsync(t => t.Slug == slug))
+        {
+            Toast.ShowError("Ce Slug existe déjà."); return;
+        }
+
+        var lt = new LicenseType
+        {
+            Name = newTypeName, Slug = slug,
+            DefaultDurationDays = newTypeDuration,
+            DefaultMaxSeats = newMaxSeats,
+            IsRecurring = isRecurring
+        };
+        Db.LicenseTypes.Add(lt);
+        await Db.SaveChangesAsync();
+        Toast.ShowSuccess($"Type '{slug}' ajouté.");
+        newTypeName = ""; newTypeSlug = ""; newTypeDuration = 30; newMaxSeats = 1; isRecurring = false;
+        await LoadData();
+    }
+
+    private async Task SaveTypeEdit(LicenseType lt)
+    {
+        await Db.SaveChangesAsync();
+        editingTypeId = null;
+        Toast.ShowSuccess("Modifications enregistrées.");
+        await LoadData();
+    }
+
+    private Task RequestDeleteType(LicenseType lt)
+    {
+        typeToDelete = lt;
+        if (lt.Licenses.Count > 0)
+        {
+            Toast.ShowError("Impossible de supprimer ce type : des licences l'utilisent encore.");
+            return Task.CompletedTask;
+        }
+        deleteTypeMsg = $"Supprimer le type '{lt.Name}' ({lt.Slug}) ?";
+        modalDeleteType.Show();
+        return Task.CompletedTask;
+    }
+
+    private async Task OnDeleteTypeConfirm(bool confirmed)
+    {
+        if (confirmed && typeToDelete != null)
+        {
+            Db.LicenseTypes.Remove(typeToDelete);
+            await Db.SaveChangesAsync();
+            Toast.ShowSuccess("Type supprimé.");
+            await LoadData();
+        }
+        typeToDelete = null;
+    }
+
+    // --- PRODUITS ---
+
+    private async Task ImportProduct()
+    {
+        if (string.IsNullOrWhiteSpace(NewProductName)) { Toast.ShowError("Nom requis."); return; }
+        if (string.IsNullOrWhiteSpace(importPrivateKeyXml)) { Toast.ShowError("Collez la clé privée XML."); return; }
+
+        isImporting = true;
+        StateHasChanged();
+
+        try
+        {
+            var exists = await Db.Products.AnyAsync(p => p.Name.ToLower() == NewProductName.ToLower());
+            if (exists) { Toast.ShowError("Un logiciel avec ce nom existe déjà."); return; }
+
+            // Extraire la clé publique depuis la clé privée
+            using var rsa = System.Security.Cryptography.RSA.Create();
+            rsa.FromXmlString(importPrivateKeyXml.Trim());
+            var publicKeyXml = rsa.ToXmlString(false);
+
+            // Chiffrer la clé privée
+            var encryptedKey = Encryption.Encrypt(importPrivateKeyXml.Trim());
+
+            var p = new Product
+            {
+                Name = NewProductName,
+                PrivateKeyXml = encryptedKey,
+                PublicKeyXml = publicKeyXml
+            };
+
+            Db.Products.Add(p);
+            await Db.SaveChangesAsync();
+
+            Toast.ShowSuccess($"Produit '{NewProductName}' importé avec les clés existantes !");
+            NewProductName = ""; importPrivateKeyXml = ""; showImport = false; showCreate = false;
+            await LoadData();
+        }
+        catch (System.Security.Cryptography.CryptographicException)
+        {
+            Toast.ShowError("Clé privée XML invalide. Vérifiez le format.");
+        }
+        catch (Exception ex)
+        {
+            Toast.ShowError($"Erreur : {ex.Message}");
+        }
+        finally
+        {
+            isImporting = false;
+        }
+    }
+
+    private async Task CreateProduct()
+    {
+        if (string.IsNullOrWhiteSpace(NewProductName)) { Toast.ShowError("Nom requis."); return; }
+        
+        isCreating = true;
+        creationStep = 1;
+        StateHasChanged();
+
+        try 
+        {
+            // Vérification des doublons (insensible à la casse)
+            var exists = await Db.Products.AnyAsync(p => p.Name.ToLower() == NewProductName.ToLower());
+            if (exists)
+            {
+                Toast.ShowError("Un logiciel avec ce nom existe déjà.");
+                isCreating = false;
+                return;
+            }
+
+            // ÉTAPE 1 : GÉNÉRATION
+            await Task.Delay(500); // Pour le visuel
+            var keys = await Task.Run(() => LicenseService.GenerateKeys());
+            generatedPrivateKey = keys.PrivateKey;
+            
+            // ÉTAPE 2 : CHIFFREMENT
+            creationStep = 2;
+            StateHasChanged();
+            await Task.Delay(500);
+            var encryptedKey = Encryption.Encrypt(keys.PrivateKey);
+            
+            // ÉTAPE 3 : ENREGISTREMENT
+            creationStep = 3;
+            StateHasChanged();
+            await Task.Delay(500);
+
+            var p = new Product 
+            { 
+                Name = NewProductName, 
+                PrivateKeyXml = encryptedKey, 
+                PublicKeyXml = keys.PublicKey 
+            };
+            
+            Db.Products.Add(p);
+            await Db.SaveChangesAsync();
+
+            // ÉTAPE 3.5 : SAUVEGARDE DRIVE (rclone)
+            // On envoie la PAIRE de clés sur le Drive (le Drive doit être crypté via rclone)
+            await Backup.UploadKeyPairAsync(NewProductName, keys.PrivateKey, keys.PublicKey);
+
+            // ÉTAPE 4 : BACKUP (On reste dans l'overlay)
+            creationStep = 4;
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            Toast.ShowError("Erreur lors de la création : " + ex.Message);
+            isCreating = false;
+            creationStep = 0;
+        }
+    }
+
+    private async Task DownloadPrivateKey()
+    {
+        if (string.IsNullOrEmpty(generatedPrivateKey)) return;
+        
+        var filename = $"PrivateKey_{NewProductName.Replace(" ", "_")}.xml";
+        var bytes = System.Text.Encoding.UTF8.GetBytes(generatedPrivateKey);
+        var base64 = Convert.ToBase64String(bytes);
+        
+        await JS.InvokeVoidAsync("eval", $@"
+            (function() {{
+                const link = document.createElement('a');
+                link.download = '{filename}';
+                link.href = 'data:text/xml;base64,{base64}';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            }})()
+        ");
+        
+        Toast.ShowInfo("Téléchargement lancé.");
+    }
+
+    private async Task FinishCreation()
+    {
+        Toast.ShowSuccess($"Logiciel '{NewProductName}' prêt.");
+        NewProductName = ""; 
+        showCreate = false;
+        isCreating = false;
+        creationStep = 0;
+        generatedPrivateKey = null;
+        await LoadData();
+    }
+
+    private void ShowPublicKey(Product p) { ShowKey = p.PublicKeyXml; ShowKeyName = p.Name; }
+
+    private void RequestDelete(Product p)
+    {
+        if (p.Licenses.Any())
+        {
+            Toast.ShowError($"Impossible de supprimer '{p.Name}' : ce logiciel possède {p.Licenses.Count} licence(s) active(s).");
+            return;
+        }
+
+        productToDelete = p;
+        deleteMessage = $"Êtes-vous absolument sûr de vouloir supprimer définitivement le logiciel '{p.Name}' ? Cette action est irréversible.";
+        modalDelete.Show();
+    }
+
+    private async Task OnDeleteConfirm(bool confirmed)
+    {
+        if (confirmed && productToDelete != null)
+        {
+            Db.Products.Remove(productToDelete);
+            await Db.SaveChangesAsync();
+            Toast.ShowSuccess("Logiciel supprimé.");
+            selectedProduct = null;
+            await LoadData();
+        }
+        productToDelete = null;
+    }
+}

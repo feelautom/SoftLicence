@@ -1,0 +1,242 @@
+@page "/"
+@inject SoftLicence.Server.Services.AuthService Auth
+@inject SoftLicence.Server.Services.StatsService StatsService
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@inject SoftLicence.Server.Services.AuditNotifier AuditNotifier
+@using SoftLicence.Server.Services
+@implements IDisposable
+
+<PageTitle>Dashboard</PageTitle>
+
+@if (!isAuthorized)
+{
+    <div class="text-center py-5">
+        <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-danger mb-4"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
+        <h2 class="text-white">Accès Refusé</h2>
+        <p class="text-muted">Vous n'avez pas les permissions nécessaires pour voir le tableau de bord.</p>
+    </div>
+}
+else
+{
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h1>Tableau de bord</h1>
+        <button class="btn btn-outline-secondary btn-sm" @onclick="LoadStats">Actualiser</button>
+    </div>
+
+    @if (Stats == null)
+    {
+        <div class="text-center py-5">
+            <div class="spinner-border text-primary" role="status"></div>
+            <p class="mt-2 text-muted">Chargement des statistiques...</p>
+        </div>
+    }
+    else
+    {
+        <!-- KPIs -->
+        <div class="row g-3 mb-4">
+            <div class="col-md-3">
+                <div class="card stat-card h-100">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small fw-bold">Licences totales</h6>
+                        <div class="d-flex align-items-center mt-2">
+                            <h2 class="mb-0">@Stats.TotalLicenses</h2>
+                            <div class="ms-auto icon-circle bg-primary-soft text-primary">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-key" viewBox="0 0 16 16"><path d="M0 8a4 4 0 0 1 7.465-2H14a.5.5 0 0 1 .354.146l1.5 1.5a.5.5 0 0 1 0 .708l-1.5 1.5a.5.5 0 0 1-.708 0L13 9.207l-.646.647a.5.5 0 0 1-.708 0L11 9.207l-.646.647a.5.5 0 0 1-.708 0L9 9.207l-.646.647A.5.5 0 0 1 8 10h-.535A4 4 0 0 1 0 8zm4-3a3 3 0 1 0 2.712 4.285A.5.5 0 0 1 7.163 9h.63l.853-.854a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.793-.793-1-1h-6.63a.5.5 0 0 1-.451-.285A3 3 0 0 0 4 5z"/></svg>
+                            </div>
+                        </div>
+                        <div class="mt-2 small">
+                            <span class="text-success fw-bold">@Stats.ActiveLicenses</span> actives / 
+                            <span class="text-danger fw-bold">@Stats.RevokedLicenses</span> révoquées
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-md-3">
+                <div class="card stat-card h-100" style="border-left-color: #198754;">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small fw-bold">Logiciels</h6>
+                        <div class="d-flex align-items-center mt-2">
+                            <h2 class="mb-0">@Stats.TotalProducts</h2>
+                            <div class="ms-auto icon-circle bg-success-soft text-success">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-box-seam" viewBox="0 0 16 16"><path d="M8.186 1.113a.5.5 0 0 0-.372 0L1.846 3.5l2.404.961L10.404 2l-2.218-.887zm3.564 1.426L5.596 5 8 5.961 14.154 3.5l-2.404-.961zm3.25 1.7-6.5 2.6v7.922l6.5-2.6V4.24zM7.5 14.762V6.838L1 4.239v7.923l6.5 2.6zM7.443.184a1.5 1.5 0 0 1 1.114 0l7.129 2.852A.5.5 0 0 1 16 3.5v8.662a1 1 0 0 1-.629.928l-7.185 2.874a.5.5 0 0 1-.372 0L.63 13.09a1 1 0 0 1-.63-.928V3.5a.5.5 0 0 1 .314-.464L7.443.184z"/></svg>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-3">
+                <div class="card stat-card h-100" style="border-left-color: #ffc107;">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small fw-bold">Requêtes (30j)</h6>
+                        <div class="d-flex align-items-center mt-2">
+                            <h2 class="mb-0">@Stats.TotalRequests</h2>
+                            <div class="ms-auto icon-circle bg-warning-soft text-warning">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-activity" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M6 2a.5.5 0 0 1 .47.33L10 12.036l1.53-4.208A.5.5 0 0 1 12 7.5h3.5a.5.5 0 0 1 0 1h-3.15l-1.88 5.17a.5.5 0 0 1-.94 0L6 3.964 4.47 8.171A.5.5 0 0 1 4 8.5H.5a.5.5 0 0 1 0-1h3.15l1.88-5.17A.5.5 0 0 1 6 2z"/></svg>
+                            </div>
+                        </div>
+                        <div class="mt-2 small text-muted">
+                            Appels API Activations + Checks
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-3">
+                <div class="card stat-card h-100" style="border-left-color: #dc3545;">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small fw-bold">Taux d'erreur</h6>
+                        <div class="d-flex align-items-center mt-2">
+                            <h2 class="mb-0">@((Stats.TotalRequests > 0) ? (Stats.FailedRequests * 100 / Stats.TotalRequests) : 0)%</h2>
+                            <div class="ms-auto icon-circle bg-danger-soft text-danger">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-shield-exclamation" viewBox="0 0 16 16"><path d="M5.338 1.59a61.44 61.44 0 0 0-2.837.856.481.481 0 0 0-.328.39c-.554 4.157.726 7.19 2.253 9.188a10.725 10.725 0 0 0 2.287 2.233c.346.244.652.42.893.533.12.057.218.095.293.118a.55.55 0 0 0 .101.025.615.615 0 0 0 .1-.025c.076-.023.174-.061.294-.118.24-.113.547-.29.893-.533a10.726 10.726 0 0 0 2.287-2.233c1.527-1.997 2.807-5.031 2.253-9.188a.48.48 0 0 0-.328-.39c-.651-.213-1.75-.56-2.837-.855C9.552 1.29 8.531 1.067 8 1.067c-.53 0-1.552.223-2.662.524zM5.072.56C6.157.265 7.31 0 8 0s1.843.265 2.928.56c1.11.3 2.229.655 2.887.87a1.54 1.54 0 0 1 1.044 1.262c.596 4.477.787 7.795 2.465 9.99a11.775 11.775 0 0 1-2.517 2.453c-.386.273-.744.482-1.048.625-.28.132-.581.24-.829.24s-.548-.108-.829-.24a7.158 7.158 0 0 1-1.048-.625 11.777 11.777 0 0 1-2.517-2.453C1.928 10.487 4.545 7.169 5.141 2.692a1.54 1.54 0 0 1 1.044-1.262z"/><path d="M7.002 11a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 4.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 4.995z"/></svg>
+                            </div>
+                        </div>
+                        <div class="mt-2 small text-danger">
+                            @Stats.FailedRequests échecs / rejets
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Charts Section (côte à côte) -->
+        <div class="row g-3">
+            <!-- Activité API -->
+            <div class="col-md-6">
+                <div class="card p-4 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h6 class="mb-0">Activité API (7j)</h6>
+                        <div class="d-flex gap-3 small">
+                            <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-success"></span> OK</span>
+                            <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-danger"></span> Erreurs</span>
+                        </div>
+                    </div>
+                    <div class="chart-container d-flex align-items-end justify-content-around" style="height: 180px;">
+                        @{
+                            var maxActivity = Stats.ActivityChart.Max(d => d.Total);
+                            if (maxActivity == 0) maxActivity = 1;
+                        }
+                        @foreach (var day in Stats.ActivityChart)
+                        {
+                            var ok = day.Total - day.Errors;
+                            var pctTotal = (int)((day.Total * 100.0) / maxActivity);
+                            var pctErrors = (day.Total > 0) ? (int)((day.Errors * 100.0) / maxActivity) : 0;
+                            var pctOk = pctTotal - pctErrors;
+
+                            <div class="d-flex flex-column align-items-center flex-fill">
+                                @if (day.Total > 0)
+                                {
+                                    <div class="small text-muted mb-1">@day.Total</div>
+                                }
+                                <div class="bar-container position-relative rounded" style="height: 140px; width: 28px;">
+                                    @if (pctErrors > 0)
+                                    {
+                                        <div class="bar-fill bg-danger position-absolute bottom-0 w-100 rounded-bottom" style="height: @pctTotal%;"></div>
+                                    }
+                                    @if (pctOk > 0)
+                                    {
+                                        <div class="bar-fill bg-success position-absolute bottom-0 w-100 rounded-bottom" style="height: @pctOk%;"></div>
+                                    }
+                                </div>
+                                <span class="mt-2 text-muted" style="font-size: 0.7rem;">@TZ.ToLocal(day.Date).ToString("dd/MM")</span>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+
+            <!-- Licences délivrées -->
+            <div class="col-md-6">
+                <div class="card p-4 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h6 class="mb-0">Licences (7j)</h6>
+                        <div class="d-flex gap-3 small">
+                            <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-primary"></span> Créées</span>
+                            <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-info"></span> Activées</span>
+                        </div>
+                    </div>
+                    <div class="chart-container d-flex align-items-end justify-content-around" style="height: 180px;">
+                        @{
+                            var maxLic = Stats.LicenseChart.Max(d => Math.Max(d.Created, d.Activated));
+                            if (maxLic == 0) maxLic = 1;
+                        }
+                        @foreach (var day in Stats.LicenseChart)
+                        {
+                            var pctCreated = (int)((day.Created * 100.0) / maxLic);
+                            var pctActivated = (int)((day.Activated * 100.0) / maxLic);
+
+                            <div class="d-flex flex-column align-items-center flex-fill">
+                                @if (day.Created > 0 || day.Activated > 0)
+                                {
+                                    <div class="small text-muted mb-1">@day.Created / @day.Activated</div>
+                                }
+                                <div class="d-flex gap-1 align-items-end" style="height: 140px;">
+                                    <div class="bar-container position-relative rounded" style="height: 140px; width: 13px;">
+                                        @if (pctCreated > 0)
+                                        {
+                                            <div class="bar-fill bg-primary position-absolute bottom-0 w-100 rounded-bottom" style="height: @pctCreated%;"></div>
+                                        }
+                                    </div>
+                                    <div class="bar-container position-relative rounded" style="height: 140px; width: 13px;">
+                                        @if (pctActivated > 0)
+                                        {
+                                            <div class="bar-fill bg-info position-absolute bottom-0 w-100 rounded-bottom" style="height: @pctActivated%;"></div>
+                                        }
+                                    </div>
+                                </div>
+                                <span class="mt-2 text-muted" style="font-size: 0.7rem;">@TZ.ToLocal(day.Date).ToString("dd/MM")</span>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+<style>
+    .bg-primary-soft { background-color: rgba(13, 110, 253, 0.15); }
+    .bg-success-soft { background-color: rgba(25, 135, 84, 0.15); }
+    .bg-warning-soft { background-color: rgba(255, 193, 7, 0.15); }
+    .bg-danger-soft { background-color: rgba(220, 53, 69, 0.15); }
+    
+    .bar-container { background-color: rgba(255,255,255,0.05) !important; overflow: hidden; }
+    .bar-fill { transition: height 0.5s ease; }
+    .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+</style>
+
+@code {
+    private DashboardStats? Stats;
+    private bool isAuthorized = false;
+
+    protected override async Task OnInitializedAsync()
+    {
+        isAuthorized = await Auth.HasPermissionAsync("dashboard.view");
+        if (isAuthorized)
+        {
+            AuditNotifier.OnNewLog += OnNewLogReceived;
+            await LoadStats();
+        }
+    }
+
+    private async void OnNewLogReceived()
+    {
+        await InvokeAsync(async () =>
+        {
+            await LoadStats();
+            StateHasChanged();
+        });
+    }
+
+    private async Task LoadStats()
+    {
+        Stats = await StatsService.GetDashboardStatsAsync();
+    }
+
+    public void Dispose()
+    {
+        AuditNotifier.OnNewLog -= OnNewLogReceived;
+    }
+}

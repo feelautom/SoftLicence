@@ -1,0 +1,385 @@
+@page "/users"
+@inject SoftLicence.Server.Services.AuthService Auth
+@inject LicenseDbContext Db
+@inject SoftLicence.Server.Services.SecurityService Security
+@inject SoftLicence.Server.Services.ToastService Toast
+@inject SoftLicence.Server.Services.EmailService Mailer
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@using Microsoft.EntityFrameworkCore
+@using SoftLicence.Server.Data
+@using SoftLicence.Server.Components.Shared
+
+<div class="container-fluid animate-fade">
+    @if (!isAuthorized)
+    {
+        <div class="text-center py-5">
+            <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-danger mb-4"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
+            <h2 class="text-white">Accès Refusé</h2>
+            <p class="text-muted">Vous n'avez pas les permissions nécessaires pour gérer les utilisateurs.</p>
+        </div>
+    }
+    else
+    {
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h3>Utilisateurs & Rôles</h3>
+            <div class="d-flex gap-2">
+                <button class="btn btn-outline-info btn-sm" @onclick="() => { showRoleCreate = !showRoleCreate; editingRole = null; }">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-1"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                    @(showRoleCreate || editingRole != null ? "Annuler" : "Nouveau Rôle")
+                </button>
+                <button class="btn btn-primary btn-sm" @onclick="() => showCreate = !showCreate">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-1"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" x2="19" y1="8" y2="14"/><line x1="16" x2="22" y1="11" y2="11"/></svg>
+                    @(showCreate ? "Annuler" : "Nouvel Utilisateur")
+                </button>
+            </div>
+        </div>
+
+        @if (showRoleCreate || editingRole != null)
+        {
+            <div class="card bg-dark border-info mb-4 animate-fade">
+                <div class="card-body">
+                    <h6>@(editingRole != null ? "Modifier le rôle" : "Créer un nouveau rôle")</h6>
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <input class="form-control" placeholder="Nom du rôle (ex: Support)" @bind="newRoleName" />
+                        </div>
+                        <div class="col-md-8">
+                            <div class="d-flex flex-wrap gap-3 p-2 bg-black rounded border border-secondary">
+                                @foreach (var perm in availablePermissions)
+                                {
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" id="p_@perm.Key" 
+                                               checked="@selectedPermissions.Contains(perm.Key)"
+                                               @onchange="@(e => TogglePermission(perm.Key, e.Value))">
+                                        <label class="form-check-label small" for="p_@perm.Key">@perm.Value</label>
+                                    </div>
+                                }
+                            </div>
+                        </div>
+                        <div class="col-12 text-end">
+                            @if (editingRole != null)
+                            {
+                                <button class="btn btn-success btn-sm" @onclick="SaveRoleEdit">Enregistrer les modifications</button>
+                            }
+                            else
+                            {
+                                <button class="btn btn-info btn-sm" @onclick="CreateRole">Créer le Rôle</button>
+                            }
+                        </div>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @if (showCreate)
+        {
+            <div class="card bg-dark border-primary mb-4 animate-fade">
+                <div class="card-body">
+                    <h6>Créer un nouvel utilisateur</h6>
+                    <p class="text-muted small">Le mot de passe sera généré et envoyé par e-mail.</p>
+                    <div class="row g-3">
+                        <div class="col-md-3">
+                            <input class="form-control" placeholder="Identifiant (Login)" @bind="newUsername" />
+                        </div>
+                        <div class="col-md-4">
+                            <input class="form-control" type="email" placeholder="Adresse E-mail" @bind="newEmail" />
+                        </div>
+                        <div class="col-md-3">
+                            <select class="form-select" @bind="newRoleId">
+                                <option value="">-- Choisir un rôle --</option>
+                                @foreach (var role in AdminRolesList)
+                                {
+                                    <option value="@role.Id">@role.Name</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <button class="btn btn-success w-100" @onclick="CreateUser" disabled="@isBusy">
+                                @if (isBusy) { <span class="spinner-border spinner-border-sm"></span> }
+                                else { <span>Créer</span> }
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        }
+
+        <div class="row g-4">
+            <!-- LISTE DES UTILISATEURS -->
+            <div class="col-md-8">
+                <div class="card bg-dark border-0 shadow-sm h-100">
+                    <div class="card-header bg-transparent border-secondary py-3">
+                        <h6 class="mb-0 text-uppercase small fw-bold text-muted">Comptes Utilisateurs</h6>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-dark table-hover align-middle mb-0">
+                            <thead>
+                                <tr>
+                                    <th>Utilisateur</th>
+                                    <th>Rôle</th>
+                                    <th>Statut</th>
+                                    <th>Créé le</th>
+                                    <th class="text-end">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr class="opacity-75">
+                                    <td>
+                                        <div class="d-flex align-items-center">
+                                            <div class="bg-primary bg-opacity-10 text-primary rounded-circle p-2 me-2">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/></svg>
+                                            </div>
+                                            <div>
+                                                <div class="fw-bold">Root</div>
+                                                <div class="small text-muted">Système (Configuration)</div>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td><span class="badge bg-danger">SUPER ADMIN</span></td>
+                                    <td><span class="text-success small">● Actif</span></td>
+                                    <td>-</td>
+                                    <td class="text-end">
+                                        <span class="badge bg-secondary">PROTÉGÉ</span>
+                                    </td>
+                                </tr>
+                                @foreach (var user in AdminUsersList)
+                                {
+                                    <tr>
+                                        <td>
+                                            <div class="fw-bold text-info">@user.Username</div>
+                                            <div class="small text-muted">@user.Email</div>
+                                        </td>
+                                        <td>
+                                            <span class="badge bg-outline-info border border-info text-info">@user.Role?.Name</span>
+                                        </td>
+                                        <td>
+                                            @if (user.IsEnabled) { 
+                                                <span class="text-success small">● Actif</span>
+                                                @if (user.MustChangePassword) {
+                                                    <div class="text-warning" style="font-size: 0.65rem;">Attente changement MDP</div>
+                                                }
+                                            }
+                                            else { <span class="text-muted small">○ Désactivé</span> }
+                                        </td>
+                                        <td class="small text-muted">@TZ.ToLocal(user.CreatedAt).ToString("dd/MM/yyyy")</td>
+                                        <td class="text-end">
+                                            <button class="btn btn-sm btn-outline-danger" @onclick="() => RequestDeleteUser(user)">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+                                            </button>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- LISTE DES RÔLES -->
+            <div class="col-md-4">
+                <div class="card bg-dark border-0 shadow-sm h-100">
+                    <div class="card-header bg-transparent border-secondary py-3">
+                        <h6 class="mb-0 text-uppercase small fw-bold text-muted">Rôles & Permissions</h6>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="list-group list-group-flush">
+                            @foreach (var role in AdminRolesList)
+                            {
+                                <div class="list-group-item bg-transparent border-secondary py-3">
+                                    <div class="d-flex justify-content-between align-items-center mb-2">
+                                        <h6 class="mb-0 text-info">@role.Name</h6>
+                                        <div class="d-flex gap-2">
+                                            <button class="btn btn-sm btn-link text-info p-0" @onclick="() => StartRoleEdit(role)">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                                            </button>
+                                            <button class="btn btn-sm btn-link text-danger p-0" @onclick="() => RequestDeleteRole(role)">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div class="d-flex flex-wrap gap-1">
+                                        @foreach (var p in role.Permissions.Split(',', StringSplitOptions.RemoveEmptyEntries))
+                                        {
+                                            <span class="badge bg-secondary" style="font-size: 0.6rem;">@p</span>
+                                        }
+                                        @if (string.IsNullOrEmpty(role.Permissions))
+                                        {
+                                            <span class="text-muted small italic">Aucune permission</span>
+                                        }
+                                    </div>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+</div>
+
+<ConfirmModal @ref="modalDelete" Title="Suppression" Message="@deleteMsg" OnClose="OnConfirmDelete" />
+
+@code {
+    private List<AdminUser> AdminUsersList = new();
+    private List<AdminRole> AdminRolesList = new();
+    private bool isAuthorized = false;
+    private bool isBusy = false;
+    
+    private bool showCreate = false;
+    private bool showRoleCreate = false;
+    private AdminRole? editingRole;
+    
+    // Form Utilisateur
+    private string newUsername = "";
+    private string newEmail = "";
+    private string newRoleId = "";
+    
+    // Form Rôle
+    private string newRoleName = "";
+    private HashSet<string> selectedPermissions = new();
+    
+    private Dictionary<string, string> availablePermissions = new() {
+        { "dashboard.view", "Dashboard" },
+        { "products.view", "Logiciels" },
+        { "licenses.view", "Licences" },
+        { "resets.view", "Réinitialisations" },
+        { "audit.view", "Audit" },
+        { "telemetry.view", "Télémétrie" },
+        { "backups.view", "Sauvegardes" },
+        { "users.view", "Utilisateurs" },
+        { "all", "TOUS LES DROITS" }
+    };
+
+    private ConfirmModal modalDelete = default!;
+    private string deleteMsg = "";
+    private object? itemToDelete;
+
+    protected override async Task OnInitializedAsync()
+    {
+        isAuthorized = await Auth.HasPermissionAsync("users.view");
+        if (isAuthorized)
+        {
+            await LoadData();
+        }
+    }
+
+    private async Task LoadData()
+    {
+        AdminUsersList = await Db.AdminUsers.Include(u => u.Role).OrderBy(u => u.Username).ToListAsync();
+        AdminRolesList = await Db.AdminRoles.OrderBy(r => r.Name).ToListAsync();
+    }
+
+    private void TogglePermission(string key, object? val)
+    {
+        if (val is bool b && b) selectedPermissions.Add(key);
+        else selectedPermissions.Remove(key);
+    }
+
+    private void StartRoleEdit(AdminRole role)
+    {
+        editingRole = role;
+        newRoleName = role.Name;
+        selectedPermissions = new HashSet<string>(role.Permissions.Split(',', StringSplitOptions.RemoveEmptyEntries));
+        showRoleCreate = false;
+        showCreate = false;
+    }
+
+    private async Task SaveRoleEdit()
+    {
+        if (editingRole == null) return;
+        if (string.IsNullOrWhiteSpace(newRoleName)) { Toast.ShowError("Nom du rôle requis."); return; }
+
+        editingRole.Name = newRoleName;
+        editingRole.Permissions = string.Join(",", selectedPermissions);
+        
+        await Db.SaveChangesAsync();
+        Toast.ShowSuccess("Rôle mis à jour.");
+        editingRole = null;
+        newRoleName = "";
+        selectedPermissions.Clear();
+        await LoadData();
+    }
+
+    private async Task CreateRole()
+    {
+        if (string.IsNullOrWhiteSpace(newRoleName)) { Toast.ShowError("Nom du rôle requis."); return; }
+        
+        var role = new AdminRole {
+            Name = newRoleName,
+            Permissions = string.Join(",", selectedPermissions)
+        };
+        
+        Db.AdminRoles.Add(role);
+        await Db.SaveChangesAsync();
+        Toast.ShowSuccess($"Rôle '{newRoleName}' créé.");
+        newRoleName = ""; selectedPermissions.Clear(); showRoleCreate = false;
+        await LoadData();
+    }
+
+    private async Task CreateUser()
+    {
+        if (string.IsNullOrWhiteSpace(newUsername) || string.IsNullOrWhiteSpace(newEmail) || string.IsNullOrWhiteSpace(newRoleId))
+        {
+            Toast.ShowError("Tous les champs sont requis."); return;
+        }
+
+        if (await Db.AdminUsers.AnyAsync(u => u.Username == newUsername))
+        {
+            Toast.ShowError("Cet identifiant est déjà utilisé."); return;
+        }
+
+        isBusy = true;
+        try
+        {
+            // 1. Génération du mot de passe temporaire
+            var tempPass = Security.GenerateSecurePassword();
+
+            // 2. Création de l'utilisateur
+            var user = new AdminUser {
+                Username = newUsername,
+                Email = newEmail,
+                PasswordHash = Security.HashPassword(tempPass),
+                RoleId = Guid.Parse(newRoleId),
+                MustChangePassword = true
+            };
+
+            Db.AdminUsers.Add(user);
+            await Db.SaveChangesAsync();
+
+            // 3. Envoi de l'e-mail
+            await Mailer.SendAdminWelcomeEmailAsync(newEmail, newUsername, tempPass);
+
+            Toast.ShowSuccess($"Utilisateur '{newUsername}' créé. Mot de passe envoyé par e-mail.");
+            newUsername = ""; newEmail = ""; newRoleId = ""; showCreate = false;
+            await LoadData();
+        }
+        catch (Exception ex)
+        {
+            Toast.ShowError("Erreur lors de la création : " + ex.Message);
+        }
+        finally
+        {
+            isBusy = false;
+        }
+    }
+
+    private void RequestDeleteUser(AdminUser u) { itemToDelete = u; deleteMsg = $"Supprimer l'utilisateur '{u.Username}' ?"; modalDelete.Show(); }
+    private void RequestDeleteRole(AdminRole r) { 
+        if (Db.AdminUsers.Any(u => u.RoleId == r.Id)) { Toast.ShowError("Impossible de supprimer un rôle utilisé par des utilisateurs."); return; }
+        itemToDelete = r; deleteMsg = $"Supprimer le rôle '{r.Name}' ?"; modalDelete.Show(); 
+    }
+
+    private async Task OnConfirmDelete(bool confirmed)
+    {
+        if (confirmed && itemToDelete != null)
+        {
+            if (itemToDelete is AdminUser u) Db.AdminUsers.Remove(u);
+            else if (itemToDelete is AdminRole r) Db.AdminRoles.Remove(r);
+            
+            await Db.SaveChangesAsync();
+            Toast.ShowSuccess("Supprimé avec succès.");
+            await LoadData();
+        }
+        itemToDelete = null;
+    }
+}

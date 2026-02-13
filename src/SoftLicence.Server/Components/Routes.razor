@@ -1,0 +1,32 @@
+@using SoftLicence.Server.Components.Layout
+@inject NavigationManager Nav
+
+<Router AppAssembly="typeof(Program).Assembly">
+    <Found Context="routeData">
+        <AuthorizeRouteView RouteData="routeData" DefaultLayout="typeof(MainLayout)">
+            <NotAuthorized>
+                <!-- Stealth Mode: Unauthorized access looks like 404 -->
+                <LayoutView Layout="@typeof(EmptyLayout)">
+                    <div style="display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #121212; color: #6c757d;">
+                        <div style="text-align: center;">
+                            <h1 style="font-size: 4rem;">404</h1>
+                            <p>Page inexistante.</p>
+                        </div>
+                    </div>
+                </LayoutView>
+            </NotAuthorized>
+        </AuthorizeRouteView>
+        <FocusOnNavigate RouteData="routeData" Selector="h1" />
+    </Found>
+    <NotFound>
+        <PageTitle>Page non trouvée</PageTitle>
+        <LayoutView Layout="@typeof(EmptyLayout)">
+            <div style="display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #121212; color: #6c757d;">
+                <div style="text-align: center;">
+                    <h1 style="font-size: 4rem;">404</h1>
+                    <p>Page inexistante.</p>
+                </div>
+            </div>
+        </LayoutView>
+    </NotFound>
+</Router>

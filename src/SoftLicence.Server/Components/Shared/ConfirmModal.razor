@@ -1,0 +1,50 @@
+@if (IsVisible)
+{
+    <div class="modal-backdrop">
+        <div class="modal-container animate-pop">
+            <div class="modal-header">
+                <h5 class="mb-0 text-white">@Title</h5>
+            </div>
+            <div class="modal-body py-4">
+                <p class="mb-0">@Message</p>
+            </div>
+            <div class="modal-footer gap-2">
+                <button class="btn btn-outline-secondary" @onclick="Cancel">Annuler</button>
+                <button class="btn @ConfirmButtonClass" @onclick="Confirm">Confirmer</button>
+            </div>
+        </div>
+    </div>
+}
+
+<style>
+    .modal-backdrop {
+        position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+        background: rgba(0,0,0,0.8); backdrop-filter: blur(4px);
+        display: flex; align-items: center; justify-content: center; z-index: 10000;
+    }
+    .modal-container {
+        background: #1e1e1e; border: 1px solid #333; border-radius: 8px;
+        width: 100%; max-width: 450px; box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    }
+    .modal-header { padding: 15px 20px; border-bottom: 1px solid #333; }
+    .modal-body { padding: 20px; }
+    .modal-footer { padding: 15px 20px; border-top: 1px solid #333; display: flex; justify-content: flex-end; }
+    
+    .animate-pop { animation: pop 0.2s ease-out; }
+    @@keyframes pop { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+</style>
+
+@code {
+    [Parameter] public string Title { get; set; } = "Confirmation";
+    [Parameter] public string Message { get; set; } = "Êtes-vous sûr de vouloir effectuer cette action ?";
+    [Parameter] public string ConfirmButtonClass { get; set; } = "btn-danger";
+    [Parameter] public EventCallback<bool> OnClose { get; set; }
+
+    private bool IsVisible { get; set; }
+
+    public void Show() { IsVisible = true; StateHasChanged(); }
+    public void Hide() { IsVisible = false; StateHasChanged(); }
+
+    private async Task Confirm() { IsVisible = false; await OnClose.InvokeAsync(true); }
+    private async Task Cancel() { IsVisible = false; await OnClose.InvokeAsync(false); }
+}

@@ -1,0 +1,350 @@
+@page "/settings"
+@inject LicenseDbContext Db
+@inject SoftLicence.Server.Services.ToastService Toast
+@inject SoftLicence.Server.Services.EmailService Mailer
+@inject SoftLicence.Server.Services.NotificationService Notifier
+@inject IHttpClientFactory HttpFactory
+@inject Microsoft.Extensions.Options.IOptions<SoftLicence.Server.Services.SmtpSettings> SmtpOptions
+@inject SoftLicence.Server.Services.GeoIpService GeoIp
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@using Microsoft.EntityFrameworkCore
+@using SoftLicence.Server.Components.Shared
+@using SoftLicence.Server.Services
+@using SoftLicence.Server.Data
+@using SoftLicence.Server.Models
+
+<h3>Maintenance & paramètres</h3>
+
+<div class="row mt-4 g-3">
+    <!-- GESTION DES WEBHOOKS (NOTIFICATIONS) -->
+    <div class="col-12">
+        <div class="card shadow-sm">
+            <div class="card-body">
+                <h5 class="text-info">Webhooks & Notifications</h5>
+                <p class="text-muted small">Configurez vos alertes Discord, Slack, Ntfy ou vos propres API.</p>
+
+                <div class="row g-3 mb-4">
+                    <div class="col-md-3">
+                        <input class="form-control form-control-sm" placeholder="Nom (ex: Mon Discord)" @bind="newHookName" />
+                    </div>
+                    <div class="col-md-5">
+                        <input class="form-control form-control-sm" placeholder="URL du Webhook (https://...)" @bind="newHookUrl" />
+                    </div>
+                    <div class="col-md-4">
+                        <div class="border border-secondary rounded p-2 bg-black" style="max-height: 120px; overflow-y: auto;">
+                            @foreach (var kvp in NotificationService.AvailableTriggers)
+                            {
+                                <div class="form-check mb-1">
+                                    <input class="form-check-input" type="checkbox" id="trig_@kvp.Key" 
+                                           checked="@selectedTriggers.Contains(kvp.Key)" 
+                                           @onchange="@(e => ToggleTrigger(kvp.Key, e.Value))">
+                                    <label class="form-check-label text-light small" for="trig_@kvp.Key">@kvp.Value</label>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                    <div class="col-12 text-end">
+                        <button class="btn btn-info btn-sm" @onclick="CreateWebhook">Créer le Webhook</button>
+                    </div>
+                </div>
+
+                <div class="table-responsive">
+                    <table class="table table-sm table-dark table-hover align-middle">
+                        <thead>
+                            <tr>
+                                <th>Statut</th>
+                                <th>Nom</th>
+                                <th>URL</th>
+                                <th>Événements</th>
+                                <th>Dernier</th>
+                                <th class="text-end">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var hook in Webhooks)
+                            {
+                                <tr>
+                                    <td>
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" checked="@hook.IsEnabled" @onchange="@(e => ToggleWebhook(hook, e.Value))">
+                                        </div>
+                                    </td>
+                                    <td>@hook.Name</td>
+                                    <td>
+                                        <div class="text-truncate small" style="max-width: 150px;" title="@hook.Url">@hook.Url</div>
+                                    </td>
+                                    <td>
+                                        <div class="d-flex flex-wrap gap-1">
+                                            @foreach(var evt in (hook.EnabledEvents ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries))
+                                            {
+                                                string display = evt;
+                                                if (NotificationService.AvailableTriggers.TryGetValue(evt, out var friendly)) {
+                                                    display = friendly;
+                                                } else {
+                                                    display = evt.Split('.').Last();
+                                                }
+                                                <span class="badge bg-secondary" style="font-size: 0.6rem;">@display</span>
+                                            }
+                                        </div>
+                                        @if (!string.IsNullOrEmpty(hook.LastError))
+                                        {
+                                            <div class="text-danger small mt-1" title="@hook.LastError">⚠️ @hook.LastError</div>
+                                        }
+                                    </td>
+                                    <td class="small">
+                                        @if (hook.LastTriggeredAt.HasValue)
+                                        {
+                                            <span class="text-success">@TZ.ToLocal(hook.LastTriggeredAt.Value).ToString("g")</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="text-muted">-</span>
+                                        }
+                                    </td>
+                                    <td class="text-end">
+                                        <button class="btn btn-sm btn-outline-light" title="Tester" @onclick="() => TestWebhook(hook)">⚡</button>
+                                        <button class="btn btn-sm btn-outline-danger ms-1" title="Supprimer" @onclick="() => RequestDeleteWebhook(hook)">🗑️</button>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- JOURNAL D'AUDIT & TELEMETRIE -->
+    <div class="col-md-4">
+        <div class="card border-danger h-100 shadow-sm">
+            <div class="card-body">
+                <h5 class="text-danger">Journal d'audit</h5>
+                <p class="text-muted small">Supprime définitivement tout l'historique des accès. Utile pour repartir à zéro après une phase de test.</p>
+                <button class="btn btn-outline-danger mt-3 w-100" @onclick="() => modalAudit.Show()">Vider le journal</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-4">
+        <div class="card border-danger h-100 shadow-sm">
+            <div class="card-body">
+                <h5 class="text-danger">Télémétrie</h5>
+                <p class="text-muted small">Supprime définitivement toutes les données de télémétrie collectées pour tous les produits.</p>
+                <button class="btn btn-outline-danger mt-3 w-100" @onclick="() => modalTelemetry.Show()">Vider la télémétrie</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-4">
+        <div class="card h-100 shadow-sm">
+            <div class="card-body">
+                <h5 class="text-primary">Configuration email (SMTP)</h5>
+                <p class="text-muted small">Vérifiez que votre serveur SMTP est correctement configuré via Dokploy.</p>
+                
+                <div class="bg-black p-2 rounded border border-secondary mb-3" style="font-size: 0.7rem; font-family: monospace;">
+                    <div class="text-muted">CONFIG ACTUELLE :</div>
+                    <div>Host : <span class="text-info">@SmtpOptions.Value.Host</span></div>
+                    <div>Port : <span class="text-info">@SmtpOptions.Value.Port</span></div>
+                    <div>User : <span class="text-info">@(string.IsNullOrEmpty(SmtpOptions.Value.Username) ? "(aucun)" : SmtpOptions.Value.Username)</span></div>
+                    <div>SSL  : <span class="text-info">@SmtpOptions.Value.EnableSsl</span></div>
+                </div>
+
+                <div class="mt-3">
+                    <div class="input-group mb-2">
+                        <input class="form-control form-control-sm" placeholder="Email de destination..." @bind="testEmail" />
+                        <button class="btn btn-primary btn-sm" @onclick="TestSmtp" disabled="@isSending">
+                            @if(isSending) { <span class="spinner-border spinner-border-sm"></span> }
+                            Tester
+                        </button>
+                    </div>
+
+                    @if (smtpLogs.Any())
+                    {
+                        <div class="mt-3 p-2 bg-black rounded border border-secondary" style="font-family: monospace; font-size: 0.75rem; max-height: 200px; overflow-y: auto;">
+                            @foreach (var log in smtpLogs)
+                            {
+                                <div class="@(log.Contains("ERREUR") ? "text-danger" : log.Contains("succès") ? "text-success" : "text-info")">
+                                    > @log
+                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+    .bg-black { background-color: #000 !important; }
+    .dropdown-menu.show { display: block; }
+</style>
+
+<ConfirmModal @ref="modalAudit" 
+              Title="Vider l'audit" 
+              Message="Voulez-vous vraiment supprimer TOUS les logs d'audit ? Cette opération ne peut pas être annulée." 
+              OnClose="OnAuditConfirm" />
+
+<ConfirmModal @ref="modalTelemetry" 
+              Title="Vider la télémétrie" 
+              Message="Voulez-vous vraiment supprimer TOUTES les données de télémétrie ? Cette opération ne peut pas être annulée." 
+              OnClose="OnTelemetryConfirm" />
+
+@code {
+    private List<Webhook> Webhooks = new();
+
+    // Webhooks
+    private string newHookName = "";
+    private string newHookUrl = "";
+    private HashSet<string> selectedTriggers = new();
+
+    private ConfirmModal modalAudit = default!;
+    private ConfirmModal modalTelemetry = default!;
+
+    private string testEmail = "";
+    private bool isSending = false;
+    private List<string> smtpLogs = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadData();
+    }
+
+    private async Task LoadData()
+    {
+        Webhooks = await Db.Webhooks.OrderByDescending(w => w.CreatedAt).ToListAsync();
+    }
+
+    // --- WEBHOOKS LOGIC ---
+
+    private void ToggleTrigger(string trigger, object? value)
+    {
+        if (value is bool b && b) selectedTriggers.Add(trigger);
+        else selectedTriggers.Remove(trigger);
+    }
+
+    private async Task CreateWebhook()
+    {
+        if (string.IsNullOrWhiteSpace(newHookName) || string.IsNullOrWhiteSpace(newHookUrl))
+        {
+            Toast.ShowError("Nom et URL requis."); return;
+        }
+        if (!selectedTriggers.Any())
+        {
+            Toast.ShowError("Sélectionnez au moins un déclencheur."); return;
+        }
+
+        var hook = new Webhook 
+        { 
+            Name = newHookName, 
+            Url = newHookUrl,
+            EnabledEvents = string.Join(",", selectedTriggers)
+        };
+
+        Db.Webhooks.Add(hook);
+        await Db.SaveChangesAsync();
+        Toast.ShowSuccess("Webhook créé !");
+        
+        newHookName = ""; newHookUrl = ""; selectedTriggers.Clear();
+        await LoadData();
+    }
+
+    private async Task ToggleWebhook(Webhook hook, object? value)
+    {
+        if (value is bool b)
+        {
+            hook.IsEnabled = b;
+            await Db.SaveChangesAsync();
+        }
+    }
+
+    private async Task RequestDeleteWebhook(Webhook hook)
+    {
+        Db.Webhooks.Remove(hook);
+        await Db.SaveChangesAsync();
+        Toast.ShowSuccess("Webhook supprimé.");
+        await LoadData();
+    }
+
+    private async Task TestWebhook(Webhook hook)
+    {
+        try
+        {
+            var client = HttpFactory.CreateClient();
+            var payload = new { title = "Test Webhook", message = "Ceci est un test manuel depuis l'interface admin.", timestamp = DateTime.UtcNow };
+            
+            if (hook.Url.Contains("ntfy"))
+            {
+                var req = new HttpRequestMessage(HttpMethod.Post, hook.Url);
+                req.Content = new StringContent(payload.message);
+                req.Headers.Add("Title", payload.title);
+                req.Headers.Add("Tags", "zap");
+                await client.SendAsync(req);
+            }
+            else
+            {
+                await client.PostAsJsonAsync(hook.Url, payload);
+            }
+
+            Toast.ShowSuccess("Test envoyé avec succès !");
+        }
+        catch (Exception ex)
+        {
+            Toast.ShowError($"Erreur test : {ex.Message}");
+        }
+    }
+
+    // --- END WEBHOOKS ---
+
+    private async Task OnAuditConfirm(bool confirmed)
+    {
+        if (confirmed)
+        {
+            try 
+            {
+                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"AccessLogs\"");
+                Toast.ShowSuccess("Le journal d'audit a été vidé.");
+            }
+            catch (Exception ex) { Toast.ShowError($"Erreur : {ex.Message}"); }
+        }
+    }
+
+    private async Task OnTelemetryConfirm(bool confirmed)
+    {
+        if (confirmed)
+        {
+            try 
+            {
+                // La suppression en cascade s'occupe des tables liees (Events, Diagnostics, Errors)
+                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"TelemetryRecords\"");
+                Toast.ShowSuccess("La télémétrie a été vidée.");
+            }
+            catch (Exception ex) { Toast.ShowError($"Erreur : {ex.Message}"); }
+        }
+    }
+
+    private async Task TestSmtp()
+    {
+        if (string.IsNullOrWhiteSpace(testEmail)) { Toast.ShowError("Veuillez saisir un email."); return; }
+        
+        isSending = true;
+        smtpLogs.Clear();
+        smtpLogs.Add("Démarrage du diagnostic SMTP...");
+        StateHasChanged();
+
+        try 
+        {
+            await Mailer.RunDiagnosticAsync(testEmail, "Admin", "TEST SYSTEM", "CLE-TEST-1234", async (msg) => {
+                smtpLogs.Add(msg);
+                await InvokeAsync(StateHasChanged);
+            });
+            Toast.ShowSuccess("Diagnostic terminé avec succès !");
+        }
+        catch (Exception ex)
+        {
+            Toast.ShowError("Le diagnostic a échoué.");
+            Console.WriteLine($"[SMTP ERROR] {ex}");
+        }
+        finally { isSending = false; }
+    }
+}

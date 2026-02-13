@@ -1,0 +1,98 @@
+@inherits LayoutComponentBase
+@inject NavigationManager Nav
+@inject IJSRuntime JS
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@inject SoftLicence.Server.Services.AuthService Auth
+@using SoftLicence.Server.Components.Shared
+
+<ToastContainer />
+
+<div class="page">
+    <div class="sidebar">
+        <div class="sidebar-header">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="#0d6efd" class="bi bi-shield-lock-fill me-2" viewBox="0 0 16 16" style="margin-right: 10px;">
+                <path fill-rule="evenodd" d="M8 0c-.69 0-1.843.265-2.928.56-1.11.3-2.229.655-2.887.87a1.54 1.54 0 0 0-1.044 1.262c-.596 4.477.787 7.795 2.465 9.99a11.777 11.777 0 0 0 2.517 2.453c.386.273.744.482 1.048.625.28.132.581.24.829.24s.548-.108.829-.24a7.159 7.159 0 0 0 1.048-.625 11.775 11.775 0 0 0 2.517-2.453c1.678-2.195 3.061-5.513 2.465-9.99a1.541 1.541 0 0 0-1.044-1.263 62.467 62.467 0 0 0-2.887-.87C9.843.266 8.69 0 8 0z" />
+            </svg>
+            SoftLicence
+        </div>
+        <NavMenu />
+    </div>
+
+    <main>
+        <div class="top-bar">
+            <div class="text-muted d-flex align-items-center">
+                Administration Console
+                <span class="badge bg-dark border border-secondary ms-2" style="font-size: 0.6rem; opacity: 0.5;">v1.1.2</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 20px;">
+                <AuthorizeView>
+                    <Authorized>
+                        <span style="color: #fff; font-weight: 500;">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-person-circle me-2" viewBox="0 0 16 16" style="vertical-align: middle; margin-top: -3px; opacity: 0.7;">
+                                <path d="M11 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"/>
+                                <path fill-rule="evenodd" d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm8-7a7 7 0 0 0-5.468 11.37C3.242 11.226 4.805 10 8 10s4.757 1.225 5.468 2.37A7 7 0 0 0 8 1z"/>
+                            </svg>
+                            @context.User.Identity?.Name
+                        </span>
+                        
+                        <a href="settings" class="top-link" title="Paramètres">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="bi bi-gear-fill" viewBox="0 0 16 16">
+                                <path d="M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 0 1 2.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 0 0 1 2.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-.311a1.464 1.464 0 0 1 .872-2.105l.34-.1c1.4-.413 1.4-2.397 0-2.81l-.34-.1a1.464 1.464 0 0 1-.872-2.105l.17-.31c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872l-.1-.34zM8 10.93a2.929 2.929 0 1 1 0-5.86 2.929 2.929 0 0 1 0 5.858z"/>
+                            </svg>
+                        </a>
+
+                        <a href="/account/logout" class="top-link logout" title="Déconnexion">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="bi bi-box-arrow-right" viewBox="0 0 16 16">
+                                <path fill-rule="evenodd" d="M10 12.5a.5.5 0 0 1-.5.5h-8a.5.5 0 0 1-.5-.5v-9a.5.5 0 0 1 .5-.5h8a.5.5 0 0 1 .5.5v2a.5.5 0 0 0 1 0v-2A1.5 1.5 0 0 0 9.5 2h-8A1.5 1.5 0 0 0 0 3.5v9A1.5 1.5 0 0 0 1.5 14h8a1.5 1.5 0 0 0 1.5-1.5v-2a.5.5 0 0 0-1 0v2z"/>
+                                <path fill-rule="evenodd" d="M15.854 8.354a.5.5 0 0 0 0-.708l-3-3a.5.5 0 0 0-.708.708L14.293 7.5H5.5a.5.5 0 0 0 0 1h8.793l-2.147 2.146a.5.5 0 0 0 .708.708l3-3z"/>
+                            </svg>
+                        </a>
+                    </Authorized>
+                </AuthorizeView>
+            </div>
+        </div>
+
+        <div class="content">
+            @Body
+        </div>
+    </main>
+</div>
+
+@code {
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            try
+            {
+                var mustChange = await Auth.MustChangePasswordAsync();
+                if (mustChange && !Nav.Uri.Contains("/account/change-password"))
+                {
+                    Nav.NavigateTo("/account/change-password");
+                    return;
+                }
+
+                var offset = await JS.InvokeAsync<int>("getTimezoneOffset");
+                TZ.SetOffset(offset);
+                StateHasChanged();
+            }
+            catch { /* Silently fail if JS not ready */ }
+        }
+    }
+}
+
+<style>
+    .top-link {
+        color: #aaa;
+        transition: all 0.2s;
+        display: flex;
+        align-items: center;
+    }
+    .top-link:hover {
+        color: #fff;
+        transform: scale(1.1);
+    }
+    .top-link.logout:hover {
+        color: #ff6b6b;
+    }
+</style>

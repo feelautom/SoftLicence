@@ -1,0 +1,59 @@
+@using SoftLicence.Server.Services
+@inject ToastService Service
+@implements IDisposable
+
+@if (IsVisible)
+{
+    <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 9999">
+        <div class="toast show align-items-center text-white @BackgroundClass border-0" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="d-flex">
+                <div class="toast-body">
+                    <strong>@Title</strong><br/>
+                    @Message
+                </div>
+                <button type="button" class="btn-close btn-close-white me-2 m-auto" @onclick="Close"></button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private bool IsVisible;
+    private string Message = "";
+    private string Title = "";
+    private string BackgroundClass = "bg-primary";
+
+    protected override void OnInitialized()
+    {
+        Service.OnShow += ShowToast;
+        Service.OnHide += HideToast;
+    }
+
+    private void ShowToast(string message, string title, ToastLevel level)
+    {
+        Message = message;
+        Title = title;
+        IsVisible = true;
+        BackgroundClass = level switch
+        {
+            ToastLevel.Success => "bg-success",
+            ToastLevel.Error => "bg-danger",
+            _ => "bg-primary"
+        };
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void HideToast()
+    {
+        IsVisible = false;
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void Close() => IsVisible = false;
+
+    public void Dispose()
+    {
+        Service.OnShow -= ShowToast;
+        Service.OnHide -= HideToast;
+    }
+}

@@ -1,0 +1,146 @@
+@page "/resets"
+@inject LicenseDbContext Db
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@using SoftLicence.Server.Data
+@using Microsoft.EntityFrameworkCore
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h3>Suivi des réinitialisations</h3>
+    <button class="btn btn-primary btn-sm" @onclick="Refresh">Actualiser</button>
+</div>
+
+<div class="table-responsive">
+    <table class="table table-hover table-sm align-middle" style="font-size: 0.85rem;">
+        <thead>
+            <tr>
+                <th>Date (Locale)</th>
+                <th>Logiciel</th>
+                <th>Clé de licence</th>
+                <th>Action</th>
+                <th>Statut</th>
+                <th>IP Client</th>
+            </tr>
+        </thead>
+        <tbody>
+            @if (Logs != null)
+            {
+                @foreach (var log in Logs)
+                {
+                    <tr class="@GetRowClass(log)">
+                        <td class="text-nowrap">@TZ.ToLocal(log.Timestamp).ToString("dd/MM HH:mm:ss")</td>
+                        <td class="fw-bold">@log.AppName</td>
+                        <td><code class="small">@log.LicenseKey</code></td>
+                        <td>
+                            @if (log.Endpoint == "RESET_REQUEST")
+                            {
+                                <span class="badge bg-info">DEMANDE CODE</span>
+                            }
+                            else
+                            {
+                                <span class="badge bg-primary">CONFIRMATION</span>
+                            }
+                        </td>
+                        <td>
+                            @if (log.IsSuccess)
+                            {
+                                <span class="text-success fw-bold">✓ Succès</span>
+                            }
+                            else
+                            {
+                                <span class="text-danger fw-bold" title="@log.ResultStatus">✗ Échec (@log.StatusCode)</span>
+                            }
+                        </td>
+                        <td><small class="text-muted"><code>@log.ClientIp</code></small></td>
+                    </tr>
+                }
+            }
+        </tbody>
+    </table>
+</div>
+
+@if (TotalCount > 0)
+{
+    <div class="d-flex justify-content-between align-items-center mt-3">
+        <div class="d-flex align-items-center gap-2">
+            <small class="text-muted">Afficher</small>
+            <select class="form-select form-select-sm" style="width: 80px;" @bind:get="PageSize" @bind:set="ChangePageSize">
+                <option value="10">10</option>
+                <option value="25">25</option>
+                <option value="50">50</option>
+            </select>
+            <small class="text-muted">sur @TotalCount opérations</small>
+        </div>
+        <nav>
+            <ul class="pagination pagination-sm mb-0">
+                <li class="page-item @(CurrentPage == 1 ? "disabled" : "")">
+                    <button class="page-link" @onclick="() => GoToPage(CurrentPage - 1)">Précédent</button>
+                </li>
+                <li class="page-item disabled"><span class="page-link">Page @CurrentPage / @TotalPages</span></li>
+                <li class="page-item @(CurrentPage >= TotalPages ? "disabled" : "")">
+                    <button class="page-link" @onclick="() => GoToPage(CurrentPage + 1)">Suivant</button>
+                </li>
+            </ul>
+        </nav>
+    </div>
+}
+
+@code {
+    private List<AccessLog> Logs = new();
+    
+    // Pagination
+    private int CurrentPage = 1;
+    private int PageSize = 25;
+    private int TotalCount = 0;
+    private int TotalPages => (int)Math.Ceiling((double)TotalCount / PageSize);
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Refresh();
+    }
+
+    private async Task ChangePageSize(int size)
+    {
+        PageSize = size;
+        CurrentPage = 1;
+        await Refresh();
+    }
+
+    private async Task GoToPage(int page)
+    {
+        if (page < 1 || page > TotalPages) return;
+        CurrentPage = page;
+        await Refresh();
+    }
+
+    private string GetRowClass(AccessLog log)
+    {
+        if (!log.IsSuccess) return "table-danger-hard";
+        return "";
+    }
+
+    private async Task Refresh()
+    {
+        try
+        {
+            var query = Db.AccessLogs.Where(l => l.Endpoint == "RESET_REQUEST" || l.Endpoint == "RESET_CONFIRM");
+
+            TotalCount = await query.CountAsync();
+            
+            if (CurrentPage > TotalPages && TotalPages > 0) CurrentPage = TotalPages;
+            if (CurrentPage < 1) CurrentPage = 1;
+
+            Logs = await query.OrderByDescending(l => l.Timestamp)
+                              .Skip((CurrentPage - 1) * PageSize)
+                              .Take(PageSize)
+                              .ToListAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error refreshing resets: {ex.Message}");
+        }
+    }
+}
+
+<style>
+    .table-danger-hard { background-color: rgba(220, 53, 69, 0.1) !important; }
+</style>

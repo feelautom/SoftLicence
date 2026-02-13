@@ -1,0 +1,20 @@
+<?xml version='1.0'?>
+<Obfuscator>
+  <Var name="InPath" value="." />
+  <Var name="OutPath" value=".\Obfuscated" />
+  <Var name="KeepPublicApi" value="true" /> <!-- Important pour WPF (Bindings) -->
+  <Var name="HidePrivateApi" value="true" />
+  <Var name="RenameProperties" value="true" />
+  <Var name="RenameEvents" value="true" />
+  <Var name="RenameFields" value="true" />
+  <Var name="UseUnicodeNames" value="true" /> <!-- Rend le code illisible (caractères chinois/arabes) -->
+  <Var name="HideStrings" value="true" /> <!-- Crypte les chaînes (URLs, Clés) -->
+
+  <Module file="$(InPath)\SoftLicence.Samples.SimpleApp.dll">
+     <!-- On peut forcer l'exclusion de certaines classes si le binding casse -->
+  </Module>
+  
+  <!-- On obfusque aussi la librairie UI et Core si elles sont copiées -->
+  <Module file="$(InPath)\SoftLicence.UI.dll" />
+  <Module file="$(InPath)\SoftLicence.Core.dll" />
+</Obfuscator>

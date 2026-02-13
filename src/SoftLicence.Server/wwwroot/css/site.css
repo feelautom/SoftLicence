@@ -1,0 +1,282 @@
+:root {
+    --bg-dark: #121212;
+    --bg-card: #1e1e1e;
+    --bg-sidebar: #181818;
+    --text-primary: #e0e0e0;
+    --text-secondary: #a0a0a0;
+    --accent-color: #0d6efd;
+    --accent-hover: #0b5ed7;
+    --border-color: #333;
+}
+
+html, body {
+    font-family: 'Segoe UI', Helvetica, Arial, sans-serif;
+    background-color: var(--bg-dark);
+    color: #ffffff; /* Texte de base en blanc */
+    margin: 0;
+    height: 100vh;
+}
+
+p, li, span, label { 
+    color: #e0e0e0 !important; 
+}
+
+a { color: var(--accent-color); text-decoration: none; }
+a:hover { color: var(--accent-hover); text-decoration: underline; }
+
+.page {
+    display: flex;
+    flex-direction: row;
+    height: 100vh;
+    overflow: hidden;
+}
+
+/* Sidebar */
+.sidebar {
+    width: 260px;
+    background-color: var(--bg-sidebar);
+    border-right: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+}
+
+.sidebar-header {
+    height: 60px;
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    font-weight: bold;
+    font-size: 1.2rem;
+    color: #fff;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.nav-scrollable {
+    flex: 1;
+    overflow-y: auto;
+    padding-top: 20px;
+}
+
+.nav-item { margin-bottom: 5px; }
+
+.nav-link {
+    display: flex;
+    align-items: center;
+    padding: 10px 20px;
+    color: var(--text-secondary);
+    transition: all 0.2s;
+    border-left: 3px solid transparent;
+}
+
+.nav-link:hover {
+    color: #fff;
+    background-color: rgba(255,255,255,0.05);
+}
+
+.nav-link.active {
+    color: #fff;
+    background-color: rgba(13, 110, 253, 0.1);
+    border-left-color: var(--accent-color);
+}
+
+.nav-link span { margin-right: 10px; font-size: 1.1rem; }
+
+/* Main Content */
+main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background-color: var(--bg-dark);
+}
+
+.top-bar {
+    height: 60px;
+    background-color: var(--bg-card);
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 30px;
+}
+
+.content {
+    flex: 1;
+    padding: 30px;
+    overflow-y: auto;
+}
+
+/* Components */
+.card {
+    background-color: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+}
+
+/* Typography */
+h1, h2, h3, h4, h5, h6 {
+    color: #fff;
+    margin-bottom: 1rem;
+}
+
+/* Form Controls */
+.form-control, .form-select {
+    background-color: #2d2d2d !important;
+    border: 1px solid var(--border-color) !important;
+    color: #fff !important;
+}
+
+.form-control:focus, .form-select:focus {
+    background-color: #333 !important;
+    border-color: var(--accent-color) !important;
+    box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25) !important;
+    outline: none;
+}
+
+.form-control::placeholder {
+    color: #777 !important;
+}
+
+/* Custom styling for select arrow in dark mode */
+.form-select {
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23ffffff' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e") !important;
+}
+
+/* Tables - Clean Dark Mode Overrides */
+.table {
+    --bs-table-bg: transparent;
+    --bs-table-color: var(--text-primary);
+    --bs-table-border-color: var(--border-color);
+    color: var(--text-primary) !important;
+    background-color: var(--bg-card) !important;
+}
+
+.table thead th {
+    border-bottom: 2px solid var(--border-color) !important;
+    color: var(--text-secondary);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.85rem;
+    padding: 1rem 0.5rem;
+}
+
+.table td {
+    border-bottom: 1px solid var(--border-color) !important;
+    padding: 0.75rem 0.5rem;
+    vertical-align: middle;
+}
+
+/* Dashboard Cards */
+.stat-card {
+    border-left: 4px solid var(--accent-color);
+    transition: transform 0.2s;
+}
+.stat-card:hover { transform: translateY(-5px); }
+.icon-circle {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.bg-primary-soft { background-color: rgba(13, 110, 253, 0.1); color: #0d6efd; }
+.bg-success-soft { background-color: rgba(25, 135, 84, 0.1); color: #198754; }
+
+.table-hover>tbody>tr:hover>* {
+    background-color: rgba(13, 110, 253, 0.1) !important;
+    color: #fff !important;
+    box-shadow: inset 0 0 0 9999px rgba(13, 110, 253, 0.05);
+}
+
+/* Utilities */
+.text-muted { color: var(--text-secondary) !important; }
+.fw-bold { font-weight: 600; }
+
+/* Remove ugly focus outline on navigation */
+h1:focus, main:focus, .page:focus {
+    outline: none !important;
+}
+
+/* Blazor Reconnection UI Overhaul - Brutal Override */
+#blazor-error-ui {
+    background: #121212 !important;
+    color: #ffffff !important;
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    z-index: 9999 !important;
+    display: none !important; /* Cache par defaut */
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    text-align: center !important;
+    border: none !important;
+}
+
+/* On affiche uniquement quand Blazor met les classes specifiques */
+.components-reconnect-show #blazor-error-ui,
+.components-reconnect-failed #blazor-error-ui,
+.components-reconnect-rejected #blazor-error-ui {
+    display: flex !important;
+}
+
+#blazor-error-ui h5 { color: #fff !important; margin-top: 20px; }
+#blazor-error-ui p { color: #aaa !important; }
+
+#blazor-error-ui .spinner-border {
+    width: 4rem !important;
+    height: 4rem !important;
+    border-width: 0.3rem !important;
+}
+
+#blazor-error-ui .reload {
+    margin-top: 20px !important;
+    display: inline-block !important;
+}
+
+/* Pagination Dark Mode */
+.pagination {
+    --bs-pagination-bg: #1e1e1e;
+    --bs-pagination-border-color: #333;
+    --bs-pagination-color: #aaa;
+    --bs-pagination-hover-bg: #2d2d2d;
+    --bs-pagination-hover-color: #fff;
+    --bs-pagination-hover-border-color: #444;
+    --bs-pagination-active-bg: var(--accent-color);
+    --bs-pagination-active-border-color: var(--accent-color);
+    --bs-pagination-disabled-bg: #181818;
+    --bs-pagination-disabled-border-color: #222;
+    --bs-pagination-disabled-color: #555;
+}
+
+.page-link {
+    background-color: var(--bs-pagination-bg);
+    border-color: var(--bs-pagination-border-color);
+    color: var(--bs-pagination-color);
+}
+
+.page-link:hover {
+    background-color: var(--bs-pagination-hover-bg);
+    color: var(--bs-pagination-hover-color);
+    border-color: var(--bs-pagination-hover-border-color);
+}
+
+.page-item.active .page-link {
+    background-color: var(--bs-pagination-active-bg);
+    border-color: var(--bs-pagination-active-border-color);
+}
+
+.page-item.disabled .page-link {
+    background-color: var(--bs-pagination-disabled-bg);
+    border-color: var(--bs-pagination-disabled-border-color);
+    color: var(--bs-pagination-disabled-color);
+}
+
+
+
