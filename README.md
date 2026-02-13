@@ -137,3 +137,7 @@ See the [Protection Guide](docs/en/PROTECTION_GUIDE.md) for a complete step-by-s
 Elastic License 2.0 - see [LICENSE](LICENSE) for details.
 
 You are free to use, modify, and self-host this software. You may **not** offer it as a hosted/managed service (SaaS).
+
+## Author
+
+Built by [FeelAutom](https://feelautom.fr) — contact@feelautom.fr
