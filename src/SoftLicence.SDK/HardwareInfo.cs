@@ -58,12 +58,17 @@ namespace SoftLicence.SDK
                     foreach (var mObj in collection)
                     {
                         var obj = mObj as ManagementObject;
-                        if (obj == null) continue;
-
-                        var value = obj[propertyName]?.ToString();
-                        if (!string.IsNullOrWhiteSpace(value))
+                        if (obj != null)
                         {
-                            return value.Trim();
+                            var propValue = obj.Properties[propertyName]?.Value;
+                            if (propValue != null)
+                            {
+                                string? value = propValue.ToString();
+                                if (!string.IsNullOrWhiteSpace(value))
+                                {
+                                    return value.Trim();
+                                }
+                            }
                         }
                     }
                 }
