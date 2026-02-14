@@ -13,7 +13,6 @@
     <Authors>FeelAutom</Authors>
     <Company>FeelAutom</Company>
     <Description>SDK officiel pour l'intégration de la protection SoftLicence dans les applications .NET.</Description>
-    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <PackageTags>licensing;drm;protection;sdk</PackageTags>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
   </PropertyGroup>

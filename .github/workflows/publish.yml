@@ -1,0 +1,43 @@
+name: Publish SoftLicence.SDK
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    name: Publish to Registries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+          source-url: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+        env:
+          NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore Dependencies
+        run: dotnet restore src/SoftLicence.SDK/SoftLicence.SDK.csproj
+
+      - name: Build SDK
+        run: dotnet build src/SoftLicence.SDK/SoftLicence.SDK.csproj --configuration Release --no-restore
+
+      - name: Pack SDK
+        run: dotnet pack src/SoftLicence.SDK/SoftLicence.SDK.csproj --configuration Release --no-build -o out
+
+      - name: Push to GitHub Packages
+        run: dotnet nuget push out/*.nupkg --api-key ${{ secrets.GITHUB_TOKEN }} --source "github" --skip-duplicate
+
+      - name: Push to NuGet.org
+        if: env.NUGET_API_KEY != ''
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: dotnet nuget push out/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
