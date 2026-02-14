@@ -7,7 +7,7 @@ on:
 
 jobs:
   publish:
-    name: Publish to GitHub Packages
+    name: Publish to Registries
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -35,3 +35,9 @@ jobs:
 
       - name: Push to GitHub Packages
         run: dotnet nuget push out/*.nupkg --api-key ${{ secrets.GITHUB_TOKEN }} --source "github" --skip-duplicate
+
+      - name: Push to NuGet.org
+        if: env.NUGET_API_KEY != ''
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: dotnet nuget push out/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
