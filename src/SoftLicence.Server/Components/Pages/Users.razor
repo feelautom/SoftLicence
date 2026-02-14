@@ -5,6 +5,7 @@
 @inject SoftLicence.Server.Services.ToastService Toast
 @inject SoftLicence.Server.Services.EmailService Mailer
 @inject SoftLicence.Server.Services.TimeZoneService TZ
+@inject IStringLocalizer<SharedResource> L
 @using Microsoft.EntityFrameworkCore
 @using SoftLicence.Server.Data
 @using SoftLicence.Server.Components.Shared
@@ -14,22 +15,22 @@
     {
         <div class="text-center py-5">
             <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-danger mb-4"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
-            <h2 class="text-white">Accès Refusé</h2>
-            <p class="text-muted">Vous n'avez pas les permissions nécessaires pour gérer les utilisateurs.</p>
+            <h2 class="text-white">@L["Common_AccessDenied"]</h2>
+            <p class="text-muted">@L["Common_NoPermissionUsers"]</p>
         </div>
     }
     else
     {
         <div class="d-flex justify-content-between align-items-center mb-4">
-            <h3>Utilisateurs & Rôles</h3>
+            <h3>@L["Users_Title"]</h3>
             <div class="d-flex gap-2">
                 <button class="btn btn-outline-info btn-sm" @onclick="() => { showRoleCreate = !showRoleCreate; editingRole = null; }">
                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-1"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-                    @(showRoleCreate || editingRole != null ? "Annuler" : "Nouveau Rôle")
+                    @(showRoleCreate || editingRole != null ? L["Common_Cancel"] : L["Users_NewRole"])
                 </button>
                 <button class="btn btn-primary btn-sm" @onclick="() => showCreate = !showCreate">
                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-1"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" x2="19" y1="8" y2="14"/><line x1="16" x2="22" y1="11" y2="11"/></svg>
-                    @(showCreate ? "Annuler" : "Nouvel Utilisateur")
+                    @(showCreate ? L["Common_Cancel"] : L["Users_NewUser"])
                 </button>
             </div>
         </div>
@@ -38,10 +39,10 @@
         {
             <div class="card bg-dark border-info mb-4 animate-fade">
                 <div class="card-body">
-                    <h6>@(editingRole != null ? "Modifier le rôle" : "Créer un nouveau rôle")</h6>
+                    <h6>@(editingRole != null ? L["Users_EditRole"] : L["Users_CreateRole"])</h6>
                     <div class="row g-3">
                         <div class="col-md-4">
-                            <input class="form-control" placeholder="Nom du rôle (ex: Support)" @bind="newRoleName" />
+                            <input class="form-control" placeholder="@L["Users_RoleName"]" @bind="newRoleName" />
                         </div>
                         <div class="col-md-8">
                             <div class="d-flex flex-wrap gap-3 p-2 bg-black rounded border border-secondary">
@@ -59,11 +60,11 @@
                         <div class="col-12 text-end">
                             @if (editingRole != null)
                             {
-                                <button class="btn btn-success btn-sm" @onclick="SaveRoleEdit">Enregistrer les modifications</button>
+                                <button class="btn btn-success btn-sm" @onclick="SaveRoleEdit">@L["Users_SaveChanges"]</button>
                             }
                             else
                             {
-                                <button class="btn btn-info btn-sm" @onclick="CreateRole">Créer le Rôle</button>
+                                <button class="btn btn-info btn-sm" @onclick="CreateRole">@L["Users_CreateRoleBtn"]</button>
                             }
                         </div>
                     </div>
@@ -75,18 +76,18 @@
         {
             <div class="card bg-dark border-primary mb-4 animate-fade">
                 <div class="card-body">
-                    <h6>Créer un nouvel utilisateur</h6>
-                    <p class="text-muted small">Le mot de passe sera généré et envoyé par e-mail.</p>
+                    <h6>@L["Users_CreateUserTitle"]</h6>
+                    <p class="text-muted small">@L["Users_PasswordByEmail"]</p>
                     <div class="row g-3">
                         <div class="col-md-3">
-                            <input class="form-control" placeholder="Identifiant (Login)" @bind="newUsername" />
+                            <input class="form-control" placeholder="@L["Users_LoginPlaceholder"]" @bind="newUsername" />
                         </div>
                         <div class="col-md-4">
-                            <input class="form-control" type="email" placeholder="Adresse E-mail" @bind="newEmail" />
+                            <input class="form-control" type="email" placeholder="@L["Users_EmailPlaceholder"]" @bind="newEmail" />
                         </div>
                         <div class="col-md-3">
                             <select class="form-select" @bind="newRoleId">
-                                <option value="">-- Choisir un rôle --</option>
+                                <option value="">@L["Users_SelectRole"]</option>
                                 @foreach (var role in AdminRolesList)
                                 {
                                     <option value="@role.Id">@role.Name</option>
@@ -96,7 +97,7 @@
                         <div class="col-md-2">
                             <button class="btn btn-success w-100" @onclick="CreateUser" disabled="@isBusy">
                                 @if (isBusy) { <span class="spinner-border spinner-border-sm"></span> }
-                                else { <span>Créer</span> }
+                                else { <span>@L["Common_Create"]</span> }
                             </button>
                         </div>
                     </div>
@@ -109,17 +110,17 @@
             <div class="col-md-8">
                 <div class="card bg-dark border-0 shadow-sm h-100">
                     <div class="card-header bg-transparent border-secondary py-3">
-                        <h6 class="mb-0 text-uppercase small fw-bold text-muted">Comptes Utilisateurs</h6>
+                        <h6 class="mb-0 text-uppercase small fw-bold text-muted">@L["Users_Accounts"]</h6>
                     </div>
                     <div class="table-responsive">
                         <table class="table table-dark table-hover align-middle mb-0">
                             <thead>
                                 <tr>
-                                    <th>Utilisateur</th>
-                                    <th>Rôle</th>
-                                    <th>Statut</th>
-                                    <th>Créé le</th>
-                                    <th class="text-end">Actions</th>
+                                    <th>@L["Users_User"]</th>
+                                    <th>@L["Users_Role"]</th>
+                                    <th>@L["Common_Status"]</th>
+                                    <th>@L["Users_CreatedOn"]</th>
+                                    <th class="text-end">@L["Common_Actions"]</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -131,15 +132,15 @@
                                             </div>
                                             <div>
                                                 <div class="fw-bold">Root</div>
-                                                <div class="small text-muted">Système (Configuration)</div>
+                                                <div class="small text-muted">@L["Users_SystemConfig"]</div>
                                             </div>
                                         </div>
                                     </td>
-                                    <td><span class="badge bg-danger">SUPER ADMIN</span></td>
-                                    <td><span class="text-success small">● Actif</span></td>
+                                    <td><span class="badge bg-danger">@L["Users_SuperAdmin"]</span></td>
+                                    <td><span class="text-success small">● @L["Common_Active"]</span></td>
                                     <td>-</td>
                                     <td class="text-end">
-                                        <span class="badge bg-secondary">PROTÉGÉ</span>
+                                        <span class="badge bg-secondary">@L["Users_Protected"]</span>
                                     </td>
                                 </tr>
                                 @foreach (var user in AdminUsersList)
@@ -154,12 +155,12 @@
                                         </td>
                                         <td>
                                             @if (user.IsEnabled) { 
-                                                <span class="text-success small">● Actif</span>
+                                                <span class="text-success small">● @L["Common_Active"]</span>
                                                 @if (user.MustChangePassword) {
-                                                    <div class="text-warning" style="font-size: 0.65rem;">Attente changement MDP</div>
+                                                    <div class="text-warning" style="font-size: 0.65rem;">@L["Users_AwaitingPasswordChange"]</div>
                                                 }
                                             }
-                                            else { <span class="text-muted small">○ Désactivé</span> }
+                                            else { <span class="text-muted small">○ @L["Common_Disabled"]</span> }
                                         </td>
                                         <td class="small text-muted">@TZ.ToLocal(user.CreatedAt).ToString("dd/MM/yyyy")</td>
                                         <td class="text-end">
@@ -179,7 +180,7 @@
             <div class="col-md-4">
                 <div class="card bg-dark border-0 shadow-sm h-100">
                     <div class="card-header bg-transparent border-secondary py-3">
-                        <h6 class="mb-0 text-uppercase small fw-bold text-muted">Rôles & Permissions</h6>
+                        <h6 class="mb-0 text-uppercase small fw-bold text-muted">@L["Users_RolesPermissions"]</h6>
                     </div>
                     <div class="card-body p-0">
                         <div class="list-group list-group-flush">
@@ -204,7 +205,7 @@
                                         }
                                         @if (string.IsNullOrEmpty(role.Permissions))
                                         {
-                                            <span class="text-muted small italic">Aucune permission</span>
+                                            <span class="text-muted small italic">@L["Users_NoPermissions"]</span>
                                         }
                                     </div>
                                 </div>
@@ -217,7 +218,7 @@
     }
 </div>
 
-<ConfirmModal @ref="modalDelete" Title="Suppression" Message="@deleteMsg" OnClose="OnConfirmDelete" />
+<ConfirmModal @ref="modalDelete" Title="@L["Users_Deletion"]" Message="@deleteMsg" OnClose="OnConfirmDelete" />
 
 @code {
     private List<AdminUser> AdminUsersList = new();
@@ -238,17 +239,7 @@
     private string newRoleName = "";
     private HashSet<string> selectedPermissions = new();
     
-    private Dictionary<string, string> availablePermissions = new() {
-        { "dashboard.view", "Dashboard" },
-        { "products.view", "Logiciels" },
-        { "licenses.view", "Licences" },
-        { "resets.view", "Réinitialisations" },
-        { "audit.view", "Audit" },
-        { "telemetry.view", "Télémétrie" },
-        { "backups.view", "Sauvegardes" },
-        { "users.view", "Utilisateurs" },
-        { "all", "TOUS LES DROITS" }
-    };
+    private Dictionary<string, string> availablePermissions = new();
 
     private ConfirmModal modalDelete = default!;
     private string deleteMsg = "";
@@ -256,6 +247,18 @@
 
     protected override async Task OnInitializedAsync()
     {
+        availablePermissions = new Dictionary<string, string> {
+            { "dashboard.view", L["Nav_Dashboard"] },
+            { "products.view", L["Nav_Software"] },
+            { "licenses.view", L["Nav_Licenses"] },
+            { "resets.view", L["Nav_Resets"] },
+            { "audit.view", L["Nav_Audit"] },
+            { "telemetry.view", L["Nav_Telemetry"] },
+            { "backups.view", L["Nav_Backups"] },
+            { "users.view", L["Nav_Users"] },
+            { "all", "TOUS LES DROITS" }
+        };
+
         isAuthorized = await Auth.HasPermissionAsync("users.view");
         if (isAuthorized)
         {
@@ -287,13 +290,13 @@
     private async Task SaveRoleEdit()
     {
         if (editingRole == null) return;
-        if (string.IsNullOrWhiteSpace(newRoleName)) { Toast.ShowError("Nom du rôle requis."); return; }
+        if (string.IsNullOrWhiteSpace(newRoleName)) { Toast.ShowError(L["Users_RoleNameRequired"]); return; }
 
         editingRole.Name = newRoleName;
         editingRole.Permissions = string.Join(",", selectedPermissions);
         
         await Db.SaveChangesAsync();
-        Toast.ShowSuccess("Rôle mis à jour.");
+        Toast.ShowSuccess(L["Users_RoleUpdated"]);
         editingRole = null;
         newRoleName = "";
         selectedPermissions.Clear();
@@ -302,7 +305,7 @@
 
     private async Task CreateRole()
     {
-        if (string.IsNullOrWhiteSpace(newRoleName)) { Toast.ShowError("Nom du rôle requis."); return; }
+        if (string.IsNullOrWhiteSpace(newRoleName)) { Toast.ShowError(L["Users_RoleNameRequired"]); return; }
         
         var role = new AdminRole {
             Name = newRoleName,
@@ -320,12 +323,12 @@
     {
         if (string.IsNullOrWhiteSpace(newUsername) || string.IsNullOrWhiteSpace(newEmail) || string.IsNullOrWhiteSpace(newRoleId))
         {
-            Toast.ShowError("Tous les champs sont requis."); return;
+            Toast.ShowError(L["Users_AllFieldsRequired"]); return;
         }
 
         if (await Db.AdminUsers.AnyAsync(u => u.Username == newUsername))
         {
-            Toast.ShowError("Cet identifiant est déjà utilisé."); return;
+            Toast.ShowError(L["Users_UsernameInUse"]); return;
         }
 
         isBusy = true;
@@ -355,7 +358,7 @@
         }
         catch (Exception ex)
         {
-            Toast.ShowError("Erreur lors de la création : " + ex.Message);
+            Toast.ShowError(L["Common_Error"] + " : " + ex.Message);
         }
         finally
         {
@@ -365,7 +368,7 @@
 
     private void RequestDeleteUser(AdminUser u) { itemToDelete = u; deleteMsg = $"Supprimer l'utilisateur '{u.Username}' ?"; modalDelete.Show(); }
     private void RequestDeleteRole(AdminRole r) { 
-        if (Db.AdminUsers.Any(u => u.RoleId == r.Id)) { Toast.ShowError("Impossible de supprimer un rôle utilisé par des utilisateurs."); return; }
+        if (Db.AdminUsers.Any(u => u.RoleId == r.Id)) { Toast.ShowError(L["Users_RoleInUse"]); return; }
         itemToDelete = r; deleteMsg = $"Supprimer le rôle '{r.Name}' ?"; modalDelete.Show(); 
     }
 
@@ -377,7 +380,7 @@
             else if (itemToDelete is AdminRole r) Db.AdminRoles.Remove(r);
             
             await Db.SaveChangesAsync();
-            Toast.ShowSuccess("Supprimé avec succès.");
+            Toast.ShowSuccess(L["Users_Deleted"]);
             await LoadData();
         }
         itemToDelete = null;

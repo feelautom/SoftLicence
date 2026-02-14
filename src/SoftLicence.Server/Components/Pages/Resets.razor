@@ -1,24 +1,25 @@
 @page "/resets"
 @inject LicenseDbContext Db
 @inject SoftLicence.Server.Services.TimeZoneService TZ
+@inject IStringLocalizer<SharedResource> L
 @using SoftLicence.Server.Data
 @using Microsoft.EntityFrameworkCore
 
 <div class="d-flex justify-content-between align-items-center mb-4">
-    <h3>Suivi des réinitialisations</h3>
-    <button class="btn btn-primary btn-sm" @onclick="Refresh">Actualiser</button>
+    <h3>@L["Resets_Title"]</h3>
+    <button class="btn btn-primary btn-sm" @onclick="Refresh">@L["Common_Refresh"]</button>
 </div>
 
 <div class="table-responsive">
     <table class="table table-hover table-sm align-middle" style="font-size: 0.85rem;">
         <thead>
             <tr>
-                <th>Date (Locale)</th>
-                <th>Logiciel</th>
-                <th>Clé de licence</th>
-                <th>Action</th>
-                <th>Statut</th>
-                <th>IP Client</th>
+                <th>@L["Common_DateLocal"]</th>
+                <th>@L["Resets_Software"]</th>
+                <th>@L["Resets_LicenseKey"]</th>
+                <th>@L["Resets_Action"]</th>
+                <th>@L["Common_Status"]</th>
+                <th>@L["Resets_ClientIp"]</th>
             </tr>
         </thead>
         <tbody>
@@ -33,21 +34,21 @@
                         <td>
                             @if (log.Endpoint == "RESET_REQUEST")
                             {
-                                <span class="badge bg-info">DEMANDE CODE</span>
+                                <span class="badge bg-info">@L["Resets_RequestCode"]</span>
                             }
                             else
                             {
-                                <span class="badge bg-primary">CONFIRMATION</span>
+                                <span class="badge bg-primary">@L["Resets_Confirmation"]</span>
                             }
                         </td>
                         <td>
                             @if (log.IsSuccess)
                             {
-                                <span class="text-success fw-bold">✓ Succès</span>
+                                <span class="text-success fw-bold">✓ @L["Resets_Success"]</span>
                             }
                             else
                             {
-                                <span class="text-danger fw-bold" title="@log.ResultStatus">✗ Échec (@log.StatusCode)</span>
+                                <span class="text-danger fw-bold" title="@log.ResultStatus">✗ @L["Resets_Failure"] (@log.StatusCode)</span>
                             }
                         </td>
                         <td><small class="text-muted"><code>@log.ClientIp</code></small></td>
@@ -62,22 +63,22 @@
 {
     <div class="d-flex justify-content-between align-items-center mt-3">
         <div class="d-flex align-items-center gap-2">
-            <small class="text-muted">Afficher</small>
+            <small class="text-muted">@L["Common_Show"]</small>
             <select class="form-select form-select-sm" style="width: 80px;" @bind:get="PageSize" @bind:set="ChangePageSize">
                 <option value="10">10</option>
                 <option value="25">25</option>
                 <option value="50">50</option>
             </select>
-            <small class="text-muted">sur @TotalCount opérations</small>
+            <small class="text-muted">@L["Common_Of"] @TotalCount @L["Common_Operations"]</small>
         </div>
         <nav>
             <ul class="pagination pagination-sm mb-0">
                 <li class="page-item @(CurrentPage == 1 ? "disabled" : "")">
-                    <button class="page-link" @onclick="() => GoToPage(CurrentPage - 1)">Précédent</button>
+                    <button class="page-link" @onclick="() => GoToPage(CurrentPage - 1)">@L["Common_Previous"]</button>
                 </li>
-                <li class="page-item disabled"><span class="page-link">Page @CurrentPage / @TotalPages</span></li>
+                <li class="page-item disabled"><span class="page-link">@L["Common_Page"] @CurrentPage / @TotalPages</span></li>
                 <li class="page-item @(CurrentPage >= TotalPages ? "disabled" : "")">
-                    <button class="page-link" @onclick="() => GoToPage(CurrentPage + 1)">Suivant</button>
+                    <button class="page-link" @onclick="() => GoToPage(CurrentPage + 1)">@L["Common_Next"]</button>
                 </li>
             </ul>
         </nav>

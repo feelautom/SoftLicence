@@ -7,7 +7,7 @@ public class ProjectIntegrityTests
 {
     [Theory]
     [InlineData("src/SoftLicence.Server/SoftLicence.Server.csproj")]
-    [InlineData("src/SoftLicence.Core/SoftLicence.Core.csproj")]
+    [InlineData("src/SoftLicence.SDK/SoftLicence.SDK.csproj")]
     public void ProjectFiles_MustTreatWarningsAsErrors(string relativePath)
     {
         // On remonte à la racine depuis le dossier de test

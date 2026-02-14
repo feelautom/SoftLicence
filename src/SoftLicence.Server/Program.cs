@@ -39,6 +39,9 @@ builder.Services.AddDataProtection()
     .PersistKeysToFileSystem(new DirectoryInfo(keysFolder))
     .SetApplicationName("SoftLicence");
 
+// Localization (i18n)
+builder.Services.AddLocalization(options => options.ResourcesPath = "Resources");
+
 // Services API
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
@@ -117,7 +120,18 @@ app.UseForwardedHeaders(new ForwardedHeadersOptions
 
 app.UseRateLimiter(); 
 
-app.UseStaticFiles(); 
+app.UseStaticFiles();
+
+// Localization middleware
+var supportedCultures = new[] { "en", "fr" };
+app.UseRequestLocalization(options =>
+{
+    options.SetDefaultCulture("en");
+    options.AddSupportedCultures(supportedCultures);
+    options.AddSupportedUICultures(supportedCultures);
+    options.ApplyCurrentCultureToResponseHeaders = true;
+});
+
 app.UseAntiforgery();
 
 app.UseAuthentication();
@@ -139,40 +153,53 @@ if (builder.Configuration["IsIntegrationTest"] != "true")
         const int maxRetries = 10;
         var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
         
-        // Diagnostic DNS
-        try {
-            var host = connectionString?.Split(';').FirstOrDefault(s => s.StartsWith("Host="))?.Split('=')[1];
-            if (!string.IsNullOrEmpty(host)) {
-                Console.WriteLine($"🌐 Résolution DNS pour : {host}...");
-                var ips = System.Net.Dns.GetHostAddresses(host);
-                Console.WriteLine($"🌐 DNS {host} résolu en : {string.Join(", ", ips.Select(i => i.ToString()))}");
-            }
-        } catch (Exception ex) { Console.WriteLine($"🌐 DNS Wait : {ex.Message}"); }
+        if (app.Environment.IsDevelopment())
+        {
+            // Diagnostic DNS
+            try {
+                var host = connectionString?.Split(';').FirstOrDefault(s => s.StartsWith("Host="))?.Split('=')[1];
+                if (!string.IsNullOrEmpty(host)) {
+                    Console.WriteLine($"🌐 Résolution DNS pour : {host}...");
+                    var ips = System.Net.Dns.GetHostAddresses(host);
+                    Console.WriteLine($"🌐 DNS {host} résolu en : {string.Join(", ", ips.Select(i => i.ToString()))}");
+                }
+            } catch (Exception ex) { Console.WriteLine($"🌐 DNS Wait : {ex.Message}"); }
 
-        var displayConn = connectionString?.Split(';').Select(s => s.StartsWith("Password") ? "Password=***" : s).Aggregate((a, b) => a + ";" + b);
-        Console.WriteLine($"🔍 Tentative de connexion : {displayConn}");
+            var displayConn = connectionString?.Split(';').Select(s => s.StartsWith("Password") ? "Password=***" : s).Aggregate((a, b) => a + ";" + b);
+            Console.WriteLine($"🔍 Tentative de connexion : {displayConn}");
+        }
 
         while (retryCount < maxRetries)
         {
             try 
             {
                 db.Database.Migrate();
-                Console.WriteLine("✅ Base de données prête et migrations appliquées.");
+                if (app.Environment.IsDevelopment())
+                {
+                    Console.WriteLine("✅ Base de données prête et migrations appliquées.");
+                }
                 break;
             }
             catch (Exception ex)
             {
                 retryCount++;
-                Console.WriteLine($"⚠️ Tentative {retryCount}/{maxRetries} échouée.");
-                Console.WriteLine($"   Erreur : {ex.GetType().Name} - {ex.Message}");
-                if (ex.InnerException != null) Console.WriteLine($"   Interne : {ex.InnerException.Message}");
+                if (app.Environment.IsDevelopment())
+                {
+                    Console.WriteLine($"⚠️ Tentative {retryCount}/{maxRetries} échouée.");
+                    Console.WriteLine($"   Erreur : {ex.GetType().Name} - {ex.Message}");
+                    if (ex.InnerException != null) Console.WriteLine($"   Interne : {ex.InnerException.Message}");
+                }
 
                 if (retryCount >= maxRetries)
                 {
                     Console.WriteLine($"[FATAL] Impossible de se connecter à PostgreSQL après {maxRetries} tentatives.");
                     throw; 
                 }
-                Console.WriteLine($"[WAIT] PostgreSQL n'est pas encore prêt. Attente de 5s...");
+                
+                if (app.Environment.IsDevelopment())
+                {
+                    Console.WriteLine($"[WAIT] PostgreSQL n'est pas encore prêt. Attente de 5s...");
+                }
                 Thread.Sleep(5000); 
             }
         }

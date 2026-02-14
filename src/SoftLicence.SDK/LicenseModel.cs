@@ -1,4 +1,4 @@
-namespace SoftLicence.Core
+namespace SoftLicence.SDK
 {
     // L'énumération est supprimée au profit d'un système de Slugs dynamiques (ex: "PRO", "TRIAL_15D")
 

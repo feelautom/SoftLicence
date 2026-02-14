@@ -5,21 +5,22 @@
 @inject SoftLicence.Server.Services.TimeZoneService TZ
 @inject SoftLicence.Server.Services.ToastService Toast
 @inject IConfiguration Config
+@inject IStringLocalizer<SharedResource> L
 
 <div class="container-fluid animate-fade">
     <div class="d-flex justify-content-between align-items-center mb-4">
         <div>
-            <h3 class="mb-1">Sauvegardes Drive</h3>
-            <p class="text-muted small">Gestion des backups cryptés via rclone et Google Drive.</p>
+            <h3 class="mb-1">@L["Backups_Title"]</h3>
+            <p class="text-muted small">@L["Backups_Description"]</p>
         </div>
         <div class="d-flex gap-2">
             <button class="btn btn-outline-info" @onclick="CheckHealth" disabled="@(isBusy || !isBackupEnabled)">
                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-shield-check me-2" viewBox="0 0 16 16"><path d="M8 0c-.69 0-1.843.265-2.928.56-1.11.3-2.229.655-2.887.87a1.54 1.54 0 0 0-1.044 1.262c-.596 4.477.787 7.795 2.465 9.99a11.775 11.775 0 0 0 2.517 2.453c.386.273.744.482 1.048.625.28.132.581.24.829.24s.548-.108.829-.24c.304-.143.662-.352 1.048-.625a11.775 11.775 0 0 0 2.517-2.453c1.678-2.195 2.461-5.513 1.465-9.99a1.541 1.541 0 0 0-1.044-1.263 62.467 62.467 0 0 0-2.887-.87C9.843.266 8.69 0 8 0zm2.157 1.56c1.07.288 2.14.612 2.767.818a.541.541 0 0 1 .364.443c.808 6.062-.51 8.875-2.148 11.02a10.777 10.777 0 0 1-2.31 2.255A1.75 1.75 0 0 1 8 16a1.75 1.75 0 0 1-.83-.204 10.778 10.778 0 0 1-2.31-2.255c-1.638-2.145-2.956-4.958-2.148-11.02a.54.54 0 0 1 .364-.443c.628-.206 1.698-.53 2.767-.818.913-.246 1.77-.457 2.157-.457s1.244.211 2.157.457z"/><path d="M10.854 5.146a.5.5 0 0 1 0 .708l-3 3a.5.5 0 0 1-.708 0l-1.5-1.5a.5.5 0 1 1 .708-.708L7.5 7.793l2.646-2.647a.5.5 0 0 1 .708 0z"/></svg>
-                Vérifier l'état
+                @L["Backups_CheckStatus"]
             </button>
             <button class="btn btn-primary" @onclick="RunManualBackup" disabled="@(isBusy || !isBackupEnabled)">
                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-cloud-upload me-2" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M4.406 1.342A5.53 5.53 0 0 1 8 0c2.69 0 4.923 2 5.166 4.579C14.758 4.804 16 6.137 16 7.773 16 9.569 14.502 11 12.687 11H10a.5.5 0 0 1 0-1h2.688C13.979 10 15 8.988 15 7.773c0-1.216-1.02-2.228-2.313-2.228h-.5v-.5C12.188 2.825 10.328 1 8 1a4.53 4.53 0 0 0-2.941 1.1c-.757.652-1.153 1.438-1.153 2.055v.448l-.445.049C2.064 4.805 1 5.952 1 7.318 1 8.785 2.23 10 3.781 10H6a.5.5 0 0 1 0 1H3.781C1.708 11 0 9.366 0 7.318c0-1.763 1.266-3.223 2.942-3.593.143-.863.698-1.723 1.464-2.383z"/><path fill-rule="evenodd" d="M7.646 4.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 5.707V14.5a.5.5 0 0 1-1 0V5.707L5.354 7.854a.5.5 0 1 1-.708-.708l3-3z"/></svg>
-                Backup BDD Immédiat
+                @L["Backups_ImmediateBackup"]
             </button>
         </div>
     </div>
@@ -29,7 +30,7 @@
         <div class="col-md-4">
             <div class="card h-100 p-4 border-0 shadow-sm bg-dark">
                 <div class="d-flex justify-content-between align-items-center mb-4">
-                    <h6 class="text-uppercase small text-muted mb-0 fw-bold">Statut du Service</h6>
+                    <h6 class="text-uppercase small text-muted mb-0 fw-bold">@L["Backups_ServiceStatus"]</h6>
                     <div class="form-check form-switch">
                         <input class="form-check-input" type="checkbox" role="switch" id="backupToggle" @bind="isBackupEnabled" @bind:after="OnBackupToggleChanged">
                     </div>
@@ -40,30 +41,30 @@
                         <div class="rounded-circle @(isBackupEnabled ? (isRcloneReady ? "bg-success" : "bg-danger") : "bg-secondary")" style="width: 12px; height: 12px;"></div>
                     </div>
                     <div>
-                        <div class="fw-bold text-white">@(isBackupEnabled ? (isRcloneReady ? "Opérationnel" : "Erreur de configuration") : "Désactivé")</div>
-                        <div class="small text-muted">@(isBackupEnabled ? healthMessage : "Les sauvegardes sont suspendues.")</div>
+                        <div class="fw-bold text-white">@(isBackupEnabled ? (isRcloneReady ? L["Backups_Operational"] : L["Backups_ConfigError"]) : L["Common_Disabled"])</div>
+                        <div class="small text-muted">@(isBackupEnabled ? healthMessage : L["Backups_BackupsPaused"])</div>
                     </div>
                 </div>
 
                 <hr class="border-secondary my-4" />
 
                 <div class="mb-3">
-                    <label class="small text-muted d-block mb-1">Remote Configuré</label>
+                    <label class="small text-muted d-block mb-1">@L["Backups_ConfiguredRemote"]</label>
                     <code class="text-info bg-black p-1 rounded">@Config["BackupSettings:RcloneRemote"]</code>
                 </div>
 
                 <div class="mb-3">
-                    <label class="small text-muted d-block mb-1">Backup Automatique</label>
-                    <span class="badge @(isBackupEnabled ? "bg-primary" : "bg-secondary")">Journalier (00:00)</span>
+                    <label class="small text-muted d-block mb-1">@L["Backups_AutoBackup"]</label>
+                    <span class="badge @(isBackupEnabled ? "bg-primary" : "bg-secondary")">@L["Backups_Daily"]</span>
                 </div>
 
                 <div class="mt-auto pt-3">
                     <button class="btn btn-sm btn-outline-warning w-100 mb-2" @onclick="CheckHealth" disabled="@(isBusy || !isBackupEnabled)">
                         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-shield-check me-2" viewBox="0 0 16 16"><path d="M8 0c-.69 0-1.843.265-2.928.56-1.11.3-2.229.655-2.887.87a1.54 1.54 0 0 0-1.044 1.262c-.596 4.477.787 7.795 2.465 9.99a11.775 11.775 0 0 0 2.517 2.453c.386.273.744.482 1.048.625.28.132.581.24.829.24s.548-.108.829-.24c.304-.143.662-.352 1.048-.625a11.775 11.775 0 0 0 2.517-2.453c1.678-2.195 2.461-5.513 1.465-9.99a1.541 1.541 0 0 0-1.044-1.263 62.467 62.467 0 0 0-2.887-.87C9.843.266 8.69 0 8 0zm2.157 1.56c1.07.288 2.14.612 2.767.818a.541.541 0 0 1 .364.443c.808 6.062-.51 8.875-2.148 11.02a10.777 10.777 0 0 1-2.31 2.255A1.75 1.75 0 0 1 8 16a1.75 1.75 0 0 1-.83-.204 10.778 10.778 0 0 1-2.31-2.255c-1.638-2.145-2.956-4.958-2.148-11.02a.54.54 0 0 1 .364-.443c.628-.206 1.698-.53 2.767-.818.913-.246 1.77-.457 2.157-.457s1.244.211 2.157.457z"/><path d="M10.854 5.146a.5.5 0 0 1 0 .708l-3 3a.5.5 0 0 1-.708 0l-1.5-1.5a.5.5 0 1 1 .708-.708L7.5 7.793l2.646-2.647a.5.5 0 0 1 .708 0z"/></svg>
-                        Diagnostic Rclone
+                        @L["Backups_RcloneDiag"]
                     </button>
                     <button class="btn btn-sm btn-outline-info w-100" @onclick="TestConnection" disabled="@(isBusy || !isRcloneReady || !isBackupEnabled)">
-                        ⚡ Tester le transfert
+                        ⚡ @L["Backups_TestTransfer"]
                     </button>
                 </div>
             </div>
@@ -72,13 +73,13 @@
         <!-- DIAGNOSTIC LOGS -->
         <div class="col-md-8">
             <div class="card h-100 p-4 border-0 shadow-sm bg-dark">
-                <h6 class="text-uppercase small text-muted mb-4 fw-bold">Console de Diagnostic</h6>
+                <h6 class="text-uppercase small text-muted mb-4 fw-bold">@L["Backups_DiagConsole"]</h6>
                 <div class="bg-black p-3 rounded font-monospace text-success border border-secondary overflow-auto h-100" style="min-height: 250px; font-size: 0.75rem;">
                     @foreach (var log in diagnosticLogs)
                     {
                         <div class="mb-1 text-nowrap">> @log</div>
                     }
-                    @if (isBusy) { <div class="text-info animate-pulse">> Traitement en cours...</div> }
+                    @if (isBusy) { <div class="text-info animate-pulse">> @L["Backups_Processing"]</div> }
                 </div>
             </div>
         </div>
@@ -87,31 +88,31 @@
         <div class="col-12">
             <div class="card p-4 border-0 shadow-sm bg-dark">
                 <div class="d-flex justify-content-between align-items-center mb-4">
-                    <h6 class="text-uppercase small text-muted mb-0 fw-bold">Historique des sauvegardes (Cloud)</h6>
+                    <h6 class="text-uppercase small text-muted mb-0 fw-bold">@L["Backups_History"]</h6>
                     <div class="d-flex gap-2">
                         <button class="btn btn-sm btn-outline-secondary" @onclick="RefreshBackupList" disabled="@(isBusy || !isRcloneReady || !isBackupEnabled)">
                             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-1"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
-                            Actualiser
+                            @L["Common_Refresh"]
                         </button>
                         <button class="btn btn-sm btn-primary" @onclick="RunManualBackup" disabled="@(isBusy || !isBackupEnabled)">
                             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-cloud-upload me-1" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M4.406 1.342A5.53 5.53 0 0 1 8 0c2.69 0 4.923 2 5.166 4.579C14.758 4.804 16 6.137 16 7.773 16 9.569 14.502 11 12.687 11H10a.5.5 0 0 1 0-1h2.688C13.979 10 15 8.988 15 7.773c0-1.216-1.02-2.228-2.313-2.228h-.5v-.5C12.188 2.825 10.328 1 8 1a4.53 4.53 0 0 0-2.941 1.1c-.757.652-1.153 1.438-1.153 2.055v.448l-.445.049C2.064 4.805 1 5.952 1 7.318 1 8.785 2.23 10 3.781 10H6a.5.5 0 0 1 0 1H3.781C1.708 11 0 9.366 0 7.318c0-1.763 1.266-3.223 2.942-3.593.143-.863.698-1.723 1.464-2.383z"/><path fill-rule="evenodd" d="M7.646 4.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 5.707V14.5a.5.5 0 0 1-1 0V5.707L5.354 7.854a.5.5 0 1 1-.708-.708l3-3z"/></svg>
-                            Sauvegarder BDD
+                            @L["Backups_BackupDb"]
                         </button>
                     </div>
                 </div>
 
                 <div class="mb-3">
-                    <input class="form-control form-control-sm" style="max-width: 300px;" placeholder="Rechercher (nom, chemin, date...)" @bind="backupSearch" @bind:event="oninput" @bind:after="() => { backupPage = 1; }" />
+                    <input class="form-control form-control-sm" style="max-width: 300px;" placeholder="@L["Backups_SearchPlaceholder"]" @bind="backupSearch" @bind:event="oninput" @bind:after="() => { backupPage = 1; }" />
                 </div>
 
                 <div class="table-responsive">
                     <table class="table table-sm table-dark table-hover align-middle" style="font-size: 0.85rem;">
                         <thead class="sticky-top bg-dark">
                             <tr>
-                                <th>Type</th>
-                                <th>Fichier / Chemin</th>
-                                <th class="text-end">Date de sauvegarde</th>
-                                <th class="text-end" style="width: 100px;">Actions</th>
+                                <th>@L["Common_Type"]</th>
+                                <th>@L["Backups_FilePath"]</th>
+                                <th class="text-end">@L["Backups_BackupDate"]</th>
+                                <th class="text-end" style="width: 100px;">@L["Common_Actions"]</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -120,7 +121,7 @@
                                 <tr>
                                     <td>
                                         <span class="badge @(file.Category == "Clé RSA" ? "bg-info text-dark" : "bg-primary")" style="font-size: 0.65rem;">
-                                            @file.Category
+                                            @(file.Category == "Clé RSA" ? L["Backups_RsaKey"] : L["Backups_Database"])
                                         </span>
                                     </td>
                                     <td>
@@ -131,7 +132,7 @@
                                     <td class="text-end">
                                         @if (file.Category == "Base de données")
                                         {
-                                            <button class="btn btn-sm btn-outline-danger" title="Restaurer cette version" @onclick="() => PrepareRestore(file)" disabled="@(isBusy || !isBackupEnabled)">
+                                            <button class="btn btn-sm btn-outline-danger" title="@L["Backups_RestoreTitle"]" @onclick="() => PrepareRestore(file)" disabled="@(isBusy || !isBackupEnabled)">
                                                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-archive-restore"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h2"/><path d="M20 8v11a2 2 0 0 1-2 2h-2"/><path d="m9 15 3-3 3 3"/><path d="M12 12v9"/></svg>
                                             </button>
                                         }
@@ -142,7 +143,7 @@
                             {
                                 <tr>
                                     <td colspan="4" class="text-center py-4 text-muted italic">
-                                        @(isBusy ? "Chargement..." : (string.IsNullOrEmpty(backupSearch) ? "Aucune sauvegarde trouvée sur le Drive." : "Aucun résultat pour cette recherche."))
+                                        @(isBusy ? L["Common_Loading"] : (string.IsNullOrEmpty(backupSearch) ? L["Backups_NoBackups"] : L["Backups_NoResults"]))
                                     </td>
                                 </tr>
                             }
@@ -154,23 +155,23 @@
                 {
                     <div class="d-flex justify-content-between align-items-center mt-3">
                         <div class="d-flex align-items-center gap-2">
-                            <small class="text-muted">Afficher</small>
+                            <small class="text-muted">@L["Common_Show"]</small>
                             <select class="form-select form-select-sm" style="width: 80px;" @bind:get="backupPageSize" @bind:set="v => { backupPageSize = v; backupPage = 1; }">
                                 <option value="10">10</option>
                                 <option value="25">25</option>
                                 <option value="50">50</option>
                                 <option value="100">100</option>
                             </select>
-                            <small class="text-muted">sur @FilteredBackups.Count fichiers</small>
+                            <small class="text-muted">@L["Common_Of"] @FilteredBackups.Count @L["Common_Files"]</small>
                         </div>
                         <nav>
                             <ul class="pagination pagination-sm mb-0">
                                 <li class="page-item @(backupPage == 1 ? "disabled" : "")">
-                                    <button class="page-link" @onclick="() => backupPage--">Précédent</button>
+                                    <button class="page-link" @onclick="() => backupPage--">@L["Common_Previous"]</button>
                                 </li>
-                                <li class="page-item disabled"><span class="page-link">Page @backupPage / @BackupTotalPages</span></li>
+                                <li class="page-item disabled"><span class="page-link">@L["Common_Page"] @backupPage / @BackupTotalPages</span></li>
                                 <li class="page-item @(backupPage >= BackupTotalPages ? "disabled" : "")">
-                                    <button class="page-link" @onclick="() => backupPage++">Suivant</button>
+                                    <button class="page-link" @onclick="() => backupPage++">@L["Common_Next"]</button>
                                 </li>
                             </ul>
                         </nav>
@@ -189,15 +190,15 @@
                 <div class="modal-header border-secondary bg-danger bg-opacity-10">
                     <h5 class="modal-title text-white">
                         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="bi bi-exclamation-triangle-fill text-danger me-2" viewBox="0 0 16 16"><path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/></svg>
-                        Confirmation de restauration critique
+                        @L["Backups_RestoreTitle"]
                     </h5>
                     <button type="button" class="btn-close btn-close-white" @onclick="() => showRestoreModal = false"></button>
                 </div>
                 <div class="modal-body p-4 text-center">
                     <div class="mb-4">
-                        <p class="text-light">Vous allez écraser la base de données actuelle par la sauvegarde du <strong class="text-info">@TZ.ToLocal(selectedForRestore.Date).ToString("f")</strong>.</p>
+                        <p class="text-light">@L["Backups_RestoreWarning"] <strong class="text-info">@TZ.ToLocal(selectedForRestore.Date).ToString("f")</strong>.</p>
                         <div class="alert alert-warning border-warning bg-black bg-opacity-50 small">
-                            <strong>⚠️ Attention :</strong> L'application redémarrera immédiatement après la restauration.
+                            <strong>⚠️ Attention :</strong> @L["Backups_RestartWarning"]
                         </div>
                     </div>
 
@@ -205,7 +206,7 @@
                     {
                         <div class="py-5">
                             <div class="spinner-border text-info mb-3"></div>
-                            <div class="text-info">Analyse de la sauvegarde en cours...</div>
+                            <div class="text-info">@L["Backups_Analyzing"]</div>
                         </div>
                     }
                     else if (currentStats != null)
@@ -213,18 +214,18 @@
                         <div class="row g-3">
                             <div class="col-md-6">
                                 <div class="card bg-black border-secondary h-100">
-                                    <div class="card-header border-secondary small text-muted text-uppercase">État Actuel (Live)</div>
+                                    <div class="card-header border-secondary small text-muted text-uppercase">@L["Backups_CurrentState"]</div>
                                     <div class="card-body">
-                                        <div class="d-flex justify-content-between mb-2"><span>Produits :</span> <span class="fw-bold">@currentStats.ProductsCount</span></div>
-                                        <div class="d-flex justify-content-between mb-2"><span>Licences :</span> <span class="fw-bold">@currentStats.LicensesCount</span></div>
-                                        <div class="d-flex justify-content-between mb-2"><span>Audit :</span> <span class="fw-bold">@currentStats.LogsCount</span></div>
-                                        <div class="d-flex justify-content-between mb-2"><span>Télémétrie :</span> <span class="fw-bold">@currentStats.TelemetryCount</span></div>
+                                        <div class="d-flex justify-content-between mb-2"><span>@L["Nav_Software"] :</span> <span class="fw-bold">@currentStats.ProductsCount</span></div>
+                                        <div class="d-flex justify-content-between mb-2"><span>@L["Nav_Licenses"] :</span> <span class="fw-bold">@currentStats.LicensesCount</span></div>
+                                        <div class="d-flex justify-content-between mb-2"><span>@L["Nav_Audit"] :</span> <span class="fw-bold">@currentStats.LogsCount</span></div>
+                                        <div class="d-flex justify-content-between mb-2"><span>@L["Nav_Telemetry"] :</span> <span class="fw-bold">@currentStats.TelemetryCount</span></div>
                                     </div>
                                 </div>
                             </div>
                             <div class="col-md-6">
                                 <div class="card bg-black border-info h-100 shadow-sm">
-                                    <div class="card-header border-info bg-info bg-opacity-10 small text-info text-uppercase">Fichier de Sauvegarde</div>
+                                    <div class="card-header border-info bg-info bg-opacity-10 small text-info text-uppercase">@L["Backups_BackupFile"]</div>
                                     <div class="card-body d-flex flex-column justify-content-center">
                                         <div class="text-info fw-bold">@selectedForRestore.Name</div>
                                         <div class="small text-muted mt-2">Date : @TZ.ToLocal(selectedForRestore.Date).ToString("g")</div>
@@ -236,16 +237,17 @@
                     }
                 </div>
                 <div class="modal-footer border-secondary">
-                    <button type="button" class="btn btn-outline-secondary" @onclick="() => showRestoreModal = false">Annuler</button>
+                    <button type="button" class="btn btn-outline-secondary" @onclick="() => showRestoreModal = false">@L["Common_Cancel"]</button>
                     <button type="button" class="btn btn-danger px-4" @onclick="FinalizeRestore" disabled="@isAnalyzing">
                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-shield-lock-fill me-2" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M8 0c-.69 0-1.843.265-2.928.56-1.11.3-2.229.655-2.887.87a1.54 1.54 0 0 0-1.044 1.262c-.596 4.477.787 7.795 2.465 9.99a11.775 11.775 0 0 0 2.517 2.453c.386.273.744.482 1.048.625.28.132.581.24.829.24s.548-.108.829-.24a7.159 7.159 0 0 0 1.048-.625 11.775 11.775 0 0 0 2.517-2.453c1.678-2.195 3.061-5.513 2.465-9.99a1.541 1.541 0 0 0-1.044-1.263 62.467 62.467 0 0 0-2.887-.87C9.843.266 8.69 0 8 0z"/></svg>
-                        Confirmer et Restaurer
+                        @L["Backups_ConfirmRestore"]
                     </button>
                 </div>
             </div>
         </div>
     </div>
 }
+
 
 <style>
     .bg-black { background-color: #000 !important; }

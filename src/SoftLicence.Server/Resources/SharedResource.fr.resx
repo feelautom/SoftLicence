@@ -1,0 +1,428 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType>
+        <xsd:choice maxOccurs="unbounded">
+          <xsd:element name="data">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" />
+              <xsd:attribute name="type" type="xsd:string" />
+              <xsd:attribute name="xml:space" type="xsd:string" />
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:choice>
+      </xsd:complexType>
+    </xsd:element>
+  </xsd:schema>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+
+  <!-- Common -->
+  <data name="Common_AccessDenied" xml:space="preserve"><value>Accès Refusé</value></data>
+  <data name="Common_NoPermission" xml:space="preserve"><value>Vous n'avez pas les permissions nécessaires.</value></data>
+  <data name="Common_Refresh" xml:space="preserve"><value>Actualiser</value></data>
+  <data name="Common_Previous" xml:space="preserve"><value>Précédent</value></data>
+  <data name="Common_Next" xml:space="preserve"><value>Suivant</value></data>
+  <data name="Common_Show" xml:space="preserve"><value>Afficher</value></data>
+  <data name="Common_Of" xml:space="preserve"><value>sur</value></data>
+  <data name="Common_Entries" xml:space="preserve"><value>entrées</value></data>
+  <data name="Common_Cancel" xml:space="preserve"><value>Annuler</value></data>
+  <data name="Common_Close" xml:space="preserve"><value>Fermer</value></data>
+  <data name="Common_Delete" xml:space="preserve"><value>Supprimer</value></data>
+  <data name="Common_Save" xml:space="preserve"><value>Enregistrer</value></data>
+  <data name="Common_Edit" xml:space="preserve"><value>Modifier</value></data>
+  <data name="Common_Error" xml:space="preserve"><value>Erreur</value></data>
+  <data name="Common_Copied" xml:space="preserve"><value>Copié !</value></data>
+  <data name="Common_Create" xml:space="preserve"><value>Créer</value></data>
+  <data name="Common_Loading" xml:space="preserve"><value>Chargement...</value></data>
+  <data name="Common_Select" xml:space="preserve"><value>-- Choisir --</value></data>
+  <data name="Common_Search" xml:space="preserve"><value>Rechercher...</value></data>
+  <data name="Common_Operations" xml:space="preserve"><value>opérations</value></data>
+  <data name="Common_Files" xml:space="preserve"><value>fichiers</value></data>
+  <data name="Common_Page" xml:space="preserve"><value>Page</value></data>
+  <data name="Common_Method" xml:space="preserve"><value>Méthode</value></data>
+  <data name="Common_Status" xml:space="preserve"><value>Statut</value></data>
+  <data name="Common_Actions" xml:space="preserve"><value>Actions</value></data>
+  <data name="Common_Name" xml:space="preserve"><value>Nom</value></data>
+  <data name="Common_Date" xml:space="preserve"><value>Date</value></data>
+  <data name="Common_DateLocal" xml:space="preserve"><value>Date (Locale)</value></data>
+  <data name="Common_Active" xml:space="preserve"><value>Actif</value></data>
+  <data name="Common_Disabled" xml:space="preserve"><value>Désactivé</value></data>
+  <data name="Common_Test" xml:space="preserve"><value>Tester</value></data>
+  <data name="Common_Details" xml:space="preserve"><value>Détails</value></data>
+  <data name="Common_Version" xml:space="preserve"><value>Version</value></data>
+  <data name="Common_Add" xml:space="preserve"><value>Ajouter</value></data>
+  <data name="Common_Hide" xml:space="preserve"><value>Masquer</value></data>
+  <data name="Common_Never" xml:space="preserve"><value>Jamais</value></data>
+  <data name="Common_Type" xml:space="preserve"><value>Type</value></data>
+  <data name="Common_NoPermissionDashboard" xml:space="preserve"><value>Vous n'avez pas les permissions nécessaires pour voir le tableau de bord.</value></data>
+  <data name="Common_NoPermissionLicenses" xml:space="preserve"><value>Vous n'avez pas les permissions nécessaires pour gérer les licences.</value></data>
+  <data name="Common_NoPermissionProducts" xml:space="preserve"><value>Vous n'avez pas les permissions nécessaires pour gérer les logiciels.</value></data>
+  <data name="Common_NoPermissionUsers" xml:space="preserve"><value>Vous n'avez pas les permissions nécessaires pour gérer les utilisateurs.</value></data>
+
+  <!-- Dashboard -->
+  <data name="Dashboard_Title" xml:space="preserve"><value>Tableau de bord</value></data>
+  <data name="Dashboard_TotalLicenses" xml:space="preserve"><value>Licences totales</value></data>
+  <data name="Dashboard_ActiveCount" xml:space="preserve"><value>actives</value></data>
+  <data name="Dashboard_RevokedCount" xml:space="preserve"><value>révoquées</value></data>
+  <data name="Dashboard_Products" xml:space="preserve"><value>Logiciels</value></data>
+  <data name="Dashboard_Requests30d" xml:space="preserve"><value>Requêtes (30j)</value></data>
+  <data name="Dashboard_ApiCalls" xml:space="preserve"><value>Appels API Activations + Checks</value></data>
+  <data name="Dashboard_ErrorRate" xml:space="preserve"><value>Taux d'erreur</value></data>
+  <data name="Dashboard_Failures" xml:space="preserve"><value>échecs / rejets</value></data>
+  <data name="Dashboard_ApiActivity7d" xml:space="preserve"><value>Activité API (7j)</value></data>
+  <data name="Dashboard_OK" xml:space="preserve"><value>OK</value></data>
+  <data name="Dashboard_Errors" xml:space="preserve"><value>Erreurs</value></data>
+  <data name="Dashboard_Licenses7d" xml:space="preserve"><value>Licences (7j)</value></data>
+  <data name="Dashboard_Created" xml:space="preserve"><value>Créées</value></data>
+  <data name="Dashboard_Activated" xml:space="preserve"><value>Activées</value></data>
+  <data name="Dashboard_LoadingStats" xml:space="preserve"><value>Chargement des statistiques...</value></data>
+
+  <!-- Licenses -->
+  <data name="Licenses_Title" xml:space="preserve"><value>Gestion des licences</value></data>
+  <data name="Licenses_Generate" xml:space="preserve"><value>Générer une licence</value></data>
+  <data name="Licenses_New" xml:space="preserve"><value>Nouvelle licence</value></data>
+  <data name="Licenses_Software" xml:space="preserve"><value>Logiciel</value></data>
+  <data name="Licenses_Client" xml:space="preserve"><value>Client</value></data>
+  <data name="Licenses_Email" xml:space="preserve"><value>Email</value></data>
+  <data name="Licenses_Days" xml:space="preserve"><value>Jours</value></data>
+  <data name="Licenses_Seats" xml:space="preserve"><value>Postes</value></data>
+  <data name="Licenses_GenerateKey" xml:space="preserve"><value>Générer Clé</value></data>
+  <data name="Licenses_Created" xml:space="preserve"><value>Licence créée ! Voici la clé :</value></data>
+  <data name="Licenses_Key" xml:space="preserve"><value>Clé (ID)</value></data>
+  <data name="Licenses_HardwareId" xml:space="preserve"><value>Hardware ID</value></data>
+  <data name="Licenses_Recovery" xml:space="preserve"><value>Recov.</value></data>
+  <data name="Licenses_Reference" xml:space="preserve"><value>Réf. / Custom</value></data>
+  <data name="Licenses_Revoked" xml:space="preserve"><value>Révoqué</value></data>
+  <data name="Licenses_Reactivate" xml:space="preserve"><value>Réactiver</value></data>
+  <data name="Licenses_DeleteTitle" xml:space="preserve"><value>Supprimer la licence</value></data>
+  <data name="Licenses_DeleteWarning" xml:space="preserve"><value>Cette action est irréversible. Les postes associés seront également supprimés.</value></data>
+  <data name="Licenses_ActivatedSeats" xml:space="preserve"><value>Postes activés</value></data>
+  <data name="Licenses_GlobalReset" xml:space="preserve"><value>Reset Global</value></data>
+  <data name="Licenses_NoSeats" xml:space="preserve"><value>Aucun poste activé pour le moment.</value></data>
+  <data name="Licenses_ActivatedOn" xml:space="preserve"><value>Activé :</value></data>
+  <data name="Licenses_LastSeen" xml:space="preserve"><value>Dernier vu :</value></data>
+  <data name="Licenses_Online" xml:space="preserve"><value>En ligne</value></data>
+  <data name="Licenses_UnlinkSeat" xml:space="preserve"><value>Délier ce poste</value></data>
+  <data name="Licenses_MsgRevoked" xml:space="preserve"><value>Révoquée.</value></data>
+  <data name="Licenses_MsgReactivated" xml:space="preserve"><value>Réactivée.</value></data>
+  <data name="Licenses_MsgSeatUnlinked" xml:space="preserve"><value>Poste délié.</value></data>
+  <data name="Licenses_MsgAllSeatsUnlinked" xml:space="preserve"><value>Tous les postes ont été déliés.</value></data>
+  <data name="Licenses_MsgDeleted" xml:space="preserve"><value>Licence supprimée définitivement.</value></data>
+  <data name="Licenses_MsgMissingFields" xml:space="preserve"><value>Champs manquants.</value></data>
+  <data name="Licenses_MsgEmailSent" xml:space="preserve"><value>Email envoyé !</value></data>
+  <data name="Licenses_SeatDetails" xml:space="preserve"><value>Détails</value></data>
+  <data name="Licenses_NamePlaceholder" xml:space="preserve"><value>Nom...</value></data>
+  <data name="Licenses_EmailPlaceholder" xml:space="preserve"><value>Optionnel...</value></data>
+
+  <!-- Products -->
+  <data name="Products_Title" xml:space="preserve"><value>Gestion des logiciels</value></data>
+  <data name="Products_New" xml:space="preserve"><value>Nouveau logiciel</value></data>
+  <data name="Products_BackToList" xml:space="preserve"><value>Retour à la liste</value></data>
+  <data name="Products_NamePlaceholder" xml:space="preserve"><value>Nom du logiciel (ex: Feeling v1.0)...</value></data>
+  <data name="Products_CreateSoftware" xml:space="preserve"><value>Créer le logiciel</value></data>
+  <data name="Products_ImportKeys" xml:space="preserve"><value>Importer des clés (DEV)</value></data>
+  <data name="Products_Creating" xml:space="preserve"><value>Création en cours...</value></data>
+  <data name="Products_StepRSA" xml:space="preserve"><value>Génération RSA-4096</value></data>
+  <data name="Products_StepEncrypt" xml:space="preserve"><value>Chiffrement de sécurité</value></data>
+  <data name="Products_StepSave" xml:space="preserve"><value>Enregistrement en base</value></data>
+  <data name="Products_SecurityBackup" xml:space="preserve"><value>Sécurité &amp; Sauvegarde</value></data>
+  <data name="Products_CreatedSuccess" xml:space="preserve"><value>a été créé avec succès.</value></data>
+  <data name="Products_KeyEncrypted" xml:space="preserve"><value>Sa clé privée est désormais chiffrée en base de données.</value></data>
+  <data name="Products_Important" xml:space="preserve"><value>IMPORTANT</value></data>
+  <data name="Products_KeyLossWarning" xml:space="preserve"><value>En cas de corruption du serveur ou de perte des clés de protection système, vous ne pourrez plus signer de nouvelles licences.</value></data>
+  <data name="Products_DownloadPrivateKey" xml:space="preserve"><value>Télécharger la clé privée (XML)</value></data>
+  <data name="Products_BackupDone" xml:space="preserve"><value>J'ai effectué ma sauvegarde</value></data>
+  <data name="Products_KeyNote" xml:space="preserve"><value>Note : La clé téléchargée est en clair. Gardez-la dans un coffre-fort numérique.</value></data>
+  <data name="Products_LicenseTypes" xml:space="preserve"><value>Types de licences</value></data>
+  <data name="Products_ManageTypes" xml:space="preserve"><value>Gérer les types</value></data>
+  <data name="Products_NoTypes" xml:space="preserve"><value>Aucun type défini.</value></data>
+  <data name="Products_Duration" xml:space="preserve"><value>Durée</value></data>
+  <data name="Products_Mode" xml:space="preserve"><value>Mode</value></data>
+  <data name="Products_Subscription" xml:space="preserve"><value>ABONNEMENT</value></data>
+  <data name="Products_Fixed" xml:space="preserve"><value>FIXE</value></data>
+  <data name="Products_PublicKeyXml" xml:space="preserve"><value>Clé publique XML</value></data>
+  <data name="Products_ProductApiKey" xml:space="preserve"><value>Clé API Produit</value></data>
+  <data name="Products_Analysis" xml:space="preserve"><value>Analyse :</value></data>
+  <data name="Products_KeysCreated" xml:space="preserve"><value>Clés créées</value></data>
+  <data name="Products_Activations" xml:space="preserve"><value>Activations</value></data>
+  <data name="Products_Checks24h" xml:space="preserve"><value>Checks (24h)</value></data>
+  <data name="Products_RevokedCount" xml:space="preserve"><value>Révoqués</value></data>
+  <data name="Products_ConversionFunnel" xml:space="preserve"><value>Tunnel de conversion (Clés -> Activation)</value></data>
+  <data name="Products_LatestLicenses" xml:space="preserve"><value>Dernières licences</value></data>
+  <data name="Products_Telemetry" xml:space="preserve"><value>Télémétrie</value></data>
+  <data name="Products_AccessLog" xml:space="preserve"><value>Journal d'accès</value></data>
+  <data name="Products_NoLicenses" xml:space="preserve"><value>Aucune licence trouvée.</value></data>
+  <data name="Products_NoTelemetry" xml:space="preserve"><value>Aucune donnée de télémétrie.</value></data>
+  <data name="Products_NoLogs" xml:space="preserve"><value>Aucun log d'accès.</value></data>
+  <data name="Products_CreationDate" xml:space="preserve"><value>Date création</value></data>
+  <data name="Products_Endpoint" xml:space="preserve"><value>Endpoint</value></data>
+  <data name="Products_SoftwareName" xml:space="preserve"><value>Nom du logiciel</value></data>
+  <data name="Products_Licenses" xml:space="preserve"><value>Licences</value></data>
+  <data name="Products_ID" xml:space="preserve"><value>ID</value></data>
+  <data name="Products_DeleteSoftware" xml:space="preserve"><value>Supprimer logiciel</value></data>
+  <data name="Products_RegenApiKey" xml:space="preserve"><value>Régénérer Clé API</value></data>
+  <data name="Products_RegenApiKeyMsg" xml:space="preserve"><value>Voulez-vous vraiment générer une nouvelle clé API ? L'ancienne clé ne fonctionnera plus immédiatement.</value></data>
+  <data name="Products_DeleteTypeTitle" xml:space="preserve"><value>Supprimer type de licence</value></data>
+  <data name="Products_TelemetryDetails" xml:space="preserve"><value>Détails Télémétrie</value></data>
+  <data name="Products_EventData" xml:space="preserve"><value>Données de l'événement</value></data>
+  <data name="Products_GlobalScore" xml:space="preserve"><value>Score Global :</value></data>
+  <data name="Products_Results" xml:space="preserve"><value>Résultats :</value></data>
+  <data name="Products_Ports" xml:space="preserve"><value>Ports :</value></data>
+  <data name="Products_NoExtraData" xml:space="preserve"><value>Aucune donnée supplémentaire.</value></data>
+  <data name="Products_ApiTelemetry" xml:space="preserve"><value>Télémétrie API</value></data>
+  <data name="Products_PublicKeyRequired" xml:space="preserve"><value>Obligatoire pour l'intégration du logiciel client.</value></data>
+  <data name="Products_ShowLarger" xml:space="preserve"><value>Afficher en grand</value></data>
+  <data name="Products_ApiKeyDescription" xml:space="preserve"><value>Utilisez cette clé pour récupérer la télémétrie via l'API</value></data>
+  <data name="Products_PastePrivateKey" xml:space="preserve"><value>Collez votre clé privée RSA (XML) :</value></data>
+  <data name="Products_ImportProduct" xml:space="preserve"><value>Importer le produit</value></data>
+  <data name="Products_NameRequired" xml:space="preserve"><value>Nom requis.</value></data>
+  <data name="Products_NameExists" xml:space="preserve"><value>Un logiciel avec ce nom existe déjà.</value></data>
+  <data name="Products_InvalidKey" xml:space="preserve"><value>Clé privée XML invalide. Vérifiez le format.</value></data>
+  <data name="Products_NameAndSlugRequired" xml:space="preserve"><value>Nom et Slug requis.</value></data>
+  <data name="Products_SlugExists" xml:space="preserve"><value>Ce Slug existe déjà.</value></data>
+  <data name="Products_TypeAdded" xml:space="preserve"><value>ajouté.</value></data>
+  <data name="Products_ChangesSaved" xml:space="preserve"><value>Modifications enregistrées.</value></data>
+  <data name="Products_TypeInUse" xml:space="preserve"><value>Impossible de supprimer ce type : des licences l'utilisent encore.</value></data>
+  <data name="Products_SoftwareReady" xml:space="preserve"><value>prêt.</value></data>
+  <data name="Products_PublicKeyOf" xml:space="preserve"><value>Clé publique :</value></data>
+  <data name="Products_CannotDeleteWithLicenses" xml:space="preserve"><value>Impossible de supprimer : ce logiciel possède des licences.</value></data>
+  <data name="Products_DeleteConfirm" xml:space="preserve"><value>Êtes-vous absolument sûr de vouloir supprimer définitivement ce logiciel ? Cette action est irréversible.</value></data>
+  <data name="Products_SoftwareDeleted" xml:space="preserve"><value>Logiciel supprimé.</value></data>
+  <data name="Products_ApiKeyRegenerated" xml:space="preserve"><value>Clé API régénérée avec succès.</value></data>
+  <data name="Products_TypeDeleted" xml:space="preserve"><value>Type supprimé.</value></data>
+  <data name="Products_DownloadStarted" xml:space="preserve"><value>Téléchargement lancé.</value></data>
+
+  <!-- Audit -->
+  <data name="Audit_Title" xml:space="preserve"><value>Journal d'audit global</value></data>
+  <data name="Audit_ScansHidden" xml:space="preserve"><value>Scans masqués</value></data>
+  <data name="Audit_ScansVisible" xml:space="preserve"><value>Scans visibles</value></data>
+  <data name="Audit_ActiveBans" xml:space="preserve"><value>Bannissements actifs</value></data>
+  <data name="Audit_BanHistory" xml:space="preserve"><value>Historique des bannissements</value></data>
+  <data name="Audit_Expired" xml:space="preserve"><value>Expiré</value></data>
+  <data name="Audit_BannedOn" xml:space="preserve"><value>Banni le</value></data>
+  <data name="Audit_Unban" xml:space="preserve"><value>Débannir (Pardonner)</value></data>
+  <data name="Audit_NoActiveBans" xml:space="preserve"><value>Aucun bannissement actif.</value></data>
+  <data name="Audit_ErrorDetails" xml:space="preserve"><value>Détails de l'erreur</value></data>
+  <data name="Audit_UserAgent" xml:space="preserve"><value>User-Agent :</value></data>
+  <data name="Audit_ISP" xml:space="preserve"><value>Fournisseur (ISP) :</value></data>
+  <data name="Audit_RequestBody" xml:space="preserve"><value>Données reçues (Request Body) :</value></data>
+  <data name="Audit_ServerResponse" xml:space="preserve"><value>Message renvoyé par le serveur :</value></data>
+  <data name="Audit_CopyHint" xml:space="preserve"><value>Vous pouvez sélectionner et copier le texte ci-dessus.</value></data>
+  <data name="Audit_Country" xml:space="preserve"><value>Pays</value></data>
+  <data name="Audit_IpIsp" xml:space="preserve"><value>IP / ISP</value></data>
+  <data name="Audit_AppDetails" xml:space="preserve"><value>App / détails</value></data>
+  <data name="Audit_Score" xml:space="preserve"><value>Score</value></data>
+  <data name="Audit_Path" xml:space="preserve"><value>Path</value></data>
+  <data name="Audit_IpPardoned" xml:space="preserve"><value>pardonnée.</value></data>
+  <data name="Audit_ExpiresOn" xml:space="preserve"><value>Expire le</value></data>
+  <data name="Audit_WebInterface" xml:space="preserve"><value>Web Interface</value></data>
+
+  <!-- Telemetry -->
+  <data name="Telemetry_Title" xml:space="preserve"><value>Télémétrie des produits</value></data>
+  <data name="Telemetry_AllProducts" xml:space="preserve"><value>Tous les produits</value></data>
+  <data name="Telemetry_AllTypes" xml:space="preserve"><value>Tous les types</value></data>
+  <data name="Telemetry_Events" xml:space="preserve"><value>Événements</value></data>
+  <data name="Telemetry_Diagnostics" xml:space="preserve"><value>Diagnostics</value></data>
+  <data name="Telemetry_Errors" xml:space="preserve"><value>Erreurs</value></data>
+  <data name="Telemetry_Product" xml:space="preserve"><value>Produit</value></data>
+  <data name="Telemetry_Event" xml:space="preserve"><value>Événement</value></data>
+  <data name="Telemetry_HardwareId" xml:space="preserve"><value>Hardware ID</value></data>
+  <data name="Telemetry_Details" xml:space="preserve"><value>Détails Télémétrie</value></data>
+  <data name="Telemetry_AppVersion" xml:space="preserve"><value>App / Version</value></data>
+  <data name="Telemetry_EventData" xml:space="preserve"><value>Données de l'événement</value></data>
+  <data name="Telemetry_GlobalScore" xml:space="preserve"><value>Score Global :</value></data>
+  <data name="Telemetry_Results" xml:space="preserve"><value>Résultats :</value></data>
+  <data name="Telemetry_Ports" xml:space="preserve"><value>Ports :</value></data>
+  <data name="Telemetry_NoExtraData" xml:space="preserve"><value>Aucune donnée supplémentaire.</value></data>
+
+  <!-- Maintenance -->
+  <data name="Maintenance_Title" xml:space="preserve"><value>Maintenance &amp; paramètres</value></data>
+  <data name="Maintenance_Webhooks" xml:space="preserve"><value>Webhooks &amp; Notifications</value></data>
+  <data name="Maintenance_WebhooksDesc" xml:space="preserve"><value>Configurez vos alertes Discord, Slack, Ntfy ou vos propres API.</value></data>
+  <data name="Maintenance_CreateWebhook" xml:space="preserve"><value>Créer le Webhook</value></data>
+  <data name="Maintenance_AuditLog" xml:space="preserve"><value>Journal d'audit</value></data>
+  <data name="Maintenance_AuditLogDesc" xml:space="preserve"><value>Supprime définitivement tout l'historique des accès. Utile pour repartir à zéro après une phase de test.</value></data>
+  <data name="Maintenance_ClearLog" xml:space="preserve"><value>Vider le journal</value></data>
+  <data name="Maintenance_TelemetryTitle" xml:space="preserve"><value>Télémétrie</value></data>
+  <data name="Maintenance_TelemetryDesc" xml:space="preserve"><value>Supprime définitivement toutes les données de télémétrie collectées pour tous les produits.</value></data>
+  <data name="Maintenance_ClearTelemetry" xml:space="preserve"><value>Vider la télémétrie</value></data>
+  <data name="Maintenance_SmtpConfig" xml:space="preserve"><value>Configuration email (SMTP)</value></data>
+  <data name="Maintenance_SmtpDesc" xml:space="preserve"><value>Vérifiez que votre serveur SMTP est correctement configuré via Dokploy.</value></data>
+  <data name="Maintenance_CurrentConfig" xml:space="preserve"><value>CONFIG ACTUELLE :</value></data>
+  <data name="Maintenance_DestEmail" xml:space="preserve"><value>Email de destination...</value></data>
+  <data name="Maintenance_SmtpDiagStart" xml:space="preserve"><value>Démarrage du diagnostic SMTP...</value></data>
+  <data name="Maintenance_ClearAuditTitle" xml:space="preserve"><value>Vider l'audit</value></data>
+  <data name="Maintenance_ClearAuditMsg" xml:space="preserve"><value>Voulez-vous vraiment supprimer TOUS les logs d'audit ? Cette opération ne peut pas être annulée.</value></data>
+  <data name="Maintenance_ClearTelemetryTitle" xml:space="preserve"><value>Vider la télémétrie</value></data>
+  <data name="Maintenance_ClearTelemetryMsg" xml:space="preserve"><value>Voulez-vous vraiment supprimer TOUTES les données de télémétrie ? Cette opération ne peut pas être annulée.</value></data>
+  <data name="Maintenance_AuditCleared" xml:space="preserve"><value>Le journal d'audit a été vidé.</value></data>
+  <data name="Maintenance_TelemetryCleared" xml:space="preserve"><value>La télémétrie a été vidée.</value></data>
+  <data name="Maintenance_WebhookNamePlaceholder" xml:space="preserve"><value>Nom (ex: Mon Discord)</value></data>
+  <data name="Maintenance_WebhookUrlPlaceholder" xml:space="preserve"><value>URL du Webhook (https://...)</value></data>
+  <data name="Maintenance_WebhookCreated" xml:space="preserve"><value>Webhook créé !</value></data>
+  <data name="Maintenance_WebhookDeleted" xml:space="preserve"><value>Webhook supprimé.</value></data>
+  <data name="Maintenance_TestSent" xml:space="preserve"><value>Test envoyé avec succès !</value></data>
+  <data name="Maintenance_NameUrlRequired" xml:space="preserve"><value>Nom et URL requis.</value></data>
+  <data name="Maintenance_SelectTrigger" xml:space="preserve"><value>Sélectionnez au moins un déclencheur.</value></data>
+  <data name="Maintenance_EnterEmail" xml:space="preserve"><value>Veuillez saisir un email.</value></data>
+  <data name="Maintenance_DiagSuccess" xml:space="preserve"><value>Diagnostic terminé avec succès !</value></data>
+  <data name="Maintenance_DiagFailed" xml:space="preserve"><value>Le diagnostic a échoué.</value></data>
+  <data name="Maintenance_URL" xml:space="preserve"><value>URL</value></data>
+  <data name="Maintenance_Events" xml:space="preserve"><value>Événements</value></data>
+  <data name="Maintenance_Last" xml:space="preserve"><value>Dernier</value></data>
+  <data name="Maintenance_None" xml:space="preserve"><value>(aucun)</value></data>
+
+  <!-- Backups -->
+  <data name="Backups_Title" xml:space="preserve"><value>Sauvegardes Drive</value></data>
+  <data name="Backups_Description" xml:space="preserve"><value>Gestion des backups cryptés via rclone et Google Drive.</value></data>
+  <data name="Backups_CheckStatus" xml:space="preserve"><value>Vérifier l'état</value></data>
+  <data name="Backups_ImmediateBackup" xml:space="preserve"><value>Backup BDD Immédiat</value></data>
+  <data name="Backups_ServiceStatus" xml:space="preserve"><value>Statut du Service</value></data>
+  <data name="Backups_Operational" xml:space="preserve"><value>Opérationnel</value></data>
+  <data name="Backups_ConfigError" xml:space="preserve"><value>Erreur de configuration</value></data>
+  <data name="Backups_BackupsPaused" xml:space="preserve"><value>Les sauvegardes sont suspendues.</value></data>
+  <data name="Backups_ConfiguredRemote" xml:space="preserve"><value>Remote Configuré</value></data>
+  <data name="Backups_AutoBackup" xml:space="preserve"><value>Backup Automatique</value></data>
+  <data name="Backups_Daily" xml:space="preserve"><value>Journalier (00:00)</value></data>
+  <data name="Backups_RcloneDiag" xml:space="preserve"><value>Diagnostic Rclone</value></data>
+  <data name="Backups_TestTransfer" xml:space="preserve"><value>Tester le transfert</value></data>
+  <data name="Backups_DiagConsole" xml:space="preserve"><value>Console de Diagnostic</value></data>
+  <data name="Backups_Processing" xml:space="preserve"><value>Traitement en cours...</value></data>
+  <data name="Backups_History" xml:space="preserve"><value>Historique des sauvegardes (Cloud)</value></data>
+  <data name="Backups_BackupDb" xml:space="preserve"><value>Sauvegarder BDD</value></data>
+  <data name="Backups_SearchPlaceholder" xml:space="preserve"><value>Rechercher (nom, chemin, date...)</value></data>
+  <data name="Backups_FilePath" xml:space="preserve"><value>Fichier / Chemin</value></data>
+  <data name="Backups_BackupDate" xml:space="preserve"><value>Date de sauvegarde</value></data>
+  <data name="Backups_RsaKey" xml:space="preserve"><value>Clé RSA</value></data>
+  <data name="Backups_Database" xml:space="preserve"><value>Base de données</value></data>
+  <data name="Backups_NoBackups" xml:space="preserve"><value>Aucune sauvegarde trouvée sur le Drive.</value></data>
+  <data name="Backups_NoResults" xml:space="preserve"><value>Aucun résultat pour cette recherche.</value></data>
+  <data name="Backups_RestoreTitle" xml:space="preserve"><value>Confirmation de restauration critique</value></data>
+  <data name="Backups_RestoreWarning" xml:space="preserve"><value>Vous allez écraser la base de données actuelle par la sauvegarde du</value></data>
+  <data name="Backups_RestartWarning" xml:space="preserve"><value>L'application redémarrera immédiatement après la restauration.</value></data>
+  <data name="Backups_Analyzing" xml:space="preserve"><value>Analyse de la sauvegarde en cours...</value></data>
+  <data name="Backups_CurrentState" xml:space="preserve"><value>État Actuel (Live)</value></data>
+  <data name="Backups_BackupFile" xml:space="preserve"><value>Fichier de Sauvegarde</value></data>
+  <data name="Backups_ConfirmRestore" xml:space="preserve"><value>Confirmer et Restaurer</value></data>
+
+  <!-- Resets -->
+  <data name="Resets_Title" xml:space="preserve"><value>Suivi des réinitialisations</value></data>
+  <data name="Resets_Software" xml:space="preserve"><value>Logiciel</value></data>
+  <data name="Resets_LicenseKey" xml:space="preserve"><value>Clé de licence</value></data>
+  <data name="Resets_Action" xml:space="preserve"><value>Action</value></data>
+  <data name="Resets_RequestCode" xml:space="preserve"><value>DEMANDE CODE</value></data>
+  <data name="Resets_Confirmation" xml:space="preserve"><value>CONFIRMATION</value></data>
+  <data name="Resets_Success" xml:space="preserve"><value>Succès</value></data>
+  <data name="Resets_Failure" xml:space="preserve"><value>Échec</value></data>
+  <data name="Resets_ClientIp" xml:space="preserve"><value>IP Client</value></data>
+
+  <!-- Users -->
+  <data name="Users_Title" xml:space="preserve"><value>Utilisateurs &amp; Rôles</value></data>
+  <data name="Users_NewRole" xml:space="preserve"><value>Nouveau Rôle</value></data>
+  <data name="Users_NewUser" xml:space="preserve"><value>Nouvel Utilisateur</value></data>
+  <data name="Users_CreateRole" xml:space="preserve"><value>Créer un nouveau rôle</value></data>
+  <data name="Users_EditRole" xml:space="preserve"><value>Modifier le rôle</value></data>
+  <data name="Users_RoleName" xml:space="preserve"><value>Nom du rôle (ex: Support)</value></data>
+  <data name="Users_SaveChanges" xml:space="preserve"><value>Enregistrer les modifications</value></data>
+  <data name="Users_CreateRoleBtn" xml:space="preserve"><value>Créer le Rôle</value></data>
+  <data name="Users_CreateUserTitle" xml:space="preserve"><value>Créer un nouvel utilisateur</value></data>
+  <data name="Users_PasswordByEmail" xml:space="preserve"><value>Le mot de passe sera généré et envoyé par e-mail.</value></data>
+  <data name="Users_LoginPlaceholder" xml:space="preserve"><value>Identifiant (Login)</value></data>
+  <data name="Users_EmailPlaceholder" xml:space="preserve"><value>Adresse E-mail</value></data>
+  <data name="Users_SelectRole" xml:space="preserve"><value>-- Choisir un rôle --</value></data>
+  <data name="Users_Accounts" xml:space="preserve"><value>Comptes Utilisateurs</value></data>
+  <data name="Users_User" xml:space="preserve"><value>Utilisateur</value></data>
+  <data name="Users_Role" xml:space="preserve"><value>Rôle</value></data>
+  <data name="Users_CreatedOn" xml:space="preserve"><value>Créé le</value></data>
+  <data name="Users_SystemConfig" xml:space="preserve"><value>Système (Configuration)</value></data>
+  <data name="Users_SuperAdmin" xml:space="preserve"><value>SUPER ADMIN</value></data>
+  <data name="Users_Protected" xml:space="preserve"><value>PROTÉGÉ</value></data>
+  <data name="Users_AwaitingPasswordChange" xml:space="preserve"><value>Attente changement MDP</value></data>
+  <data name="Users_RolesPermissions" xml:space="preserve"><value>Rôles &amp; Permissions</value></data>
+  <data name="Users_NoPermissions" xml:space="preserve"><value>Aucune permission</value></data>
+  <data name="Users_Deleted" xml:space="preserve"><value>Supprimé avec succès.</value></data>
+  <data name="Users_AllFieldsRequired" xml:space="preserve"><value>Tous les champs sont requis.</value></data>
+  <data name="Users_UsernameInUse" xml:space="preserve"><value>Cet identifiant est déjà utilisé.</value></data>
+  <data name="Users_RoleNameRequired" xml:space="preserve"><value>Nom du rôle requis.</value></data>
+  <data name="Users_RoleUpdated" xml:space="preserve"><value>Rôle mis à jour.</value></data>
+  <data name="Users_RoleInUse" xml:space="preserve"><value>Impossible de supprimer un rôle utilisé par des utilisateurs.</value></data>
+  <data name="Users_Deletion" xml:space="preserve"><value>Suppression</value></data>
+
+  <!-- Login -->
+  <data name="Login_Title" xml:space="preserve"><value>Connexion - SoftLicence</value></data>
+  <data name="Login_Username" xml:space="preserve"><value>Identifiant</value></data>
+  <data name="Login_Password" xml:space="preserve"><value>Mot de passe</value></data>
+  <data name="Login_Submit" xml:space="preserve"><value>Connexion</value></data>
+  <data name="Login_PageNotFound" xml:space="preserve"><value>Page inexistante.</value></data>
+
+  <!-- Layout Extras -->
+  <data name="Layout_LostConnection" xml:space="preserve"><value>Lien perdu avec le serveur</value></data>
+  <data name="Layout_Reconnecting" xml:space="preserve"><value>Tentative de reconnexion en cours...</value></data>
+  <data name="Layout_ReloadPage" xml:space="preserve"><value>Recharger la page</value></data>
+
+  <!-- ChangePassword -->
+  <data name="ChangePassword_Title" xml:space="preserve"><value>Sécurité requise</value></data>
+  <data name="ChangePassword_Description" xml:space="preserve"><value>Vous devez définir un nouveau mot de passe pour continuer.</value></data>
+  <data name="ChangePassword_NewPassword" xml:space="preserve"><value>Nouveau mot de passe</value></data>
+  <data name="ChangePassword_MinChars" xml:space="preserve"><value>Minimum 8 caractères</value></data>
+  <data name="ChangePassword_Confirm" xml:space="preserve"><value>Confirmer le mot de passe</value></data>
+  <data name="ChangePassword_Save" xml:space="preserve"><value>Enregistrer le mot de passe</value></data>
+  <data name="ChangePassword_ReloginNote" xml:space="preserve"><value>Une fois validé, vous devrez vous reconnecter.</value></data>
+  <data name="ChangePassword_TooShort" xml:space="preserve"><value>Le mot de passe doit faire au moins 8 caractères.</value></data>
+  <data name="ChangePassword_Mismatch" xml:space="preserve"><value>Les mots de passe ne correspondent pas.</value></data>
+  <data name="ChangePassword_Updated" xml:space="preserve"><value>Mot de passe mis à jour !</value></data>
+
+  <!-- API Errors -->
+  <data name="Api_AccessRevoked" xml:space="preserve"><value>Votre accès a été révoqué.</value></data>
+  <data name="Api_InternalErrorSignature" xml:space="preserve"><value>Erreur interne : Clé de signature illisible.</value></data>
+  <data name="Api_TrialNotEnabled" xml:space="preserve"><value>Le mode Trial n'est pas activé pour ce produit.</value></data>
+  <data name="Api_InvalidLicenseKey" xml:space="preserve"><value>Clé de licence invalide.</value></data>
+  <data name="Api_LicenseDisabled" xml:space="preserve"><value>Cette licence a été désactivée.</value></data>
+  <data name="Api_LicenseExpired" xml:space="preserve"><value>Licence expirée.</value></data>
+  <data name="Api_MaxActivationsReached" xml:space="preserve"><value>Cette licence a atteint son nombre maximum d'activations ({0}). Veuillez délier un ancien poste ou contacter le support.</value></data>
+  <data name="Api_InternalErrorServerKey" xml:space="preserve"><value>Erreur interne : La clé de signature du serveur est illisible.</value></data>
+  <data name="Api_NoEmail" xml:space="preserve"><value>Aucun email n'est associé à cette licence. Contactez le support.</value></data>
+  <data name="Api_CodeSent" xml:space="preserve"><value>Code envoyé par email.</value></data>
+  <data name="Api_InvalidResetCode" xml:space="preserve"><value>Code de réinitialisation invalide ou expiré.</value></data>
+  <data name="Api_UnlinkSuccess" xml:space="preserve"><value>Licence déliée avec succès. Vous pouvez l'utiliser sur un nouveau poste.</value></data>
+  <data name="Api_Exists" xml:space="preserve"><value>Existe déjà.</value></data>
+  <data name="Api_DecryptError" xml:space="preserve"><value>Impossible de déchiffrer la clé privée. Les clés DataProtection ont probablement changé.</value></data>
+  <data name="Api_KeyInvalid" xml:space="preserve"><value>Clé déchiffrée mais invalide : {0}</value></data>
+  <data name="Api_KeysUpdated" xml:space="preserve"><value>Clés mises à jour avec succès.</value></data>
+  <data name="Api_PrivateKeyInvalid" xml:space="preserve"><value>Clé privée invalide : {0}</value></data>
+  <data name="Api_TransactionUsed" xml:space="preserve"><value>Cette transaction a déjà été utilisée pour un renouvellement.</value></data>
+  <data name="Api_Extended" xml:space="preserve"><value>Licence prolongée de {0} jours.</value></data>
+
+  <!-- UI Extras -->
+  <data name="UI_ConfirmRevokeTitle" xml:space="preserve"><value>Voulez-vous révoquer la licence de {0} ?</value></data>
+  <data name="UI_RevocationReasonLabel" xml:space="preserve"><value>Motif de révocation (optionnel) :</value></data>
+  <data name="UI_ServerResponse" xml:space="preserve"><value>Message renvoyé par le serveur :</value></data>
+  <data name="UI_CopyHint" xml:space="preserve"><value>Vous pouvez sélectionner et copier le texte ci-dessus.</value></data>
+
+  <!-- Documentation -->
+  <data name="Docs_Title" xml:space="preserve"><value>Documentation technique</value></data>
+  <data name="Docs_WpfIntegration" xml:space="preserve"><value>Intégration WPF</value></data>
+  <data name="Docs_Administration" xml:space="preserve"><value>Administration</value></data>
+  <data name="Docs_SecurityAudit" xml:space="preserve"><value>Sécurité &amp; audit</value></data>
+  <data name="Docs_ApiReference" xml:space="preserve"><value>API reference</value></data>
+
+  <!-- Nav -->
+  <data name="Nav_Dashboard" xml:space="preserve"><value>Dashboard</value></data>
+  <data name="Nav_Software" xml:space="preserve"><value>Logiciels</value></data>
+  <data name="Nav_Licenses" xml:space="preserve"><value>Licences</value></data>
+  <data name="Nav_Resets" xml:space="preserve"><value>Réinitialisations</value></data>
+  <data name="Nav_Audit" xml:space="preserve"><value>Audit</value></data>
+  <data name="Nav_Telemetry" xml:space="preserve"><value>Télémétrie</value></data>
+  <data name="Nav_Backups" xml:space="preserve"><value>Sauvegardes</value></data>
+  <data name="Nav_Users" xml:space="preserve"><value>Utilisateurs</value></data>
+
+  <!-- Layout -->
+  <data name="Layout_AdminConsole" xml:space="preserve"><value>Administration Console</value></data>
+  <data name="Layout_Settings" xml:space="preserve"><value>Paramètres</value></data>
+  <data name="Layout_Logout" xml:space="preserve"><value>Déconnexion</value></data>
+</root>

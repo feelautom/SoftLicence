@@ -9,7 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\SoftLicence.Core\SoftLicence.Core.csproj" />
+    <ProjectReference Include="..\..\src\SoftLicence.SDK\SoftLicence.SDK.csproj" />
     <ProjectReference Include="..\..\src\SoftLicence.UI\SoftLicence.UI.csproj" />
   </ItemGroup>
 

@@ -1,7 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using SoftLicence.Core;
+using SoftLicence.SDK;
 using SoftLicence.Server.Data;
+using Microsoft.Extensions.Localization;
 
 namespace SoftLicence.Server.Controllers
 {
@@ -13,12 +14,30 @@ namespace SoftLicence.Server.Controllers
         private readonly LicenseDbContext _db;
         private readonly ILogger<ActivationController> _logger;
         private readonly Services.EncryptionService _encryption;
+        private readonly Services.EmailService _mailer;
+        private readonly Services.TelemetryService _telemetry;
+        private readonly Services.GeoIpService _geoIp;
+        private readonly IConfiguration _config;
+        private readonly IStringLocalizer<SharedResource> _localizer;
 
-        public ActivationController(LicenseDbContext db, ILogger<ActivationController> logger, Services.EncryptionService encryption)
+        public ActivationController(
+            LicenseDbContext db, 
+            ILogger<ActivationController> logger, 
+            Services.EncryptionService encryption,
+            Services.EmailService mailer,
+            Services.TelemetryService telemetry,
+            Services.GeoIpService geoIp,
+            IConfiguration config,
+            IStringLocalizer<SharedResource> localizer)
         {
             _db = db;
             _logger = logger;
             _encryption = encryption;
+            _mailer = mailer;
+            _telemetry = telemetry;
+            _geoIp = geoIp;
+            _config = config;
+            _localizer = localizer;
         }
 
         public class ActivationRequest
@@ -90,8 +109,19 @@ namespace SoftLicence.Server.Controllers
             if (existing != null)
             {
                 // Si une licence existe déjà pour ce matériel, on la renvoie simplement (comme un Recovery)
-                if (!existing.IsActive) return BadRequest("Votre accès a été révoqué.");
+                if (!existing.IsActive) return BadRequest(_localizer["Api_AccessRevoked"].Value);
                 
+                // S'assurer que le siège existe
+                var seat = await _db.LicenseSeats.FirstOrDefaultAsync(s => s.LicenseId == existing.Id && s.HardwareId == req.HardwareId);
+                if (seat == null)
+                {
+                    _db.LicenseSeats.Add(new LicenseSeat {
+                        LicenseId = existing.Id, HardwareId = req.HardwareId,
+                        FirstActivatedAt = DateTime.UtcNow, LastCheckInAt = DateTime.UtcNow
+                    });
+                    await _db.SaveChangesAsync();
+                }
+
                 var model = new LicenseModel
                 {
                     Id = existing.Id,
@@ -105,9 +135,18 @@ namespace SoftLicence.Server.Controllers
                     HardwareId = existing.HardwareId ?? string.Empty
                 };
 
-                var signed = LicenseService.GenerateLicense(model, _encryption.Decrypt(product.PrivateKeyXml));
-                _logger.LogInformation("Trial Recovery : Renvoi de la licence existante pour {HardwareId}", req.HardwareId);
-                return Ok(new { LicenseFile = signed });
+                try
+                {
+                    var decryptedKey = _encryption.Decrypt(product.PrivateKeyXml);
+                    if (decryptedKey == "ERROR_DECRYPTION_FAILED") return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
+                    var signed = LicenseService.GenerateLicense(model, decryptedKey);
+                    _logger.LogInformation("Trial Recovery : Renvoi de la licence existante pour {HardwareId}", req.HardwareId);
+                    return Ok(new { LicenseFile = signed });
+                }
+                catch (Exception ex)
+                {
+                    return StatusCode(500, $"Erreur de signature : {ex.Message}");
+                }
             }
 
             // Sinon, création d'une nouvelle licence Trial
@@ -129,6 +168,17 @@ namespace SoftLicence.Server.Controllers
             _db.Licenses.Add(license);
             await _db.SaveChangesAsync();
 
+            // Création du siège initial pour le multi-postes
+            var firstSeat = new LicenseSeat
+            {
+                LicenseId = license.Id,
+                HardwareId = req.HardwareId,
+                FirstActivatedAt = DateTime.UtcNow,
+                LastCheckInAt = DateTime.UtcNow
+            };
+            _db.LicenseSeats.Add(firstSeat);
+            await _db.SaveChangesAsync();
+
             _logger.LogInformation("Nouveau Trial cree : {TypeSlug} ({Days} jours) pour {HardwareId}", type.Slug, type.DefaultDurationDays, req.HardwareId);
 
             var licenseModel = new LicenseModel
@@ -144,8 +194,17 @@ namespace SoftLicence.Server.Controllers
                 HardwareId = license.HardwareId ?? string.Empty
             };
 
-            var signedLicenseString = LicenseService.GenerateLicense(licenseModel, _encryption.Decrypt(product.PrivateKeyXml));
-            return Ok(new { LicenseFile = signedLicenseString });
+            try
+            {
+                var decryptedKey = _encryption.Decrypt(product.PrivateKeyXml);
+                if (decryptedKey == "ERROR_DECRYPTION_FAILED") return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
+                var signedLicenseString = LicenseService.GenerateLicense(licenseModel, decryptedKey);
+                return Ok(new { LicenseFile = signedLicenseString });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"Erreur de signature : {ex.Message}");
+            }
         }
 
         [HttpPost]
@@ -176,7 +235,7 @@ namespace SoftLicence.Server.Controllers
                 if (type == null) 
                 {
                     _logger.LogWarning("Demande Trial echouee : Aucun type de licence 'TRIAL' n'est configure.");
-                    return BadRequest("Le mode Trial n'est pas activé pour ce produit.");
+                    return BadRequest(_localizer["Api_TrialNotEnabled"].Value);
                 }
 
                 // On vérifie si ce PC a déjà une licence pour ce produit
@@ -186,8 +245,23 @@ namespace SoftLicence.Server.Controllers
 
                 if (existing != null)
                 {
-                    if (!existing.IsActive) return BadRequest("Votre accès a été révoqué.");
+                    if (!existing.IsActive) return BadRequest(_localizer["Api_AccessRevoked"].Value);
                     
+                    // S'assurer que le siège existe (pour les licences créées avant le système de seats)
+                    var seat = await _db.LicenseSeats.FirstOrDefaultAsync(s => s.LicenseId == existing.Id && s.HardwareId == req.HardwareId);
+                    if (seat == null)
+                    {
+                        _db.LicenseSeats.Add(new LicenseSeat {
+                            LicenseId = existing.Id, HardwareId = req.HardwareId,
+                            FirstActivatedAt = DateTime.UtcNow, LastCheckInAt = DateTime.UtcNow
+                        });
+                        await _db.SaveChangesAsync();
+                    }
+                    else {
+                        seat.LastCheckInAt = DateTime.UtcNow;
+                        await _db.SaveChangesAsync();
+                    }
+
                     // On met à jour le log avec la vraie clé trouvée
                     HttpContext.Items[LogKeys.LicenseKey] = existing.LicenseKey;
 
@@ -197,7 +271,18 @@ namespace SoftLicence.Server.Controllers
                         Reference = existing.Reference,
                         CreationDate = existing.CreationDate, ExpirationDate = existing.ExpirationDate, HardwareId = existing.HardwareId ?? string.Empty
                     };
-                    return Ok(new { LicenseFile = LicenseService.GenerateLicense(recoveryModel, _encryption.Decrypt(product.PrivateKeyXml)) });
+
+                    try
+                    {
+                        var decryptedKey = _encryption.Decrypt(product.PrivateKeyXml);
+                        if (decryptedKey == "ERROR_DECRYPTION_FAILED") return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
+                        return Ok(new { LicenseFile = LicenseService.GenerateLicense(recoveryModel, decryptedKey) });
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Erreur signature recovery trial");
+                        return StatusCode(500, $"Erreur de signature : {ex.Message}");
+                    }
                 }
 
                 // Création auto
@@ -211,6 +296,17 @@ namespace SoftLicence.Server.Controllers
                 _db.Licenses.Add(newLic);
                 await _db.SaveChangesAsync();
 
+                // Création du siège initial pour le multi-postes
+                var firstSeat = new LicenseSeat
+                {
+                    LicenseId = newLic.Id,
+                    HardwareId = req.HardwareId,
+                    FirstActivatedAt = DateTime.UtcNow,
+                    LastCheckInAt = DateTime.UtcNow
+                };
+                _db.LicenseSeats.Add(firstSeat);
+                await _db.SaveChangesAsync();
+
                 // On met à jour le log avec la clé générée
                 HttpContext.Items[LogKeys.LicenseKey] = newKey;
 
@@ -220,7 +316,17 @@ namespace SoftLicence.Server.Controllers
                     Reference = newLic.Reference,
                     CreationDate = newLic.CreationDate, ExpirationDate = newLic.ExpirationDate, HardwareId = newLic.HardwareId ?? string.Empty
                 };
-                return Ok(new { LicenseFile = LicenseService.GenerateLicense(newModel, _encryption.Decrypt(product.PrivateKeyXml)) });
+
+                try
+                {
+                    var decryptedKey = _encryption.Decrypt(product.PrivateKeyXml);
+                    if (decryptedKey == "ERROR_DECRYPTION_FAILED") return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
+                    return Ok(new { LicenseFile = LicenseService.GenerateLicense(newModel, decryptedKey) });
+                }
+                catch (Exception ex)
+                {
+                    return StatusCode(500, $"Erreur de signature : {ex.Message}");
+                }
             }
             // --- FIN INTERCEPTION ---
 
@@ -232,19 +338,19 @@ namespace SoftLicence.Server.Controllers
             if (license == null) 
             {
                 _logger.LogWarning("Activation echouee : Cle '{LicenseKey}' non trouvee pour le produit '{ProductName}' (ID: {ProductId}).", cleanKey, product.Name, product.Id);
-                return BadRequest("Clé de licence invalide.");
+                return BadRequest(_localizer["Api_InvalidLicenseKey"].Value);
             }
             
             if (!license.IsActive) 
             {
                 _logger.LogWarning("Activation echouee : Cle '{LicenseKey}' revoquee.", cleanKey);
-                return BadRequest("Cette licence a été désactivée.");
+                return BadRequest(_localizer["Api_LicenseDisabled"].Value);
             }
             
             if (license.ExpirationDate.HasValue && DateTime.UtcNow > license.ExpirationDate.Value)
             {
                 _logger.LogWarning("Activation echouee : Cle '{LicenseKey}' expiree ({Expiry}).", cleanKey, license.ExpirationDate);
-                return BadRequest("Licence expirée.");
+                return BadRequest(_localizer["Api_LicenseExpired"].Value);
             }
 
             // Vérification de version
@@ -272,8 +378,8 @@ namespace SoftLicence.Server.Controllers
                 
                 if (currentSeatsCount >= license.MaxSeats)
                 {
-                    _logger.LogWarning("Activation echouee : Limite de postes atteinte ({Max}) pour la cle '{LicenseKey}'", license.MaxSeats, cleanKey);
-                    return BadRequest($"Cette licence a atteint son nombre maximum d'activations ({license.MaxSeats}). Veuillez délier un ancien poste ou contacter le support.");
+                    _logger.LogWarning("Activation echouee : Limite de postes atteinte ({Max}) pour la clé '{LicenseKey}'", license.MaxSeats, cleanKey);
+                    return BadRequest(string.Format(_localizer["Api_MaxActivationsReached"].Value, license.MaxSeats));
                 }
 
                 // On crée le nouveau siège
@@ -312,9 +418,23 @@ namespace SoftLicence.Server.Controllers
                 HardwareId = license.HardwareId ?? string.Empty
             };
 
-            var signedLicenseString = LicenseService.GenerateLicense(licenseModel, _encryption.Decrypt(product.PrivateKeyXml));
+            try
+            {
+                var decryptedKey = _encryption.Decrypt(product.PrivateKeyXml);
+                if (decryptedKey == "ERROR_DECRYPTION_FAILED")
+                {
+                    _logger.LogError("ERREUR CRITIQUE : Impossible de dechiffrer la cle privee du produit '{ProductName}'. Les cles de DataProtection sont peut-etre manquantes ou invalides.", product.Name);
+                    return StatusCode(500, _localizer["Api_InternalErrorServerKey"].Value);
+                }
 
-            return Ok(new { LicenseFile = signedLicenseString });
+                var signedLicenseString = LicenseService.GenerateLicense(licenseModel, decryptedKey);
+                return Ok(new { LicenseFile = signedLicenseString });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Erreur lors de la signature de la licence pour '{AppName}'", req.AppName);
+                return StatusCode(500, $"Erreur de signature : {ex.Message}");
+            }
         }
 
         [HttpPost("check")]
@@ -353,7 +473,7 @@ namespace SoftLicence.Server.Controllers
         }
 
         [HttpPost("reset-request")]
-        public async Task<IActionResult> RequestReset([FromBody] ResetRequest req, [FromServices] Services.EmailService mailer)
+        public async Task<IActionResult> RequestReset([FromBody] ResetRequest req)
         {
             HttpContext.Items[LogKeys.AppName] = req.AppName;
             HttpContext.Items[LogKeys.LicenseKey] = req.LicenseKey;
@@ -364,13 +484,13 @@ namespace SoftLicence.Server.Controllers
 
             var cleanKey = req.LicenseKey.Trim().ToUpper();
             var license = await _db.Licenses.FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
-            if (license == null) return BadRequest("Clé de licence invalide.");
+            if (license == null) return BadRequest(_localizer["Api_InvalidLicenseKey"].Value);
             
             HttpContext.Items[LogKeys.HardwareId] = license.HardwareId; // On logge le HWID actuel qui va etre delie
 
-            if (string.IsNullOrEmpty(license.CustomerEmail)) return BadRequest("Aucun email n'est associé à cette licence. Contactez le support.");
+            if (string.IsNullOrEmpty(license.CustomerEmail)) return BadRequest(_localizer["Api_NoEmail"].Value);
 
-            // Génération cryptographique du code à 6 chiffres
+            // Génération Code (6 chiffres sécure)
             var code = System.Security.Cryptography.RandomNumberGenerator.GetInt32(100000, 999999).ToString();
             license.ResetCode = code;
             license.ResetCodeExpiry = DateTime.UtcNow.AddMinutes(15);
@@ -379,8 +499,8 @@ namespace SoftLicence.Server.Controllers
 
             try
             {
-                await mailer.SendResetCodeEmailAsync(license.CustomerEmail, license.CustomerName, product.Name, code);
-                return Ok(new { Message = "Code envoyé par email." });
+                await _mailer.SendResetCodeEmailAsync(license.CustomerEmail, license.CustomerName, product.Name, code);
+                return Ok(new { Message = _localizer["Api_CodeSent"].Value });
             }
             catch (Exception)
             {
@@ -400,11 +520,11 @@ namespace SoftLicence.Server.Controllers
 
             var cleanKey = req.LicenseKey.Trim().ToUpper();
             var license = await _db.Licenses.FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
-            if (license == null) return BadRequest("Clé de licence invalide.");
+            if (license == null) return BadRequest(_localizer["Api_InvalidLicenseKey"].Value);
 
             if (license.ResetCode == null || license.ResetCode != req.ResetCode || license.ResetCodeExpiry < DateTime.UtcNow)
             {
-                return BadRequest("Code de réinitialisation invalide ou expiré.");
+                return BadRequest(_localizer["Api_InvalidResetCode"].Value);
             }
 
             // Reset effectif
@@ -412,10 +532,13 @@ namespace SoftLicence.Server.Controllers
             license.ActivationDate = null;
             license.ResetCode = null; // Usage unique
             license.ResetCodeExpiry = null;
+            license.RecoveryCount = 0; // On reset le compteur d'abus
+
+            if (license.Seats != null) _db.LicenseSeats.RemoveRange(license.Seats);
 
             await _db.SaveChangesAsync();
 
-            return Ok(new { Message = "Licence déliée avec succès. Vous pouvez l'utiliser sur un nouveau poste." });
+            return Ok(new { Message = _localizer["Api_UnlinkSuccess"].Value });
         }
     }
 }

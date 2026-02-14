@@ -4,6 +4,7 @@
 @inject SoftLicence.Server.Services.TimeZoneService TZ
 @inject SoftLicence.Server.Services.AuditNotifier AuditNotifier
 @using SoftLicence.Server.Services
+@inject IStringLocalizer<SharedResource> L
 @implements IDisposable
 
 <PageTitle>Dashboard</PageTitle>
@@ -12,22 +13,22 @@
 {
     <div class="text-center py-5">
         <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-danger mb-4"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/></svg>
-        <h2 class="text-white">Accès Refusé</h2>
-        <p class="text-muted">Vous n'avez pas les permissions nécessaires pour voir le tableau de bord.</p>
+        <h2 class="text-white">@L["Common_AccessDenied"]</h2>
+        <p class="text-muted">@L["Common_NoPermissionDashboard"]</p>
     </div>
 }
 else
 {
     <div class="d-flex justify-content-between align-items-center mb-4">
-        <h1>Tableau de bord</h1>
-        <button class="btn btn-outline-secondary btn-sm" @onclick="LoadStats">Actualiser</button>
+        <h1>@L["Dashboard_Title"]</h1>
+        <button class="btn btn-outline-secondary btn-sm" @onclick="LoadStats">@L["Common_Refresh"]</button>
     </div>
 
     @if (Stats == null)
     {
         <div class="text-center py-5">
             <div class="spinner-border text-primary" role="status"></div>
-            <p class="mt-2 text-muted">Chargement des statistiques...</p>
+            <p class="mt-2 text-muted">@L["Dashboard_LoadingStats"]</p>
         </div>
     }
     else
@@ -37,7 +38,7 @@ else
             <div class="col-md-3">
                 <div class="card stat-card h-100">
                     <div class="card-body">
-                        <h6 class="text-muted text-uppercase small fw-bold">Licences totales</h6>
+                        <h6 class="text-muted text-uppercase small fw-bold">@L["Dashboard_TotalLicenses"]</h6>
                         <div class="d-flex align-items-center mt-2">
                             <h2 class="mb-0">@Stats.TotalLicenses</h2>
                             <div class="ms-auto icon-circle bg-primary-soft text-primary">
@@ -45,8 +46,8 @@ else
                             </div>
                         </div>
                         <div class="mt-2 small">
-                            <span class="text-success fw-bold">@Stats.ActiveLicenses</span> actives / 
-                            <span class="text-danger fw-bold">@Stats.RevokedLicenses</span> révoquées
+                            <span class="text-success fw-bold">@Stats.ActiveLicenses</span> @L["Dashboard_ActiveCount"] /
+                            <span class="text-danger fw-bold">@Stats.RevokedLicenses</span> @L["Dashboard_RevokedCount"]
                         </div>
                     </div>
                 </div>
@@ -55,7 +56,7 @@ else
             <div class="col-md-3">
                 <div class="card stat-card h-100" style="border-left-color: #198754;">
                     <div class="card-body">
-                        <h6 class="text-muted text-uppercase small fw-bold">Logiciels</h6>
+                        <h6 class="text-muted text-uppercase small fw-bold">@L["Dashboard_Products"]</h6>
                         <div class="d-flex align-items-center mt-2">
                             <h2 class="mb-0">@Stats.TotalProducts</h2>
                             <div class="ms-auto icon-circle bg-success-soft text-success">
@@ -69,7 +70,7 @@ else
             <div class="col-md-3">
                 <div class="card stat-card h-100" style="border-left-color: #ffc107;">
                     <div class="card-body">
-                        <h6 class="text-muted text-uppercase small fw-bold">Requêtes (30j)</h6>
+                        <h6 class="text-muted text-uppercase small fw-bold">@L["Dashboard_Requests30d"]</h6>
                         <div class="d-flex align-items-center mt-2">
                             <h2 class="mb-0">@Stats.TotalRequests</h2>
                             <div class="ms-auto icon-circle bg-warning-soft text-warning">
@@ -77,7 +78,7 @@ else
                             </div>
                         </div>
                         <div class="mt-2 small text-muted">
-                            Appels API Activations + Checks
+                            @L["Dashboard_ApiCalls"]
                         </div>
                     </div>
                 </div>
@@ -86,7 +87,7 @@ else
             <div class="col-md-3">
                 <div class="card stat-card h-100" style="border-left-color: #dc3545;">
                     <div class="card-body">
-                        <h6 class="text-muted text-uppercase small fw-bold">Taux d'erreur</h6>
+                        <h6 class="text-muted text-uppercase small fw-bold">@L["Dashboard_ErrorRate"]</h6>
                         <div class="d-flex align-items-center mt-2">
                             <h2 class="mb-0">@((Stats.TotalRequests > 0) ? (Stats.FailedRequests * 100 / Stats.TotalRequests) : 0)%</h2>
                             <div class="ms-auto icon-circle bg-danger-soft text-danger">
@@ -94,7 +95,7 @@ else
                             </div>
                         </div>
                         <div class="mt-2 small text-danger">
-                            @Stats.FailedRequests échecs / rejets
+                            @Stats.FailedRequests @L["Dashboard_Failures"]
                         </div>
                     </div>
                 </div>
@@ -107,10 +108,10 @@ else
             <div class="col-md-6">
                 <div class="card p-4 h-100">
                     <div class="d-flex justify-content-between align-items-center mb-3">
-                        <h6 class="mb-0">Activité API (7j)</h6>
+                        <h6 class="mb-0">@L["Dashboard_ApiActivity7d"]</h6>
                         <div class="d-flex gap-3 small">
-                            <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-success"></span> OK</span>
-                            <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-danger"></span> Erreurs</span>
+                            <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-success"></span> @L["Dashboard_OK"]</span>
+                            <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-danger"></span> @L["Dashboard_Errors"]</span>
                         </div>
                     </div>
                     <div class="chart-container d-flex align-items-end justify-content-around" style="height: 180px;">
@@ -151,10 +152,10 @@ else
             <div class="col-md-6">
                 <div class="card p-4 h-100">
                     <div class="d-flex justify-content-between align-items-center mb-3">
-                        <h6 class="mb-0">Licences (7j)</h6>
+                        <h6 class="mb-0">@L["Dashboard_Licenses7d"]</h6>
                         <div class="d-flex gap-3 small">
-                            <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-primary"></span> Créées</span>
-                            <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-info"></span> Activées</span>
+                            <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-primary"></span> @L["Dashboard_Created"]</span>
+                            <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-info"></span> @L["Dashboard_Activated"]</span>
                         </div>
                     </div>
                     <div class="chart-container d-flex align-items-end justify-content-around" style="height: 180px;">

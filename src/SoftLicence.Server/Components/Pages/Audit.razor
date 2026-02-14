@@ -8,25 +8,26 @@
 @using SoftLicence.Server.Data
 @using Microsoft.EntityFrameworkCore
 @using SoftLicence.Server.Models
+@inject IStringLocalizer<SharedResource> L
 
 <div class="d-flex justify-content-between align-items-center mb-4">
-    <h3>Journal d'audit global</h3>
+    <h3>@L["Audit_Title"]</h3>
     <div class="d-flex gap-2">
         <div class="btn-group btn-group-sm me-2">
-            <button class="btn @(!HideScans ? "btn-warning" : "btn-outline-warning")" @onclick="ToggleScans" title="Afficher les tentatives de scan des bots (404)">
+            <button class="btn @(!HideScans ? "btn-danger" : "btn-outline-warning")" @onclick="ToggleScans" title="Afficher les tentatives de scan des bots (404)">
                 <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-robot me-1" viewBox="0 0 16 16"><path d="M6 12.5a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1-.5-.5ZM3 8.062C3 6.76 4.235 5.765 5.53 5.886a26.58 26.58 0 0 0 4.94 0C11.765 5.765 13 6.76 13 8.062v1.157a4.417 4.417 0 0 1-1.528 3.33L11.414 13H4.586l-.058-.05a4.423 4.423 0 0 1-1.528-3.33V8.062ZM5.53 4.886c-1.711-.158-3.53 1.13-3.53 3.176v1.157a5.423 4.423 0 0 0 1.874 4.08l.458.39a.5.5 0 0 0 .332.17h6.612a.5.5 0 0 0 .332-.17l.458-.39A5.423 5.423 0 0 0 14 9.219V8.062c0-2.046-1.819-3.334-3.53-3.176a25.578 25.578 0 0 1-4.94 0Z"/><path d="M14 7V5.672a.5.5 0 0 0-.146-.354l-1.328-1.328a.5.5 0 0 0-.354-.146H3.828a.5.5 0 0 0-.354.146L2.146 5.318a.5.5 0 0 0-.146.354V7a.5.5 0 0 1-1 0V5.672a1.5 1.5 0 0 1 .44-1.06l1.328-1.328A1.5 1.5 0 0 1 3.828 2.83h8.344a1.5 1.5 0 0 1 1.06.44l1.328 1.328a1.5 1.5 0 0 1 .44 1.06V7a.5.5 0 0 1-1 0Z"/><path d="M9.5 8.5a.5.5 0 1 1 1 0 .5.5 0 0 1-1 0Zm-4 0a.5.5 0 1 1 1 0 .5.5 0 0 1-1 0Z"/></svg>
-                @(HideScans ? "Scans masqués" : "Scans visibles")
+                @(HideScans ? L["Audit_ScansHidden"] : L["Audit_ScansVisible"])
             </button>
         </div>
         <select class="form-select form-select-sm" style="width: 100px;" @bind:get="FilterMethod" @bind:set="async (v) => { FilterMethod = v; await Refresh(); }">
-            <option value="">Méthode</option>
+            <option value="">@L["Common_Method"]</option>
             <option value="GET">GET</option>
             <option value="POST">POST</option>
             <option value="PUT">PUT</option>
             <option value="DELETE">DELETE</option>
         </select>
         <select class="form-select form-select-sm" style="width: 120px;" @bind:get="FilterStatus" @bind:set="async (v) => { FilterStatus = v; await Refresh(); }">
-            <option value="">Statut</option>
+            <option value="">@L["Common_Status"]</option>
             <option value="200">200 OK</option>
             <option value="400">400 Bad Request</option>
             <option value="401">401 Unauthorized</option>
@@ -34,8 +35,8 @@
             <option value="404">404 Not Found</option>
             <option value="500">500 Error</option>
         </select>
-        <input class="form-control form-control-sm" style="width: 200px;" placeholder="Rechercher..." @bind="SearchTerm" @bind:event="oninput" />
-        <button class="btn btn-primary btn-sm" @onclick="Refresh">Actualiser</button>
+        <input class="form-control form-control-sm" style="width: 200px;" placeholder="@L["Common_Search"]" @bind="SearchTerm" @bind:event="oninput" />
+        <button class="btn btn-primary btn-sm" @onclick="Refresh">@L["Common_Refresh"]</button>
     </div>
 </div>
 
@@ -45,14 +46,14 @@
             <table class="table table-hover table-sm align-middle" style="font-size: 0.85rem;">
                 <thead>
                     <tr>
-                        <th>Date (Locale)</th>
-                        <th>Méthode</th>
-                        <th>Path</th>
-                        <th class="text-center">Score</th>
-                        <th>Statut</th>
-                        <th>Pays</th>
-                        <th>IP / ISP</th>
-                        <th>App / détails</th>
+                        <th>@L["Common_DateLocal"]</th>
+                        <th>@L["Common_Method"]</th>
+                        <th>@L["Audit_Path"]</th>
+                        <th class="text-center">@L["Audit_Score"]</th>
+                        <th>@L["Common_Status"]</th>
+                        <th>@L["Audit_Country"]</th>
+                        <th>@L["Audit_IpIsp"]</th>
+                        <th>@L["Audit_AppDetails"]</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -89,7 +90,7 @@
                                 <td>
                                     @if (!string.IsNullOrEmpty(log.CountryCode) && log.CountryCode != "--")
                                     {
-                                        <img src="https://flagcdn.com/16x12/@(log.CountryCode.ToLower()).png" width="16" height="12" class="me-1" title="@log.CountryCode" />
+                                        <img src="lib/flags/@(log.CountryCode.ToLower()).png" width="16" height="12" class="me-1" title="@log.CountryCode" />
                                         <span>@log.CountryCode</span>
                                     }
                                     else { <span class="text-muted">--</span> }
@@ -116,7 +117,7 @@
                                     }
                                     else
                                     {
-                                        <span class="text-muted small">Web Interface</span>
+                                        <span class="text-muted small">@L["Audit_WebInterface"]</span>
                                     }
                                     <span class="text-secondary ms-1 small">(@log.Endpoint)</span>
                                 </td>
@@ -131,23 +132,23 @@
         {
             <div class="d-flex justify-content-between align-items-center mt-3">
                 <div class="d-flex align-items-center gap-2">
-                    <small class="text-muted">Afficher</small>
+                    <small class="text-muted">@L["Common_Show"]</small>
                     <select class="form-select form-select-sm" style="width: 80px;" @bind:get="PageSize" @bind:set="ChangePageSize">
                         <option value="10">10</option>
                         <option value="25">25</option>
                         <option value="50">50</option>
                         <option value="100">100</option>
                     </select>
-                    <small class="text-muted">sur @TotalCount entrées</small>
+                    <small class="text-muted">@L["Common_Of"] @TotalCount @L["Common_Entries"]</small>
                 </div>
                 <nav>
                     <ul class="pagination pagination-sm mb-0">
                         <li class="page-item @(CurrentPage == 1 ? "disabled" : "")">
-                            <button class="page-link" @onclick="() => GoToPage(CurrentPage - 1)">Précédent</button>
+                            <button class="page-link" @onclick="() => GoToPage(CurrentPage - 1)">@L["Common_Previous"]</button>
                         </li>
-                        <li class="page-item disabled"><span class="page-link">Page @CurrentPage / @TotalPages</span></li>
+                        <li class="page-item disabled"><span class="page-link">@L["Common_Page"] @CurrentPage / @TotalPages</span></li>
                         <li class="page-item @(CurrentPage >= TotalPages ? "disabled" : "")">
-                            <button class="page-link" @onclick="() => GoToPage(CurrentPage + 1)">Suivant</button>
+                            <button class="page-link" @onclick="() => GoToPage(CurrentPage + 1)">@L["Common_Next"]</button>
                         </li>
                     </ul>
                 </nav>
@@ -155,18 +156,18 @@
         }
     </div>
 
-    <!-- IPS BANNIES (En dessous) -->
+    <!-- IPS BANNIES ACTIVES -->
     <div class="col-12 mt-4">
         <div class="card h-100 shadow-sm border-warning bg-dark bg-opacity-10">
             <div class="card-header bg-warning bg-opacity-10 py-3 border-warning border-opacity-25">
                 <h6 class="text-warning d-flex align-items-center mb-0">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="bi bi-shield-slash me-2" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M1.093 3.093c-.465.42-.797.927-.988 1.485 1.22 3.118 3.455 6.488 6.46 9.46a18.6 18.6 0 0 0 1.435 1.417 36 36 0 0 0 1.435-1.417c3.005-2.972 5.24-6.342 6.46-9.461a6.4 6.4 0 0 0-.988-1.484L1.093 3.093Zm2.818-1.99a7.4 7.4 0 0 1 8.178 0l.03.022a1.5 1.5 0 0 1 .146 1.263c-.596 4.477.787 7.795 2.465 9.99a11.8 11.8 0 0 0 2.517 2.453c.386.273.744.482 1.048.625.28.132.581.24.829.24s.548-.108.829-.24a7.2 7.2 0 0 0 1.048-.625 11.8 11.8 0 0 0 2.517-2.453c1.678-2.195 3.061-5.513 2.465-9.99a1.5 1.5 0 0 1 .146-1.263l.03-.022ZM8 0c-.69 0-1.843.265-2.928.56-1.11.3-2.229.655-2.887.87a1.54 1.54 0 0 0-1.044 1.262c-.596 4.477.787 7.795 2.465 9.99a11.8 11.8 0 0 0 2.517 2.453c.386.273.744.482 1.048.625.28.132.581.24.829.24s.548-.108.829-.24a7.2 7.2 0 0 0 1.048-.625 11.8 11.8 0 0 0 2.517-2.453c1.678-2.195 3.061-5.513 2.465-9.99a1.5 1.5 0 0 1 .146-1.263l.03-.022ZM8 0c-.69 0-1.843.265-2.928.56-1.11.3-2.229.655-2.887.87a1.54 1.54 0 0 0-1.044 1.262c-.596 4.477.787 7.795 2.465 9.99a11.8 11.8 0 0 0 2.517 2.453c.386.273.744.482 1.048.625.28.132.581.24.829.24s.548-.108.829-.24a7.2 7.2 0 0 0 1.048-.625 11.8 11.8 0 0 0 2.517-2.453c1.678-2.195 3.061-5.513 2.465-9.99a1.5 1.5 0 0 1 .146-1.263l.03-.022ZM8 0c-.69 0-1.843.265-2.928.56-1.11.3-2.229.655-2.887.87a1.54 1.54 0 0 0-1.044 1.262c-.596 4.477.787 7.795 2.465 9.99a11.8 11.8 0 0 0 2.517 2.453c.386.273.744.482 1.048.625.28.132.581.24.829.24s.548-.108.829-.24a7.2 7.2 0 0 0 1.048-.625 11.8 11.8 0 0 0 2.517-2.453c1.678-2.195 3.061-5.513 2.465-9.99a1.5 1.5 0 0 1 .146-1.263l.03-.022ZM8 0c-.69 0-1.843.265-2.928.56-1.11.3-2.229.655-2.887.87a1.54 1.54 0 0 0-1.044 1.262c-.596 4.477.787 7.795 2.465 9.99a11.8 11.8 0 0 0 2.517 2.453c.386.273.744.482 1.048.625.28.132.581.24.829.24s.548-.108.829-.24a7.2 7.2 0 0 0 1.048-.625 11.8 11.8 0 0 0 2.517-2.453c1.678-2.195 3.061-5.513 2.465-9.99a1.5 1.5 0 0 1 .146-1.263l.03-.022ZM8 0c-.69 0-1.843.265-2.928.56-1.11.3-2.229.655-2.887.87a1.54 1.54 0 0 0-1.044 1.262c-.596 4.477.787 7.795 2.465 9.99a11.8 11.8 0 0 0 2.517 2.453c.386.273.744.482 1.048.625.28.132.581.24.829.24s.548-.108.829-.24a7.2 7.2 0 0 0 1.048-.625 11.8 11.8 0 0 0 2.517-2.453c1.678-2.195 3.061-5.513 2.465-9.99a1.5 1.5 0 0 1 .146-1.263l.03-.022ZM8 0c-.69 0-1.843.265-2.928.56-1.11.3-2.229.655-2.887.87a1.54 1.54 0 0 0-1.044 1.262c-.596 4.477.787 7.795 2.465 9.99a11.8 11.8 0 0 0 2.517 2.453c.386.273.744.482 1.048.625.28.132.581.24.829.24s.548-.108.829-.24a7.2 7.2 0 0 0 1.048-.625 11.8 11.8 0 0 0 2.517-2.453c1.678-2.195 3.061-5.513 2.465-9.99a1.5 1.5 0 0 1 .146-1.263l.03-.022ZM8 0c-.69 0-1.843.265-2.928.56-1.11.3-2.229.655-2.887.87a1.54 1.54 0 0 0-1.044 1.262c-.596 4.477.787 7.795 2.465 9.99a11.8 11.8 0 0 0 2.517 2.453c.386.273.744.482 1.048.625.28.132.581.24.829.24s.548-.108.829-.24a7.2 7.2 0 0 0 1.048-.625 11.8 11.8 0 0 0 2.517-2.453c1.678-2.195 3.061-5.513 2.465-9.99a1.5 1.5 0 0 1 .146-1.263l.03-.022ZM8 0c-.69 0-1.843.265-2.928.56-1.11.3-2.229.655-2.887.87a1.54 1.54 0 0 0-1.044 1.262c-.596 4.477.787 7.795 2.465 9.99a11.8 11.8 0 0 0 2.517 2.453c.386.273.744.482 1.048.625.28.132.581.24.829.24s.548-.108.829-.24a7.2 7.2 0 0 0 1.048-.625 11.8 11.8 0 0 0 2.517-2.453c1.678-2.195 3.061-5.513 2.465-9.99a1.5 1.5 0 0 1 .146-1.263l.03-.022Z"/></svg>
-                    Bannissements actifs (24h)
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="bi bi-shield-exclamation me-2" viewBox="0 0 16 16"><path d="M5.338 1.59a61 61 0 0 0-2.837.856.48.48 0 0 0-.328.39c-.554 4.157.726 7.19 2.253 9.188a10.7 10.7 0 0 0 2.287 2.233c.346.244.652.42.893.533q.18.085.293.118a1 1 0 0 0 .101.025 1 1 0 0 0 .1-.025q.114-.034.294-.118c.24-.113.547-.29.893-.533a10.7 10.7 0 0 0 2.287-2.233c1.527-1.997 2.807-5.031 2.253-9.188a.48.48 0 0 0-.328-.39c-.651-.213-1.75-.56-2.837-.855C9.552 1.29 8.531 1.067 8 1.067c-.53 0-1.552.223-2.662.524zM5.072.56C6.157.265 7.31 0 8 0s1.843.265 2.928.56c1.11.3 2.229.655 2.887.87a1.54 1.54 0 0 1 1.044 1.262c.596 4.477-.787 7.795-2.465 9.99a11.8 11.8 0 0 1-2.517 2.453 7 7 0 0 1-1.048.625c-.28.132-.581.24-.829.24s-.548-.108-.829-.24a7 7 0 0 1-1.048-.625 11.8 11.8 0 0 1-2.517-2.453C1.928 10.487.545 7.169 1.141 2.692A1.54 1.54 0 0 1 2.185 1.43 63 63 0 0 1 5.072.56"/><path d="M7.001 11a1 1 0 1 1 2 0 1 1 0 0 1-2 0M7.1 4.995a.905.905 0 1 1 1.8 0l-.35 3.507a.553.553 0 0 1-1.1 0z"/></svg>
+                    @L["Audit_ActiveBans"] (@ActiveBans.Count)
                 </h6>
             </div>
             <div class="card-body">
                 <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 row-cols-xl-4 g-3">
-                    @foreach (var ban in BannedIps)
+                    @foreach (var ban in ActiveBans)
                     {
                         var geo = ResolvedBans.GetValueOrDefault(ban.IpAddress, new GeoInfo());
                         <div class="col">
@@ -176,11 +177,15 @@
                                         <div class="d-flex align-items-center">
                                             @if (!string.IsNullOrEmpty(geo.CountryCode) && geo.CountryCode != "--")
                                             {
-                                                <img src="https://flagcdn.com/16x12/@(geo.CountryCode.ToLower()).png" width="16" height="12" class="me-2" />
+                                                <img src="lib/flags/@(geo.CountryCode.ToLower()).png" width="16" height="12" class="me-2" />
                                             }
                                             <code class="text-info small">@AnonymizeIp(ban.IpAddress)</code>
+                                            @if (ban.BanCount > 1)
+                                            {
+                                                <span class="badge bg-danger ms-2" style="font-size: 0.65rem;">x@(ban.BanCount)</span>
+                                            }
                                         </div>
-                                        <button class="btn btn-sm btn-link text-success p-0" title="Débannir (Pardonner)" @onclick="() => Unban(ban.IpAddress)">
+                                        <button class="btn btn-sm btn-link text-success p-0" title="@L["Audit_Unban"]" @onclick="() => Unban(ban.IpAddress)">
                                             ✓
                                         </button>
                                     </div>
@@ -192,19 +197,74 @@
                                     </div>
                                 </div>
                                 <div class="text-end mt-3 border-top border-secondary border-opacity-25 pt-2">
-                                    <small class="text-muted" style="font-size: 0.65rem;">Expire le @(ban.ExpiresAt.HasValue ? TZ.ToLocal(ban.ExpiresAt.Value).ToString("dd/MM à HH:mm") : "Jamais")</small>
+                                    <small class="text-muted" style="font-size: 0.65rem;">
+                                        <span class="badge bg-secondary me-1">@GetBanDurationLabel(ban)</span>
+                                        @L["Audit_ExpiresOn"] @(ban.ExpiresAt.HasValue ? TZ.ToLocal(ban.ExpiresAt.Value).ToString("dd/MM à HH:mm") : L["Common_Never"].Value)
+                                    </small>
                                 </div>
                             </div>
                         </div>
                     }
                 </div>
-                @if (!BannedIps.Any())
+                @if (!ActiveBans.Any())
                 {
-                    <div class="text-center py-5 text-muted small italic">Aucun bannissement actif détecté sur les dernières 24 heures.</div>
+                    <div class="text-center py-5 text-muted small italic">@L["Audit_NoActiveBans"]</div>
                 }
             </div>
         </div>
     </div>
+
+    <!-- HISTORIQUE DES BANNISSEMENTS -->
+    @if (ExpiredBans.Any())
+    {
+        <div class="col-12 mt-4">
+            <div class="card h-100 shadow-sm border-secondary bg-dark bg-opacity-10">
+                <div class="card-header bg-secondary bg-opacity-10 py-3 border-secondary border-opacity-25">
+                    <h6 class="text-secondary d-flex align-items-center mb-0">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="bi bi-clock-history me-2" viewBox="0 0 16 16"><path d="M8.515 1.019A7 7 0 0 0 8 1V0a8 8 0 0 1 .589.022zm2.004.45a7 7 0 0 0-.985-.299l.219-.976q.576.129 1.126.342zm1.37.71a7 7 0 0 0-.439-.27l.493-.87a8 8 0 0 1 .979.654l-.615.789a7 7 0 0 0-.418-.302zm1.834 1.79a7 7 0 0 0-.653-.796l.724-.69q.406.429.747.91zm.744 1.352a7 7 0 0 0-.214-.468l.893-.45a8 8 0 0 1 .45 1.088l-.95.313a7 7 0 0 0-.179-.483m.53 2.507a7 7 0 0 0-.1-1.025l.985-.17q.1.58.116 1.17zm-.131 1.538q.05-.254.081-.51l.993.123a8 8 0 0 1-.23 1.155l-.964-.267q.069-.247.12-.501m-.952 2.379q.276-.436.486-.908l.914.405q-.253.556-.585 1.075zm-1.663 1.871q.183-.183.339-.378l.778.613a8 8 0 0 1-.775.87zm-2.104 1.247-.015-.002q.246-.12.479-.259l.521.85q-.263.16-.543.296zM8.001 15A7 7 0 1 0 1.001 8a7 7 0 0 0 7 7M8 2a6 6 0 1 1 0 12A6 6 0 0 1 8 2"/><path d="M8 3.5a.5.5 0 0 0-1 0V8a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 7.71z"/></svg>
+                        @L["Audit_BanHistory"] (@ExpiredBans.Count)
+                    </h6>
+                </div>
+                <div class="card-body">
+                    <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 row-cols-xl-4 g-3">
+                        @foreach (var ban in ExpiredBans)
+                        {
+                            var geo = ResolvedBans.GetValueOrDefault(ban.IpAddress, new GeoInfo());
+                            <div class="col">
+                                <div class="p-3 bg-black rounded border border-secondary border-opacity-25 shadow-sm h-100 animate-fade d-flex flex-column justify-content-between opacity-75">
+                                    <div>
+                                        <div class="d-flex justify-content-between align-items-center mb-2">
+                                            <div class="d-flex align-items-center">
+                                                @if (!string.IsNullOrEmpty(geo.CountryCode) && geo.CountryCode != "--")
+                                                {
+                                                    <img src="lib/flags/@(geo.CountryCode.ToLower()).png" width="16" height="12" class="me-2" />
+                                                }
+                                                <code class="text-muted small">@AnonymizeIp(ban.IpAddress)</code>
+                                                @if (ban.BanCount > 1)
+                                                {
+                                                    <span class="badge bg-warning text-dark ms-2" style="font-size: 0.65rem;">x@(ban.BanCount)</span>
+                                                }
+                                            </div>
+                                            <span class="badge bg-success" style="font-size: 0.6rem;">@L["Audit_Expired"]</span>
+                                        </div>
+                                        <div class="text-muted small text-truncate" title="@geo.Isp">
+                                            <strong>ISP:</strong> @geo.Isp
+                                        </div>
+                                        <div class="text-secondary mt-2" style="font-size: 0.75rem;">
+                                            @ban.Reason
+                                        </div>
+                                    </div>
+                                    <div class="text-end mt-3 border-top border-secondary border-opacity-25 pt-2">
+                                        <small class="text-muted" style="font-size: 0.65rem;">@L["Audit_BannedOn"] @TZ.ToLocal(ban.BannedAt).ToString("dd/MM/yyyy à HH:mm")</small>
+                                    </div>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
 </div>
 
 @if (SelectedLog != null)
@@ -213,19 +273,19 @@
         <div class="modal-dialog modal-dialog-centered">
             <div class="modal-content bg-dark border-secondary">
                 <div class="modal-header border-secondary">
-                    <h5 class="modal-title">Détails de l'erreur</h5>
+                    <h5 class="modal-title">@L["Audit_ErrorDetails"]</h5>
                     <button type="button" class="btn-close btn-close-white" @onclick="() => SelectedLog = null"></button>
                 </div>
                 <div class="modal-body">
                     <div class="mb-3 d-flex gap-4">
                         <div>
-                            <small class="text-muted d-block">User-Agent :</small>
+                            <small class="text-muted d-block">@L["Audit_UserAgent"]</small>
                             <code class="small" style="word-break: break-all;">@SelectedLog.UserAgent</code>
                         </div>
                         @if (!string.IsNullOrEmpty(SelectedLog.Isp))
                         {
                             <div style="min-width: 150px;">
-                                <small class="text-muted d-block">Fournisseur (ISP) :</small>
+                                <small class="text-muted d-block">@L["Audit_ISP"]</small>
                                 <span class="small text-info">@SelectedLog.Isp</span>
                             </div>
                         }
@@ -233,14 +293,14 @@
 
                     @if (!string.IsNullOrEmpty(SelectedLog.RequestBody))
                     {
-                        <p class="small text-muted mb-2">Données reçues (Request Body) :</p>
+                        <p class="small text-muted mb-2">@L["Audit_RequestBody"]</p>
                         <textarea class="form-control bg-black text-info font-monospace mb-3" rows="6" readonly>@SelectedLog.RequestBody</textarea>
                     }
 
-                    <p class="small text-muted mb-2">Message renvoyé par le serveur :</p>
+                    <p class="small text-muted mb-2">@L["UI_ServerResponse"]</p>
                     <textarea class="form-control bg-black text-danger font-monospace" rows="6" readonly>@SelectedLog.ErrorDetails</textarea>
                     <div class="mt-2 text-end">
-                        <small class="text-muted italic">Vous pouvez sélectionner et copier le texte ci-dessus.</small>
+                        <small class="text-muted italic">@L["UI_CopyHint"]</small>
                     </div>
                 </div>
                 <div class="modal-footer border-secondary">
@@ -264,7 +324,8 @@
 
 @code {
     private List<AccessLog> Logs = new();
-    private List<BannedIp> BannedIps = new();
+    private List<BannedIp> ActiveBans = new();
+    private List<BannedIp> ExpiredBans = new();
     private Dictionary<string, GeoInfo> ResolvedBans = new();
     
     private AccessLog? SelectedLog;
@@ -325,11 +386,20 @@
         var ban = await Db.BannedIps.FindAsync(ip);
         if (ban != null)
         {
-            Db.BannedIps.Remove(ban);
+            ban.IsActive = false;
             await Db.SaveChangesAsync();
             Toast.ShowSuccess($"IP {ip} pardonnée.");
             await Refresh();
         }
+    }
+
+    private string GetBanDurationLabel(BannedIp ban)
+    {
+        if (!ban.ExpiresAt.HasValue) return "Permanent";
+        var duration = ban.ExpiresAt.Value - ban.BannedAt;
+        if (duration.TotalDays >= 28) return "30j";
+        if (duration.TotalDays >= 5) return "7j";
+        return "24h";
     }
 
     private string GetRowClass(AccessLog log)
@@ -409,9 +479,11 @@
                               .Take(PageSize)
                               .ToListAsync();
 
-            // 2. IPs Bannies
-            BannedIps = await Db.BannedIps.OrderByDescending(b => b.BannedAt).ToListAsync();
-            foreach (var ban in BannedIps)
+            // 2. IPs Bannies (actives + historique)
+            var allBans = await Db.BannedIps.OrderByDescending(b => b.BannedAt).ToListAsync();
+            ActiveBans = allBans.Where(b => b.IsActive).ToList();
+            ExpiredBans = allBans.Where(b => !b.IsActive).ToList();
+            foreach (var ban in allBans)
             {
                 if (!ResolvedBans.ContainsKey(ban.IpAddress))
                 {

@@ -1,4 +1,4 @@
-using SoftLicence.Core;
+using SoftLicence.SDK;
 using Xunit;
 
 namespace SoftLicence.Tests.Core;

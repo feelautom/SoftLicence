@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-namespace SoftLicence.Core
+namespace SoftLicence.SDK
 {
     public class LicenseService
     {
@@ -10,7 +10,8 @@ namespace SoftLicence.Core
         // Retourne { PrivateKeyXml, PublicKeyXml }
         public static (string PrivateKey, string PublicKey) GenerateKeys()
         {
-            using var rsa = RSA.Create(4096);
+            using var rsa = RSA.Create();
+            rsa.KeySize = 4096;
             return (rsa.ToXmlString(true), rsa.ToXmlString(false));
         }
 

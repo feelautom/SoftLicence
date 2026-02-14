@@ -1,8 +1,9 @@
 @page "/docs"
 @rendermode RenderMode.InteractiveServer
+@inject IStringLocalizer<SharedResource> L
 
 <div class="d-flex justify-content-between align-items-center mb-4">
-    <h3>Documentation technique</h3>
+    <h3>@L["Docs_Title"]</h3>
     <span class="badge bg-primary">Version 1.1</span>
 </div>
 
@@ -10,16 +11,16 @@
     <div class="bg-dark p-2 border-bottom border-secondary">
         <ul class="nav nav-pills" id="docTabs" role="tablist">
             <li class="nav-item">
-                <button class="nav-link @(activeTab == "client" ? "active" : "")" @onclick="@(() => activeTab = "client")">Intégration WPF</button>
+                <button class="nav-link @(activeTab == "client" ? "active" : "")" @onclick="@(() => activeTab = "client")">@L["Docs_WpfIntegration"]</button>
             </li>
             <li class="nav-item">
-                <button class="nav-link @(activeTab == "server" ? "active" : "")" @onclick="@(() => activeTab = "server")">Administration</button>
+                <button class="nav-link @(activeTab == "server" ? "active" : "")" @onclick="@(() => activeTab = "server")">@L["Docs_Administration"]</button>
             </li>
             <li class="nav-item">
-                <button class="nav-link @(activeTab == "security" ? "active" : "")" @onclick="@(() => activeTab = "security")">Sécurité & audit</button>
+                <button class="nav-link @(activeTab == "security" ? "active" : "")" @onclick="@(() => activeTab = "security")">@L["Docs_SecurityAudit"]</button>
             </li>
             <li class="nav-item">
-                <button class="nav-link @(activeTab == "api" ? "active" : "")" @onclick="@(() => activeTab = "api")">API reference</button>
+                <button class="nav-link @(activeTab == "api" ? "active" : "")" @onclick="@(() => activeTab = "api")">@L["Docs_ApiReference"]</button>
             </li>
         </ul>
     </div>

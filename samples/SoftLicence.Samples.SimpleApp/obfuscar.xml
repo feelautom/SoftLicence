@@ -16,5 +16,5 @@
   
   <!-- On obfusque aussi la librairie UI et Core si elles sont copiées -->
   <Module file="$(InPath)\SoftLicence.UI.dll" />
-  <Module file="$(InPath)\SoftLicence.Core.dll" />
+  <Module file="$(InPath)\SoftLicence.SDK.dll" />
 </Obfuscator>

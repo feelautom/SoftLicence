@@ -1,4 +1,4 @@
-using SoftLicence.Core;
+using SoftLicence.SDK;
 using System.ComponentModel.DataAnnotations;
 
 namespace SoftLicence.Server.Data

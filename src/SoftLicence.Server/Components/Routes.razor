@@ -1,5 +1,6 @@
 @using SoftLicence.Server.Components.Layout
 @inject NavigationManager Nav
+@inject IStringLocalizer<SharedResource> L
 
 <Router AppAssembly="typeof(Program).Assembly">
     <Found Context="routeData">
@@ -10,7 +11,7 @@
                     <div style="display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #121212; color: #6c757d;">
                         <div style="text-align: center;">
                             <h1 style="font-size: 4rem;">404</h1>
-                            <p>Page inexistante.</p>
+                            <p>@L["Login_PageNotFound"]</p>
                         </div>
                     </div>
                 </LayoutView>
@@ -19,12 +20,12 @@
         <FocusOnNavigate RouteData="routeData" Selector="h1" />
     </Found>
     <NotFound>
-        <PageTitle>Page non trouvée</PageTitle>
+        <PageTitle>@L["Login_PageNotFound"]</PageTitle>
         <LayoutView Layout="@typeof(EmptyLayout)">
             <div style="display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #121212; color: #6c757d;">
                 <div style="text-align: center;">
                     <h1 style="font-size: 4rem;">404</h1>
-                    <p>Page inexistante.</p>
+                    <p>@L["Login_PageNotFound"]</p>
                 </div>
             </div>
         </LayoutView>

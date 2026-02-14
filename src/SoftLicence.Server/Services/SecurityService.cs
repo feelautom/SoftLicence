@@ -43,8 +43,8 @@ public class SecurityService
         }
 
         using var db = await _dbFactory.CreateDbContextAsync();
-        var ban = await db.BannedIps.FirstOrDefaultAsync(b => b.IpAddress == ip);
-        
+        var ban = await db.BannedIps.FirstOrDefaultAsync(b => b.IpAddress == ip && b.IsActive);
+
         if (ban != null)
         {
             if (ban.ExpiresAt == null || ban.ExpiresAt > DateTime.UtcNow)
@@ -52,8 +52,8 @@ public class SecurityService
                 _bannedCache[ip] = ban.ExpiresAt ?? DateTime.MaxValue;
                 return true;
             }
-            
-            db.BannedIps.Remove(ban);
+
+            ban.IsActive = false;
             await db.SaveChangesAsync();
         }
 
@@ -103,25 +103,52 @@ public class SecurityService
     public async Task BanIpAsync(string ip, string reason)
     {
         using var db = await _dbFactory.CreateDbContextAsync();
-        if (await db.BannedIps.AnyAsync(b => b.IpAddress == ip)) return;
+        var existing = await db.BannedIps.FirstOrDefaultAsync(b => b.IpAddress == ip);
 
-        var ban = new BannedIp
+        if (existing != null)
         {
-            IpAddress = ip,
-            Reason = reason,
-            BannedAt = DateTime.UtcNow,
-            ExpiresAt = DateTime.UtcNow.AddDays(1)
-        };
+            if (existing.IsActive) return; // Already actively banned
 
-        db.BannedIps.Add(ban);
-        await db.SaveChangesAsync();
-        _bannedCache[ip] = ban.ExpiresAt.Value;
+            existing.BanCount++;
+            existing.IsActive = true;
+            existing.Reason = reason;
+            existing.BannedAt = DateTime.UtcNow;
+            existing.ExpiresAt = existing.BanCount switch
+            {
+                1 => DateTime.UtcNow.AddDays(1),
+                2 => DateTime.UtcNow.AddDays(7),
+                _ => DateTime.UtcNow.AddDays(30)
+            };
 
-        _logger.LogCritical("IP BANNIE AUTOMATIQUEMENT : {IP} pour {Reason}", ip, reason);
-        
-        _notifier.Notify(NotificationService.Triggers.SecurityIpBanned, 
-            "🚫 IP BANNIE", 
-            $"IP: {ip}\nRaison: {reason}\nScore dépassé.");
+            await db.SaveChangesAsync();
+            _bannedCache[ip] = existing.ExpiresAt.Value;
+
+            _logger.LogCritical("IP BANNIE (Récidive x{Count}) : {IP} pour {Reason} — Durée escaladée", existing.BanCount, ip, reason);
+
+            _notifier.Notify(NotificationService.Triggers.SecurityIpBanned,
+                $"🚫 IP BANNIE (x{existing.BanCount})",
+                $"IP: {ip}\nRaison: {reason}\nRécidive #{existing.BanCount}");
+        }
+        else
+        {
+            var ban = new BannedIp
+            {
+                IpAddress = ip,
+                Reason = reason,
+                BannedAt = DateTime.UtcNow,
+                ExpiresAt = DateTime.UtcNow.AddDays(1)
+            };
+
+            db.BannedIps.Add(ban);
+            await db.SaveChangesAsync();
+            _bannedCache[ip] = ban.ExpiresAt.Value;
+
+            _logger.LogCritical("IP BANNIE AUTOMATIQUEMENT : {IP} pour {Reason}", ip, reason);
+
+            _notifier.Notify(NotificationService.Triggers.SecurityIpBanned,
+                "🚫 IP BANNIE",
+                $"IP: {ip}\nRaison: {reason}\nScore dépassé.");
+        }
     }
 
     public async Task CheckForZombieAsync(string hardwareId, string currentIp)

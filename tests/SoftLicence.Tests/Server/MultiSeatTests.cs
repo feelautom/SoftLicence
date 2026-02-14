@@ -5,7 +5,7 @@ using Xunit;
 using SoftLicence.Server.Data;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.EntityFrameworkCore;
-using SoftLicence.Core;
+using SoftLicence.SDK;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 

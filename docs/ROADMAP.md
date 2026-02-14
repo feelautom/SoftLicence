@@ -1,40 +1,40 @@
 # Roadmap - SoftLicence
 
-Voici l'état d'avancement de la solution industrielle de gestion de licences.
+Here is the progress status of the industrial license management solution.
 
-## ✅ Phase 1 : Sécurité & Stabilité (Terminée)
-- [x] **Auth Admin** : Système de login sécurisé pour le Dashboard.
-- [x] **Sécurité API** : Double protection par Secret et Liste blanche d'IPs (WhiteList).
-- [x] **Audit Total** : Middleware capturant 100% du trafic avec IP réelle et télémétrie.
-- [x] **Migrations EF Core** : Système de mise à jour de schéma professionnel.
-- [x] **Auto-Heal** : Mécanisme de récupération automatique de la base de données.
+## ✅ Phase 1: Security & Stability (Completed)
+- [x] **Admin Auth**: Secure login system for the Dashboard.
+- [x] **API Security**: Dual protection via Secret and IP Whitelist.
+- [x] **Total Audit**: Middleware capturing 100% of traffic with real IP and telemetry.
+- [x] **EF Core Migrations**: Professional schema update system.
+- [x] **Auto-Heal**: Automatic database recovery mechanism.
 
-## ✅ Phase 2 : Fonctionnalités Avancées (Terminée)
-- [x] **Types de Licences Dynamiques** : Création de types personnalisés via Slugs (PRO, GOLD, TRIAL).
-- [x] **Analytics Dashboard** : Graphiques d'activité, KPIs et tunnel de conversion.
-- [x] **Timer de Révocation** : Vérification en temps réel côté client WPF.
-- [x] **Emailing Industriel** : Intégration de MailKit pour l'envoi fiable des clés.
+## ✅ Phase 2: Advanced Features (Completed)
+- [x] **Dynamic License Types**: Create custom types via Slugs (PRO, GOLD, TRIAL).
+- [x] **Analytics Dashboard**: Activity charts, KPIs, and conversion funnel.
+- [x] **Revocation Timer**: Real-time verification on the WPF client side.
+- [x] **Industrial Emailing**: MailKit integration for reliable key delivery.
 
-## ✅ Phase 3 : Infrastructure & Automatisation (Terminée)
-- [x] **Nettoyage automatique** : Tâche de fond pour purger les vieux logs.
-- [x] **Gestion des Versions** : Restreindre une licence à une version majeure spécifique (ex: v1.x).
-- [x] **Multi-Postes** : Autoriser une licence sur X machines simultanément.
+## ✅ Phase 3: Infrastructure & Automation (Completed)
+- [x] **Automatic Cleaning**: Background task to purge old logs.
+- [x] **Version Management**: Restrict a license to a specific major version (e.g., v1.x).
+- [x] **Multi-Seat**: Authorize a license on X machines simultaneously.
 
-## ✅ Phase 4 : Quality Assurance & Tests Industriels (Terminée)
-- [x] **Core Stability** : Tests unitaires du moteur RSA et de la logique de validation.
-- [x] **Active Defense** : Validation des services de bannissement et détection zombie.
-- [x] **Integrity Lock** : Tests de verrouillage des configurations de compilation (Warnings as Errors).
-- [x] **API Functional Tests** : Validation des endpoints d'activation, auto-trial et renouvellement.
-- [x] **Telemetry Integrity** : Tests de parsing JSON complexe et isolation des données produits.
-- [x] **Stats Accuracy** : Validation des calculs de KPIs et graphiques du dashboard.
-- [x] **I18N Validation** : Tests de conversion automatique des fuseaux horaires.
+## ✅ Phase 4: Quality Assurance & Industrial Tests (Completed)
+- [x] **Core Stability**: Unit tests for the RSA engine and validation logic.
+- [x] **Active Defense**: Validation of banning services and zombie detection.
+- [x] **Integrity Lock**: Compilation configuration locking tests (Warnings as Errors).
+- [x] **API Functional Tests**: Validation of activation, auto-trial, and renewal endpoints.
+- [x] **Telemetry Integrity**: Complex JSON parsing tests and product data isolation.
+- [x] **Stats Accuracy**: Validation of KPI calculations and dashboard charts.
+- [x] **I18N Validation**: Automatic time zone conversion tests.
 
-## 🌟 Phase 5 : Portail & Écosystème (v1.2)
-- [x] **UI Gestion des Postes** : Interface d'administration pour visualiser et libérer les machines liées à une licence.
-- [ ] **Portail Client Self-Service** : Espace dédié pour que les clients gèrent leurs clés et effectuent des resets.
-- [ ] **Connecteur Stripe** : Automatisation totale de la vente et génération de licence.
-- [ ] **Anti-Tamper Avancé** : Détection de Debuggers et VM dans le Core.
+## 🌟 Phase 5: Portal & Ecosystem (v1.2)
+- [x] **Seat Management UI**: Administration interface to view and release machines linked to a license.
+- [ ] **Self-Service Customer Portal**: Dedicated space for customers to manage their keys and perform resets.
+- [ ] **Stripe Connector**: Total automation of sales and license generation.
+- [ ] **Advanced Anti-Tamper**: Debugger and VM detection in the Core.
 
-## 🛠️ Maintenance & Optimisation
-- [x] **Audit Total** : Middleware v1.1.
-- [x] **Nettoyage automatique** : Background service de purge.
+## 🛠️ Maintenance & Optimization
+- [x] **Total Audit**: Middleware v1.1.
+- [x] **Automatic Cleaning**: Purge background service.

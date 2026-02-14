@@ -6,7 +6,7 @@ using Xunit;
 using SoftLicence.Server.Data;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.EntityFrameworkCore;
-using SoftLicence.Core;
+using SoftLicence.SDK;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -41,7 +41,7 @@ public class VersionControlTests : IClassFixture<WebApplicationFactory<Program>>
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
             var encryption = scope.ServiceProvider.GetRequiredService<SoftLicence.Server.Services.EncryptionService>();
             
-            var prod = new Product { Id = Guid.NewGuid(), Name = "TestApp", PrivateKeyXml = encryption.Encrypt("k"), PublicKeyXml = "k" };
+            var prod = new Product { Id = Guid.NewGuid(), Name = "SipLine", PrivateKeyXml = encryption.Encrypt("k"), PublicKeyXml = "k" };
             var type = new LicenseType { Id = Guid.NewGuid(), Name = "T", Slug = "T" };
             db.Products.Add(prod);
             db.LicenseTypes.Add(type);
@@ -60,7 +60,7 @@ public class VersionControlTests : IClassFixture<WebApplicationFactory<Program>>
         var request = new { 
             LicenseKey = licenseKey, 
             HardwareId = "HW1", 
-            AppName = "TestApp",
+            AppName = "SipLine",
             AppVersion = "2.0.0" // Tentative en v2
         };
 
@@ -83,7 +83,7 @@ public class VersionControlTests : IClassFixture<WebApplicationFactory<Program>>
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
             var encryption = scope.ServiceProvider.GetRequiredService<SoftLicence.Server.Services.EncryptionService>();
 
-            var prod = new Product { Id = Guid.NewGuid(), Name = "TestApp", PrivateKeyXml = encryption.Encrypt(LicenseService.GenerateKeys().PrivateKey), PublicKeyXml = "k" };
+            var prod = new Product { Id = Guid.NewGuid(), Name = "SipLine", PrivateKeyXml = encryption.Encrypt(LicenseService.GenerateKeys().PrivateKey), PublicKeyXml = "k" };
             var type = new LicenseType { Id = Guid.NewGuid(), Name = "T", Slug = "T" };
             db.Products.Add(prod);
             db.LicenseTypes.Add(type);
@@ -102,7 +102,7 @@ public class VersionControlTests : IClassFixture<WebApplicationFactory<Program>>
         var request = new { 
             LicenseKey = licenseKey, 
             HardwareId = "HW1", 
-            AppName = "TestApp",
+            AppName = "SipLine",
             AppVersion = "1.2.3" // Version compatible v1.*
         };
 

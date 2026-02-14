@@ -12,4 +12,8 @@ public class BannedIp
     public DateTime? ExpiresAt { get; set; }
     
     public string Reason { get; set; } = string.Empty;
+
+    public int BanCount { get; set; } = 1;
+
+    public bool IsActive { get; set; } = true;
 }

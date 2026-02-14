@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-02-14
+- feat(ui): add confirmation modals for license revocation and fix culture redirection
+- feat(i18n): transition to local assets for offline support and add I18N documentation
+- feat(i18n): set English as default, add documentation translations and silence production logs
+- fix(i18n): fix resource loading by moving SharedResource to root
+- feat(i18n): complete localization for remaining Admin pages
+- Localized Backups, Products, Telemetry, and Users pages.
+- Fixed field initialization error in Users.razor.
+- Added language selector to MainLayout top bar.
+- wip: implement I18N and enhanced ban security system
+- Setup localization (FR/EN) across the Admin UI using IStringLocalizer.
+- Refactored ban system: added recidivism tracking with escalated duration (1d, 7d, 30d).
+- Updated Audit UI to show ban history and active/expired status.
+- Migrated BannedIp model to support persistence of previous bans.
+
 ## 2026-02-13
 - security: auto-backup database before applying migrations
 - feat(auth): add email notifications for users and force password change on first login
@@ -30,27 +45,20 @@
 
 ## 2026-02-12
 - security: comprehensive server audit fix and architectural hardening
-
-### 1. Sécurité & Défense Active
-- Audit Complet : Tracement des actions administrateurs dans les logs d'audit.
-- Whitelist IP Admin : Correction de la logique de vérification (match exact requis).
-- Codes de Réinitialisation : Utilisation de RandomNumberGenerator (CSPRNG) pour les codes à 6 chiffres.
-- Fuites de Données : Suppression de l'énumération des clés de licence dans les logs d'erreur.
-- Détection Zombie : Seuil assoupli à 5 IPs/24h et suppression du ban IP automatique agressif.
-
-### 2. Architecture & Fiabilité
-- Thread-Safety : Refactoring du TelemetryService avec IDbContextFactory.
-- Protection des Données : CleanupService désactivé par défaut (configurable).
-- Intégrité Référentielle : Désactivation de la suppression en cascade sur les produits (Restrict).
-- Migration DB : Ajout de la migration 'ProtectProductDelete'.
-
-### 3. Corrections Techniques & UI
-- Routing Furtif : Correction du blocage des fichiers statiques (favicon) via contrainte Regex.
-- Mode Trial : Sécurisation de la détection et suppression du fallback arbitraire.
-- Maintenance des Tests : Mise à jour complète de la suite de tests unitaires.
-- UI : Remplacement des '??' par '--' pour les pays manquants dans les tableaux d'audit et maintenance.
+- Audit Complet: Tracing admin actions in audit logs.
+- Admin IP Whitelist: Fixed verification logic (exact match required).
+- Reset Codes: Use of RandomNumberGenerator (CSPRNG) for 6-digit codes.
+- Data Leaks: Removal of license key enumeration in error logs.
+- Zombie Detection: Threshold relaxed to 5 IPs/24h and removal of aggressive automatic IP ban.
+- Thread-Safety: Refactored TelemetryService with IDbContextFactory.
+- Data Protection: CleanupService disabled by default (configurable).
+- Referential Integrity: Disabled cascade delete on products (Restrict).
+- DB Migration: Added 'ProtectProductDelete' migration.
+- Stealth Routing: Fixed blocking of static files (favicon) via Regex constraint.
+- Trial Mode: Secured detection and removal of arbitrary fallback.
+- Test Maintenance: Complete update of the unit test suite.
+- UI: Replaced '??' with '--' for missing countries in audit and maintenance tables.
 - security: fix multiple vulnerabilities and architectural issues from code audit
-
 - Fix CleanupService silent data deletion (now configurable)
 - Fix TelemetryService thread-safety with IDbContextFactory
 - Fix AdminController IP whitelist logic

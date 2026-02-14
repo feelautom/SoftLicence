@@ -1,4 +1,4 @@
-using SoftLicence.Core;
+using SoftLicence.SDK;
 
 namespace SoftLicence.KeyGen
 {

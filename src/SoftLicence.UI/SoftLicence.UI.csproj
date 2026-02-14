@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <ProjectReference Include="..\SoftLicence.Core\SoftLicence.Core.csproj" />
+    <ProjectReference Include="..\SoftLicence.SDK\SoftLicence.SDK.csproj" />
   </ItemGroup>
 
   <ItemGroup>

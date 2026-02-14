@@ -159,11 +159,17 @@ namespace SoftLicence.Server.Migrations
                     b.Property<string>("IpAddress")
                         .HasColumnType("text");
 
+                    b.Property<int>("BanCount")
+                        .HasColumnType("integer");
+
                     b.Property<DateTime>("BannedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<DateTime?>("ExpiresAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
 
                     b.Property<string>("Reason")
                         .IsRequired()

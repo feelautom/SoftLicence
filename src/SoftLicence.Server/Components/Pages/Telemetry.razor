@@ -1,27 +1,28 @@
 @page "/telemetry"
 @inject LicenseDbContext Db
 @inject SoftLicence.Server.Services.TimeZoneService TZ
+@inject IStringLocalizer<SharedResource> L
 @using SoftLicence.Server.Data
 @using Microsoft.EntityFrameworkCore
 @using System.Text.Json
 
 <div class="d-flex justify-content-between align-items-center mb-4">
-    <h3>Télémétrie des produits</h3>
+    <h3>@L["Telemetry_Title"]</h3>
     <div class="d-flex gap-2">
         <select class="form-select form-select-sm" style="width: 150px;" @bind:get="FilterProductId" @bind:set="async (v) => { FilterProductId = v; await Refresh(); }">
-            <option value="">Tous les produits</option>
+            <option value="">@L["Telemetry_AllProducts"]</option>
             @foreach (var p in Products)
             {
                 <option value="@p.Id.ToString()">@p.Name</option>
             }
         </select>
         <select class="form-select form-select-sm" style="width: 130px;" @bind:get="FilterType" @bind:set="async (v) => { FilterType = v; await Refresh(); }">
-            <option value="">Tous les types</option>
-            <option value="Event">Événements</option>
-            <option value="Diagnostic">Diagnostics</option>
-            <option value="Error">Erreurs</option>
+            <option value="">@L["Telemetry_AllTypes"]</option>
+            <option value="Event">@L["Telemetry_Events"]</option>
+            <option value="Diagnostic">@L["Telemetry_Diagnostics"]</option>
+            <option value="Error">@L["Telemetry_Errors"]</option>
         </select>
-        <button class="btn btn-primary btn-sm" @onclick="Refresh">Actualiser</button>
+        <button class="btn btn-primary btn-sm" @onclick="Refresh">@L["Common_Refresh"]</button>
     </div>
 </div>
 
@@ -29,13 +30,13 @@
     <table class="table table-hover table-sm align-middle" style="font-size: 0.85rem;">
         <thead>
             <tr>
-                <th>Date (Locale)</th>
-                <th>Produit</th>
-                <th>Type</th>
-                <th>Événement</th>
+                <th>@L["Common_DateLocal"]</th>
+                <th>@L["Telemetry_Product"]</th>
+                <th>@L["Common_Type"]</th>
+                <th>@L["Telemetry_Event"]</th>
                 <th>Version</th>
-                <th>Hardware ID</th>
-                <th class="text-end">Détails</th>
+                <th>@L["Telemetry_HardwareId"]</th>
+                <th class="text-end">@L["Common_Actions"]</th>
             </tr>
         </thead>
         <tbody>
@@ -68,23 +69,23 @@
 {
     <div class="d-flex justify-content-between align-items-center mt-3">
         <div class="d-flex align-items-center gap-2">
-            <small class="text-muted">Afficher</small>
+            <small class="text-muted">@L["Common_Show"]</small>
             <select class="form-select form-select-sm" style="width: 80px;" @bind:get="PageSize" @bind:set="ChangePageSize">
                 <option value="10">10</option>
                 <option value="25">25</option>
                 <option value="50">50</option>
                 <option value="100">100</option>
             </select>
-            <small class="text-muted">sur @TotalCount entrées</small>
+            <small class="text-muted">@L["Common_Of"] @TotalCount @L["Common_Entries"]</small>
         </div>
         <nav>
             <ul class="pagination pagination-sm mb-0">
                 <li class="page-item @(CurrentPage == 1 ? "disabled" : "")">
-                    <button class="page-link" @onclick="() => GoToPage(CurrentPage - 1)">Précédent</button>
+                    <button class="page-link" @onclick="() => GoToPage(CurrentPage - 1)">@L["Common_Previous"]</button>
                 </li>
-                <li class="page-item disabled"><span class="page-link">Page @CurrentPage / @TotalPages</span></li>
+                <li class="page-item disabled"><span class="page-link">@L["Common_Page"] @CurrentPage / @TotalPages</span></li>
                 <li class="page-item @(CurrentPage >= TotalPages ? "disabled" : "")">
-                    <button class="page-link" @onclick="() => GoToPage(CurrentPage + 1)">Suivant</button>
+                    <button class="page-link" @onclick="() => GoToPage(CurrentPage + 1)">@L["Common_Next"]</button>
                 </li>
             </ul>
         </nav>
@@ -97,22 +98,22 @@
         <div class="modal-dialog modal-lg modal-dialog-centered">
             <div class="modal-content bg-dark border-secondary">
                 <div class="modal-header border-secondary">
-                    <h5 class="modal-title">Détails Télémétrie - @SelectedRecord.EventName</h5>
+                    <h5 class="modal-title">@L["Telemetry_Details"] - @SelectedRecord.EventName</h5>
                     <button type="button" class="btn-close btn-close-white" @onclick="() => SelectedRecord = null"></button>
                 </div>
                 <div class="modal-body">
                     <div class="row mb-3">
                         <div class="col-md-6">
-                            <small class="text-muted d-block">App / Version</small>
+                            <small class="text-muted d-block">@L["Telemetry_AppVersion"]</small>
                             <span>@SelectedRecord.AppName / @SelectedRecord.Version</span>
                         </div>
                         <div class="col-md-6">
-                            <small class="text-muted d-block">Hardware ID</small>
+                            <small class="text-muted d-block">@L["Telemetry_HardwareId"]</small>
                             <code>@SelectedRecord.HardwareId</code>
                         </div>
                     </div>
                     
-                    <h6 class="mt-4 mb-2">Données de l'événement (@SelectedRecord.Type)</h6>
+                    <h6 class="mt-4 mb-2">@L["Telemetry_EventData"] (@SelectedRecord.Type)</h6>
                     <div class="p-3 bg-black text-info rounded border border-secondary" style="font-size: 0.85rem; max-height: 400px; overflow-y: auto;">
                         @if (SelectedRecord.Type == TelemetryType.Event && SelectedRecord.EventData != null)
                         {
@@ -127,9 +128,9 @@
                         }
                         else if (SelectedRecord.Type == TelemetryType.Diagnostic && SelectedRecord.DiagnosticData != null)
                         {
-                            <div class="mb-3">Score Global : <span class="badge bg-info">@SelectedRecord.DiagnosticData.Score / 100</span></div>
+                            <div class="mb-3">@L["Telemetry_GlobalScore"] <span class="badge bg-info">@SelectedRecord.DiagnosticData.Score / 100</span></div>
                             
-                            <h6>Résultats :</h6>
+                            <h6>@L["Telemetry_Results"]</h6>
                             <ul class="list-unstyled">
                                 @foreach (var r in SelectedRecord.DiagnosticData.Results)
                                 {
@@ -142,9 +143,9 @@
 
                             @if (SelectedRecord.DiagnosticData.Ports.Any())
                             {
-                                <h6 class="mt-3">Ports :</h6>
+                                <h6 class="mt-3">@L["Telemetry_Ports"]</h6>
                                 <table class="table table-sm table-dark">
-                                    <thead><tr><th>Nom</th><th>Port</th><th>Proto</th></tr></thead>
+                                    <thead><tr><th>@L["Common_Name"]</th><th>Port</th><th>Proto</th></tr></thead>
                                     <tbody>
                                         @foreach (var p in SelectedRecord.DiagnosticData.Ports)
                                         {
@@ -156,17 +157,18 @@
                         }
                         else
                         {
-                            <span class="text-muted italic">Aucune donnée supplémentaire.</span>
+                            <span class="text-muted italic">@L["Telemetry_NoExtraData"]</span>
                         }
                     </div>
                 </div>
                 <div class="modal-footer border-secondary">
-                    <button type="button" class="btn btn-secondary" @onclick="() => SelectedRecord = null">Fermer</button>
+                    <button type="button" class="btn btn-secondary" @onclick="() => SelectedRecord = null">@L["Common_Close"]</button>
                 </div>
             </div>
         </div>
     </div>
 }
+
 
 <style>
     .bg-black { background-color: #000 !important; }

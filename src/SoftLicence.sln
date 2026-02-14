@@ -3,7 +3,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SoftLicence.Core", "SoftLicence.Core\SoftLicence.Core.csproj", "{35BCAFB0-918D-4BD7-A094-72539A0557C3}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SoftLicence.SDK", "SoftLicence.SDK\SoftLicence.SDK.csproj", "{35BCAFB0-918D-4BD7-A094-72539A0557C3}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SoftLicence.KeyGen", "SoftLicence.KeyGen\SoftLicence.KeyGen.csproj", "{4E3E925A-82E5-4624-AB56-1AE98787184B}"
 EndProject
