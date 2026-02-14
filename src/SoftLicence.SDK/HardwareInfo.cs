@@ -53,9 +53,13 @@ namespace SoftLicence.SDK
                 if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return "NON-WINDOWS";
 
                 using (var searcher = new ManagementObjectSearcher($"SELECT {propertyName} FROM {className}"))
+                using (var collection = searcher.Get())
                 {
-                    foreach (ManagementObject obj in searcher.Get())
+                    foreach (var mObj in collection)
                     {
+                        var obj = mObj as ManagementObject;
+                        if (obj == null) continue;
+
                         var value = obj[propertyName]?.ToString();
                         if (!string.IsNullOrWhiteSpace(value))
                         {

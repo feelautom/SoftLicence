@@ -15,10 +15,12 @@
     <Description>SDK officiel pour l'intégration de la protection SoftLicence dans les applications .NET.</Description>
     <PackageTags>licensing;drm;protection;sdk</PackageTags>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="..\..\LICENSE" Pack="true" PackagePath="" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="" />
   </ItemGroup>
 
   <ItemGroup>
