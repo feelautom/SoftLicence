@@ -8,7 +8,7 @@ RSA-4096 cryptographic licensing with hardware fingerprinting, admin dashboard, 
 [![License](https://img.shields.io/badge/License-Elastic%202.0-blue.svg)](LICENSE)
 [![FR](https://img.shields.io/badge/lang-FR-blue.svg)](README.fr.md)
 
-![Dashboard](screens/Dashboard.png)
+![Dashboard](https://raw.githubusercontent.com/feelautom/SoftLicence/main/screens/Dashboard.png)
 
 ## Features
 
@@ -102,7 +102,7 @@ See the [Protection Guide](docs/en/PROTECTION_GUIDE.md) for a complete step-by-s
 
 | Dashboard | Products | Licenses |
 |---|---|---|
-| ![Dashboard](screens/Dashboard.png) | ![Products](screens/Product.png) | ![Licenses](screens/Licences.png) |
+| ![Dashboard](https://raw.githubusercontent.com/feelautom/SoftLicence/main/screens/Dashboard.png) | ![Products](screens/Product.png) | ![Licenses](screens/Licences.png) |
 
 | Audit Log | Telemetry | Self-Service Reset |
 |---|---|---|
