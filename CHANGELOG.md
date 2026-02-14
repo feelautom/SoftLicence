@@ -1,6 +1,8 @@
 # Changelog
 
 ## 2026-02-14
+- fix(i18n): finalize localization by replacing hardcoded strings in Controllers and Views
+- feat(sdk): refactor Core to SDK, standardize HardwareID (16-hex) and add Client API
 - feat(ui): add confirmation modals for license revocation and fix culture redirection
 - feat(i18n): transition to local assets for offline support and add I18N documentation
 - feat(i18n): set English as default, add documentation translations and silence production logs

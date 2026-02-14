@@ -86,7 +86,7 @@ namespace SoftLicence.Server.Controllers
                 if (!IsAuthorized()) return Unauthorized();
         
                 var product = await _db.Products.FindAsync(id);
-                if (product == null) return NotFound("Produit introuvable");
+                if (product == null) return NotFound(_localizer["Api_ProductNotFound"].Value);
         
                 var decrypted = _encryption.Decrypt(product.PrivateKeyXml);
                 if (decrypted == "ERROR_DECRYPTION_FAILED")
@@ -135,7 +135,7 @@ namespace SoftLicence.Server.Controllers
                 if (!IsAuthorized()) return Unauthorized();
         
                 var product = await _db.Products.FindAsync(id);
-                if (product == null) return NotFound("Produit introuvable");
+                if (product == null) return NotFound(_localizer["Api_ProductNotFound"].Value);
         
                 // Valider que la clé est un XML RSA valide
                 try
@@ -179,7 +179,7 @@ namespace SoftLicence.Server.Controllers
                 if (!IsAuthorized()) return Unauthorized();
         
                 var product = await _db.Products.FirstOrDefaultAsync(p => p.Name == req.ProductName);
-                if (product == null) return NotFound("Produit introuvable");
+                if (product == null) return NotFound(_localizer["Api_ProductNotFound"].Value);
         
                 var type = await _db.LicenseTypes.FirstOrDefaultAsync(t => t.Slug == req.TypeSlug);
                 if (type == null) return BadRequest($"Type de licence '{req.TypeSlug}' inconnu.");
@@ -241,15 +241,14 @@ namespace SoftLicence.Server.Controllers
                     .Include(l => l.Type)
                     .FirstOrDefaultAsync(l => l.LicenseKey == licenseKey);
         
-                if (license == null) return NotFound("Licence introuvable");
-                if (license.Type == null) return BadRequest("Type de licence inconnu.");
+                if (license == null) return NotFound(_localizer["Api_LicenseNotFound"].Value);
+                if (license.Type == null) return BadRequest(_localizer["Api_LicenseTypeUnknown"].Value);
         
                 // Sécurité 1 : Vérifier si le type autorise le renouvellement
-                if (!license.Type.IsRecurring)
-                {
-                    return BadRequest("Ce type de licence n'autorise pas le renouvellement automatique (Mode FIXE).");
-                }
-        
+                            if (!license.Type.IsRecurring)
+                            {
+                                return BadRequest(_localizer["Api_RenewalNotAllowed"].Value);
+                            }        
                 // Sécurité 2 : Vérifier si la transaction a déjà été traitée
                 var alreadyProcessed = await _db.LicenseRenewals.AnyAsync(r => r.TransactionId == req.TransactionId);
                 if (alreadyProcessed)

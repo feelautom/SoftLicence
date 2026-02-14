@@ -397,6 +397,12 @@
   <data name="Api_PrivateKeyInvalid" xml:space="preserve"><value>Invalid private key: {0}</value></data>
   <data name="Api_TransactionUsed" xml:space="preserve"><value>This transaction has already been used for a renewal.</value></data>
   <data name="Api_Extended" xml:space="preserve"><value>License extended by {0} days.</value></data>
+  <data name="Api_AppUnknown" xml:space="preserve"><value>Application '{0}' unknown.</value></data>
+  <data name="Api_VersionNotAllowed" xml:space="preserve"><value>This license is not valid for version {0} of the software.</value></data>
+  <data name="Api_ProductNotFound" xml:space="preserve"><value>Product not found.</value></data>
+  <data name="Api_LicenseNotFound" xml:space="preserve"><value>License not found.</value></data>
+  <data name="Api_LicenseTypeUnknown" xml:space="preserve"><value>Unknown license type.</value></data>
+  <data name="Api_RenewalNotAllowed" xml:space="preserve"><value>This license type does not allow automatic renewal (FIXED Mode).</value></data>
 
   <!-- UI Extras -->
   <data name="UI_ConfirmRevokeTitle" xml:space="preserve"><value>Do you want to revoke the license for {0}?</value></data>

@@ -397,6 +397,12 @@
   <data name="Api_PrivateKeyInvalid" xml:space="preserve"><value>Clé privée invalide : {0}</value></data>
   <data name="Api_TransactionUsed" xml:space="preserve"><value>Cette transaction a déjà été utilisée pour un renouvellement.</value></data>
   <data name="Api_Extended" xml:space="preserve"><value>Licence prolongée de {0} jours.</value></data>
+  <data name="Api_AppUnknown" xml:space="preserve"><value>Application '{0}' inconnue.</value></data>
+  <data name="Api_VersionNotAllowed" xml:space="preserve"><value>Cette licence n'est pas valide pour la version {0} du logiciel.</value></data>
+  <data name="Api_ProductNotFound" xml:space="preserve"><value>Produit introuvable.</value></data>
+  <data name="Api_LicenseNotFound" xml:space="preserve"><value>Licence introuvable.</value></data>
+  <data name="Api_LicenseTypeUnknown" xml:space="preserve"><value>Type de licence inconnu.</value></data>
+  <data name="Api_RenewalNotAllowed" xml:space="preserve"><value>Ce type de licence n'autorise pas le renouvellement automatique (Mode FIXE).</value></data>
 
   <!-- UI Extras -->
   <data name="UI_ConfirmRevokeTitle" xml:space="preserve"><value>Voulez-vous révoquer la licence de {0} ?</value></data>

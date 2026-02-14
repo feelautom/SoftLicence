@@ -95,11 +95,10 @@ namespace SoftLicence.Server.Controllers
         {
             TagLog(req, "TRIAL_AUTO");
 
-            var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
-            if (product == null) return BadRequest($"Application '{req.AppName}' inconnue.");
-
-            var type = await _db.LicenseTypes.FirstOrDefaultAsync(t => t.Slug.ToUpper() == req.TypeSlug.Trim().ToUpper());
-            if (type == null) return BadRequest($"Type de licence '{req.TypeSlug}' inconnu.");
+                    var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
+                    if (product == null) return BadRequest(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
+            
+                    var type = await _db.LicenseTypes.FirstOrDefaultAsync(t => t.Slug.ToUpper() == req.TypeSlug.Trim().ToUpper());            if (type == null) return BadRequest($"Type de licence '{req.TypeSlug}' inconnu.");
 
             // Vérifier si ce PC a déjà une licence pour ce produit (Trial ou autre)
             var existing = await _db.Licenses
@@ -145,7 +144,7 @@ namespace SoftLicence.Server.Controllers
                 }
                 catch (Exception ex)
                 {
-                    return StatusCode(500, $"Erreur de signature : {ex.Message}");
+                    return StatusCode(500, string.Format(_localizer["Api_InternalErrorSignature"].Value + " ({0})", ex.Message));
                 }
             }
 
@@ -217,7 +216,7 @@ namespace SoftLicence.Server.Controllers
             if (product == null) 
             {
                 _logger.LogWarning("Activation echouee : Application '{AppName}' inconnue.", req.AppName);
-                return BadRequest($"Application '{req.AppName}' inconnue.");
+                return BadRequest(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
             }
 
             // --- INTERCEPTION AUTO-TRIAL ---
@@ -281,7 +280,7 @@ namespace SoftLicence.Server.Controllers
                     catch (Exception ex)
                     {
                         _logger.LogError(ex, "Erreur signature recovery trial");
-                        return StatusCode(500, $"Erreur de signature : {ex.Message}");
+                        return StatusCode(500, string.Format(_localizer["Api_InternalErrorSignature"].Value + " ({0})", ex.Message));
                     }
                 }
 
@@ -325,7 +324,7 @@ namespace SoftLicence.Server.Controllers
                 }
                 catch (Exception ex)
                 {
-                    return StatusCode(500, $"Erreur de signature : {ex.Message}");
+                    return StatusCode(500, string.Format(_localizer["Api_InternalErrorSignature"].Value + " ({0})", ex.Message));
                 }
             }
             // --- FIN INTERCEPTION ---
@@ -357,7 +356,7 @@ namespace SoftLicence.Server.Controllers
             if (!IsVersionAllowed(req.AppVersion, license.AllowedVersions))
             {
                 _logger.LogWarning("Activation echouee : Version '{Version}' non autorisee pour la cle '{LicenseKey}' (Attendu: '{Allowed}')", req.AppVersion, cleanKey, license.AllowedVersions);
-                return BadRequest($"Cette licence n'est pas valide pour la version {req.AppVersion} du logiciel.");
+                return BadRequest(string.Format(_localizer["Api_VersionNotAllowed"].Value, req.AppVersion));
             }
 
             // --- GESTION MULTI-POSTES (SEATS) ---
@@ -433,7 +432,7 @@ namespace SoftLicence.Server.Controllers
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Erreur lors de la signature de la licence pour '{AppName}'", req.AppName);
-                return StatusCode(500, $"Erreur de signature : {ex.Message}");
+                return StatusCode(500, string.Format(_localizer["Api_InternalErrorSignature"].Value + " ({0})", ex.Message));
             }
         }
 
@@ -443,16 +442,22 @@ namespace SoftLicence.Server.Controllers
             var cleanKey = req.LicenseKey.Trim().ToUpper();
             TagLog(req, "CHECK");
 
-            var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
-            if (product == null) return NotFound("App unknown");
-
-            var license = await _db.Licenses
-                .Include(l => l.Type)
-                .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
-
-            if (license == null) return NotFound("License not found");
-
-            string status = "VALID";
+                    var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
+                    if (product == null) return NotFound(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
+            
+                            var license = await _db.Licenses
+            
+                                .Include(l => l.Type)
+            
+                                .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
+            
+                    
+            
+                            if (license == null) return NotFound(_localizer["Api_LicenseNotFound"].Value);
+            
+                    
+            
+                            string status = "VALID";
             if (!license.IsActive) status = "REVOKED";
             else if (license.ExpirationDate.HasValue && DateTime.UtcNow > license.ExpirationDate.Value) status = "EXPIRED";
             else if (string.IsNullOrEmpty(license.HardwareId)) status = "REQUIRES_ACTIVATION";
@@ -479,11 +484,10 @@ namespace SoftLicence.Server.Controllers
             HttpContext.Items[LogKeys.LicenseKey] = req.LicenseKey;
             HttpContext.Items[LogKeys.Endpoint] = "RESET_REQUEST";
 
-            var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
-            if (product == null) return BadRequest("Application inconnue.");
-
-            var cleanKey = req.LicenseKey.Trim().ToUpper();
-            var license = await _db.Licenses.FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
+                    var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
+                    if (product == null) return BadRequest(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
+            
+                    var cleanKey = req.LicenseKey.Trim().ToUpper();            var license = await _db.Licenses.FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
             if (license == null) return BadRequest(_localizer["Api_InvalidLicenseKey"].Value);
             
             HttpContext.Items[LogKeys.HardwareId] = license.HardwareId; // On logge le HWID actuel qui va etre delie
@@ -515,11 +519,10 @@ namespace SoftLicence.Server.Controllers
             HttpContext.Items[LogKeys.LicenseKey] = req.LicenseKey;
             HttpContext.Items[LogKeys.Endpoint] = "RESET_CONFIRM";
 
-            var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
-            if (product == null) return BadRequest("Application inconnue.");
-
-            var cleanKey = req.LicenseKey.Trim().ToUpper();
-            var license = await _db.Licenses.FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
+                    var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
+                    if (product == null) return BadRequest(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
+            
+                    var cleanKey = req.LicenseKey.Trim().ToUpper();            var license = await _db.Licenses.FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
             if (license == null) return BadRequest(_localizer["Api_InvalidLicenseKey"].Value);
 
             if (license.ResetCode == null || license.ResetCode != req.ResetCode || license.ResetCodeExpiry < DateTime.UtcNow)
