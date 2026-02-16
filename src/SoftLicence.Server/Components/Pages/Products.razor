@@ -1,6 +1,7 @@
 @page "/products"
 @inject SoftLicence.Server.Services.AuthService Auth
 @inject LicenseDbContext Db
+@inject IDbContextFactory<LicenseDbContext> DbFactory
 @inject SoftLicence.Server.Services.ToastService Toast
 @inject SoftLicence.Server.Services.TimeZoneService TZ
 @inject SoftLicence.Server.Services.EncryptionService Encryption
@@ -498,6 +499,7 @@
                                                 <th>@L["Common_DateLocal"]</th>
                                                 <th>@L["Common_Method"]</th>
                                                 <th>@L["Products_Endpoint"]</th>
+                                                <th>@L["Telemetry_HardwareId"]</th>
                                                 <th>@L["Common_Status"]</th>
                                                 <th>@L["Audit_Duration"]</th>
                                             </tr>
@@ -509,6 +511,7 @@
                                                     <td><small class="text-muted">@TZ.ToLocal(log.Timestamp).ToString("dd/MM HH:mm:ss")</small></td>
                                                     <td><span class="badge bg-secondary">@log.Method</span></td>
                                                     <td><code>@log.Endpoint</code></td>
+                                                    <td><code class="small text-info">@log.HardwareId</code></td>
                                                     <td><span class="badge @GetStatusBadgeClass(log.StatusCode)">@log.StatusCode</span></td>
                                                     <td class="text-muted">@log.DurationMs ms</td>
                                                 </tr>
@@ -766,10 +769,17 @@
     {
         if (confirmed && selectedProduct != null)
         {
-            selectedProduct.ApiSecret = Guid.NewGuid().ToString("N");
-            await Db.SaveChangesAsync();
-            Toast.ShowSuccess("Clé API régénérée avec succès.");
-            StateHasChanged();
+            var pid = selectedProduct.Id;
+            using var db = await DbFactory.CreateDbContextAsync();
+            var dbProd = await db.Products.FindAsync(pid);
+            
+            if (dbProd != null)
+            {
+                dbProd.ApiSecret = Guid.NewGuid().ToString("N");
+                await db.SaveChangesAsync();
+                Toast.ShowSuccess("Clé API régénérée avec succès.");
+                await LoadData();
+            }
         }
     }
 
@@ -903,10 +913,22 @@
 
     private async Task SaveTypeEdit(LicenseType lt)
     {
-        await Db.SaveChangesAsync();
-        editingTypeId = null;
-        Toast.ShowSuccess("Modifications enregistrées.");
-        await LoadData();
+        var tid = lt.Id;
+        using var db = await DbFactory.CreateDbContextAsync();
+        var dbType = await db.LicenseTypes.FindAsync(tid);
+        
+        if (dbType != null)
+        {
+            dbType.Name = lt.Name;
+            dbType.DefaultDurationDays = lt.DefaultDurationDays;
+            dbType.DefaultMaxSeats = lt.DefaultMaxSeats;
+            dbType.IsRecurring = lt.IsRecurring;
+            
+            await db.SaveChangesAsync();
+            editingTypeId = null;
+            Toast.ShowSuccess("Modifications enregistrées.");
+            await LoadData();
+        }
     }
 
     private Task RequestDeleteType(LicenseType lt)

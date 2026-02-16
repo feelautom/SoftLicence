@@ -43,7 +43,7 @@ if (status.IsValid)
 
 ## 📚 Documentation
 
-For full integration guides and server setup, please visit the [Official Repository](https://github.com/YOUR_COMPANY_NAME/SoftLicence).
+For full integration guides and server setup, please visit the [Official Repository](https://github.com/feelautom/SoftLicence).
 
 ## 📄 License
 
