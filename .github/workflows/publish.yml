@@ -1,43 +1,44 @@
-name: Publish SoftLicence.SDK
+name: Test & Publish NuGet
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
-  publish:
-    name: Publish to Registries
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+  test-and-publish:
+    runs-on: windows-latest
+
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
-          source-url: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
-        env:
-          NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          dotnet-version: '9.0.x'
 
-      - name: Restore Dependencies
-        run: dotnet restore src/SoftLicence.SDK/SoftLicence.SDK.csproj
+      - name: Restore dependencies
+        run: dotnet restore src/SoftLicence.sln
 
-      - name: Build SDK
-        run: dotnet build src/SoftLicence.SDK/SoftLicence.SDK.csproj --configuration Release --no-restore
+      - name: Restore test dependencies
+        run: dotnet restore tests/SoftLicence.Tests/SoftLicence.Tests.csproj
 
-      - name: Pack SDK
-        run: dotnet pack src/SoftLicence.SDK/SoftLicence.SDK.csproj --configuration Release --no-build -o out
+      - name: Run tests
+        run: dotnet test tests/SoftLicence.Tests/ --no-restore --verbosity normal
 
-      - name: Push to GitHub Packages
-        run: dotnet nuget push out/*.nupkg --api-key ${{ secrets.GITHUB_TOKEN }} --source "github" --skip-duplicate
+      - name: Build solution
+        run: dotnet build src/SoftLicence.sln -c Release --no-restore
 
-      - name: Push to NuGet.org
-        if: env.NUGET_API_KEY != ''
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-        run: dotnet nuget push out/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+            - name: Pack SDK
+              run: dotnet pack src/SoftLicence.SDK/SoftLicence.SDK.csproj -c Release -o out
+      
+            - name: Push NuGet package
+              if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+              shell: pwsh
+              run: |
+                $packages = Get-ChildItem -Path out -Filter *.nupkg
+                foreach ($pkg in $packages) {
+                    Write-Host "Pushing $($pkg.FullName)..."
+                    dotnet nuget push $pkg.FullName --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+                }

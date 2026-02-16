@@ -1,15 +1,77 @@
 @page "/resets"
+@inject SoftLicence.Server.Services.AuthService Auth
 @inject LicenseDbContext Db
 @inject SoftLicence.Server.Services.TimeZoneService TZ
+@inject SoftLicence.Server.Services.ToastService Toast
 @inject IStringLocalizer<SharedResource> L
 @using SoftLicence.Server.Data
 @using Microsoft.EntityFrameworkCore
 
+@if (!isAuthorized)
+{
+    <div class="text-center py-5">
+        <h2 class="text-white">@L["Common_AccessDenied"]</h2>
+        <p class="text-muted">@L["Common_NoPermission"]</p>
+    </div>
+}
+else
+{
 <div class="d-flex justify-content-between align-items-center mb-4">
     <h3>@L["Resets_Title"]</h3>
-    <button class="btn btn-primary btn-sm" @onclick="Refresh">@L["Common_Refresh"]</button>
+    <button class="btn btn-outline-secondary btn-sm" @onclick="Refresh">@L["Common_Refresh"]</button>
 </div>
 
+<!-- OUTIL DE RESET MANUEL -->
+<div class="card border-warning bg-dark bg-opacity-10 mb-5 shadow-sm">
+    <div class="card-header bg-warning bg-opacity-10 py-3">
+        <h6 class="text-warning mb-0">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" class="bi bi-unlock me-2" viewBox="0 0 16 16"><path d="M11 1a2 2 0 0 0-2 2v4a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h5V3a3 3 0 0 1 6 0v4a.5.5 0 0 1-1 0V3a2 2 0 0 0-2-2M3 8a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V9a1 1 0 0 0-1-1z"/></svg>
+            @L["Resets_ManualTitle"]
+        </h6>
+    </div>
+    <div class="card-body p-4">
+        <div class="row g-3 align-items-end">
+            <div class="col-md-6">
+                <label class="form-label small text-muted">@L["Resets_SearchLabel"]</label>
+                <div class="input-group">
+                    <input class="form-control font-monospace" placeholder="CLE-XXXX-XXXX..." @bind="searchKey" @bind:event="oninput" @onkeyup="HandleKeyUp" />
+                    <button class="btn btn-primary" @onclick="SearchLicense">@L["Resets_SearchBtn"]</button>
+                </div>
+            </div>
+            
+            @if (foundLicense != null)
+            {
+                <div class="col-md-6 animate-fade">
+                    <div class="p-3 bg-black rounded border border-secondary">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div>
+                                <div class="fw-bold">@foundLicense.CustomerName</div>
+                                <div class="small text-muted">@foundLicense.Product?.Name</div>
+                                @if (!string.IsNullOrEmpty(foundLicense.HardwareId) || (foundLicense.Seats != null && foundLicense.Seats.Any(s => s.IsActive)))
+                                {
+                                    <div class="mt-2 text-info small">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="bi bi-pc-display me-1" viewBox="0 0 16 16"><path d="M8 1a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1zm1 0v14h6V1z"/><path d="M4 14a1 1 0 1 1-2 0 1 1 0 0 1 2 0m1.713-4.423L13 9.17l.21.977-7.287 1.407zm.323-3.535 7.062 2.348-.314.948-7.062-2.348z"/></svg>
+                                        @string.Format(L["Resets_ActiveSeats"].Value, foundLicense.Seats?.Count(s => s.IsActive) ?? 0)
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="mt-2 text-success small">@L["Resets_FreeLicense"]</div>
+                                }
+                            </div>
+                            @if (!string.IsNullOrEmpty(foundLicense.HardwareId) || (foundLicense.Seats != null && foundLicense.Seats.Any(s => s.IsActive)))
+                            {
+                                <button class="btn btn-danger btn-sm" @onclick="ManualReset">@L["Resets_UnlinkBtn"]</button>
+                            }
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    </div>
+</div>
+
+<h5 class="mb-3 text-muted">@L["Resets_HistoryTitle"]</h5>
 <div class="table-responsive">
     <table class="table table-hover table-sm align-middle" style="font-size: 0.85rem;">
         <thead>
@@ -85,9 +147,14 @@
     </div>
 }
 
+}
+
 @code {
     private List<AccessLog> Logs = new();
-    
+    private string searchKey = "";
+    private License? foundLicense;
+    private bool isAuthorized = false;
+
     // Pagination
     private int CurrentPage = 1;
     private int PageSize = 25;
@@ -96,7 +163,65 @@
 
     protected override async Task OnInitializedAsync()
     {
-        await Refresh();
+        isAuthorized = await Auth.HasPermissionAsync("licenses.view");
+        if (isAuthorized) await Refresh();
+    }
+
+    private async Task HandleKeyUp(KeyboardEventArgs e) { if (e.Key == "Enter") await SearchLicense(); }
+
+    private async Task SearchLicense()
+    {
+        if (string.IsNullOrWhiteSpace(searchKey)) return;
+        
+        var key = searchKey.Trim().ToUpper();
+        foundLicense = await Db.Licenses
+            .Include(l => l.Product)
+            .Include(l => l.Seats)
+            .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == key);
+            
+        if (foundLicense == null) Toast.ShowInfo(L["Resets_MsgNotFound"]);
+    }
+
+    private async Task ManualReset()
+    {
+        if (foundLicense == null) return;
+
+        try
+        {
+            // Soft Reset des seats
+            if (foundLicense.Seats != null)
+            {
+                foreach (var seat in foundLicense.Seats.Where(s => s.IsActive))
+                {
+                    seat.IsActive = false;
+                    seat.UnlinkedAt = DateTime.UtcNow;
+
+                    foundLicense.History.Add(new LicenseHistory {
+                        Action = HistoryActions.UnlinkedAdminTool,
+                        Details = string.Format(L["Licenses_Action_UnlinkedAdminTool"].Value, seat.HardwareId),
+                        PerformedBy = "Admin"
+                    });
+                }
+            }
+
+            // Reset des champs principaux
+            foundLicense.HardwareId = null;
+            foundLicense.ActivationDate = null;
+            foundLicense.RecoveryCount = 0;
+            foundLicense.ResetCode = null;
+            foundLicense.ResetCodeExpiry = null;
+
+            await Db.SaveChangesAsync();
+            Toast.ShowSuccess(L["Resets_MsgSuccess"]);
+            
+            searchKey = "";
+            foundLicense = null;
+            await Refresh();
+        }
+        catch (Exception ex)
+        {
+            Toast.ShowError(L["Common_Error"] + " : " + ex.Message);
+        }
     }
 
     private async Task ChangePageSize(int size)
@@ -144,4 +269,7 @@
 
 <style>
     .table-danger-hard { background-color: rgba(220, 53, 69, 0.1) !important; }
+    .bg-black { background-color: #000 !important; }
+    .animate-fade { animation: fadeIn 0.3s ease-out; }
+    @@keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
 </style>

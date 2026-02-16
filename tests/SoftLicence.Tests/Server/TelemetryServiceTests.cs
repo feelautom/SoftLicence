@@ -13,6 +13,7 @@ public class TelemetryServiceTests
     private readonly DbContextOptions<LicenseDbContext> _dbOptions;
     private readonly Mock<ILogger<TelemetryService>> _loggerMock;
     private readonly Mock<IDbContextFactory<LicenseDbContext>> _dbFactoryMock;
+    private readonly Mock<GeoIpService> _geoIpMock;
 
     public TelemetryServiceTests()
     {
@@ -24,6 +25,15 @@ public class TelemetryServiceTests
         _dbFactoryMock = new Mock<IDbContextFactory<LicenseDbContext>>();
         _dbFactoryMock.Setup(f => f.CreateDbContextAsync(It.IsAny<CancellationToken>()))
             .ReturnsAsync(() => new LicenseDbContext(_dbOptions));
+
+        var envMock = new Mock<Microsoft.AspNetCore.Hosting.IWebHostEnvironment>();
+        envMock.Setup(e => e.ContentRootPath).Returns(Directory.GetCurrentDirectory());
+        var cacheMock = new Mock<Microsoft.Extensions.Caching.Memory.IMemoryCache>();
+        var geoLoggerMock = new Mock<ILogger<GeoIpService>>();
+        
+        _geoIpMock = new Mock<GeoIpService>(envMock.Object, cacheMock.Object, geoLoggerMock.Object);
+        _geoIpMock.Setup(g => g.GetGeoInfoAsync(It.IsAny<string>()))
+            .ReturnsAsync(new GeoInfo { Isp = "Test ISP", CountryCode = "FR" });
     }
 
     private async Task SeedProductAsync(LicenseDbContext db, string name)
@@ -44,13 +54,13 @@ public class TelemetryServiceTests
         // Arrange
         using (var db = new LicenseDbContext(_dbOptions))
         {
-            await SeedProductAsync(db, "TestApp");
+            await SeedProductAsync(db, "YOUR_APP_NAME");
         }
-        var service = new TelemetryService(_dbFactoryMock.Object, _loggerMock.Object);
+        var service = new TelemetryService(_dbFactoryMock.Object, _loggerMock.Object, _geoIpMock.Object);
 
         var request = new TelemetryDiagnosticRequest
         {
-            AppName = "TestApp",
+            AppName = "YOUR_APP_NAME",
             HardwareId = "HW-DIAG",
             EventName = "NETWORK_TEST",
             Score = 85,
@@ -89,13 +99,13 @@ public class TelemetryServiceTests
         // Arrange
         using (var db = new LicenseDbContext(_dbOptions))
         {
-            await SeedProductAsync(db, "TestApp");
+            await SeedProductAsync(db, "YOUR_APP_NAME");
         }
-        var service = new TelemetryService(_dbFactoryMock.Object, _loggerMock.Object);
+        var service = new TelemetryService(_dbFactoryMock.Object, _loggerMock.Object, _geoIpMock.Object);
 
         var request = new TelemetryErrorRequest
         {
-            AppName = "TestApp",
+            AppName = "YOUR_APP_NAME",
             HardwareId = "HW-ERR",
             EventName = "CRASH",
             ErrorType = "NullReferenceException",
@@ -127,7 +137,7 @@ public class TelemetryServiceTests
             await SeedProductAsync(db, "AppA");
             await SeedProductAsync(db, "AppB");
         }
-        var service = new TelemetryService(_dbFactoryMock.Object, _loggerMock.Object);
+        var service = new TelemetryService(_dbFactoryMock.Object, _loggerMock.Object, _geoIpMock.Object);
 
         // App A data
         await service.SaveEventAsync(new TelemetryEventRequest { AppName = "AppA", HardwareId = "HW-A", EventName = "START" });

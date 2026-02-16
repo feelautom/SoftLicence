@@ -37,7 +37,7 @@ namespace SoftLicence.Server.Controllers
             if (username == adminUser && password == adminPass)
             {
                 claims.Add(new Claim(ClaimTypes.Name, "Root"));
-                claims.Add(new Claim(ClaimTypes.Role, "SuperAdmin"));
+                claims.Add(new Claim(ClaimTypes.Role, "CHANGE_ME_RANDOM_SECRET"));
                 // Root a toutes les permissions imaginables
                 claims.Add(new Claim("Permissions", "all"));
                 authenticated = true;

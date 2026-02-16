@@ -18,4 +18,7 @@ public class LicenseSeat
     public DateTime LastCheckInAt { get; set; } = DateTime.UtcNow;
     
     public string? MachineName { get; set; }
+
+    public bool IsActive { get; set; } = true;
+    public DateTime? UnlinkedAt { get; set; }
 }

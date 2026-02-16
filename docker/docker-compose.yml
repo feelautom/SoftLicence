@@ -13,12 +13,12 @@ services:
       - "5432"
     environment:
       - POSTGRES_DB=db_softlicence
-      - POSTGRES_USER=${DB_USER:-postgres}
-      - POSTGRES_PASSWORD=${DB_PASSWORD:?DB_PASSWORD is required}
+      - POSTGRES_USER=developer
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-CHANGE_ME_DB_PASSWORD}
     volumes:
-      - /opt/softlicence/pgdata:/var/lib/postgresql/data
+      - /home/developer/softlicence/pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d db_softlicence"]
+      test: ["CMD-SHELL", "pg_isready -U developer -d db_softlicence"]
       interval: 3s
       timeout: 3s
       retries: 10
@@ -40,20 +40,20 @@ services:
       licencedb:
         condition: service_healthy
     volumes:
-      # Local directories for persistent data
-      - /opt/softlicence/data:/app/data
-      - /opt/softlicence:/app/config
+      # Dossiers locaux pour gestion via WinSCP (Chemins absolus Docker)
+      - /home/developer/softlicence/data:/app/data
+      - /home/developer/softlicence:/app/config
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - RCLONE_CONFIG=/app/config/rclone.conf
       - DB_TYPE=PostgreSQL
-      - ConnectionStrings__DefaultConnection=Host=licencedb;Database=db_softlicence;Username=${DB_USER:-postgres};Password=${DB_PASSWORD:?DB_PASSWORD is required}
+      - ConnectionStrings__DefaultConnection=Host=licencedb;Database=db_softlicence;Username=developer;Password=${DB_PASSWORD:-CHANGE_ME_DB_PASSWORD}
       - RetentionSettings__CleanupEnabled=true
-      # Admin settings (required - set via environment variables)
-      - AdminSettings__Username=${AdminSettings__Username:?AdminSettings__Username is required}
-      - AdminSettings__Password=${AdminSettings__Password:?AdminSettings__Password is required}
-      - AdminSettings__ApiSecret=${AdminSettings__ApiSecret:?AdminSettings__ApiSecret is required}
-      - AdminSettings__LoginPath=${AdminSettings__LoginPath:-login}
+      # On laisse Docker injecter ces valeurs via les Variables d'Environnement
+      - AdminSettings__Username=${AdminSettings__Username:-admin}
+      - AdminSettings__Password=${AdminSettings__Password:-CHANGE_ME_ADMIN_PASSWORD}
+      - AdminSettings__ApiSecret=${AdminSettings__ApiSecret:-CHANGE_ME_RANDOM_SECRET}
+      - AdminSettings__LoginPath=${AdminSettings__LoginPath:-CHANGE_ME_LOGIN_PATH}
       - AdminSettings__AllowedIps=${AdminSettings__AllowedIps:-}
       # SMTP Settings
       - SmtpSettings__Host
@@ -71,4 +71,4 @@ services:
           cpus: '0.75'
           memory: 1024M
 
-# Named volumes are replaced by bind mounts (local directories)
+# Les volumes nommés sont remplacés par des bind mounts (dossiers locaux)

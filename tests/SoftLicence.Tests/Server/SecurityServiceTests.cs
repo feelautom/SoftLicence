@@ -49,20 +49,30 @@ public class SecurityServiceTests
     }
 
     [Fact]
-    public async Task ReportThreat_ShouldBanIp_WhenScoreReaches100()
+    public async Task ReportThreat_ShouldBanIp_WhenScoreReaches200()
     {
         // Arrange
         var ip = "1.2.3.4";
 
-        // Act
+        // Act 1: Reach 100 points (Quarantine, but not banned yet)
         await _service.ReportThreatAsync(ip, 50, "Test 1");
         await _service.ReportThreatAsync(ip, 50, "Test 2");
 
+        using (var db1 = new LicenseDbContext(_dbOptions))
+        {
+            var ban1 = await db1.BannedIps.FirstOrDefaultAsync(b => b.IpAddress == ip);
+            Assert.Null(ban1); // Should NOT be banned at 100
+        }
+
+        // Act 2: Reach 200 points (Ban triggered)
+        await _service.ReportThreatAsync(ip, 50, "Test 3");
+        await _service.ReportThreatAsync(ip, 50, "Test 4");
+
         // Assert
-        using var db = new LicenseDbContext(_dbOptions);
-        var ban = await db.BannedIps.FirstOrDefaultAsync(b => b.IpAddress == ip);
-        Assert.NotNull(ban);
-        Assert.Equal("Test 2 (Score: 100)", ban.Reason);
+        using var db2 = new LicenseDbContext(_dbOptions);
+        var ban2 = await db2.BannedIps.FirstOrDefaultAsync(b => b.IpAddress == ip);
+        Assert.NotNull(ban2);
+        Assert.Equal("Test 4 (Score: 200)", ban2.Reason);
         _notifierMock.Verify(n => n.Notify(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<object>()), Times.Once);
     }
 

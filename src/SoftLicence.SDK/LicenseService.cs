@@ -107,6 +107,7 @@ namespace SoftLicence.SDK
                 
                 var response = await client.PostAsync(url, content);
 
+                if (response.StatusCode == System.Net.HttpStatusCode.NotFound) return "NOT_FOUND";
                 if (!response.IsSuccessStatusCode) return "SERVER_ERROR";
 
                 var json = await response.Content.ReadAsStringAsync();

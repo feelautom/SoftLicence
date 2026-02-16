@@ -63,15 +63,24 @@ Le `HardwareID` est une empreinte digitale unique du PC du client.
 - Le serveur renverra une erreur `HARDWARE_MISMATCH`.
 - **Réinitialisation** : L'administrateur peut réinitialiser ce lien via le dashboard ("Reset HWID"). Le client peut également le faire lui-même (Self-Service) si votre site implémente les routes de réinitialisation par email du serveur.
 
-## 📁 Stockage local
+## 📁 Stockage local & Sécurité SDK
+
+
+
 Le fichier de licence signé est stocké ici :
+
 `%AppData%/Local/[NomDeLApp]/license.lic`
+
 Il s'agit d'un JSON cryptographiquement signé et encodé en Base64.
 
-### Propriétés disponibles dans `LicenseModel`
-Une fois la licence validée, vous pouvez accéder aux informations suivantes :
-- `LicenseKey` : La clé d'activation.
-- `TypeSlug` : Le type (ex: PRO, TRIAL).
-- `Reference` : Votre champ personnalisé (ex: ID Commande).
-- `ExpirationDate` : Date limite de validité.
-- `Features` : Dictionnaire de fonctionnalités optionnelles.
+
+
+### Comportement Strict du SDK
+
+Pour garantir une protection maximale, le SDK applique les règles suivantes :
+
+1.  **Vérification au démarrage** : Contrairement aux systèmes classiques, SoftLicence effectue un appel réseau **immédiat** dès le lancement si une licence locale est trouvée. Si le serveur renvoie `REVOKED` ou `NOT_FOUND` (licence supprimée), l'accès est coupé instantanément.
+
+2.  **Suppression physique** : Si le serveur invalide la licence (expiration, révocation ou suppression), le SDK **supprime physiquement** le fichier `license.lic` du disque. L'utilisateur ne peut donc pas "tricher" en coupant internet après un premier rejet.
+
+3.  **Arrêt Net** : En cas de perte de licence (révocation à distance), l'application d'exemple est configurée pour fermer toutes ses fenêtres, ce qui arrête immédiatement tous les processus de fond (télémétrie, calculs, etc.).

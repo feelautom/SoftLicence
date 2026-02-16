@@ -41,7 +41,7 @@ public class VersionControlTests : IClassFixture<WebApplicationFactory<Program>>
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
             var encryption = scope.ServiceProvider.GetRequiredService<SoftLicence.Server.Services.EncryptionService>();
             
-            var prod = new Product { Id = Guid.NewGuid(), Name = "SipLine", PrivateKeyXml = encryption.Encrypt("k"), PublicKeyXml = "k" };
+            var prod = new Product { Id = Guid.NewGuid(), Name = "YOUR_APP_NAME", PrivateKeyXml = encryption.Encrypt("k"), PublicKeyXml = "k" };
             var type = new LicenseType { Id = Guid.NewGuid(), Name = "T", Slug = "T" };
             db.Products.Add(prod);
             db.LicenseTypes.Add(type);
@@ -60,7 +60,7 @@ public class VersionControlTests : IClassFixture<WebApplicationFactory<Program>>
         var request = new { 
             LicenseKey = licenseKey, 
             HardwareId = "HW1", 
-            AppName = "SipLine",
+            AppName = "YOUR_APP_NAME",
             AppVersion = "2.0.0" // Tentative en v2
         };
 
@@ -70,7 +70,7 @@ public class VersionControlTests : IClassFixture<WebApplicationFactory<Program>>
         // Assert
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         var content = await response.Content.ReadAsStringAsync();
-        Assert.Contains("pas valide pour la version 2.0.0", content);
+        Assert.True(content.Contains("pas valide pour la version 2.0.0") || content.Contains("not valid for version 2.0.0"));
     }
 
     [Fact]
@@ -83,7 +83,7 @@ public class VersionControlTests : IClassFixture<WebApplicationFactory<Program>>
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
             var encryption = scope.ServiceProvider.GetRequiredService<SoftLicence.Server.Services.EncryptionService>();
 
-            var prod = new Product { Id = Guid.NewGuid(), Name = "SipLine", PrivateKeyXml = encryption.Encrypt(LicenseService.GenerateKeys().PrivateKey), PublicKeyXml = "k" };
+            var prod = new Product { Id = Guid.NewGuid(), Name = "YOUR_APP_NAME", PrivateKeyXml = encryption.Encrypt(LicenseService.GenerateKeys().PrivateKey), PublicKeyXml = "k" };
             var type = new LicenseType { Id = Guid.NewGuid(), Name = "T", Slug = "T" };
             db.Products.Add(prod);
             db.LicenseTypes.Add(type);
@@ -102,7 +102,7 @@ public class VersionControlTests : IClassFixture<WebApplicationFactory<Program>>
         var request = new { 
             LicenseKey = licenseKey, 
             HardwareId = "HW1", 
-            AppName = "SipLine",
+            AppName = "YOUR_APP_NAME",
             AppVersion = "1.2.3" // Version compatible v1.*
         };
 
