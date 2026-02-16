@@ -51,6 +51,8 @@
   <data name="Common_Date" xml:space="preserve"><value>Date</value></data>
   <data name="Common_DateLocal" xml:space="preserve"><value>Date (Locale)</value></data>
   <data name="Common_Active" xml:space="preserve"><value>Actif</value></data>
+  <data name="Common_Valid" xml:space="preserve"><value>Valide</value></data>
+  <data name="Common_Expired" xml:space="preserve"><value>Expiré</value></data>
   <data name="Common_Disabled" xml:space="preserve"><value>Désactivé</value></data>
   <data name="Common_Test" xml:space="preserve"><value>Tester</value></data>
   <data name="Common_Details" xml:space="preserve"><value>Détails</value></data>
@@ -113,6 +115,25 @@
   <data name="Licenses_MsgSeatUnlinked" xml:space="preserve"><value>Poste délié.</value></data>
   <data name="Licenses_MsgAllSeatsUnlinked" xml:space="preserve"><value>Tous les postes ont été déliés.</value></data>
   <data name="Licenses_MsgDeleted" xml:space="preserve"><value>Licence supprimée définitivement.</value></data>
+  <data name="Licenses_HistoryTitle" xml:space="preserve"><value>Historique des appareils déliés</value></data>
+  <data name="Licenses_LifeCycleTitle" xml:space="preserve"><value>Cycle de vie (Carnet de santé)</value></data>
+  <data name="Licenses_ImmutableHistory" xml:space="preserve"><value>Historique immuable de la licence</value></data>
+  <data name="Licenses_History_Empty" xml:space="preserve"><value>Aucun historique disponible pour cette licence ancienne.</value></data>
+  <data name="Licenses_FirstActivation" xml:space="preserve"><value>Première activation</value></data>
+  <data name="Licenses_UnlinkDate" xml:space="preserve"><value>Date de déliement</value></data>
+  <data name="Licenses_Action_Created" xml:space="preserve"><value>Type : {0} | Postes max : {1}</value></data>
+  <data name="Licenses_Action_Activated" xml:space="preserve"><value>ID Matériel : {0} | Version : {1}</value></data>
+  <data name="Licenses_Action_Revoked" xml:space="preserve"><value>Motif : {0}</value></data>
+  <data name="Licenses_Action_UnlinkedManual" xml:space="preserve"><value>ID Matériel : {0} délié manuellement par l'Admin</value></data>
+  <data name="Licenses_Action_UnlinkedApi" xml:space="preserve"><value>ID Matériel : {0} délié via Code Reset API</value></data>
+  <data name="Licenses_Action_UnlinkedAdminTool" xml:space="preserve"><value>ID Matériel : {0} délié via l'outil SOS Admin</value></data>
+  <data name="Licenses_Action_GlobalReset" xml:space="preserve"><value>{0} poste(s) délié(s) manuellement par l'Admin</value></data>
+  <data name="Licenses_PerformedBy_Admin" xml:space="preserve"><value>Admin</value></data>
+  <data name="Licenses_PerformedBy_System" xml:space="preserve"><value>Système</value></data>
+  <data name="Licenses_GlobalResetConfirmTitle" xml:space="preserve"><value>Confirmation de Reset Global</value></data>
+  <data name="Licenses_GlobalResetConfirmMsg" xml:space="preserve"><value>Vous allez délier tous les appareils associés à la licence de {0}.</value></data>
+  <data name="Licenses_GlobalResetNote" xml:space="preserve"><value>L'historique des IDs sera conservé, mais les accès actuels seront réinitialisés.</value></data>
+  <data name="Licenses_GlobalResetBtn" xml:space="preserve"><value>Confirmer le Reset</value></data>
   <data name="Licenses_MsgMissingFields" xml:space="preserve"><value>Champs manquants.</value></data>
   <data name="Licenses_MsgEmailSent" xml:space="preserve"><value>Email envoyé !</value></data>
   <data name="Licenses_SeatDetails" xml:space="preserve"><value>Détails</value></data>
@@ -276,6 +297,15 @@
   <data name="Maintenance_Events" xml:space="preserve"><value>Événements</value></data>
   <data name="Maintenance_Last" xml:space="preserve"><value>Dernier</value></data>
   <data name="Maintenance_None" xml:space="preserve"><value>(aucun)</value></data>
+  <data name="Maintenance_ResetDbTitle" xml:space="preserve"><value>Remise à zéro complète</value></data>
+  <data name="Maintenance_ResetDbDesc" xml:space="preserve"><value>Supprime TOUTES les données métier (produits, licences, télémétrie, audit, bans, webhooks). Les comptes administrateurs et la configuration système sont conservés. Action irréversible.</value></data>
+  <data name="Maintenance_ResetDbBtn" xml:space="preserve"><value>Réinitialiser la base</value></data>
+  <data name="Maintenance_ResetDbConfirmTitle" xml:space="preserve"><value>Confirmation de remise à zéro</value></data>
+  <data name="Maintenance_ResetDbConfirmMsg" xml:space="preserve"><value>Cette opération va supprimer définitivement TOUTES les données métier : produits, licences, postes, télémétrie, audit, bannissements et webhooks. Les comptes administrateurs seront conservés.</value></data>
+  <data name="Maintenance_ResetDbConfirmPhrase" xml:space="preserve"><value>RESET</value></data>
+  <data name="Maintenance_ResetDbConfirmHint" xml:space="preserve"><value>Tapez RESET pour confirmer</value></data>
+  <data name="Maintenance_ResetDbSuccess" xml:space="preserve"><value>Base de données réinitialisée avec succès.</value></data>
+  <data name="Maintenance_ResetSelection" xml:space="preserve"><value>Sélectionnez les données à supprimer :</value></data>
 
   <!-- Backups -->
   <data name="Backups_Title" xml:space="preserve"><value>Sauvegardes Drive</value></data>
@@ -320,6 +350,15 @@
   <data name="Resets_Success" xml:space="preserve"><value>Succès</value></data>
   <data name="Resets_Failure" xml:space="preserve"><value>Échec</value></data>
   <data name="Resets_ClientIp" xml:space="preserve"><value>IP Client</value></data>
+  <data name="Resets_ManualTitle" xml:space="preserve"><value>Réinitialisation manuelle (Action Admin)</value></data>
+  <data name="Resets_SearchLabel" xml:space="preserve"><value>Rechercher une clé de licence</value></data>
+  <data name="Resets_SearchBtn" xml:space="preserve"><value>Chercher</value></data>
+  <data name="Resets_ActiveSeats" xml:space="preserve"><value>{0} poste(s) actif(s)</value></data>
+  <data name="Resets_FreeLicense" xml:space="preserve"><value>Licence libre (déjà déliée)</value></data>
+  <data name="Resets_UnlinkBtn" xml:space="preserve"><value>Délier l'appareil</value></data>
+  <data name="Resets_HistoryTitle" xml:space="preserve"><value>Historique des demandes (Logs API)</value></data>
+  <data name="Resets_MsgSuccess" xml:space="preserve"><value>La licence a été déliée avec succès.</value></data>
+  <data name="Resets_MsgNotFound" xml:space="preserve"><value>Licence introuvable.</value></data>
 
   <!-- Users -->
   <data name="Users_Title" xml:space="preserve"><value>Utilisateurs &amp; Rôles</value></data>
@@ -352,6 +391,9 @@
   <data name="Users_RoleUpdated" xml:space="preserve"><value>Rôle mis à jour.</value></data>
   <data name="Users_RoleInUse" xml:space="preserve"><value>Impossible de supprimer un rôle utilisé par des utilisateurs.</value></data>
   <data name="Users_Deletion" xml:space="preserve"><value>Suppression</value></data>
+  <data name="Users_AdminPath" xml:space="preserve"><value>URL d'accès</value></data>
+  <data name="Users_AdminPathPlaceholder" xml:space="preserve"><value>ex: username</value></data>
+  <data name="Users_AdminPathDescription" xml:space="preserve"><value>Si rempli, l'utilisateur pourra se connecter via cette URL personnalisée.</value></data>
 
   <!-- Login -->
   <data name="Login_Title" xml:space="preserve"><value>Connexion - SoftLicence</value></data>
@@ -403,6 +445,7 @@
   <data name="Api_LicenseNotFound" xml:space="preserve"><value>Licence introuvable.</value></data>
   <data name="Api_LicenseTypeUnknown" xml:space="preserve"><value>Type de licence inconnu.</value></data>
   <data name="Api_RenewalNotAllowed" xml:space="preserve"><value>Ce type de licence n'autorise pas le renouvellement automatique (Mode FIXE).</value></data>
+  <data name="Api_EmailError" xml:space="preserve"><value>Erreur lors de l'envoi de l'email.</value></data>
 
   <!-- UI Extras -->
   <data name="UI_ConfirmRevokeTitle" xml:space="preserve"><value>Voulez-vous révoquer la licence de {0} ?</value></data>

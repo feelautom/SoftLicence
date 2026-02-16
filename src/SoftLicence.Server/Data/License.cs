@@ -40,6 +40,7 @@ namespace SoftLicence.Server.Data
 
         public int MaxSeats { get; set; } = 1; // Nombre de postes autorisés
         public ICollection<LicenseSeat> Seats { get; set; } = new List<LicenseSeat>();
+        public ICollection<LicenseHistory> History { get; set; } = new List<LicenseHistory>();
 
         // Relation
         public Guid ProductId { get; set; }

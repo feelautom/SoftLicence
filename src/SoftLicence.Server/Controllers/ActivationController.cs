@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SoftLicence.SDK;
@@ -95,10 +97,14 @@ namespace SoftLicence.Server.Controllers
         {
             TagLog(req, "TRIAL_AUTO");
 
-                    var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
-                    if (product == null) return BadRequest(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
+            var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
+            if (product == null) return BadRequest(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
+
+            // Utiliser le nom canonique pour le log
+            HttpContext.Items[LogKeys.AppName] = product.Name;
             
-                    var type = await _db.LicenseTypes.FirstOrDefaultAsync(t => t.Slug.ToUpper() == req.TypeSlug.Trim().ToUpper());            if (type == null) return BadRequest($"Type de licence '{req.TypeSlug}' inconnu.");
+            var type = await _db.LicenseTypes.FirstOrDefaultAsync(t => t.Slug.ToUpper() == req.TypeSlug.Trim().ToUpper());
+            if (type == null) return BadRequest(string.Format(_localizer["Api_LicenseTypeUnknown"].Value, req.TypeSlug));
 
             // Vérifier si ce PC a déjà une licence pour ce produit (Trial ou autre)
             var existing = await _db.Licenses
@@ -111,12 +117,13 @@ namespace SoftLicence.Server.Controllers
                 if (!existing.IsActive) return BadRequest(_localizer["Api_AccessRevoked"].Value);
                 
                 // S'assurer que le siège existe
-                var seat = await _db.LicenseSeats.FirstOrDefaultAsync(s => s.LicenseId == existing.Id && s.HardwareId == req.HardwareId);
+                var seat = await _db.LicenseSeats.FirstOrDefaultAsync(s => s.LicenseId == existing.Id && s.HardwareId == req.HardwareId && s.IsActive);
                 if (seat == null)
                 {
                     _db.LicenseSeats.Add(new LicenseSeat {
                         LicenseId = existing.Id, HardwareId = req.HardwareId,
-                        FirstActivatedAt = DateTime.UtcNow, LastCheckInAt = DateTime.UtcNow
+                        FirstActivatedAt = DateTime.UtcNow, LastCheckInAt = DateTime.UtcNow,
+                        IsActive = true
                     });
                     await _db.SaveChangesAsync();
                 }
@@ -144,11 +151,15 @@ namespace SoftLicence.Server.Controllers
                 }
                 catch (Exception ex)
                 {
-                    return StatusCode(500, string.Format(_localizer["Api_InternalErrorSignature"].Value + " ({0})", ex.Message));
+                    _logger.LogError(ex, "Erreur signature trial recovery pour {HardwareId}", req.HardwareId);
+                    return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
                 }
             }
 
             // Sinon, création d'une nouvelle licence Trial
+            using var trialTransaction = _db.Database.ProviderName == "Microsoft.EntityFrameworkCore.InMemory" ? null : await _db.Database.BeginTransactionAsync();
+            try
+            {
             var newKey = Guid.NewGuid().ToString("D").ToUpper();
             var license = new License
             {
@@ -165,7 +176,6 @@ namespace SoftLicence.Server.Controllers
             };
 
             _db.Licenses.Add(license);
-            await _db.SaveChangesAsync();
 
             // Création du siège initial pour le multi-postes
             var firstSeat = new LicenseSeat
@@ -173,9 +183,18 @@ namespace SoftLicence.Server.Controllers
                 LicenseId = license.Id,
                 HardwareId = req.HardwareId,
                 FirstActivatedAt = DateTime.UtcNow,
-                LastCheckInAt = DateTime.UtcNow
+                LastCheckInAt = DateTime.UtcNow,
+                IsActive = true
             };
             _db.LicenseSeats.Add(firstSeat);
+
+            _db.LicenseHistories.Add(new LicenseHistory {
+                LicenseId = license.Id,
+                Action = HistoryActions.Created,
+                Details = string.Format(_localizer["Licenses_Action_Created"].Value, type.Name, 1),
+                PerformedBy = "System"
+            });
+
             await _db.SaveChangesAsync();
 
             _logger.LogInformation("Nouveau Trial cree : {TypeSlug} ({Days} jours) pour {HardwareId}", type.Slug, type.DefaultDurationDays, req.HardwareId);
@@ -193,16 +212,21 @@ namespace SoftLicence.Server.Controllers
                 HardwareId = license.HardwareId ?? string.Empty
             };
 
-            try
+            var decryptedKey = _encryption.Decrypt(product.PrivateKeyXml);
+            if (decryptedKey == "ERROR_DECRYPTION_FAILED")
             {
-                var decryptedKey = _encryption.Decrypt(product.PrivateKeyXml);
-                if (decryptedKey == "ERROR_DECRYPTION_FAILED") return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
-                var signedLicenseString = LicenseService.GenerateLicense(licenseModel, decryptedKey);
-                return Ok(new { LicenseFile = signedLicenseString });
+                if (trialTransaction != null) await trialTransaction.RollbackAsync();
+                return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
+            }
+            var signedLicenseString = LicenseService.GenerateLicense(licenseModel, decryptedKey);
+            if (trialTransaction != null) await trialTransaction.CommitAsync();
+            return Ok(new { LicenseFile = signedLicenseString });
             }
             catch (Exception ex)
             {
-                return StatusCode(500, $"Erreur de signature : {ex.Message}");
+                if (trialTransaction != null) await trialTransaction.RollbackAsync();
+                _logger.LogError(ex, "Erreur creation trial pour {HardwareId}", req.HardwareId);
+                return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
             }
         }
 
@@ -218,6 +242,9 @@ namespace SoftLicence.Server.Controllers
                 _logger.LogWarning("Activation echouee : Application '{AppName}' inconnue.", req.AppName);
                 return BadRequest(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
             }
+
+            // Utiliser le nom canonique pour le log
+            HttpContext.Items[LogKeys.AppName] = product.Name;
 
             // --- INTERCEPTION AUTO-TRIAL ---
             if (cleanKey.EndsWith("-FREE-TRIAL") || cleanKey == "FREE-TRIAL")
@@ -247,12 +274,13 @@ namespace SoftLicence.Server.Controllers
                     if (!existing.IsActive) return BadRequest(_localizer["Api_AccessRevoked"].Value);
                     
                     // S'assurer que le siège existe (pour les licences créées avant le système de seats)
-                    var seat = await _db.LicenseSeats.FirstOrDefaultAsync(s => s.LicenseId == existing.Id && s.HardwareId == req.HardwareId);
+                    var seat = await _db.LicenseSeats.FirstOrDefaultAsync(s => s.LicenseId == existing.Id && s.HardwareId == req.HardwareId && s.IsActive);
                     if (seat == null)
                     {
                         _db.LicenseSeats.Add(new LicenseSeat {
                             LicenseId = existing.Id, HardwareId = req.HardwareId,
-                            FirstActivatedAt = DateTime.UtcNow, LastCheckInAt = DateTime.UtcNow
+                            FirstActivatedAt = DateTime.UtcNow, LastCheckInAt = DateTime.UtcNow,
+                            IsActive = true
                         });
                         await _db.SaveChangesAsync();
                     }
@@ -280,11 +308,14 @@ namespace SoftLicence.Server.Controllers
                     catch (Exception ex)
                     {
                         _logger.LogError(ex, "Erreur signature recovery trial");
-                        return StatusCode(500, string.Format(_localizer["Api_InternalErrorSignature"].Value + " ({0})", ex.Message));
+                        return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
                     }
                 }
 
-                // Création auto
+                // Création auto (atomique)
+                using var autoTrialTx = _db.Database.ProviderName == "Microsoft.EntityFrameworkCore.InMemory" ? null : await _db.Database.BeginTransactionAsync();
+                try
+                {
                 var newKey = Guid.NewGuid().ToString("D").ToUpper();
                 var newLic = new License {
                     ProductId = product.Id, LicenseTypeId = type.Id, LicenseKey = newKey,
@@ -293,7 +324,6 @@ namespace SoftLicence.Server.Controllers
                     ExpirationDate = DateTime.UtcNow.AddDays(type.DefaultDurationDays), IsActive = true
                 };
                 _db.Licenses.Add(newLic);
-                await _db.SaveChangesAsync();
 
                 // Création du siège initial pour le multi-postes
                 var firstSeat = new LicenseSeat
@@ -301,9 +331,18 @@ namespace SoftLicence.Server.Controllers
                     LicenseId = newLic.Id,
                     HardwareId = req.HardwareId,
                     FirstActivatedAt = DateTime.UtcNow,
-                    LastCheckInAt = DateTime.UtcNow
+                    LastCheckInAt = DateTime.UtcNow,
+                    IsActive = true
                 };
                 _db.LicenseSeats.Add(firstSeat);
+
+                _db.LicenseHistories.Add(new LicenseHistory {
+                    LicenseId = newLic.Id,
+                    Action = HistoryActions.Created,
+                    Details = string.Format(_localizer["Licenses_Action_Created"].Value, type.Name, 1),
+                    PerformedBy = "System"
+                });
+
                 await _db.SaveChangesAsync();
 
                 // On met à jour le log avec la clé générée
@@ -316,15 +355,21 @@ namespace SoftLicence.Server.Controllers
                     CreationDate = newLic.CreationDate, ExpirationDate = newLic.ExpirationDate, HardwareId = newLic.HardwareId ?? string.Empty
                 };
 
-                try
+                var decryptedKey = _encryption.Decrypt(product.PrivateKeyXml);
+                if (decryptedKey == "ERROR_DECRYPTION_FAILED")
                 {
-                    var decryptedKey = _encryption.Decrypt(product.PrivateKeyXml);
-                    if (decryptedKey == "ERROR_DECRYPTION_FAILED") return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
-                    return Ok(new { LicenseFile = LicenseService.GenerateLicense(newModel, decryptedKey) });
+                    if (autoTrialTx != null) await autoTrialTx.RollbackAsync();
+                    return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
+                }
+                var signed = LicenseService.GenerateLicense(newModel, decryptedKey);
+                if (autoTrialTx != null) await autoTrialTx.CommitAsync();
+                return Ok(new { LicenseFile = signed });
                 }
                 catch (Exception ex)
                 {
-                    return StatusCode(500, string.Format(_localizer["Api_InternalErrorSignature"].Value + " ({0})", ex.Message));
+                    if (autoTrialTx != null) await autoTrialTx.RollbackAsync();
+                    _logger.LogError(ex, "Erreur creation auto-trial pour {AppName}", req.AppName);
+                    return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
                 }
             }
             // --- FIN INTERCEPTION ---
@@ -360,7 +405,7 @@ namespace SoftLicence.Server.Controllers
             }
 
             // --- GESTION MULTI-POSTES (SEATS) ---
-            var existingSeat = await _db.LicenseSeats.FirstOrDefaultAsync(s => s.LicenseId == license.Id && s.HardwareId == req.HardwareId);
+            var existingSeat = await _db.LicenseSeats.FirstOrDefaultAsync(s => s.LicenseId == license.Id && s.HardwareId == req.HardwareId && s.IsActive);
             
             if (existingSeat != null)
             {
@@ -369,11 +414,18 @@ namespace SoftLicence.Server.Controllers
                 license.RecoveryCount++;
                 TagLog(req, "RECOVERY");
                 _logger.LogInformation("Recovery reussi (Multi-Seat) : Cle '{LicenseKey}' sur HWID '{HardwareId}'", cleanKey, req.HardwareId);
+
+                _db.LicenseHistories.Add(new LicenseHistory {
+                    LicenseId = license.Id,
+                    Action = HistoryActions.Recovery,
+                    Details = string.Format(_localizer["Licenses_Action_Activated"].Value, req.HardwareId, req.AppVersion ?? "Unknown"),
+                    PerformedBy = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown"
+                });
             }
             else
             {
                 // Nouveau poste : On vérifie si on a encore de la place
-                var currentSeatsCount = await _db.LicenseSeats.CountAsync(s => s.LicenseId == license.Id);
+                var currentSeatsCount = await _db.LicenseSeats.CountAsync(s => s.LicenseId == license.Id && s.IsActive);
                 
                 if (currentSeatsCount >= license.MaxSeats)
                 {
@@ -387,10 +439,18 @@ namespace SoftLicence.Server.Controllers
                     LicenseId = license.Id,
                     HardwareId = req.HardwareId,
                     FirstActivatedAt = DateTime.UtcNow,
-                    LastCheckInAt = DateTime.UtcNow
+                    LastCheckInAt = DateTime.UtcNow,
+                    IsActive = true
                 };
                 _db.LicenseSeats.Add(newSeat);
                 
+                _db.LicenseHistories.Add(new LicenseHistory {
+                    LicenseId = license.Id,
+                    Action = HistoryActions.Activated,
+                    Details = string.Format(_localizer["Licenses_Action_Activated"].Value, req.HardwareId, req.AppVersion ?? "Unknown"),
+                    PerformedBy = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown"
+                });
+
                 // Pour la compatibilité v1, on met à jour le HardwareId principal si c'est le premier poste
                 if (string.IsNullOrEmpty(license.HardwareId))
                 {
@@ -432,7 +492,7 @@ namespace SoftLicence.Server.Controllers
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Erreur lors de la signature de la licence pour '{AppName}'", req.AppName);
-                return StatusCode(500, string.Format(_localizer["Api_InternalErrorSignature"].Value + " ({0})", ex.Message));
+                return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
             }
         }
 
@@ -442,26 +502,34 @@ namespace SoftLicence.Server.Controllers
             var cleanKey = req.LicenseKey.Trim().ToUpper();
             TagLog(req, "CHECK");
 
-                    var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
-                    if (product == null) return NotFound(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
+            var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
+            if (product == null) return NotFound(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
+
+            // Utiliser le nom canonique pour le log
+            HttpContext.Items[LogKeys.AppName] = product.Name;
             
-                            var license = await _db.Licenses
-            
-                                .Include(l => l.Type)
-            
-                                .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
-            
-                    
-            
-                            if (license == null) return NotFound(_localizer["Api_LicenseNotFound"].Value);
-            
-                    
-            
-                            string status = "VALID";
+            var license = await _db.Licenses
+                .Include(l => l.Type)
+                .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
+
+            if (license == null) return NotFound(_localizer["Api_LicenseNotFound"].Value);
+
+            string status = "VALID";
             if (!license.IsActive) status = "REVOKED";
             else if (license.ExpirationDate.HasValue && DateTime.UtcNow > license.ExpirationDate.Value) status = "EXPIRED";
-            else if (string.IsNullOrEmpty(license.HardwareId)) status = "REQUIRES_ACTIVATION";
-            else if (license.HardwareId != req.HardwareId) status = "HARDWARE_MISMATCH";
+            else
+            {
+                // Vérifier via les seats (multi-postes) au lieu du champ legacy HardwareId
+                var hasAnySeat = await _db.LicenseSeats.AnyAsync(s => s.LicenseId == license.Id && s.IsActive);
+                if (!hasAnySeat && string.IsNullOrEmpty(license.HardwareId))
+                    status = "REQUIRES_ACTIVATION";
+                else
+                {
+                    var hasSeatForHwid = await _db.LicenseSeats.AnyAsync(s => s.LicenseId == license.Id && s.HardwareId == req.HardwareId && s.IsActive);
+                    if (!hasSeatForHwid && license.HardwareId != req.HardwareId)
+                        status = "HARDWARE_MISMATCH";
+                }
+            }
 
             return Ok(new { Status = status });
         }
@@ -484,10 +552,13 @@ namespace SoftLicence.Server.Controllers
             HttpContext.Items[LogKeys.LicenseKey] = req.LicenseKey;
             HttpContext.Items[LogKeys.Endpoint] = "RESET_REQUEST";
 
-                    var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
-                    if (product == null) return BadRequest(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
+            var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
+            if (product == null) return BadRequest(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
+
+            // Utiliser le nom canonique pour le log
+            HttpContext.Items[LogKeys.AppName] = product.Name;
             
-                    var cleanKey = req.LicenseKey.Trim().ToUpper();            var license = await _db.Licenses.FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
+            var cleanKey = req.LicenseKey.Trim().ToUpper();            var license = await _db.Licenses.FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
             if (license == null) return BadRequest(_localizer["Api_InvalidLicenseKey"].Value);
             
             HttpContext.Items[LogKeys.HardwareId] = license.HardwareId; // On logge le HWID actuel qui va etre delie
@@ -506,9 +577,10 @@ namespace SoftLicence.Server.Controllers
                 await _mailer.SendResetCodeEmailAsync(license.CustomerEmail, license.CustomerName, product.Name, code);
                 return Ok(new { Message = _localizer["Api_CodeSent"].Value });
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                return StatusCode(500, "Erreur lors de l'envoi de l'email.");
+                _logger.LogError(ex, "Erreur envoi email de reset pour {LicenseKey}", req.LicenseKey);
+                return StatusCode(500, _localizer["Api_EmailError"].Value);
             }
         }
 
@@ -519,13 +591,23 @@ namespace SoftLicence.Server.Controllers
             HttpContext.Items[LogKeys.LicenseKey] = req.LicenseKey;
             HttpContext.Items[LogKeys.Endpoint] = "RESET_CONFIRM";
 
-                    var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
-                    if (product == null) return BadRequest(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
+            var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
+            if (product == null) return BadRequest(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
+
+            // Utiliser le nom canonique pour le log
+            HttpContext.Items[LogKeys.AppName] = product.Name;
             
-                    var cleanKey = req.LicenseKey.Trim().ToUpper();            var license = await _db.Licenses.FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
+            var cleanKey = req.LicenseKey.Trim().ToUpper();
+            var license = await _db.Licenses
+                .Include(l => l.Seats)
+                .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
+            
             if (license == null) return BadRequest(_localizer["Api_InvalidLicenseKey"].Value);
 
-            if (license.ResetCode == null || license.ResetCode != req.ResetCode || license.ResetCodeExpiry < DateTime.UtcNow)
+            if (license.ResetCode == null || license.ResetCodeExpiry < DateTime.UtcNow ||
+                !CryptographicOperations.FixedTimeEquals(
+                    Encoding.UTF8.GetBytes(license.ResetCode),
+                    Encoding.UTF8.GetBytes(req.ResetCode)))
             {
                 return BadRequest(_localizer["Api_InvalidResetCode"].Value);
             }
@@ -537,7 +619,21 @@ namespace SoftLicence.Server.Controllers
             license.ResetCodeExpiry = null;
             license.RecoveryCount = 0; // On reset le compteur d'abus
 
-            if (license.Seats != null) _db.LicenseSeats.RemoveRange(license.Seats);
+            if (license.Seats != null) 
+            {
+                foreach (var seat in license.Seats.Where(s => s.IsActive))
+                {
+                    seat.IsActive = false;
+                    seat.UnlinkedAt = DateTime.UtcNow;
+                    
+                    _db.LicenseHistories.Add(new LicenseHistory {
+                        LicenseId = license.Id,
+                        Action = HistoryActions.UnlinkedApi,
+                        Details = string.Format(_localizer["Licenses_Action_UnlinkedApi"].Value, seat.HardwareId),
+                        PerformedBy = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown"
+                    });
+                }
+            }
 
             await _db.SaveChangesAsync();
 

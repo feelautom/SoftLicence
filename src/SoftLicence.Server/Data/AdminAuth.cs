@@ -33,6 +33,11 @@ public class AdminUser
     public bool MustChangePassword { get; set; } = true;
     
     public bool IsEnabled { get; set; } = true;
+
+    /// <summary>
+    /// URL personnalisée pour accéder à la page de login (ex: "coco" pour /coco)
+    /// </summary>
+    public string? AdminPath { get; set; }
     
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     

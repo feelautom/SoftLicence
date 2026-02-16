@@ -12,6 +12,11 @@ public class AuthService
         _authStateProvider = authStateProvider;
     }
 
+    public async Task<AuthenticationState> GetAuthenticationStateAsync()
+    {
+        return await _authStateProvider.GetAuthenticationStateAsync();
+    }
+
     public async Task<bool> HasPermissionAsync(string permission)
     {
         var authState = await _authStateProvider.GetAuthenticationStateAsync();
@@ -19,8 +24,8 @@ public class AuthService
 
         if (user.Identity?.IsAuthenticated != true) return false;
 
-        // Si c'est le Root (Role SuperAdmin), il a TOUT
-        if (user.IsInRole("SuperAdmin")) return true;
+        // Si c'est le Root (Role CHANGE_ME_RANDOM_SECRET), il a TOUT
+        if (user.IsInRole("CHANGE_ME_RANDOM_SECRET")) return true;
 
         var permissionsClaim = user.FindFirst("Permissions")?.Value;
         if (string.IsNullOrEmpty(permissionsClaim)) return false;
@@ -33,7 +38,7 @@ public class AuthService
     {
         var authState = await _authStateProvider.GetAuthenticationStateAsync();
         var user = authState.User;
-        return user.Identity?.IsAuthenticated == true && user.IsInRole("SuperAdmin");
+        return user.Identity?.IsAuthenticated == true && user.IsInRole("CHANGE_ME_RANDOM_SECRET");
     }
 
     public async Task<bool> MustChangePasswordAsync()

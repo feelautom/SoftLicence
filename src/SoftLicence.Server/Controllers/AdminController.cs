@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Localization;
 using SoftLicence.SDK;
 using SoftLicence.Server.Data;
 using System.Security.Cryptography;
@@ -182,7 +183,7 @@ namespace SoftLicence.Server.Controllers
                 if (product == null) return NotFound(_localizer["Api_ProductNotFound"].Value);
         
                 var type = await _db.LicenseTypes.FirstOrDefaultAsync(t => t.Slug == req.TypeSlug);
-                if (type == null) return BadRequest($"Type de licence '{req.TypeSlug}' inconnu.");
+                if (type == null) return BadRequest(string.Format(_localizer["Api_LicenseTypeUnknown"].Value, req.TypeSlug));
         
                 var licenseKey = Guid.NewGuid().ToString("D").ToUpper();
                 var license = new License
@@ -197,6 +198,14 @@ namespace SoftLicence.Server.Controllers
                 };
         
                 _db.Licenses.Add(license);
+
+                license.History.Add(new LicenseHistory
+                {
+                    Action = HistoryActions.Created,
+                    Details = string.Format(_localizer["Licenses_Action_Created"].Value, type.Name, 1),
+                    PerformedBy = "Admin (API)"
+                });
+
                 await _db.SaveChangesAsync();
                 return Ok(new { LicenseKey = licenseKey });
             }

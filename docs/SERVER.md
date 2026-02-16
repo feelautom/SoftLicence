@@ -4,11 +4,11 @@ Le serveur SoftLicence fait office d'**Autorité de Certification** et de **Cons
 
 ## 🚀 Déploiement (Production)
 
-Le serveur est entièrement conteneurisé. Pour le déployer sur un VPS :
+Le serveur est entièrement conteneurisé. Pour le déployer sur un VPS (via Docker ou Docker direct) :
 
 1. Poussez votre code sur votre dépôt Git.
-2. Utilisez le fichier `docker/docker-compose.yml`.
-3. Configurez les **Variables d'Environnement** :
+2. Utilisez le fichier `Docker/docker-compose.yml`.
+3. Configurez les **Variables d'Environnement** dans Docker :
 
 | Variable | Description | Exemple |
 | :--- | :--- | :--- |
@@ -19,10 +19,10 @@ Le serveur est entièrement conteneurisé. Pour le déployer sur un VPS :
 | `AdminSettings__AllowedIps` | WhiteList IPs (Séparées par virgules) | `91.x.x.x, 127.0.0.1` |
 | `SmtpSettings__Host` | Serveur SMTP | `smtp.gmail.com` |
 | `SmtpSettings__Port` | Port SMTP | `587` |
-| `SmtpSettings__Username` | User SMTP | `contact@example.com` |
+| `SmtpSettings__Username` | User SMTP | `contact@EXAMPLE.COM` |
 | `SmtpSettings__Password` | Pass SMTP | `app_password` |
-| `SmtpSettings__FromEmail` | Email expéditeur | `noreply@example.com` |
-| `SmtpSettings__FromName` | Nom expéditeur | `YourCompany` |
+| `SmtpSettings__FromEmail` | Email expéditeur | `noreply@EXAMPLE.COM` |
+| `SmtpSettings__FromName` | Nom expéditeur | `YOUR_COMPANY_NAME` |
 | `FORCE_DB_RESET` | Supprimer et recréer la BDD | `true` ou `false` |
 
 ## 📡 API Publique (Activation)
@@ -35,7 +35,7 @@ Enregistre un produit sur une machine.
 {
   "LicenseKey": "XXXX-XXXX-XXXX-XXXX",
   "HardwareId": "FINGERPRINT_DU_PC",
-  "AppName": "YourApp",
+  "AppName": "YOUR_APP_NAME",
   "AppVersion": "1.2.3"
 }
 ```
@@ -87,36 +87,46 @@ Pour les types de licences marqués comme **Récurrent (Abonnement)**, vous pouv
 
 ## 🛡️ Forteresse : Sécurité Active & Anti-Bot
 
-SoftLicence intègre un système de défense proactive pour protéger votre serveur des scans et attaques par force brute.
+SoftLicence intègre un système de défense proactive adaptatif pour protéger votre serveur des scans et attaques par force brute.
 
-### 1. Threat Scoring & Auto-Ban
-Le serveur attribue un "Score de Menace" à chaque IP suspecte :
-- **Erreur 404 (Scan)** : +10 points.
-- **Échec Auth (Login)** : +50 points.
-- **Bannissement** : Si une IP atteint **100 points**, elle est bannie pour 24h.
+### 1. Système de Scoring Adaptatif
+Le serveur attribue un "Score de Menace" à chaque IP suspecte selon la gravité de l'action :
+- **Erreur 404 standard** : +2 points.
+- **Scan intentionnel** (Patterns suspects : .env, wp-admin...) : +20 points.
+- **Échec Auth** (Tentative de login admin) : +50 points.
 
-### 2. Alertes Temps-Réel (ntfy)
-Le serveur peut envoyer des notifications immédiates lors d'événements critiques (Bannissement, tentative de fraude).
+### 2. Quarantaine & Throttling (Ralentissement)
+Au lieu de bannir immédiatement, le serveur applique une sanction progressive :
+- **Score 0 à 99** : Vitesse de réponse normale.
+- **Score 100 à 199 (Quarantaine)** : Le serveur impose un délai artificiel de **5 à 15 secondes** avant chaque réponse. Durant cette phase, la pénalité pour un 404 remonte à **10 points**.
+- **Score 200+** : Bannissement strict (403 Forbidden).
 
-### 3. Intelligence Geo-IP & ISP
-Chaque requête dans le journal d'audit est enrichie avec le pays et le fournisseur d'accès (ISP).
+### 3. Surtaxe de Récidive (Punition Géométrique)
+Si une IP a déjà été bannie par le passé, le système devient "allergique" à sa présence :
+- **Algorithme** : `Points = ScoreDeBase * (NombreDeBannissements * 2)`.
+- Plus un attaquant revient, plus vite il est banni (ses points sont multipliés par 2, 4, 6...).
 
-### 4. Nettoyage Automatique
-Un service de fond purge périodiquement les logs obsolètes :
-*   Audit : 30 jours.
-*   Télémétrie : 90 jours.
-*   Suivi d'une optimisation SQLite (`VACUUM`).
+### 4. Tolérance Zéro
+Pour les multirécidivistes lourds (**5 bannissements historiques ou plus**), le système passe en mode "Basta" :
+- Le moindre faux pas (404, scan) entraîne un bannissement **immédiat** (200 points appliqués d'un coup).
+
+### 5. Détection de Fraude (Zombies)
+Le système surveille le partage de licences :
+- Si un même `HardwareID` est utilisé par plus de **5 adresses IP différentes** en 24h, la licence associée est automatiquement révoquée pour "Fraude suspecte".
+
+### 6. Immunité Admin (Whitelist)
+Les adresses IP renseignées dans `AdminSettings:AllowedIps` ou les sessions authentifiées sont totalement immunisées contre le scoring de menace et la détection zombie.
 
 ## 📊 Surveillance & Audit
 
 ### Journal d'Audit Total
-Grâce à un Middleware dédié, le serveur enregistre **chaque requête HTTP** reçue avec l'IP réelle, la performance et la version de l'application cliente.
+Grâce à un Middleware dédié, le serveur enregistre **chaque requête HTTP** reçue avec l'IP réelle, la performance, et les données reçues/envoyées (corps de requête et réponse).
 
 ### Dashboard Analytics
-Le tableau de bord fournit une vue consolidée de l'état du parc et de l'activité.
+Le tableau de bord fournit une vue consolidée de l'état du parc, de l'activité API et du taux d'erreur global.
 
 ## 🗄️ Base de Données & Migrations
 
-Le serveur utilise **SQLite**.
+Le serveur utilise **PostgreSQL** en production et **InMemory** pour les tests.
 - **Migrations EF Core** : Le schéma évolue sans perte de données.
-- **Auto-Update** : Le serveur applique les migrations automatiquement au démarrage.
+- **Auto-Update** : Le serveur tente d'appliquer les migrations automatiquement au démarrage (avec logique de retry).

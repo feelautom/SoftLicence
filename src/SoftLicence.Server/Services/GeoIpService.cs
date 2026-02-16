@@ -36,7 +36,7 @@ public class GeoIpService : IDisposable
         catch (Exception ex) { _logger.LogError(ex, "Failed to load GeoIP Databases."); }
     }
 
-    public async Task<GeoInfo> GetGeoInfoAsync(string ip)
+    public virtual async Task<GeoInfo> GetGeoInfoAsync(string ip)
     {
         if (string.IsNullOrEmpty(ip) || ip == "127.0.0.1" || ip == "::1" || ip == "Unknown")
             return new GeoInfo();

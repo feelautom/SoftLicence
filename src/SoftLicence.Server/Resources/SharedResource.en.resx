@@ -51,6 +51,8 @@
   <data name="Common_Date" xml:space="preserve"><value>Date</value></data>
   <data name="Common_DateLocal" xml:space="preserve"><value>Date (Local)</value></data>
   <data name="Common_Active" xml:space="preserve"><value>Active</value></data>
+  <data name="Common_Valid" xml:space="preserve"><value>Valid</value></data>
+  <data name="Common_Expired" xml:space="preserve"><value>Expired</value></data>
   <data name="Common_Disabled" xml:space="preserve"><value>Disabled</value></data>
   <data name="Common_Test" xml:space="preserve"><value>Test</value></data>
   <data name="Common_Details" xml:space="preserve"><value>Details</value></data>
@@ -113,6 +115,25 @@
   <data name="Licenses_MsgSeatUnlinked" xml:space="preserve"><value>Seat unlinked.</value></data>
   <data name="Licenses_MsgAllSeatsUnlinked" xml:space="preserve"><value>All seats have been unlinked.</value></data>
   <data name="Licenses_MsgDeleted" xml:space="preserve"><value>License permanently deleted.</value></data>
+  <data name="Licenses_HistoryTitle" xml:space="preserve"><value>Unlinked devices history</value></data>
+  <data name="Licenses_LifeCycleTitle" xml:space="preserve"><value>Life Cycle (Health record)</value></data>
+  <data name="Licenses_ImmutableHistory" xml:space="preserve"><value>Immutable license history</value></data>
+  <data name="Licenses_History_Empty" xml:space="preserve"><value>No history available for this legacy license.</value></data>
+  <data name="Licenses_FirstActivation" xml:space="preserve"><value>First activation</value></data>
+  <data name="Licenses_UnlinkDate" xml:space="preserve"><value>Unlink date</value></data>
+  <data name="Licenses_Action_Created" xml:space="preserve"><value>Type: {0} | Max Seats: {1}</value></data>
+  <data name="Licenses_Action_Activated" xml:space="preserve"><value>Hardware ID: {0} | Version: {1}</value></data>
+  <data name="Licenses_Action_Revoked" xml:space="preserve"><value>Reason: {0}</value></data>
+  <data name="Licenses_Action_UnlinkedManual" xml:space="preserve"><value>Hardware ID: {0} unlinked manually by Admin</value></data>
+  <data name="Licenses_Action_UnlinkedApi" xml:space="preserve"><value>Hardware ID: {0} unlinked via API Reset Code</value></data>
+  <data name="Licenses_Action_UnlinkedAdminTool" xml:space="preserve"><value>Hardware ID: {0} unlinked via Admin SOS Tool</value></data>
+  <data name="Licenses_Action_GlobalReset" xml:space="preserve"><value>{0} seat(s) unlinked manually by Admin</value></data>
+  <data name="Licenses_PerformedBy_Admin" xml:space="preserve"><value>Admin</value></data>
+  <data name="Licenses_PerformedBy_System" xml:space="preserve"><value>System</value></data>
+  <data name="Licenses_GlobalResetConfirmTitle" xml:space="preserve"><value>Global Reset Confirmation</value></data>
+  <data name="Licenses_GlobalResetConfirmMsg" xml:space="preserve"><value>You are about to unlink all devices associated with {0}'s license.</value></data>
+  <data name="Licenses_GlobalResetNote" xml:space="preserve"><value>Hardware ID history will be preserved, but current access will be reset.</value></data>
+  <data name="Licenses_GlobalResetBtn" xml:space="preserve"><value>Confirm Reset</value></data>
   <data name="Licenses_MsgMissingFields" xml:space="preserve"><value>Missing fields.</value></data>
   <data name="Licenses_MsgEmailSent" xml:space="preserve"><value>Email sent!</value></data>
   <data name="Licenses_SeatDetails" xml:space="preserve"><value>Details</value></data>
@@ -276,6 +297,15 @@
   <data name="Maintenance_Events" xml:space="preserve"><value>Events</value></data>
   <data name="Maintenance_Last" xml:space="preserve"><value>Last</value></data>
   <data name="Maintenance_None" xml:space="preserve"><value>(none)</value></data>
+  <data name="Maintenance_ResetDbTitle" xml:space="preserve"><value>Full database reset</value></data>
+  <data name="Maintenance_ResetDbDesc" xml:space="preserve"><value>Deletes ALL business data (products, licenses, telemetry, audit, bans, webhooks). Admin accounts and system settings are preserved. This action is irreversible.</value></data>
+  <data name="Maintenance_ResetDbBtn" xml:space="preserve"><value>Reset database</value></data>
+  <data name="Maintenance_ResetDbConfirmTitle" xml:space="preserve"><value>Full reset confirmation</value></data>
+  <data name="Maintenance_ResetDbConfirmMsg" xml:space="preserve"><value>This operation will permanently delete ALL business data: products, licenses, seats, telemetry, audit, bans and webhooks. Admin accounts will be preserved.</value></data>
+  <data name="Maintenance_ResetDbConfirmPhrase" xml:space="preserve"><value>RESET</value></data>
+  <data name="Maintenance_ResetDbConfirmHint" xml:space="preserve"><value>Type RESET to confirm</value></data>
+  <data name="Maintenance_ResetDbSuccess" xml:space="preserve"><value>Database reset successfully.</value></data>
+  <data name="Maintenance_ResetSelection" xml:space="preserve"><value>Select data to delete:</value></data>
 
   <!-- Backups -->
   <data name="Backups_Title" xml:space="preserve"><value>Drive Backups</value></data>
@@ -320,6 +350,15 @@
   <data name="Resets_Success" xml:space="preserve"><value>Success</value></data>
   <data name="Resets_Failure" xml:space="preserve"><value>Failure</value></data>
   <data name="Resets_ClientIp" xml:space="preserve"><value>Client IP</value></data>
+  <data name="Resets_ManualTitle" xml:space="preserve"><value>Manual Reset (Admin Action)</value></data>
+  <data name="Resets_SearchLabel" xml:space="preserve"><value>Search for a license key</value></data>
+  <data name="Resets_SearchBtn" xml:space="preserve"><value>Search</value></data>
+  <data name="Resets_ActiveSeats" xml:space="preserve"><value>{0} active seat(s)</value></data>
+  <data name="Resets_FreeLicense" xml:space="preserve"><value>Free license (already unlinked)</value></data>
+  <data name="Resets_UnlinkBtn" xml:space="preserve"><value>Unlink device</value></data>
+  <data name="Resets_HistoryTitle" xml:space="preserve"><value>Request history (API Logs)</value></data>
+  <data name="Resets_MsgSuccess" xml:space="preserve"><value>The license has been successfully unlinked.</value></data>
+  <data name="Resets_MsgNotFound" xml:space="preserve"><value>License not found.</value></data>
 
   <!-- Users -->
   <data name="Users_Title" xml:space="preserve"><value>Users &amp; Roles</value></data>
@@ -352,6 +391,9 @@
   <data name="Users_RoleUpdated" xml:space="preserve"><value>Role updated.</value></data>
   <data name="Users_RoleInUse" xml:space="preserve"><value>Cannot delete a role used by users.</value></data>
   <data name="Users_Deletion" xml:space="preserve"><value>Deletion</value></data>
+  <data name="Users_AdminPath" xml:space="preserve"><value>Access URL</value></data>
+  <data name="Users_AdminPathPlaceholder" xml:space="preserve"><value>e.g.: username</value></data>
+  <data name="Users_AdminPathDescription" xml:space="preserve"><value>If filled, the user will be able to log in via this custom URL.</value></data>
 
   <!-- Login -->
   <data name="Login_Title" xml:space="preserve"><value>Login - SoftLicence</value></data>
@@ -403,6 +445,7 @@
   <data name="Api_LicenseNotFound" xml:space="preserve"><value>License not found.</value></data>
   <data name="Api_LicenseTypeUnknown" xml:space="preserve"><value>Unknown license type.</value></data>
   <data name="Api_RenewalNotAllowed" xml:space="preserve"><value>This license type does not allow automatic renewal (FIXED Mode).</value></data>
+  <data name="Api_EmailError" xml:space="preserve"><value>Error sending email.</value></data>
 
   <!-- UI Extras -->
   <data name="UI_ConfirmRevokeTitle" xml:space="preserve"><value>Do you want to revoke the license for {0}?</value></data>

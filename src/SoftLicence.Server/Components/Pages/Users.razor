@@ -6,6 +6,7 @@
 @inject SoftLicence.Server.Services.EmailService Mailer
 @inject SoftLicence.Server.Services.TimeZoneService TZ
 @inject IStringLocalizer<SharedResource> L
+@inject IConfiguration Config
 @using Microsoft.EntityFrameworkCore
 @using SoftLicence.Server.Data
 @using SoftLicence.Server.Components.Shared
@@ -95,6 +96,12 @@
                             </select>
                         </div>
                         <div class="col-md-2">
+                            <div class="input-group">
+                                <span class="input-group-text bg-black border-secondary text-muted">/</span>
+                                <input class="form-control" placeholder="@L["Users_AdminPathPlaceholder"]" @bind="newAdminPath" />
+                            </div>
+                        </div>
+                        <div class="col-md-2">
                             <button class="btn btn-success w-100" @onclick="CreateUser" disabled="@isBusy">
                                 @if (isBusy) { <span class="spinner-border spinner-border-sm"></span> }
                                 else { <span>@L["Common_Create"]</span> }
@@ -118,6 +125,7 @@
                                 <tr>
                                     <th>@L["Users_User"]</th>
                                     <th>@L["Users_Role"]</th>
+                                    <th>@L["Users_AdminPath"]</th>
                                     <th>@L["Common_Status"]</th>
                                     <th>@L["Users_CreatedOn"]</th>
                                     <th class="text-end">@L["Common_Actions"]</th>
@@ -136,7 +144,8 @@
                                             </div>
                                         </div>
                                     </td>
-                                    <td><span class="badge bg-danger">@L["Users_SuperAdmin"]</span></td>
+                                    <td><span class="badge bg-danger">@L["Users_CHANGE_ME_RANDOM_SECRET"]</span></td>
+                                    <td><code class="small text-muted">/@(Config["AdminSettings:LoginPath"] ?? "login")</code></td>
                                     <td><span class="text-success small">● @L["Common_Active"]</span></td>
                                     <td>-</td>
                                     <td class="text-end">
@@ -154,19 +163,31 @@
                                             <span class="badge bg-outline-info border border-info text-info">@user.Role?.Name</span>
                                         </td>
                                         <td>
+                                            @if (!string.IsNullOrEmpty(user.AdminPath))
+                                            {
+                                                <code class="small text-info">/@user.AdminPath</code>
+                                            }
+                                            else { <span class="text-muted small">-</span> }
+                                        </td>
+                                        <td>
                                             @if (user.IsEnabled) { 
                                                 <span class="text-success small">● @L["Common_Active"]</span>
                                                 @if (user.MustChangePassword) {
                                                     <div class="text-warning" style="font-size: 0.65rem;">@L["Users_AwaitingPasswordChange"]</div>
                                                 }
                                             }
-                                            else { <span class="text-muted small">○ @L["Common_Disabled"]</span> }
+                                            else { <span class="text-danger small">○ @L["Common_Disabled"]</span> }
                                         </td>
                                         <td class="small text-muted">@TZ.ToLocal(user.CreatedAt).ToString("dd/MM/yyyy")</td>
                                         <td class="text-end">
-                                            <button class="btn btn-sm btn-outline-danger" @onclick="() => RequestDeleteUser(user)">
-                                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
-                                            </button>
+                                            <div class="d-flex gap-2 justify-content-end">
+                                                <button class="btn btn-sm btn-outline-info" @onclick="() => StartUserEdit(user)">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-danger" @onclick="() => RequestDeleteUser(user)">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+                                                </button>
+                                            </div>
                                         </td>
                                     </tr>
                                 }
@@ -219,6 +240,7 @@
 </div>
 
 <ConfirmModal @ref="modalDelete" Title="@L["Users_Deletion"]" Message="@deleteMsg" OnClose="OnConfirmDelete" />
+<UserEditModal User="userToEdit" Roles="AdminRolesList" OnClose="() => userToEdit = null" OnSave="SaveUserEdit" />
 
 @code {
     private List<AdminUser> AdminUsersList = new();
@@ -229,11 +251,13 @@
     private bool showCreate = false;
     private bool showRoleCreate = false;
     private AdminRole? editingRole;
+    private AdminUser? userToEdit;
     
     // Form Utilisateur
     private string newUsername = "";
     private string newEmail = "";
     private string newRoleId = "";
+    private string newAdminPath = "";
     
     // Form Rôle
     private string newRoleName = "";
@@ -303,6 +327,21 @@
         await LoadData();
     }
 
+    private void StartUserEdit(AdminUser u)
+    {
+        userToEdit = u;
+    }
+
+    private async Task SaveUserEdit()
+    {
+        if (userToEdit == null) return;
+        
+        await Db.SaveChangesAsync();
+        Toast.ShowSuccess("Utilisateur mis à jour.");
+        userToEdit = null;
+        await LoadData();
+    }
+
     private async Task CreateRole()
     {
         if (string.IsNullOrWhiteSpace(newRoleName)) { Toast.ShowError(L["Users_RoleNameRequired"]); return; }
@@ -326,6 +365,27 @@
             Toast.ShowError(L["Users_AllFieldsRequired"]); return;
         }
 
+        // Validation du slug AdminPath
+        string? adminPath = null;
+        if (!string.IsNullOrWhiteSpace(newAdminPath))
+        {
+            adminPath = newAdminPath.Trim().Trim('/').ToLower();
+            
+            // 1. Caractères autorisés (a-z, 0-9, -)
+            if (!System.Text.RegularExpressions.Regex.IsMatch(adminPath, "^[a-z0-9-]+$"))
+            {
+                Toast.ShowError("L'URL ne doit contenir que des lettres, chiffres et tirets.");
+                return;
+            }
+
+            // 2. Interdiction du mot "admin"
+            if (adminPath.Contains("admin"))
+            {
+                Toast.ShowError("Sécurité : Le mot 'admin' est interdit dans l'URL personnalisée.");
+                return;
+            }
+        }
+
         if (await Db.AdminUsers.AnyAsync(u => u.Username == newUsername))
         {
             Toast.ShowError(L["Users_UsernameInUse"]); return;
@@ -343,7 +403,9 @@
                 Email = newEmail,
                 PasswordHash = Security.HashPassword(tempPass),
                 RoleId = Guid.Parse(newRoleId),
-                MustChangePassword = true
+                MustChangePassword = true,
+                IsEnabled = true,
+                AdminPath = adminPath
             };
 
             Db.AdminUsers.Add(user);
@@ -353,7 +415,7 @@
             await Mailer.SendAdminWelcomeEmailAsync(newEmail, newUsername, tempPass);
 
             Toast.ShowSuccess($"Utilisateur '{newUsername}' créé. Mot de passe envoyé par e-mail.");
-            newUsername = ""; newEmail = ""; newRoleId = ""; showCreate = false;
+            newUsername = ""; newEmail = ""; newRoleId = ""; newAdminPath = ""; showCreate = false;
             await LoadData();
         }
         catch (Exception ex)

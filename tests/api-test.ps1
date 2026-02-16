@@ -1,6 +1,6 @@
 # Config
 $BaseUrl = "http://localhost:5200"
-$AdminSecret = "CHANGE_ME_RANDOM_SECRET" # Must match AdminSettings:ApiSecret
+$AdminSecret = "CHANGE_ME_RANDOM_SECRET" # Si inchangé dans le code, sinon à adapter
 $Headers = @{ "X-Admin-Secret" = $AdminSecret; "Content-Type" = "application/json" }
 
 Write-Host "=== DÉBUT DES TESTS SOFTLICENCE API ===" -ForegroundColor Cyan

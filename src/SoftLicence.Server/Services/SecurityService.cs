@@ -60,6 +60,13 @@ public class SecurityService
         return false;
     }
 
+    public async Task<int> GetBanCountAsync(string ip)
+    {
+        using var db = await _dbFactory.CreateDbContextAsync();
+        var ban = await db.BannedIps.AsNoTracking().FirstOrDefaultAsync(b => b.IpAddress == ip);
+        return ban?.BanCount ?? 0;
+    }
+
     public async Task ReportThreatAsync(string ip, int points, string reason)
     {
         if (ip == "127.0.0.1" || ip == "::1" || ip == "Unknown") return;
@@ -78,7 +85,7 @@ public class SecurityService
                 return (old.Score + points, now);
             });
 
-        if (entry.Score >= 100)
+        if (entry.Score >= 200)
         {
             await BanIpAsync(ip, reason + $" (Score: {entry.Score})");
             _threatScores.TryRemove(ip, out _);

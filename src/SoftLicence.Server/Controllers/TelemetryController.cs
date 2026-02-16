@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using SoftLicence.Server.Models;
 using SoftLicence.Server.Services;
 using SoftLicence.Server.Data;
+using SoftLicence.Server;
 
 namespace SoftLicence.Server.Controllers;
 
@@ -13,18 +14,47 @@ public class TelemetryController : ControllerBase
 {
     private readonly TelemetryService _telemetryService;
     private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
+    private readonly ILogger<TelemetryController> _logger;
 
-    public TelemetryController(TelemetryService telemetryService, IDbContextFactory<LicenseDbContext> dbFactory)
+    public TelemetryController(TelemetryService telemetryService, IDbContextFactory<LicenseDbContext> dbFactory, ILogger<TelemetryController> logger)
     {
         _telemetryService = telemetryService;
         _dbFactory = dbFactory;
+        _logger = logger;
+    }
+
+    private void TagLog(TelemetryBaseRequest req)
+    {
+        HttpContext.Items[LogKeys.AppName] = req.AppName;
+        HttpContext.Items[LogKeys.HardwareId] = req.HardwareId;
+        HttpContext.Items[LogKeys.Endpoint] = "TELEMETRY_" + HttpContext.Request.Path.Value?.Split('/').Last().ToUpper();
+        HttpContext.Items[LogKeys.Version] = req.Version ?? "Unknown";
     }
 
     private async Task<bool> IsValidClientAsync(TelemetryBaseRequest req)
     {
         if (string.IsNullOrWhiteSpace(req.AppName) || string.IsNullOrWhiteSpace(req.HardwareId)) return false;
+        
+        TagLog(req);
+        
         using var db = await _dbFactory.CreateDbContextAsync();
-        return await db.Products.AnyAsync(p => p.Name.ToLower() == req.AppName.ToLower());
+        var product = await db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
+        
+        if (product != null)
+        {
+            // Utiliser le nom canonique pour le log
+            HttpContext.Items[LogKeys.AppName] = product.Name;
+            return true;
+        }
+        
+        return false;
+    }
+
+    private string GetClientIp()
+    {
+        var forwarded = Request.Headers["X-Forwarded-For"].FirstOrDefault();
+        if (!string.IsNullOrEmpty(forwarded)) return forwarded.Split(',')[0].Trim();
+        return HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown";
     }
 
     [HttpPost("event")]
@@ -33,11 +63,12 @@ public class TelemetryController : ControllerBase
         if (!await IsValidClientAsync(req)) return Unauthorized();
         try
         {
-            await _telemetryService.SaveEventAsync(req);
+            await _telemetryService.SaveEventAsync(req, GetClientIp());
             return Ok();
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            _logger.LogWarning(ex, "Telemetry ingestion failed");
             return Accepted();
         }
     }
@@ -48,11 +79,12 @@ public class TelemetryController : ControllerBase
         if (!await IsValidClientAsync(req)) return Unauthorized();
         try
         {
-            await _telemetryService.SaveDiagnosticAsync(req);
+            await _telemetryService.SaveDiagnosticAsync(req, GetClientIp());
             return Ok();
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            _logger.LogWarning(ex, "Telemetry ingestion failed");
             return Accepted();
         }
     }
@@ -63,11 +95,12 @@ public class TelemetryController : ControllerBase
         if (!await IsValidClientAsync(req)) return Unauthorized();
         try
         {
-            await _telemetryService.SaveErrorAsync(req);
+            await _telemetryService.SaveErrorAsync(req, GetClientIp());
             return Ok();
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            _logger.LogWarning(ex, "Telemetry ingestion failed");
             return Accepted();
         }
     }
@@ -83,6 +116,9 @@ public class TelemetryController : ControllerBase
         {
             return Unauthorized("Missing X-Product-Key header.");
         }
+
+        page = Math.Max(1, page);
+        pageSize = Math.Clamp(pageSize, 1, 100);
 
         var results = await _telemetryService.GetTelemetryForProductAsync(productKey, page, pageSize, type);
         

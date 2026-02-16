@@ -1,6 +1,57 @@
 # Changelog
 
+## SDK v1.1.0 — 2026-02-16
+- feat(sdk): add typed `ActivationResult` and `LicenseStatusResult` — no more raw strings or thrown exceptions
+- feat(sdk): add `RequestTrialAsync` method for one-call trial activation
+- feat(sdk): add `ValidateLocal` method with stored public key — no manual key passing needed
+- feat(sdk): enrich `SoftLicenceClient` constructor with optional `publicKeyXml` parameter
+- refactor(ui): `LicenseActivationViewModel` now delegates to `SoftLicenceClient` instead of raw `HttpClient`
+- chore(sdk): remove placeholder `Class1.cs`
+- test(sdk): add 13 unit tests for `SoftLicenceClient` (activate, trial, status, local validation)
+
+## 2026-02-16
+- feat(security): implement geometric punishment and zero tolerance for repeat offenders
+- test(sdk): add unit tests for CheckOnlineStatusAsync (VALID, NOT_FOUND, SERVER_ERROR, NETWORK_ERROR, REVOKED)
+- ci: add GitHub Actions workflow with test gate before NuGet publish
+- feat(sdk): enforce online check at startup and physical license deletion on invalidation
+
+## 2026-02-15
+- feat(sdk): handle NOT_FOUND license status as a hard stop
+- feat(audit): categorize root access as PORTAL_ENTRY and hide it with scans
+- feat(security): increase 404 penalty to 10pts during quarantine
+- feat(security): implement quarantine throttling, lower 404 severity, and allow anonymous root access
+- fix(licenses): resolve concurrency issues and secure history formatting during revocation
+- ui(licenses): add HH:mm to seat activation and last seen timestamps
+- feat(users): enhanced user management with custom admin paths, account status, and reinforced security
+- feat(telemetry): capture and display client IP address and ISP info
+- feat(audit): show full IP addresses in audit logs
+- feat(ui): display full hardware ID in telemetry tables and add column to product view
+- feat(ui): switch to flag-icons CSS library to resolve 404 flag errors
+- fix(ui): eliminate circuit crashes during license revocation and add selective DB reset
+- debug(blazor): enable detailed errors and secure UI event handlers to diagnose crash
+- feat(maintenance): add selective data reset with checkboxes in Reset Database modal
+- feat(audit): capture and display response body for all logged requests
+- fix(security): eliminate ObjectDisposedException in background audit tasks
+
 ## 2026-02-14
+- fix(security): resolve duplicate variable declarations in AuditMiddleware
+- test(server): improve I18N resilience for MultiSeat and VersionControl tests
+- feat(security): prioritize ban checks and add proactive scan detection in AuditMiddleware
+- refactor(server): harmonize license history tracking and fix transaction handling for tests
+- chore: enforce strict compilation rules (Warnings as Errors) and fix test dependencies
+- fix(i18n): localize license life cycle history details and UI labels
+- fix: copy LICENSE file to docker build context for SDK packaging
+- feat: implement immutable license lifecycle history (Carnet de santé)
+- fix(i18n): finalize localization for resets history and manual reset tool
+- feat: implement hardware ID history and global reset confirmation
+- fix: update Dockerfile to use SoftLicence.SDK
+- feat: transform resets page into a functional manual unlinking tool
+- chore: finalize changelog and version for audit UI refactor
+- ui: refactor audit page with tabs for logs and bans
+- chore: commit remaining database schema and migration files
+- ui: enhance audit logs with method-specific badge colors
+- fix: resolve translation keys and normalize product name casing in logs
+- fix(i18n): finalize localization of API responses and Admin UI
 - fix(i18n): finalize localization by replacing hardcoded strings in Controllers and Views
 - feat(sdk): refactor Core to SDK, standardize HardwareID (16-hex) and add Client API
 - feat(ui): add confirmation modals for license revocation and fix culture redirection

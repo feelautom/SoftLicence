@@ -1,7 +1,38 @@
+using System.Net;
+using System.Text;
 using SoftLicence.SDK;
 using Xunit;
 
 namespace SoftLicence.Tests.Core;
+
+/// <summary>
+/// Mock HttpMessageHandler for testing CheckOnlineStatusAsync without network.
+/// </summary>
+internal class MockHttpMessageHandler : HttpMessageHandler
+{
+    private readonly Func<HttpRequestMessage, HttpResponseMessage> _handler;
+
+    public MockHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> handler)
+    {
+        _handler = handler;
+    }
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        return Task.FromResult(_handler(request));
+    }
+}
+
+/// <summary>
+/// Mock that throws on send, simulating a network error.
+/// </summary>
+internal class ThrowingHttpMessageHandler : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        throw new HttpRequestException("Simulated network failure");
+    }
+}
 
 public class LicenseServiceTests
 {
@@ -107,5 +138,87 @@ public class LicenseServiceTests
         // Assert
         Assert.False(result.IsValid);
         Assert.Equal("Signature invalide. La licence a été altérée.", result.ErrorMessage);
+    }
+
+    // ── CheckOnlineStatusAsync tests ──
+
+    [Fact]
+    public async Task CheckOnline_ShouldReturnValid_When200()
+    {
+        // Arrange
+        var handler = new MockHttpMessageHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"status\":\"VALID\"}", Encoding.UTF8, "application/json")
+            });
+        using var client = new HttpClient(handler);
+
+        // Act
+        var result = await LicenseService.CheckOnlineStatusAsync(client, "http://localhost", "TestApp", "KEY-123", "HW-001");
+
+        // Assert
+        Assert.Equal("VALID", result);
+    }
+
+    [Fact]
+    public async Task CheckOnline_ShouldReturnNotFound_When404()
+    {
+        // Arrange
+        var handler = new MockHttpMessageHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.NotFound));
+        using var client = new HttpClient(handler);
+
+        // Act
+        var result = await LicenseService.CheckOnlineStatusAsync(client, "http://localhost", "TestApp", "KEY-123", "HW-001");
+
+        // Assert
+        Assert.Equal("NOT_FOUND", result);
+    }
+
+    [Fact]
+    public async Task CheckOnline_ShouldReturnServerError_When500()
+    {
+        // Arrange
+        var handler = new MockHttpMessageHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.InternalServerError));
+        using var client = new HttpClient(handler);
+
+        // Act
+        var result = await LicenseService.CheckOnlineStatusAsync(client, "http://localhost", "TestApp", "KEY-123", "HW-001");
+
+        // Assert
+        Assert.Equal("SERVER_ERROR", result);
+    }
+
+    [Fact]
+    public async Task CheckOnline_ShouldReturnNetworkError_OnException()
+    {
+        // Arrange
+        var handler = new ThrowingHttpMessageHandler();
+        using var client = new HttpClient(handler);
+
+        // Act
+        var result = await LicenseService.CheckOnlineStatusAsync(client, "http://localhost", "TestApp", "KEY-123", "HW-001");
+
+        // Assert
+        Assert.Equal("NETWORK_ERROR", result);
+    }
+
+    [Fact]
+    public async Task CheckOnline_ShouldReturnRevoked_When200()
+    {
+        // Arrange
+        var handler = new MockHttpMessageHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"status\":\"REVOKED\"}", Encoding.UTF8, "application/json")
+            });
+        using var client = new HttpClient(handler);
+
+        // Act
+        var result = await LicenseService.CheckOnlineStatusAsync(client, "http://localhost", "TestApp", "KEY-123", "HW-001");
+
+        // Assert
+        Assert.Equal("REVOKED", result);
     }
 }

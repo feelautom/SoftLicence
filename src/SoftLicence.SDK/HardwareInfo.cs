@@ -15,7 +15,7 @@ namespace SoftLicence.SDK
             var diskId = GetDiskId();
             var machineName = Environment.MachineName;
             
-            // Alignement strict sur l'algorithme SipLine (5 composants)
+            // Alignement strict sur l'algorithme YOUR_APP_NAME (5 composants)
             var rawId = string.Concat(cpuId, mbId, biosId, diskId, machineName);
             
             using (var sha256 = SHA256.Create())
@@ -53,22 +53,13 @@ namespace SoftLicence.SDK
                 if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return "NON-WINDOWS";
 
                 using (var searcher = new ManagementObjectSearcher($"SELECT {propertyName} FROM {className}"))
-                using (var collection = searcher.Get())
                 {
-                    foreach (var mObj in collection)
+                    foreach (ManagementObject obj in searcher.Get())
                     {
-                        var obj = mObj as ManagementObject;
-                        if (obj != null)
+                        var value = obj[propertyName]?.ToString();
+                        if (!string.IsNullOrWhiteSpace(value))
                         {
-                            var propValue = obj.Properties[propertyName]?.Value;
-                            if (propValue != null)
-                            {
-                                string? value = propValue.ToString();
-                                if (!string.IsNullOrWhiteSpace(value))
-                                {
-                                    return value.Trim();
-                                }
-                            }
+                            return value!.Trim();
                         }
                     }
                 }

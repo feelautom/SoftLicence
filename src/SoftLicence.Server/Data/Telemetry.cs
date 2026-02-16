@@ -20,6 +20,9 @@ public class TelemetryRecord
     
     [Required]
     public string HardwareId { get; set; } = string.Empty;
+
+    public string? ClientIp { get; set; }
+    public string? Isp { get; set; }
     
     [Required]
     public string AppName { get; set; } = string.Empty;

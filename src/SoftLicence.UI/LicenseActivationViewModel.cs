@@ -4,9 +4,6 @@ using SoftLicence.SDK;
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Net.Http;
-using System.Net.Http.Json;
-using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
 
@@ -17,8 +14,7 @@ namespace SoftLicence.UI
         private readonly string _publicKeyXml;
         private readonly string _appName;
         private readonly string _appDataPath;
-        private readonly string _serverUrl;
-        private readonly HttpClient _httpClient = new();
+        private readonly SoftLicenceClient _client;
 
         [ObservableProperty]
         private string licenseKey = string.Empty;
@@ -44,8 +40,8 @@ namespace SoftLicence.UI
         {
             _publicKeyXml = publicKeyXml;
             _appName = appName;
-            _serverUrl = serverUrl;
             _appDataPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), appName, "license.lic");
+            _client = new SoftLicenceClient(serverUrl, publicKeyXml);
 
             CurrentHardwareId = HardwareInfo.GetHardwareId();
 
@@ -58,6 +54,11 @@ namespace SoftLicence.UI
         public async Task InitializeAsync()
         {
             await LoadLicenseAsync();
+            if (IsLicensed)
+            {
+                // Si on a chargé une licence locale, on vérifie direct si elle est toujours valide en ligne
+                await CheckOnlineStatus();
+            }
         }
 
         private void StartTimer() => _validationTimer?.Start();
@@ -96,43 +97,24 @@ namespace SoftLicence.UI
 
         private async Task ActivateOnline(string key)
         {
-            try
+            var result = await _client.ActivateAsync(key, _appName);
+
+            if (result.Success && !string.IsNullOrEmpty(result.LicenseFile))
             {
-                var payload = new
+                if (ValidateLocal(result.LicenseFile))
                 {
-                    LicenseKey = key,
-                    HardwareId = CurrentHardwareId,
-                    AppName = _appName
-                };
-
-                var response = await _httpClient.PostAsJsonAsync($"{_serverUrl.TrimEnd('/')}/api/activation", payload);
-
-                if (response.IsSuccessStatusCode)
-                {
-                    var result = await response.Content.ReadFromJsonAsync<ActivationResponse>();
-                    if (result != null && !string.IsNullOrEmpty(result.LicenseFile))
-                    {
-                        if (ValidateLocal(result.LicenseFile))
-                        {
-                            StatusMessage = "Activation réussie !";
-                        }
-                    }
-                }
-                else
-                {
-                    var error = await response.Content.ReadAsStringAsync();
-                    StatusMessage = $"Erreur : {error}";
+                    StatusMessage = "Activation réussie !";
                 }
             }
-            catch (Exception ex)
+            else
             {
-                StatusMessage = $"Erreur réseau : {ex.Message}";
+                StatusMessage = $"Erreur : {result.ErrorMessage ?? result.ErrorCode.ToString()}";
             }
         }
 
         private bool ValidateLocal(string licenseContent)
         {
-            var result = LicenseService.ValidateLicense(licenseContent, _publicKeyXml, CurrentHardwareId);
+            var result = _client.ValidateLocal(licenseContent, CurrentHardwareId);
 
             if (result.IsValid && result.License != null)
             {
@@ -156,6 +138,7 @@ namespace SoftLicence.UI
                     IsLicensed = false;
                 });
                 StopTimer();
+                DeleteLocalLicense();
                 return false;
             }
         }
@@ -180,21 +163,31 @@ namespace SoftLicence.UI
         {
             if (string.IsNullOrEmpty(LicenseKey)) return;
 
-            var status = await LicenseService.CheckOnlineStatusAsync(_httpClient, _serverUrl, _appName, LicenseKey, CurrentHardwareId);
+            var result = await _client.CheckStatusAsync(LicenseKey, _appName);
 
             Application.Current.Dispatcher.Invoke(() =>
             {
-                if (status == "VALID")
+                if (result.Success && result.Status == "VALID")
                 {
                     if (!IsLicensed) IsLicensed = true;
                 }
-                else if (status == "REVOKED" || status == "HARDWARE_MISMATCH" || status == "EXPIRED")
+                else if (result.Success && (result.Status == "REVOKED" || result.Status == "HARDWARE_MISMATCH" || result.Status == "EXPIRED" || result.Status == "NOT_FOUND"))
                 {
-                    StatusMessage = $"LICENCE RÉVOQUÉE ({status}). Accès bloqué.";
+                    StatusMessage = result.Status == "NOT_FOUND" ? "LICENCE INTROUVABLE. Accès bloqué." : $"LICENCE RÉVOQUÉE ({result.Status}). Accès bloqué.";
                     IsLicensed = false;
                     StopTimer();
+                    DeleteLocalLicense();
                 }
             });
+        }
+
+        private void DeleteLocalLicense()
+        {
+            try
+            {
+                if (File.Exists(_appDataPath)) File.Delete(_appDataPath);
+            }
+            catch { }
         }
 
         private void SaveLicense(string key)
@@ -217,11 +210,6 @@ namespace SoftLicence.UI
             LicenseInfo = $"Client : {model.CustomerName}\n" +
                           $"Type : {model.TypeSlug}\n" +
                           $"Expire le : {(model.ExpirationDate.HasValue ? model.ExpirationDate.Value.ToString("d") : "Jamais")}";
-        }
-
-        private class ActivationResponse
-        {
-            public string LicenseFile { get; set; } = string.Empty;
         }
     }
 }

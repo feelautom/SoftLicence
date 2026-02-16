@@ -5,17 +5,18 @@ Here is the progress status of the industrial license management solution.
 ## ✅ Phase 1: Security & Stability (Completed)
 - [x] **Admin Auth**: Secure login system for the Dashboard.
 - [x] **API Security**: Dual protection via Secret and IP Whitelist.
-- [x] **Total Audit**: Middleware capturing 100% of traffic with real IP and telemetry.
+- [x] **Fortress v2**: Advanced defense with quarantine, geometric punishment, and zero tolerance for repeat offenders.
+- [x] **Total Audit**: Middleware v1.2 capturing request/response bodies and enhanced IP visibility.
 - [x] **EF Core Migrations**: Professional schema update system.
-- [x] **Auto-Heal**: Automatic database recovery mechanism.
 
 ## ✅ Phase 2: Advanced Features (Completed)
 - [x] **Dynamic License Types**: Create custom types via Slugs (PRO, GOLD, TRIAL).
 - [x] **Analytics Dashboard**: Activity charts, KPIs, and conversion funnel.
-- [x] **Revocation Timer**: Real-time verification on the WPF client side.
+- [x] **SDK Hard Stop**: Immediate online check and local license deletion on revocation/not-found.
 - [x] **Industrial Emailing**: MailKit integration for reliable key delivery.
 
 ## ✅ Phase 3: Infrastructure & Automation (Completed)
+- [x] **Selective Reset**: Advanced maintenance tool to clear specific data categories while preserving RSA keys.
 - [x] **Automatic Cleaning**: Background task to purge old logs.
 - [x] **Version Management**: Restrict a license to a specific major version (e.g., v1.x).
 - [x] **Multi-Seat**: Authorize a license on X machines simultaneously.

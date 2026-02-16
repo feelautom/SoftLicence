@@ -50,6 +50,9 @@ namespace SoftLicence.Samples.SimpleApp
             }
         }
 
+        // Si l'utilisateur ferme la MainWindow manuellement, on quitte l'app
+        private void OnMainWindowClosed(object? sender, EventArgs e) => Shutdown();
+
         private void UpdateAppState()
         {
             if (_licenseVm == null) return;
@@ -66,8 +69,7 @@ namespace SoftLicence.Samples.SimpleApp
                 if (_mainWindow == null)
                 {
                     _mainWindow = new MainWindow();
-                    // Si l'utilisateur ferme la main window manuellement, on ferme tout
-                    _mainWindow.Closed += (s, e) => Shutdown(); 
+                    _mainWindow.Closed += OnMainWindowClosed;
                     _mainWindow.Show();
                 }
                 else
@@ -81,9 +83,10 @@ namespace SoftLicence.Samples.SimpleApp
                 // LICENCE INVALIDE/RÉVOQUÉE : On ferme l'appli et on demande l'activation
                 if (_mainWindow != null)
                 {
-                    // On cache ou ferme la MainWindow. Ici on cache pour ne pas perdre l'état si reconnexion rapide
-                    // Ou on ferme pour sécurité maximale. Choisissons Fermer pour l'exemple "Hard".
-                    _mainWindow.Hide(); 
+                    // Détacher l'event AVANT Close() pour ne pas déclencher Shutdown()
+                    _mainWindow.Closed -= OnMainWindowClosed;
+                    _mainWindow.Close();
+                    _mainWindow = null;
                 }
 
                 if (_activationWindow == null)
