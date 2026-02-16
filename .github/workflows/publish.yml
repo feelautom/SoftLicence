@@ -27,9 +27,12 @@ jobs:
       - name: Run tests
         run: dotnet test tests/SoftLicence.Tests/ --no-restore --verbosity normal
 
-      - name: Build solution
-        run: dotnet build src/SoftLicence.sln -c Release --no-restore
-
-      - name: Push NuGet package
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: dotnet nuget push src/SoftLicence.SDK/bin/Release/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+            - name: Build solution
+              run: dotnet build src/SoftLicence.sln -c Release --no-restore
+      
+            - name: Pack SDK
+              run: dotnet pack src/SoftLicence.SDK/SoftLicence.SDK.csproj -c Release -o out
+      
+            - name: Push NuGet package
+              if: github.event_name == 'push' && github.ref == 'refs/heads/main'      
+              run: dotnet nuget push out/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
