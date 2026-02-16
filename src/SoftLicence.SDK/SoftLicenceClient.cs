@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace SoftLicence.SDK
 {
-    public class SoftLicenceClient
+    public class SoftLicenceClient : ISoftLicenceClient
     {
         private readonly string _serverUrl;
         private readonly string? _publicKeyXml;
@@ -146,15 +146,35 @@ namespace SoftLicence.SDK
             }
         }
 
-        public (bool IsValid, LicenseModel? License, string ErrorMessage) ValidateLocal(string licenseString, string? hardwareId = null)
+        public (bool IsValid, LicenseModel? License, string ErrorMessage) ValidateLocal(string licenseString, string hardwareId)
         {
             if (string.IsNullOrEmpty(_publicKeyXml))
             {
                 throw new InvalidOperationException("Public key was not provided at construction. Pass publicKeyXml to the SoftLicenceClient constructor to use local validation.");
             }
 
-            var hwId = hardwareId ?? HardwareInfo.GetHardwareId();
-            return LicenseService.ValidateLicense(licenseString, _publicKeyXml!, hwId);
+            if (string.IsNullOrEmpty(hardwareId)) 
+            {
+                throw new ArgumentException("Le hardwareId est obligatoire pour ValidateLocal. Utilisez ValidateForCurrentMachine pour une validation automatique.", nameof(hardwareId));
+            }
+
+            return LicenseService.ValidateLicense(licenseString, _publicKeyXml!, hardwareId);
+        }
+
+        public async Task<(bool IsValid, LicenseModel? License, string ErrorMessage)> ValidateLocalAsync(string licenseString, string hardwareId)
+        {
+            return await Task.Run(() => ValidateLocal(licenseString, hardwareId));
+        }
+
+        public (bool IsValid, LicenseModel? License, string ErrorMessage) ValidateForCurrentMachine(string licenseString)
+        {
+            var hwId = HardwareInfo.GetHardwareId();
+            return ValidateLocal(licenseString, hwId);
+        }
+
+        public async Task<(bool IsValid, LicenseModel? License, string ErrorMessage)> ValidateForCurrentMachineAsync(string licenseString)
+        {
+            return await Task.Run(() => ValidateForCurrentMachine(licenseString));
         }
 
         private static string? ExtractLicenseFile(string json)

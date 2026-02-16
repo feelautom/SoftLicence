@@ -11,6 +11,7 @@ namespace SoftLicence.SDK
     public class LicenseStatusResult
     {
         public bool Success { get; }
+        public bool IsSuccess => Success; // Alias pour DX
         public string? Status { get; }
         public StatusErrorCode ErrorCode { get; }
         public string? ErrorMessage { get; }

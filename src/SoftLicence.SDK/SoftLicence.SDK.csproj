@@ -9,17 +9,19 @@
 
     <!-- NuGet Configuration -->
     <PackageId>SoftLicence.SDK</PackageId>
-    <Version>1.1.0</Version>
+    <Version>1.1.1</Version>
     <Authors>FeelAutom</Authors>
     <Company>FeelAutom</Company>
     <Description>SDK officiel pour l'intégration de la protection SoftLicence dans les applications .NET.</Description>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <PackageTags>licensing;drm;protection;sdk</PackageTags>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
+    <PackageReadmeFile>PACKAGE_README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="..\..\LICENSE" Pack="true" PackagePath="" />
+    <None Include="PACKAGE_README.md" Pack="true" PackagePath="" />
   </ItemGroup>
 
   <ItemGroup>
