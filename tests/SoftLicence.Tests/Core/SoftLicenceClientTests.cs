@@ -205,6 +205,40 @@ public class SoftLicenceClientTests
     }
 
     [Fact]
+    public async Task ValidateLocalAsync_ShouldValidateCorrectly()
+    {
+        var keys = LicenseService.GenerateKeys();
+        var model = new LicenseModel
+        {
+            LicenseKey = "ASYNC-TEST",
+            HardwareId = "HW-ASYNC"
+        };
+
+        var licenseString = LicenseService.GenerateLicense(model, keys.PrivateKey);
+        var client = new SoftLicenceClient(ServerUrl, keys.PublicKey);
+        var result = await client.ValidateLocalAsync(licenseString, "HW-ASYNC");
+
+        Assert.True(result.IsValid);
+    }
+
+    [Fact]
+    public void ValidateForCurrentMachine_ShouldUseCurrentHwid()
+    {
+        var keys = LicenseService.GenerateKeys();
+        var model = new LicenseModel
+        {
+            LicenseKey = "CURRENT-TEST",
+            HardwareId = HardwareInfo.GetHardwareId()
+        };
+
+        var licenseString = LicenseService.GenerateLicense(model, keys.PrivateKey);
+        var client = new SoftLicenceClient(ServerUrl, keys.PublicKey);
+        var result = client.ValidateForCurrentMachine(licenseString);
+
+        Assert.True(result.IsValid);
+    }
+
+    [Fact]
     public void ValidateLocal_ShouldThrow_WhenNoPublicKey()
     {
         var client = new SoftLicenceClient(ServerUrl);
