@@ -5,19 +5,20 @@ Voici l'état d'avancement de la solution industrielle de gestion de licences.
 ## ✅ Phase 1 : Sécurité & Stabilité (Terminée)
 - [x] **Auth Admin** : Système de login sécurisé pour le Dashboard.
 - [x] **Sécurité API** : Double protection par Secret et Liste blanche d'IPs (WhiteList).
-- [x] **Audit Total** : Middleware capturant 100% du trafic avec IP réelle et télémétrie.
+- [x] **Forteresse v2** : Défense avancée avec quarantaine, punition géométrique et tolérance zéro pour les récidivistes.
+- [x] **Audit Total** : Middleware v1.2 capturant les corps de requête/réponse et visibilité IP accrue.
 - [x] **Migrations EF Core** : Système de mise à jour de schéma professionnel.
-- [x] **Auto-Heal** : Mécanisme de récupération automatique de la base de données.
 
 ## ✅ Phase 2 : Fonctionnalités Avancées (Terminée)
 - [x] **Types de Licences Dynamiques** : Création de types personnalisés via Slugs (PRO, GOLD, TRIAL).
 - [x] **Analytics Dashboard** : Graphiques d'activité, KPIs et tunnel de conversion.
-- [x] **Timer de Révocation** : Vérification en temps réel côté client WPF.
+- [x] **SDK Hard Stop** : Vérification en ligne immédiate et suppression physique de la licence locale si invalide.
 - [x] **Emailing Industriel** : Intégration de MailKit pour l'envoi fiable des clés.
 
 ## ✅ Phase 3 : Infrastructure & Automatisation (Terminée)
+- [x] **Reset Sélectif** : Outil de maintenance avancé pour purger des catégories de données spécifiques tout en gardant les clés RSA.
 - [x] **Nettoyage automatique** : Tâche de fond pour purger les vieux logs.
-- [x] **Gestion des Versions** : Restreindre une licence à une version majeure spécifique (ex: v1.x).
+- [x] **Gestion des Versions** : Restreindre une licence à une version majeure spécifique (ex : v1.x).
 - [x] **Multi-Postes** : Autoriser une licence sur X machines simultanément.
 
 ## ✅ Phase 4 : Quality Assurance & Tests Industriels (Terminée)

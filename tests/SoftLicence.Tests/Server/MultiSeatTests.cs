@@ -81,7 +81,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         var content = await response.Content.ReadAsStringAsync();
-        Assert.Contains("maximum d'activations", content);
+        Assert.True(content.Contains("maximum d'activations") || content.Contains("maximum activations"));
     }
 
     [Fact]

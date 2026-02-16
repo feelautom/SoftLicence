@@ -20,6 +20,7 @@ namespace SoftLicence.Server.Data
         public DbSet<BannedIp> BannedIps { get; set; }
         public DbSet<Webhook> Webhooks { get; set; }
         public DbSet<LicenseSeat> LicenseSeats { get; set; }
+        public DbSet<LicenseHistory> LicenseHistories { get; set; }
         public DbSet<SystemSetting> SystemSettings { get; set; }
         public DbSet<AdminRole> AdminRoles { get; set; }
         public DbSet<AdminUser> AdminUsers { get; set; }
@@ -43,6 +44,29 @@ namespace SoftLicence.Server.Data
             modelBuilder.Entity<LicenseType>()
                 .HasIndex(t => t.Slug)
                 .IsUnique();
+
+            // Protection : empêcher la suppression d'un type s'il a des licences
+            modelBuilder.Entity<License>()
+                .HasOne(l => l.Type)
+                .WithMany(t => t.Licenses)
+                .HasForeignKey(l => l.LicenseTypeId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            // Empêcher les doublons de seat actif (même licence + même machine)
+            modelBuilder.Entity<LicenseSeat>()
+                .HasIndex(s => new { s.LicenseId, s.HardwareId })
+                .IsUnique()
+                .HasFilter("\"IsActive\" = true");
+
+            // Index de performance sur les colonnes fréquemment requêtées
+            modelBuilder.Entity<License>()
+                .HasIndex(l => new { l.ProductId, l.HardwareId });
+
+            modelBuilder.Entity<AccessLog>()
+                .HasIndex(a => a.ClientIp);
+
+            modelBuilder.Entity<AccessLog>()
+                .HasIndex(a => a.Timestamp);
 
             modelBuilder.Entity<LicenseRenewal>()
                 .HasIndex(r => r.TransactionId)
@@ -68,6 +92,12 @@ namespace SoftLicence.Server.Data
                 .HasOne(e => e.Record)
                 .WithOne(r => r.ErrorData)
                 .HasForeignKey<TelemetryError>(e => e.TelemetryRecordId);
+
+            modelBuilder.Entity<LicenseHistory>()
+                .HasOne(h => h.License)
+                .WithMany(l => l.History)
+                .HasForeignKey(h => h.LicenseId)
+                .OnDelete(DeleteBehavior.Cascade);
         }
     }
 }

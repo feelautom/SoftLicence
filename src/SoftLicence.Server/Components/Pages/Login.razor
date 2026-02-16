@@ -3,10 +3,12 @@
 @layout SoftLicence.Server.Components.Layout.EmptyLayout
 @inject IConfiguration Config
 @inject IStringLocalizer<SharedResource> L
+@inject SoftLicence.Server.Data.LicenseDbContext Db
+@using Microsoft.EntityFrameworkCore
 
 <PageTitle>@L["Login_Title"]</PageTitle>
 
-@if (IsPathValid())
+@if (isPathValid)
 {
     <div style="background-color: #121212; color: #e0e0e0; display: flex; align-items: center; justify-content: center; min-height: 100vh; width: 100%; font-family: 'Segoe UI', sans-serif;">
         <div style="background: #1e1e1e; padding: 40px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); border: 1px solid #333; width: 100%; max-width: 400px; margin: 20px;">
@@ -50,13 +52,24 @@ else
     [SupplyParameterFromQuery] public string? ReturnUrl { get; set; }
     [SupplyParameterFromQuery] public string? Error { get; set; }
 
-    private bool IsPathValid()
+    private bool isPathValid = false;
+
+    protected override async Task OnInitializedAsync()
     {
+        var currentSecret = (SecretPath ?? "").Trim().Trim('/').ToLower();
+        if (string.IsNullOrEmpty(currentSecret)) return;
+
+        // 1. Vérification du secret GLOBAL (env var)
         var configuredSecret = (Config["AdminSettings:LoginPath"] ?? "login")
             .Replace("\"", "").Trim().Trim('/').ToLower();
         
-        var currentSecret = (SecretPath ?? "").Trim().Trim('/').ToLower();
+        if (currentSecret == configuredSecret)
+        {
+            isPathValid = true;
+            return;
+        }
 
-        return currentSecret == configuredSecret;
+        // 2. Vérification des secrets PERSONNALISÉS en base
+        isPathValid = await Db.AdminUsers.AnyAsync(u => u.IsEnabled && u.AdminPath != null && u.AdminPath.ToLower() == currentSecret);
     }
 }

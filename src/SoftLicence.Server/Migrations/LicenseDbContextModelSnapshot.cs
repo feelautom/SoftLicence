@@ -95,6 +95,10 @@ namespace SoftLicence.Server.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("ClientIp");
+
+                    b.HasIndex("Timestamp");
+
                     b.ToTable("AccessLogs");
                 });
 
@@ -122,6 +126,9 @@ namespace SoftLicence.Server.Migrations
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
+
+                    b.Property<string>("AdminPath")
+                        .HasColumnType("text");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -251,9 +258,38 @@ namespace SoftLicence.Server.Migrations
 
                     b.HasIndex("LicenseTypeId");
 
-                    b.HasIndex("ProductId");
+                    b.HasIndex("ProductId", "HardwareId");
 
                     b.ToTable("Licenses");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.LicenseHistory", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Action")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Details")
+                        .HasColumnType("text");
+
+                    b.Property<Guid>("LicenseId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("PerformedBy")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("Timestamp")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("LicenseId");
+
+                    b.ToTable("LicenseHistories");
                 });
 
             modelBuilder.Entity("SoftLicence.Server.Data.LicenseRenewal", b =>
@@ -298,6 +334,9 @@ namespace SoftLicence.Server.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
                     b.Property<DateTime>("LastCheckInAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -307,9 +346,14 @@ namespace SoftLicence.Server.Migrations
                     b.Property<string>("MachineName")
                         .HasColumnType("text");
 
+                    b.Property<DateTime?>("UnlinkedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.HasKey("Id");
 
-                    b.HasIndex("LicenseId");
+                    b.HasIndex("LicenseId", "HardwareId")
+                        .IsUnique()
+                        .HasFilter("\"IsActive\" = true");
 
                     b.ToTable("LicenseSeats");
                 });
@@ -529,12 +573,18 @@ namespace SoftLicence.Server.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<string>("ClientIp")
+                        .HasColumnType("text");
+
                     b.Property<string>("EventName")
                         .IsRequired()
                         .HasColumnType("text");
 
                     b.Property<string>("HardwareId")
                         .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Isp")
                         .HasColumnType("text");
 
                     b.Property<Guid?>("ProductId")
@@ -608,7 +658,7 @@ namespace SoftLicence.Server.Migrations
                     b.HasOne("SoftLicence.Server.Data.LicenseType", "Type")
                         .WithMany("Licenses")
                         .HasForeignKey("LicenseTypeId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
                     b.HasOne("SoftLicence.Server.Data.Product", "Product")
@@ -620,6 +670,17 @@ namespace SoftLicence.Server.Migrations
                     b.Navigation("Product");
 
                     b.Navigation("Type");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.LicenseHistory", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.License", "License")
+                        .WithMany("History")
+                        .HasForeignKey("LicenseId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("License");
                 });
 
             modelBuilder.Entity("SoftLicence.Server.Data.LicenseRenewal", b =>
@@ -716,6 +777,8 @@ namespace SoftLicence.Server.Migrations
 
             modelBuilder.Entity("SoftLicence.Server.Data.License", b =>
                 {
+                    b.Navigation("History");
+
                     b.Navigation("Seats");
                 });
 

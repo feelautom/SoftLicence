@@ -9,21 +9,27 @@ public class TelemetryService
 {
     private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
     private readonly ILogger<TelemetryService> _logger;
+    private readonly GeoIpService _geoIp;
 
-    public TelemetryService(IDbContextFactory<LicenseDbContext> dbFactory, ILogger<TelemetryService> logger)
+    public TelemetryService(IDbContextFactory<LicenseDbContext> dbFactory, ILogger<TelemetryService> logger, GeoIpService geoIp)
     {
         _dbFactory = dbFactory;
         _logger = logger;
+        _geoIp = geoIp;
     }
 
-    public async Task SaveEventAsync(TelemetryEventRequest req)
+    public async Task SaveEventAsync(TelemetryEventRequest req, string? ip = null)
     {
         using var db = await _dbFactory.CreateDbContextAsync();
         var productId = await GetProductIdAsync(db, req.AppName);
+        var geo = ip != null ? await _geoIp.GetGeoInfoAsync(ip) : null;
+
         var record = new TelemetryRecord
         {
             Timestamp = req.Timestamp,
             HardwareId = req.HardwareId,
+            ClientIp = ip,
+            Isp = geo?.Isp,
             AppName = req.AppName,
             Version = req.Version,
             EventName = req.EventName,
@@ -40,14 +46,18 @@ public class TelemetryService
         await db.SaveChangesAsync();
     }
 
-    public async Task SaveDiagnosticAsync(TelemetryDiagnosticRequest req)
+    public async Task SaveDiagnosticAsync(TelemetryDiagnosticRequest req, string? ip = null)
     {
         using var db = await _dbFactory.CreateDbContextAsync();
         var productId = await GetProductIdAsync(db, req.AppName);
+        var geo = ip != null ? await _geoIp.GetGeoInfoAsync(ip) : null;
+
         var record = new TelemetryRecord
         {
             Timestamp = req.Timestamp,
             HardwareId = req.HardwareId,
+            ClientIp = ip,
+            Isp = geo?.Isp,
             AppName = req.AppName,
             Version = req.Version,
             EventName = req.EventName,
@@ -77,14 +87,18 @@ public class TelemetryService
         await db.SaveChangesAsync();
     }
 
-    public async Task SaveErrorAsync(TelemetryErrorRequest req)
+    public async Task SaveErrorAsync(TelemetryErrorRequest req, string? ip = null)
     {
         using var db = await _dbFactory.CreateDbContextAsync();
         var productId = await GetProductIdAsync(db, req.AppName);
+        var geo = ip != null ? await _geoIp.GetGeoInfoAsync(ip) : null;
+
         var record = new TelemetryRecord
         {
             Timestamp = req.Timestamp,
             HardwareId = req.HardwareId,
+            ClientIp = ip,
+            Isp = geo?.Isp,
             AppName = req.AppName,
             Version = req.Version,
             EventName = req.EventName,

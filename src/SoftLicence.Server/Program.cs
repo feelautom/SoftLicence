@@ -78,7 +78,7 @@ builder.Services.AddCascadingAuthenticationState();
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents(options => 
     {
-        options.DetailedErrors = builder.Environment.IsDevelopment();
+        options.DetailedErrors = true;
     });
 
 builder.Services.AddScoped<SoftLicence.Server.Services.ToastService>();
@@ -110,7 +110,7 @@ var app = builder.Build();
 app.UseForwardedHeaders(new ForwardedHeadersOptions
 {
     ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
-    ForwardLimit = 2, // Traefik/Dokploy + éventuel CDN
+    ForwardLimit = 2, // Traefik/Docker + éventuel CDN
     ForwardedForHeaderName = "X-Forwarded-For",
     ForwardedProtoHeaderName = "X-Forwarded-Proto",
     RequireHeaderSymmetry = false,

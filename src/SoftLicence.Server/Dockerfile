@@ -1,7 +1,8 @@
 FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 WORKDIR /src
 COPY ["src/SoftLicence.Server/SoftLicence.Server.csproj", "SoftLicence.Server/"]
-COPY ["src/SoftLicence.Core/SoftLicence.Core.csproj", "SoftLicence.Core/"]
+COPY ["src/SoftLicence.SDK/SoftLicence.SDK.csproj", "SoftLicence.SDK/"]
+COPY ["LICENSE", "/"]
 RUN dotnet restore "SoftLicence.Server/SoftLicence.Server.csproj"
 COPY src/ .
 WORKDIR "/src/SoftLicence.Server"

@@ -1,9 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
-
-  <ItemGroup>
-    <ProjectReference Include="..\SoftLicence.SDK\SoftLicence.SDK.csproj" />
-    <ProjectReference Include="..\SoftLicence.UI\SoftLicence.UI.csproj" />
-  </ItemGroup>
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -11,6 +6,12 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SoftLicence.SDK\SoftLicence.SDK.csproj" />
+    <ProjectReference Include="..\SoftLicence.UI\SoftLicence.UI.csproj" />
+  </ItemGroup>
 
 </Project>

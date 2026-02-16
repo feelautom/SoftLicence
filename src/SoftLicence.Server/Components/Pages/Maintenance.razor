@@ -137,6 +137,16 @@
     </div>
 
     <div class="col-md-4">
+        <div class="card border-danger h-100 shadow-sm">
+            <div class="card-body">
+                <h5 class="text-danger">@L["Maintenance_ResetDbTitle"]</h5>
+                <p class="text-muted small">@L["Maintenance_ResetDbDesc"]</p>
+                <button class="btn btn-outline-danger mt-3 w-100" @onclick="() => showResetDbModal = true">@L["Maintenance_ResetDbBtn"]</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-4">
         <div class="card h-100 shadow-sm">
             <div class="card-body">
                 <h5 class="text-primary">@L["Maintenance_SmtpConfig"]</h5>
@@ -191,6 +201,80 @@
               Message="@L["Maintenance_ClearTelemetryMsg"]" 
               OnClose="OnTelemetryConfirm" />
 
+@if (showResetDbModal)
+{
+    <div class="modal fade show d-block" style="background: rgba(0,0,0,0.7);" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content bg-dark border-danger">
+                <div class="modal-header border-danger">
+                    <h5 class="modal-title text-danger">@L["Maintenance_ResetDbConfirmTitle"]</h5>
+                    <button type="button" class="btn-close btn-close-white" @onclick="() => { showResetDbModal = false; resetDbInput = string.Empty; }"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="text-warning mb-3">@L["Maintenance_ResetDbConfirmMsg"]</p>
+                    
+                    <div class="bg-black p-3 rounded border border-secondary mb-3">
+                        <h6 class="text-muted small text-uppercase fw-bold mb-3">@L["Maintenance_ResetSelection"]</h6>
+                        
+                        <div class="form-check mb-2">
+                            <input class="form-check-input" type="checkbox" id="reset_lic" @bind="resetLicenses" disabled="@resetProducts">
+                            <label class="form-check-label text-white small" for="reset_lic">
+                                @L["Nav_Licenses"] <span class="text-muted">(Keys, Seats, History)</span>
+                            </label>
+                        </div>
+                        
+                        <div class="form-check mb-2">
+                            <input class="form-check-input" type="checkbox" id="reset_audit" @bind="resetAudit">
+                            <label class="form-check-label text-white small" for="reset_audit">
+                                @L["Nav_Audit"] <span class="text-muted">(Access Logs)</span>
+                            </label>
+                        </div>
+
+                        <div class="form-check mb-2">
+                            <input class="form-check-input" type="checkbox" id="reset_tel" @bind="resetTelemetry">
+                            <label class="form-check-label text-white small" for="reset_tel">
+                                @L["Nav_Telemetry"]
+                            </label>
+                        </div>
+
+                        <div class="form-check mb-2">
+                            <input class="form-check-input" type="checkbox" id="reset_bans" @bind="resetBans">
+                            <label class="form-check-label text-white small" for="reset_bans">
+                                @L["Audit_ActiveBans"]
+                            </label>
+                        </div>
+
+                        <div class="form-check mb-2">
+                            <input class="form-check-input" type="checkbox" id="reset_hooks" @bind="resetWebhooks">
+                            <label class="form-check-label text-white small" for="reset_hooks">
+                                @L["Maintenance_Webhooks"]
+                            </label>
+                        </div>
+
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="reset_prod" 
+                                   @bind:get="resetProducts" 
+                                   @bind:set="@(v => { resetProducts = v; if(v) resetLicenses = true; })">
+                            <label class="form-check-label text-danger small fw-bold" for="reset_prod">
+                                @L["Nav_Software"] <span class="text-muted small font-italic">(@L["Products_KeyLossWarning"])</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="mt-3">
+                        <label class="form-label small text-muted">@L["Maintenance_ResetDbConfirmHint"]</label>
+                        <input class="form-control form-control-sm bg-black text-danger font-monospace" @bind="resetDbInput" @bind:event="oninput" />
+                    </div>
+                </div>
+                <div class="modal-footer border-secondary">
+                    <button class="btn btn-secondary" @onclick="() => { showResetDbModal = false; resetDbInput = string.Empty; }">@L["Common_Cancel"]</button>
+                    <button class="btn btn-danger" disabled="@(resetDbInput != L["Maintenance_ResetDbConfirmPhrase"].Value)" @onclick="ExecuteResetDb">@L["Maintenance_ResetDbBtn"]</button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
 @code {
     private List<Webhook> Webhooks = new();
 
@@ -201,6 +285,16 @@
 
     private ConfirmModal modalAudit = default!;
     private ConfirmModal modalTelemetry = default!;
+
+    // Reset DB
+    private bool showResetDbModal = false;
+    private string resetDbInput = "";
+    private bool resetLicenses = true;
+    private bool resetAudit = false;
+    private bool resetTelemetry = false;
+    private bool resetBans = false;
+    private bool resetWebhooks = false;
+    private bool resetProducts = false;
 
     private string testEmail = "";
     private bool isSending = false;
@@ -327,13 +421,13 @@
     private async Task TestSmtp()
     {
         if (string.IsNullOrWhiteSpace(testEmail)) { Toast.ShowError("Veuillez saisir un email."); return; }
-        
+
         isSending = true;
         smtpLogs.Clear();
         smtpLogs.Add("Démarrage du diagnostic SMTP...");
         StateHasChanged();
 
-        try 
+        try
         {
             await Mailer.RunDiagnosticAsync(testEmail, "Admin", "TEST SYSTEM", "CLE-TEST-1234", async (msg) => {
                 smtpLogs.Add(msg);
@@ -347,5 +441,56 @@
             Console.WriteLine($"[SMTP ERROR] {ex}");
         }
         finally { isSending = false; }
+    }
+
+    private async Task ExecuteResetDb()
+    {
+        showResetDbModal = false;
+        resetDbInput = "";
+
+        try
+        {
+            // Ordre respectant les FK (enfants d'abord)
+            if (resetLicenses || resetProducts)
+            {
+                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"LicenseHistories\"");
+                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"LicenseSeats\"");
+                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"LicenseRenewals\"");
+                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"Licenses\"");
+            }
+
+            if (resetAudit)
+            {
+                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"AccessLogs\"");
+            }
+
+            if (resetBans)
+            {
+                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"BannedIps\"");
+            }
+
+            if (resetTelemetry)
+            {
+                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"TelemetryRecords\"");
+            }
+
+            if (resetWebhooks)
+            {
+                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"Webhooks\"");
+            }
+
+            if (resetProducts)
+            {
+                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"Products\"");
+                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"LicenseTypes\"");
+            }
+
+            Toast.ShowSuccess(L["Maintenance_ResetDbSuccess"]);
+            await LoadData();
+        }
+        catch (Exception ex)
+        {
+            Toast.ShowError($"{L["Common_Error"]} : {ex.Message}");
+        }
     }
 }

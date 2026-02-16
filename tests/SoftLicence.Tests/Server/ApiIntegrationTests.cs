@@ -22,7 +22,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         _factory = factory.WithWebHostBuilder(builder =>
         {
             builder.UseSetting("IsIntegrationTest", "true");
-            builder.UseSetting("AdminSettings:ApiSecret", "superadmin");
+            builder.UseSetting("AdminSettings:ApiSecret", "CHANGE_ME_RANDOM_SECRET");
             builder.UseSetting("AdminSettings:AllowedIps", ""); 
             builder.ConfigureServices(services =>
             {
@@ -38,16 +38,16 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         var db = services.GetRequiredService<LicenseDbContext>();
         var encryption = services.GetRequiredService<SoftLicence.Server.Services.EncryptionService>();
 
-        if (await db.Products.AnyAsync(p => p.Name == "TestApp")) return;
+        if (await db.Products.AnyAsync(p => p.Name == "YOUR_APP_NAME")) return;
 
         var keys = LicenseService.GenerateKeys();
         var product = new Product 
         { 
             Id = Guid.NewGuid(),
-            Name = "TestApp", 
+            Name = "YOUR_APP_NAME", 
             PrivateKeyXml = encryption.Encrypt(keys.PrivateKey), 
             PublicKeyXml = keys.PublicKey,
-            ApiSecret = "superadmin"
+            ApiSecret = "CHANGE_ME_RANDOM_SECRET"
         };
         db.Products.Add(product);
 
@@ -74,7 +74,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             await SeedDataAsync(scope.ServiceProvider);
         }
 
-        var request = new { LicenseKey = "INVALID", HardwareId = "HW1", AppName = "TestApp" };
+        var request = new { LicenseKey = "INVALID", HardwareId = "HW1", AppName = "YOUR_APP_NAME" };
         var response = await client.PostAsJsonAsync("/api/activation", request);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
@@ -89,7 +89,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             await SeedDataAsync(scope.ServiceProvider);
         }
 
-        var request = new { LicenseKey = "TESTAPP-FREE-TRIAL", HardwareId = "NEW-PC-123", AppName = "TestApp" };
+        var request = new { LicenseKey = "YOUR_APP_NAME-FREE-TRIAL", HardwareId = "NEW-PC-123", AppName = "YOUR_APP_NAME" };
         var response = await client.PostAsJsonAsync("/api/activation", request);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -105,7 +105,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         {
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
             await SeedDataAsync(scope.ServiceProvider);
-            var prod = await db.Products.FirstAsync(p => p.Name == "TestApp");
+            var prod = await db.Products.FirstAsync(p => p.Name == "YOUR_APP_NAME");
             var type = await db.LicenseTypes.FirstAsync(t => t.Slug == "TRIAL");
             
             db.Licenses.Add(new License {
@@ -123,7 +123,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         }
 
         var client = _factory.CreateClient();
-        client.DefaultRequestHeaders.Add("X-Admin-Secret", "superadmin");
+        client.DefaultRequestHeaders.Add("X-Admin-Secret", "CHANGE_ME_RANDOM_SECRET");
         
         var request = new { TransactionId = "STRIPE_SUCCESS_UNIQUE", Reference = "INV-001" };
         var response = await client.PostAsJsonAsync($"/api/admin/licenses/{licenseKey}/renew", request);
