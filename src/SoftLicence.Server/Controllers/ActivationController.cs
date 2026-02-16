@@ -47,6 +47,7 @@ namespace SoftLicence.Server.Controllers
             public required string LicenseKey { get; set; }
             public required string HardwareId { get; set; }
             public required string AppName { get; set; }
+            public string? AppId { get; set; } // Identifiant unique du produit
             public string? AppVersion { get; set; } // Nouvelle version client
         }
 
@@ -54,13 +55,28 @@ namespace SoftLicence.Server.Controllers
         {
             public required string HardwareId { get; set; }
             public required string AppName { get; set; }
+            public string? AppId { get; set; } // Identifiant unique du produit
             public required string TypeSlug { get; set; } // ex: "TRIAL"
             public string? AppVersion { get; set; }
+        }
+
+        private async Task<Product?> FindProductAsync(string name, string? id)
+        {
+            // 1. Recherche par ID si fourni et valide
+            if (!string.IsNullOrEmpty(id) && Guid.TryParse(id, out var appId))
+            {
+                var p = await _db.Products.FirstOrDefaultAsync(p => p.Id == appId);
+                if (p != null) return p;
+            }
+
+            // 2. Repli sur le nom
+            return await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == name.ToLower());
         }
 
         private void TagLog(ActivationRequest req, string endpoint)
         {
             HttpContext.Items[LogKeys.AppName] = req.AppName;
+            if (!string.IsNullOrEmpty(req.AppId)) HttpContext.Items["AppId"] = req.AppId;
             HttpContext.Items[LogKeys.LicenseKey] = req.LicenseKey.Trim().ToUpper();
             HttpContext.Items[LogKeys.HardwareId] = req.HardwareId;
             HttpContext.Items[LogKeys.Endpoint] = endpoint;
@@ -70,6 +86,7 @@ namespace SoftLicence.Server.Controllers
         private void TagLog(TrialRequest req, string endpoint)
         {
             HttpContext.Items[LogKeys.AppName] = req.AppName;
+            if (!string.IsNullOrEmpty(req.AppId)) HttpContext.Items["AppId"] = req.AppId;
             HttpContext.Items[LogKeys.LicenseKey] = "AUTO-TRIAL";
             HttpContext.Items[LogKeys.HardwareId] = req.HardwareId;
             HttpContext.Items[LogKeys.Endpoint] = endpoint;
@@ -97,7 +114,7 @@ namespace SoftLicence.Server.Controllers
         {
             TagLog(req, "TRIAL_AUTO");
 
-            var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
+            var product = await FindProductAsync(req.AppName, req.AppId);
             if (product == null) return BadRequest(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
 
             // Utiliser le nom canonique pour le log
@@ -538,6 +555,7 @@ namespace SoftLicence.Server.Controllers
         {
             public required string LicenseKey { get; set; }
             public required string AppName { get; set; }
+            public string? AppId { get; set; } // Identifiant unique du produit
         }
 
         public class ResetConfirmRequest : ResetRequest

@@ -17,7 +17,7 @@ namespace SoftLicence.SDK
             _httpClient = httpClient ?? new HttpClient();
         }
 
-        public async Task<ActivationResult> ActivateAsync(string licenseKey, string appName, string? appVersion = null)
+        public async Task<ActivationResult> ActivateAsync(string licenseKey, string appName, string? appId = null, string? appVersion = null)
         {
             try
             {
@@ -27,6 +27,7 @@ namespace SoftLicence.SDK
                     LicenseKey = licenseKey,
                     HardwareId = hwId,
                     AppName = appName,
+                    AppId = appId,
                     AppVersion = appVersion
                 };
 
@@ -56,7 +57,7 @@ namespace SoftLicence.SDK
             }
         }
 
-        public async Task<ActivationResult> RequestTrialAsync(string appName, string typeSlug, string? appVersion = null)
+        public async Task<ActivationResult> RequestTrialAsync(string appName, string? appId = null, string typeSlug = "TRIAL", string? appVersion = null)
         {
             try
             {
@@ -65,6 +66,7 @@ namespace SoftLicence.SDK
                 {
                     HardwareId = hwId,
                     AppName = appName,
+                    AppId = appId,
                     TypeSlug = typeSlug,
                     AppVersion = appVersion
                 };
@@ -95,7 +97,7 @@ namespace SoftLicence.SDK
             }
         }
 
-        public async Task<LicenseStatusResult> CheckStatusAsync(string licenseKey, string appName)
+        public async Task<LicenseStatusResult> CheckStatusAsync(string licenseKey, string appName, string? appId = null)
         {
             try
             {
@@ -104,7 +106,8 @@ namespace SoftLicence.SDK
                 {
                     LicenseKey = licenseKey,
                     HardwareId = hwId,
-                    AppName = appName
+                    AppName = appName,
+                    AppId = appId
                 };
 
                 var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
