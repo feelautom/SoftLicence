@@ -22,7 +22,7 @@ Le serveur est entièrement conteneurisé. Pour le déployer sur un VPS (via Doc
 | `SmtpSettings__Username` | User SMTP | `contact@EXAMPLE.COM` |
 | `SmtpSettings__Password` | Pass SMTP | `app_password` |
 | `SmtpSettings__FromEmail` | Email expéditeur | `noreply@EXAMPLE.COM` |
-| `SmtpSettings__FromName` | Nom expéditeur | `YOUR_COMPANY_NAME` |
+| `SmtpSettings__FromName` | Nom expéditeur | `FeelAutom` |
 | `FORCE_DB_RESET` | Supprimer et recréer la BDD | `true` ou `false` |
 
 ## 📡 API Publique (Activation)
