@@ -14,7 +14,7 @@ namespace SoftLicence.UI
         private readonly string _publicKeyXml;
         private readonly string _appName;
         private readonly string _appDataPath;
-        private readonly SoftLicenceClient _client;
+        private readonly ISoftLicenceClient _client;
 
         [ObservableProperty]
         private string licenseKey = string.Empty;
@@ -80,7 +80,7 @@ namespace SoftLicence.UI
 
             if (input.Length > 100)
             {
-                ValidateLocal(input);
+                await ValidateLocal(input);
             }
             else
             {
@@ -101,7 +101,7 @@ namespace SoftLicence.UI
 
             if (result.Success && !string.IsNullOrEmpty(result.LicenseFile))
             {
-                if (ValidateLocal(result.LicenseFile))
+                if (await ValidateLocal(result.LicenseFile))
                 {
                     StatusMessage = "Activation réussie !";
                 }
@@ -112,9 +112,9 @@ namespace SoftLicence.UI
             }
         }
 
-        private bool ValidateLocal(string licenseContent)
+        private async Task<bool> ValidateLocal(string licenseContent)
         {
-            var result = _client.ValidateLocal(licenseContent, CurrentHardwareId);
+            var result = await _client.ValidateForCurrentMachineAsync(licenseContent);
 
             if (result.IsValid && result.License != null)
             {
@@ -150,7 +150,7 @@ namespace SoftLicence.UI
                 try
                 {
                     var content = await File.ReadAllTextAsync(_appDataPath);
-                    ValidateLocal(content);
+                    await ValidateLocal(content);
                 }
                 catch (Exception ex)
                 {

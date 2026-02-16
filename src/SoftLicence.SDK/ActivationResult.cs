@@ -16,6 +16,7 @@ namespace SoftLicence.SDK
     public class ActivationResult
     {
         public bool Success { get; }
+        public bool IsSuccess => Success; // Alias pour DX
         public string? LicenseFile { get; }
         public ActivationErrorCode ErrorCode { get; }
         public string? ErrorMessage { get; }
