@@ -5,17 +5,17 @@ namespace SoftLicence.SDK
         /// <summary>
         /// Active une licence en ligne pour cette machine.
         /// </summary>
-        Task<ActivationResult> ActivateAsync(string licenseKey, string appName, string? appVersion = null);
+        Task<ActivationResult> ActivateAsync(string licenseKey, string appName, string? appId = null, string? appVersion = null);
 
         /// <summary>
         /// Effectue une demande de version d'essai (Auto-Trial) pour cette machine.
         /// </summary>
-        Task<ActivationResult> RequestTrialAsync(string appName, string typeSlug = "TRIAL", string? appVersion = null);
+        Task<ActivationResult> RequestTrialAsync(string appName, string? appId = null, string typeSlug = "TRIAL", string? appVersion = null);
 
         /// <summary>
         /// Vérifie le statut d'une licence en ligne.
         /// </summary>
-        Task<LicenseStatusResult> CheckStatusAsync(string licenseKey, string appName);
+        Task<LicenseStatusResult> CheckStatusAsync(string licenseKey, string appName, string? appId = null);
 
         /// <summary>
         /// Valide une licence pour un matériel spécifique (Signature RSA + Hardware ID + Expiration).

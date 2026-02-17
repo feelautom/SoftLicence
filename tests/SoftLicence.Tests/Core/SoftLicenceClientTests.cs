@@ -35,6 +35,26 @@ public class SoftLicenceClientTests
     }
 
     [Fact]
+    public async Task ActivateAsync_ShouldSendAppId_WhenProvided()
+    {
+        string? capturedPayload = null;
+        var handler = new MockHttpMessageHandler(request =>
+        {
+            capturedPayload = request.Content?.ReadAsStringAsync().Result;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"LicenseFile\":\"abc\"}", Encoding.UTF8, "application/json")
+            };
+        });
+
+        var client = CreateClient(handler);
+        await client.ActivateAsync("KEY-123", "TestApp", "APP-GUID-123");
+
+        Assert.NotNull(capturedPayload);
+        Assert.Contains("\"AppId\":\"APP-GUID-123\"", capturedPayload);
+    }
+
+    [Fact]
     public async Task ActivateAsync_ShouldReturnFail_When400()
     {
         var handler = new MockHttpMessageHandler(_ =>
