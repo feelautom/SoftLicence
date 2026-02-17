@@ -61,7 +61,7 @@ namespace SoftLicence.Server.Services
     </div>
     
     <div style=""background-color: #f8f9fa; padding: 20px; text-align: center; font-size: 12px; color: #a0aec0;"">
-        &copy; {DateTime.Now.Year} YOUR_COMPANY_NAME - {productName}
+        &copy; {DateTime.Now.Year} FeelAutom - {productName}
     </div>
 </div>";
             builder.TextBody = $"Bonjour {customerName},\n\nVotre code de réinitialisation pour {productName} est : {resetCode}\n\nCordialement,\nL'équipe {productName}";
@@ -149,12 +149,12 @@ namespace SoftLicence.Server.Services
             if (isDiagnostic) Log($"Tentative d'envoi à {toEmail} via {host}:{_settings.Port}");
 
             var message = new MimeMessage();
-            string senderName = isDiagnostic ? "YOUR_COMPANY_NAME Diagnostic" : productName;
+            string senderName = isDiagnostic ? "FeelAutom Diagnostic" : productName;
             message.From.Add(new MailboxAddress(senderName, _settings.FromEmail?.Trim('"')));
             message.To.Add(new MailboxAddress(customerName, toEmail));
             
             message.Subject = isDiagnostic 
-                ? "Test de configuration SMTP - YOUR_COMPANY_NAME" 
+                ? "Test de configuration SMTP - FeelAutom" 
                 : $"Votre licence pour {productName}";
             
             var builder = new BodyBuilder();
@@ -187,12 +187,12 @@ namespace SoftLicence.Server.Services
     </div>
     
     <div style=""background-color: #f8f9fa; padding: 20px; text-align: center; font-size: 12px; color: #a0aec0;"">
-        &copy; {DateTime.Now.Year} YOUR_COMPANY_NAME - {(isDiagnostic ? "Test Système" : productName)}
+        &copy; {DateTime.Now.Year} FeelAutom - {(isDiagnostic ? "Test Système" : productName)}
     </div>
 </div>";
             
             builder.TextBody = isDiagnostic 
-                ? $"Bonjour {customerName},\n\nVotre configuration SMTP est correcte.\n\nCordialement,\nL'équipe YOUR_COMPANY_NAME"
+                ? $"Bonjour {customerName},\n\nVotre configuration SMTP est correcte.\n\nCordialement,\nL'équipe FeelAutom"
                 : $"Bonjour {customerName},\n\nVotre clé pour {productName} est : {licenseKey}\n\nCordialement,\nL'équipe {productName}";
             
             message.Body = builder.ToMessageBody();
