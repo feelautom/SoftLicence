@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using SoftLicence.Server.Data;
@@ -11,9 +12,11 @@ using SoftLicence.Server.Data;
 namespace SoftLicence.Server.Migrations
 {
     [DbContext(typeof(LicenseDbContext))]
-    partial class LicenseDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260218154718_AddProductScopedTypesAndSubProducts")]
+    partial class AddProductScopedTypesAndSubProducts
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -400,35 +403,6 @@ namespace SoftLicence.Server.Migrations
                     b.ToTable("LicenseTypes");
                 });
 
-            modelBuilder.Entity("SoftLicence.Server.Data.LicenseTypeCustomParam", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Key")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<Guid>("LicenseTypeId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("Value")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("LicenseTypeId", "Key")
-                        .IsUnique();
-
-                    b.ToTable("LicenseTypeCustomParams");
-                });
-
             modelBuilder.Entity("SoftLicence.Server.Data.Product", b =>
                 {
                     b.Property<Guid>("Id")
@@ -753,17 +727,6 @@ namespace SoftLicence.Server.Migrations
                     b.Navigation("Product");
                 });
 
-            modelBuilder.Entity("SoftLicence.Server.Data.LicenseTypeCustomParam", b =>
-                {
-                    b.HasOne("SoftLicence.Server.Data.LicenseType", "LicenseType")
-                        .WithMany("CustomParams")
-                        .HasForeignKey("LicenseTypeId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("LicenseType");
-                });
-
             modelBuilder.Entity("SoftLicence.Server.Data.Product", b =>
                 {
                     b.HasOne("SoftLicence.Server.Data.Product", "ParentProduct")
@@ -853,8 +816,6 @@ namespace SoftLicence.Server.Migrations
 
             modelBuilder.Entity("SoftLicence.Server.Data.LicenseType", b =>
                 {
-                    b.Navigation("CustomParams");
-
                     b.Navigation("Licenses");
                 });
 
