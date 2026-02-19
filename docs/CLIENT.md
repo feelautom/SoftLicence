@@ -34,19 +34,25 @@ Le `LicenseActivationViewModel` intègre un **Timer automatique** (toutes les 2 
 - Si la licence est révoquée sur le serveur pendant que l'utilisateur travaille, la propriété `IsLicensed` passera à `false`.
 - **Architecture Réactive** : Il est recommandé de s'abonner à `PropertyChanged` dans votre `App.xaml.cs` pour réagir instantanément et fermer le logiciel si la licence saute en cours d'utilisation.
 
-### 3. Auto-Activation (Mode Trial)
-Si vous ne souhaitez pas demander de clé à l'utilisateur lors du premier lancement, vous pouvez appeler l'API d'auto-génération :
+### 3. Auto-Activation (Mode Community / Trial)
+Activation automatique au premier lancement. Pour les types récurrents (ex: Community), le renouvellement est automatique à expiration.
 
 **Endpoint** : `POST /api/activation/trial`
-**Payload** : 
+**Payload** :
 ```json
 {
   "HardwareId": "ABC-123-HID",
   "AppName": "VotreLogiciel",
-  "TypeSlug": "TRIAL"
+  "TypeSlug": "YOUR_APP_NAME-COMMUNITY"
 }
 ```
-Le serveur renverra directement le contenu du fichier de licence signé. S'il s'agit d'une réinstallation, le serveur renverra la licence existante.
+
+**Comportement :**
+- **Première demande** : crée une licence (durée = `DefaultDurationDays` du type)
+- **HardwareId connu, licence active** : renvoi de la licence existante (recovery)
+- **HardwareId connu, licence expirée + `IsRecurring`** : renouvellement automatique (+30 jours)
+- **HardwareId connu, licence révoquée** : `403 Forbidden`
+- **HardwareId connu, licence expirée non-récurrente** : renvoi tel quel (le client gère le blocage)
 
 ## 🛡️ Protection contre le Piratage
 

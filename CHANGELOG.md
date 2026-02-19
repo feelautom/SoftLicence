@@ -1,5 +1,18 @@
 # Changelog
 
+## SDK v1.1.3 — 2026-02-19
+- feat(sdk): add `GetParam<T>(key, fallback)` on `LicenseModel` — read typed custom parameters signed into the license
+- feat(server): add `LicenseTypeCustomParam` entity — define key/value parameters per license type, injected at activation into `LicenseModel.Features`
+
+## SDK v1.1.2 — 2026-02-17
+- feat(server): add Plugin tab in product detail view
+- fix(server): scope license types to products and add sub-product hierarchy
+- feat(server): add Community license auto-renewal on recurring license types
+
+## SDK v1.1.1 — 2026-02-16
+- feat(sdk): add AppId support in activation and status check requests
+- feat(api): match products by AppId with case-insensitive comparison
+
 ## SDK v1.1.0 — 2026-02-16
 - feat(sdk): add typed `ActivationResult` and `LicenseStatusResult` — no more raw strings or thrown exceptions
 - feat(sdk): add `RequestTrialAsync` method for one-call trial activation
@@ -10,6 +23,7 @@
 - test(sdk): add 13 unit tests for `SoftLicenceClient` (activate, trial, status, local validation)
 
 ## 2026-02-16
+- docs: anonymize SERVER.md and update public sync manifest exclusions
 - feat(sdk): add AppId support in activation requests
 - feat(sdk): update ISoftLicenceClient interface with AppId support
 - feat(api): add AppId support for product lookup and maintain lowercase name matching

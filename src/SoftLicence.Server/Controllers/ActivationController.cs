@@ -93,6 +93,12 @@ namespace SoftLicence.Server.Controllers
             HttpContext.Items[LogKeys.Version] = req.AppVersion ?? "Unknown";
         }
 
+        private static Dictionary<string, string> BuildFeatures(IEnumerable<LicenseTypeCustomParam>? customParams)
+        {
+            if (customParams == null) return new Dictionary<string, string>();
+            return customParams.ToDictionary(p => p.Key, p => p.Value);
+        }
+
         private bool IsVersionAllowed(string? clientVersion, string allowedMask)
         {
             if (string.IsNullOrEmpty(allowedMask) || allowedMask == "*") return true;
@@ -120,19 +126,38 @@ namespace SoftLicence.Server.Controllers
             // Utiliser le nom canonique pour le log
             HttpContext.Items[LogKeys.AppName] = product.Name;
             
-            var type = await _db.LicenseTypes.FirstOrDefaultAsync(t => t.Slug.ToUpper() == req.TypeSlug.Trim().ToUpper());
+            var type = await _db.LicenseTypes
+                .Include(t => t.CustomParams)
+                .FirstOrDefaultAsync(t => t.ProductId == product.Id && t.Slug.ToUpper() == req.TypeSlug.Trim().ToUpper());
             if (type == null) return BadRequest(string.Format(_localizer["Api_LicenseTypeUnknown"].Value, req.TypeSlug));
 
             // Vérifier si ce PC a déjà une licence pour ce produit (Trial ou autre)
             var existing = await _db.Licenses
-                .Include(l => l.Type)
+                .Include(l => l.Type).ThenInclude(t => t!.CustomParams)
                 .FirstOrDefaultAsync(l => l.ProductId == product.Id && l.HardwareId == req.HardwareId);
 
             if (existing != null)
             {
-                // Si une licence existe déjà pour ce matériel, on la renvoie simplement (comme un Recovery)
-                if (!existing.IsActive) return BadRequest(_localizer["Api_AccessRevoked"].Value);
-                
+                // Révoquée → 403 Forbidden
+                if (!existing.IsActive)
+                    return StatusCode(403, _localizer["Api_AccessRevoked"].Value);
+
+                // Récurrent (Community) + expirée → renouvellement automatique
+                if (existing.Type?.IsRecurring == true && existing.ExpirationDate.HasValue && DateTime.UtcNow > existing.ExpirationDate.Value)
+                {
+                    existing.ExpirationDate = DateTime.UtcNow.AddDays(existing.Type.DefaultDurationDays);
+                    _db.LicenseHistories.Add(new LicenseHistory {
+                        LicenseId = existing.Id,
+                        Action = HistoryActions.Renewed,
+                        Details = $"Renouvellement automatique ({existing.Type.Name}) : +{existing.Type.DefaultDurationDays} jours",
+                        PerformedBy = "System"
+                    });
+                    await _db.SaveChangesAsync();
+                    _logger.LogInformation("Renouvellement {TypeSlug} : {HardwareId} → expiration {Expiry}", existing.Type.Slug, req.HardwareId, existing.ExpirationDate);
+                }
+
+                // Sinon → renvoi tel quel (trial non renouvelable reste expiré côté client)
+
                 // S'assurer que le siège existe
                 var seat = await _db.LicenseSeats.FirstOrDefaultAsync(s => s.LicenseId == existing.Id && s.HardwareId == req.HardwareId && s.IsActive);
                 if (seat == null)
@@ -155,7 +180,8 @@ namespace SoftLicence.Server.Controllers
                     Reference = existing.Reference,
                     CreationDate = existing.CreationDate,
                     ExpirationDate = existing.ExpirationDate,
-                    HardwareId = existing.HardwareId ?? string.Empty
+                    HardwareId = existing.HardwareId ?? string.Empty,
+                    Features = BuildFeatures(existing.Type?.CustomParams)
                 };
 
                 try
@@ -226,7 +252,8 @@ namespace SoftLicence.Server.Controllers
                 Reference = license.Reference,
                 CreationDate = license.CreationDate,
                 ExpirationDate = license.ExpirationDate,
-                HardwareId = license.HardwareId ?? string.Empty
+                HardwareId = license.HardwareId ?? string.Empty,
+                Features = BuildFeatures(type.CustomParams)
             };
 
             var decryptedKey = _encryption.Decrypt(product.PrivateKeyXml);
@@ -269,11 +296,9 @@ namespace SoftLicence.Server.Controllers
                 _logger.LogInformation("Detection d'une demande AUTO-TRIAL pour {AppName}", product.Name);
                 HttpContext.Items[LogKeys.Endpoint] = "TRIAL_AUTO";
                 
-                // On cherche d'abord une correspondance exacte du Slug avec la clé
-                // Sinon on cherche un type TRIAL
-                var type = await _db.LicenseTypes.FirstOrDefaultAsync(t => t.Slug == cleanKey)
-                           ?? await _db.LicenseTypes.FirstOrDefaultAsync(t => t.Slug == "TRIAL") 
-                           ?? await _db.LicenseTypes.FirstOrDefaultAsync(t => t.Slug.Contains("TRIAL"));
+                // On cherche d'abord une correspondance exacte du Slug avec la clé, sinon le slug "TRIAL" — toujours filtré par produit
+                var type = await _db.LicenseTypes.Include(t => t.CustomParams).FirstOrDefaultAsync(t => t.ProductId == product.Id && t.Slug == cleanKey)
+                           ?? await _db.LicenseTypes.Include(t => t.CustomParams).FirstOrDefaultAsync(t => t.ProductId == product.Id && t.Slug == "TRIAL");
 
                 if (type == null) 
                 {
@@ -283,13 +308,31 @@ namespace SoftLicence.Server.Controllers
 
                 // On vérifie si ce PC a déjà une licence pour ce produit
                 var existing = await _db.Licenses
-                    .Include(l => l.Type)
+                    .Include(l => l.Type).ThenInclude(t => t!.CustomParams)
                     .FirstOrDefaultAsync(l => l.ProductId == product.Id && l.HardwareId == req.HardwareId);
 
                 if (existing != null)
                 {
-                    if (!existing.IsActive) return BadRequest(_localizer["Api_AccessRevoked"].Value);
-                    
+                    // Révoquée → 403 Forbidden
+                    if (!existing.IsActive)
+                        return StatusCode(403, _localizer["Api_AccessRevoked"].Value);
+
+                    // Récurrent (Community) + expirée → renouvellement automatique
+                    if (existing.Type?.IsRecurring == true && existing.ExpirationDate.HasValue && DateTime.UtcNow > existing.ExpirationDate.Value)
+                    {
+                        existing.ExpirationDate = DateTime.UtcNow.AddDays(existing.Type.DefaultDurationDays);
+                        _db.LicenseHistories.Add(new LicenseHistory {
+                            LicenseId = existing.Id,
+                            Action = HistoryActions.Renewed,
+                            Details = $"Renouvellement automatique ({existing.Type.Name}) : +{existing.Type.DefaultDurationDays} jours",
+                            PerformedBy = "System"
+                        });
+                        await _db.SaveChangesAsync();
+                        _logger.LogInformation("Renouvellement {TypeSlug} : {HardwareId} → expiration {Expiry}", existing.Type.Slug, req.HardwareId, existing.ExpirationDate);
+                    }
+
+                    // Sinon → renvoi tel quel (trial non renouvelable reste expiré côté client)
+
                     // S'assurer que le siège existe (pour les licences créées avant le système de seats)
                     var seat = await _db.LicenseSeats.FirstOrDefaultAsync(s => s.LicenseId == existing.Id && s.HardwareId == req.HardwareId && s.IsActive);
                     if (seat == null)
@@ -313,7 +356,8 @@ namespace SoftLicence.Server.Controllers
                         Id = existing.Id, LicenseKey = existing.LicenseKey, CustomerName = existing.CustomerName,
                         CustomerEmail = existing.CustomerEmail, TypeSlug = existing.Type?.Slug ?? "TRIAL",
                         Reference = existing.Reference,
-                        CreationDate = existing.CreationDate, ExpirationDate = existing.ExpirationDate, HardwareId = existing.HardwareId ?? string.Empty
+                        CreationDate = existing.CreationDate, ExpirationDate = existing.ExpirationDate, HardwareId = existing.HardwareId ?? string.Empty,
+                        Features = BuildFeatures(existing.Type?.CustomParams)
                     };
 
                     try
@@ -369,7 +413,8 @@ namespace SoftLicence.Server.Controllers
                     Id = newLic.Id, LicenseKey = newLic.LicenseKey, CustomerName = newLic.CustomerName,
                     CustomerEmail = newLic.CustomerEmail, TypeSlug = type.Slug,
                     Reference = newLic.Reference,
-                    CreationDate = newLic.CreationDate, ExpirationDate = newLic.ExpirationDate, HardwareId = newLic.HardwareId ?? string.Empty
+                    CreationDate = newLic.CreationDate, ExpirationDate = newLic.ExpirationDate, HardwareId = newLic.HardwareId ?? string.Empty,
+                    Features = BuildFeatures(type.CustomParams)
                 };
 
                 var decryptedKey = _encryption.Decrypt(product.PrivateKeyXml);
@@ -393,7 +438,7 @@ namespace SoftLicence.Server.Controllers
 
             var license = await _db.Licenses
                 .Include(l => l.Product)
-                .Include(l => l.Type)
+                .Include(l => l.Type).ThenInclude(t => t!.CustomParams)
                 .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
 
             if (license == null) 
@@ -491,7 +536,8 @@ namespace SoftLicence.Server.Controllers
                 Reference = license.Reference,
                 CreationDate = license.CreationDate,
                 ExpirationDate = license.ExpirationDate,
-                HardwareId = license.HardwareId ?? string.Empty
+                HardwareId = license.HardwareId ?? string.Empty,
+                Features = BuildFeatures(license.Type?.CustomParams)
             };
 
             try

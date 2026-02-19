@@ -23,7 +23,12 @@ namespace SoftLicence.Server.Data
 
         public int DefaultMaxSeats { get; set; } = 1;
 
+        // Produit propriétaire
+        public Guid ProductId { get; set; }
+        public Product? Product { get; set; }
+
         // Navigation
         public ICollection<License> Licenses { get; set; } = new List<License>();
+        public ICollection<LicenseTypeCustomParam> CustomParams { get; set; } = new List<LicenseTypeCustomParam>();
     }
 }
