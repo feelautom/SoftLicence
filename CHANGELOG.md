@@ -10,6 +10,9 @@
 - test(sdk): add 13 unit tests for `SoftLicenceClient` (activate, trial, status, local validation)
 
 ## 2026-02-16
+- feat(sdk): add AppId support in activation requests
+- feat(sdk): update ISoftLicenceClient interface with AppId support
+- feat(api): add AppId support for product lookup and maintain lowercase name matching
 - feat(security): implement geometric punishment and zero tolerance for repeat offenders
 - test(sdk): add unit tests for CheckOnlineStatusAsync (VALID, NOT_FOUND, SERVER_ERROR, NETWORK_ERROR, REVOKED)
 - ci: add GitHub Actions workflow with test gate before NuGet publish
