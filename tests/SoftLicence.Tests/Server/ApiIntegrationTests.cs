@@ -51,14 +51,15 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         };
         db.Products.Add(product);
 
-        var trialType = new LicenseType 
-        { 
+        var trialType = new LicenseType
+        {
             Id = Guid.NewGuid(),
-            Name = "Trial", 
-            Slug = "TRIAL", 
+            Name = "Trial",
+            Slug = "TRIAL",
             DefaultDurationDays = 7,
             IsRecurring = true,
-            DefaultMaxSeats = 1
+            DefaultMaxSeats = 1,
+            ProductId = product.Id
         };
         db.LicenseTypes.Add(trialType);
 
