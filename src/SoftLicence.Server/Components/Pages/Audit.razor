@@ -80,6 +80,7 @@
                                 <th>@L["Common_Status"]</th>
                                 <th>@L["Audit_Country"]</th>
                                 <th>@L["Audit_IpIsp"]</th>
+                                <th>@L["Telemetry_HardwareId"]</th>
                                 <th>@L["Audit_AppDetails"]</th>
                             </tr>
                         </thead>
@@ -134,6 +135,7 @@
                                                 <div class="text-muted" style="font-size: 0.65rem; max-width: 120px; overflow: hidden; text-overflow: ellipsis;">@log.Isp</div>
                                             }
                                         </td>
+                                        <td><code class="small text-info">@log.HardwareId</code></td>
                                         <td class="text-nowrap">
                                             @if (log.AppName == "BOT_SCAN")
                                             {
