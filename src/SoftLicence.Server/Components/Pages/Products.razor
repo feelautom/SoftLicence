@@ -92,7 +92,15 @@
             }
             else
             {
-                <button class="btn btn-outline-secondary" @onclick="() => { selectedProduct = null; }">@L["Products_BackToList"]</button>
+                <div class="d-flex gap-2">
+                    @if (selectedProduct?.ParentProductId == null)
+                    {
+                        <button class="btn btn-outline-success btn-sm" @onclick='() => { parentForNewProduct = selectedProduct?.Id; activeTab = "plugins"; showPluginCreate = true; }' title="Ajouter un plugin associé à ce logiciel">
+                            + Plugin
+                        </button>
+                    }
+                    <button class="btn btn-outline-secondary" @onclick="() => { selectedProduct = null; parentForNewProduct = null; showPluginCreate = false; }">@L["Products_BackToList"]</button>
+                </div>
             }
         </div>
 
@@ -132,8 +140,8 @@
                 </div>
             }
 
-            <!-- TYPES DE LICENCES -->
-            <div class="card shadow-sm mb-4">
+            <!-- TYPES : gérés dans l'onglet "Types" de chaque produit -->
+            <div class="d-none">
                 <div class="card-body">
                     <div class="d-flex justify-content-between align-items-center mb-2">
                         <h5 class="text-white mb-0">@L["Products_LicenseTypes"]</h5>
@@ -238,7 +246,15 @@
                         @foreach (var p in ProductsList)
                         {
                             <tr style="cursor:pointer" @onclick="() => SelectProduct(p)">
-                                <td class="fw-bold">@p.Name</td>
+                                <td class="fw-bold">
+                                    @if (p.SubProducts.Any())
+                                    {
+                                        <button class="btn btn-link btn-sm p-0 me-1 text-muted" style="font-size:0.75rem;" @onclick:stopPropagation="true" @onclick="() => ToggleExpand(p.Id)" title="Plugins">
+                                            @(expandedProducts.Contains(p.Id) ? "▼" : "▶")
+                                        </button>
+                                    }
+                                    @p.Name
+                                </td>
                                 <td><small class="text-muted">@p.Id</small></td>
                                 <td class="text-center">
                                     <span class="badge bg-primary">@p.Licenses.Count</span>
@@ -254,6 +270,31 @@
                                     </div>
                                 </td>
                             </tr>
+                            @if (expandedProducts.Contains(p.Id))
+                            {
+                                @foreach (var sub in p.SubProducts)
+                                {
+                                    <tr style="cursor:pointer; background:rgba(255,255,255,0.03);" @onclick="() => SelectProduct(sub)">
+                                        <td style="padding-left:2.5rem;">
+                                            <span class="text-muted me-1">└</span>
+                                            <span class="badge bg-secondary me-1" style="font-size:0.6rem;">PLUGIN</span>
+                                            <span class="fw-bold">@sub.Name</span>
+                                        </td>
+                                        <td><small class="text-muted">@sub.Id</small></td>
+                                        <td class="text-center"><span class="badge bg-primary">@sub.Licenses.Count</span></td>
+                                        <td class="text-end" @onclick:stopPropagation="true">
+                                            <div class="d-flex gap-2 justify-content-end">
+                                                <button class="btn btn-sm btn-outline-info" @onclick="() => ShowPublicKey(sub)" title="@L["Products_PublicKeyXml"]">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-key" viewBox="0 0 16 16"><path d="M0 8a4 4 0 0 1 7.465-2H14a.5.5 0 0 1 .354.146l1.5 1.5a.5.5 0 0 1 0 .708l-1.5 1.5a.5.5 0 0 1-.708 0L13 9.207l-.646.647a.5.5 0 0 1-.708 0L11 9.207l-.646.647a.5.5 0 0 1-.708 0L9 9.207l-.646.647A.5.5 0 0 1 8 10h-.535A4 4 0 0 1 0 8zm4-3a3 3 0 1 0 2.712 4.285A.5.5 0 0 1 7.163 9h.63l.853-.854a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.793-.793-1-1h-6.63a.5.5 0 0 1-.451-.285A3 3 0 0 0 4 5z"/><path d="M4 8a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/></svg>
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-danger" @onclick="() => RequestDelete(sub)" title="@L["Common_Delete"]">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-trash" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
+                                                </button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                }
+                            }
                         }
                     </tbody>
                 </table>
@@ -356,6 +397,21 @@
                             <li class="nav-item">
                                 <button class="nav-link @(activeTab == "log" ? "active" : "")" @onclick="@(() => activeTab = "log")">@L["Products_AccessLog"]</button>
                             </li>
+                            <li class="nav-item">
+                                <button class="nav-link @(activeTab == "types" ? "active" : "")" @onclick="@(() => activeTab = "types")">@L["Products_LicenseTypes"]</button>
+                            </li>
+                            @if (selectedProduct?.ParentProductId == null)
+                            {
+                                <li class="nav-item">
+                                    <button class="nav-link @(activeTab == "plugins" ? "active" : "")" @onclick="@(() => activeTab = "plugins")">
+                                        Plugins
+                                        @if (selectedProduct?.SubProducts.Any() == true)
+                                        {
+                                            <span class="badge bg-secondary ms-1" style="font-size:0.7rem;">@selectedProduct.SubProducts.Count</span>
+                                        }
+                                    </button>
+                                </li>
+                            }
                         </ul>
                     </div>
 
@@ -489,6 +545,116 @@
                                 </div>
                             </div>
                         }
+                        else if (activeTab == "types")
+                        {
+                            <div class="animate-fade">
+                                <div class="input-group mb-3">
+                                    <input class="form-control" placeholder="@L["Common_Name"] (ex: Professionnelle)" @bind="newTypeName" />
+                                    <input class="form-control" placeholder="SLUG (ex: PRO)" @bind="newTypeSlug" />
+                                    <input class="form-control" type="number" style="max-width: 100px;" title="@L["Products_Duration"] (0 = Lifetime)" @bind="newTypeDuration" />
+                                    <input class="form-control" type="number" style="max-width: 80px;" title="@L["Licenses_Seats"]" @bind="newMaxSeats" />
+                                    <div class="input-group-text bg-dark border-secondary">
+                                        <input class="form-check-input mt-0" type="checkbox" @bind="isRecurring" title="Abonnement récurrent" />
+                                        <span class="ms-2 small text-muted">@L["Products_Abo_Short"]</span>
+                                    </div>
+                                    <button class="btn btn-success" @onclick="CreateLicenseType">@L["Common_Add"]</button>
+                                </div>
+
+                                <table class="table table-sm table-hover align-middle">
+                                    <thead>
+                                        <tr>
+                                            <th>@L["Common_Name"]</th>
+                                            <th>Slug</th>
+                                            <th class="text-center">@L["Products_Duration"]</th>
+                                            <th class="text-center">@L["Licenses_Seats"]</th>
+                                            <th class="text-center">@L["Products_Mode"]</th>
+                                            <th class="text-end">@L["Common_Actions"]</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach (var type in LicenseTypes)
+                                        {
+                                            <tr>
+                                                <td>
+                                                    @if (editingTypeId == type.Id) { <input class="form-control form-control-sm" @bind="type.Name" /> }
+                                                    else { @type.Name }
+                                                </td>
+                                                <td><code class="text-info">@type.Slug</code></td>
+                                                <td class="text-center">
+                                                    @if (editingTypeId == type.Id) { <input class="form-control form-control-sm mx-auto" type="number" style="width: 70px" @bind="type.DefaultDurationDays" /> }
+                                                    else if (type.DefaultDurationDays == 0) { <span class="badge bg-info">∞ Lifetime</span> }
+                                                    else { @($"{type.DefaultDurationDays} j") }
+                                                </td>
+                                                <td class="text-center">
+                                                    @if (editingTypeId == type.Id) { <input class="form-control form-control-sm mx-auto" type="number" style="width: 60px" @bind="type.DefaultMaxSeats" /> }
+                                                    else { @type.DefaultMaxSeats }
+                                                </td>
+                                                <td class="text-center">
+                                                    @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.IsRecurring" /> }
+                                                    else { <span class="badge @(type.IsRecurring ? "bg-primary" : "bg-secondary")">@(type.IsRecurring ? L["Products_Subscription"] : L["Products_Fixed"])</span> }
+                                                </td>
+                                                <td class="text-end">
+                                                    @if (editingTypeId == type.Id)
+                                                    {
+                                                        <button class="btn btn-sm btn-success" @onclick="() => SaveTypeEdit(type)">@L["Common_Save"]</button>
+                                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => editingTypeId = null">@L["Common_Cancel"]</button>
+                                                    }
+                                                    else
+                                                    {
+                                                        <button class="btn btn-sm btn-outline-warning" @onclick="() => ToggleTypeParams(type)" title="Paramètres personnalisés">⚙</button>
+                                                        <button class="btn btn-sm btn-outline-info" @onclick="() => editingTypeId = type.Id">@L["Common_Edit"]</button>
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => RequestDeleteType(type)">@L["Common_Delete"]</button>
+                                                    }
+                                                </td>
+                                            </tr>
+                                            @if (expandedTypeParamsId == type.Id)
+                                            {
+                                                <tr class="bg-dark bg-opacity-50 animate-fade">
+                                                    <td colspan="6" class="p-3 border-start border-3 border-warning">
+                                                        <div class="d-flex justify-content-between align-items-center mb-2">
+                                                            <span class="small fw-bold text-warning">⚙ Paramètres — <code>@type.Slug</code></span>
+                                                            <button class="btn btn-sm btn-link text-muted p-0" @onclick="() => ToggleTypeParams(type)">✕</button>
+                                                        </div>
+                                                        @if (typeParams.Any())
+                                                        {
+                                                            <table class="table table-sm table-dark mb-2" style="font-size:0.8rem;">
+                                                                <thead><tr><th>Clé</th><th>Nom</th><th>Valeur</th><th></th></tr></thead>
+                                                                <tbody>
+                                                                    @foreach (var p in typeParams)
+                                                                    {
+                                                                        var param = p;
+                                                                        <tr>
+                                                                            <td><code class="text-warning">@p.Key</code></td>
+                                                                            <td class="text-muted">@p.Name</td>
+                                                                            <td>@p.Value</td>
+                                                                            <td class="text-end"><button class="btn btn-sm btn-link text-danger p-0" @onclick="() => DeleteTypeParam(param)">✕</button></td>
+                                                                        </tr>
+                                                                    }
+                                                                </tbody>
+                                                            </table>
+                                                        }
+                                                        else
+                                                        {
+                                                            <p class="text-muted small mb-2">Aucun paramètre défini.</p>
+                                                        }
+                                                        <div class="d-flex gap-2 align-items-center">
+                                                            <input class="form-control form-control-sm font-monospace" style="max-width:140px;" placeholder="clé (ex: maxAccounts)" @bind="newParamKey" />
+                                                            <input class="form-control form-control-sm" style="max-width:160px;" placeholder="Nom (ex: Comptes max)" @bind="newParamName" />
+                                                            <input class="form-control form-control-sm" style="max-width:120px;" placeholder="Valeur (ex: 50)" @bind="newParamValue" />
+                                                            <button class="btn btn-sm btn-success" @onclick="() => AddTypeParam(type)">+ Ajouter</button>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            }
+                                        }
+                                        @if (!LicenseTypes.Any())
+                                        {
+                                            <tr><td colspan="6" class="text-center py-4 text-muted">@L["Products_NoTypes"]</td></tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                        }
                         else if (activeTab == "log")
                         {
                             <div class="animate-fade">
@@ -541,6 +707,72 @@
                                         </li>
                                     </ul>
                                 </div>
+                            </div>
+                        }
+                        else if (activeTab == "plugins")
+                        {
+                            <div class="animate-fade">
+                                @if (showPluginCreate)
+                                {
+                                    <div class="card p-3 mb-4 border-success animate-fade">
+                                        <p class="text-muted small mb-2">Nouveau plugin rattaché à <strong class="text-white">@selectedProduct?.Name</strong></p>
+                                        <div class="input-group">
+                                            <input class="form-control" placeholder="Nom du plugin (ex: Module Reporting)" @bind="NewProductName" />
+                                            <button class="btn btn-success" @onclick="CreateProduct">Créer</button>
+                                            <button class="btn btn-outline-secondary" @onclick='() => { showPluginCreate = false; NewProductName = ""; parentForNewProduct = null; }'>Annuler</button>
+                                        </div>
+                                    </div>
+                                }
+
+                                @if (!selectedProduct!.SubProducts.Any())
+                                {
+                                    @if (!showPluginCreate)
+                                    {
+                                        <div class="text-center py-5 text-muted">
+                                            <div style="font-size:2rem;">🔌</div>
+                                            <p class="mt-2">Aucun plugin associé à ce produit.</p>
+                                            <button class="btn btn-outline-success btn-sm" @onclick="() => { parentForNewProduct = selectedProduct?.Id; showPluginCreate = true; }">+ Ajouter un plugin</button>
+                                        </div>
+                                    }
+                                }
+                                else
+                                {
+                                    <table class="table table-sm table-hover align-middle">
+                                        <thead>
+                                            <tr>
+                                                <th>Nom</th>
+                                                <th>ID</th>
+                                                <th class="text-center">Licences</th>
+                                                <th class="text-end">Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var sub in selectedProduct.SubProducts)
+                                            {
+                                                <tr style="cursor:pointer" @onclick="() => SelectProduct(sub)">
+                                                    <td class="fw-bold">
+                                                        <span class="badge bg-secondary me-2" style="font-size:0.6rem;">PLUGIN</span>
+                                                        @sub.Name
+                                                    </td>
+                                                    <td><small class="text-muted font-monospace">@sub.Id</small></td>
+                                                    <td class="text-center"><span class="badge bg-primary">@sub.Licenses.Count</span></td>
+                                                    <td class="text-end" @onclick:stopPropagation="true">
+                                                        <button class="btn btn-sm btn-outline-info" @onclick="() => ShowPublicKey(sub)" title="Clé publique">
+                                                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-key" viewBox="0 0 16 16"><path d="M0 8a4 4 0 0 1 7.465-2H14a.5.5 0 0 1 .354.146l1.5 1.5a.5.5 0 0 1 0 .708l-1.5 1.5a.5.5 0 0 1-.708 0L13 9.207l-.646.647a.5.5 0 0 1-.708 0L11 9.207l-.646.647a.5.5 0 0 1-.708 0L9 9.207l-.646.647A.5.5 0 0 1 8 10h-.535A4 4 0 0 1 0 8zm4-3a3 3 0 1 0 2.712 4.285A.5.5 0 0 1 7.163 9h.63l.853-.854a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.793-.793-1-1h-6.63a.5.5 0 0 1-.451-.285A3 3 0 0 0 4 5z"/><path d="M4 8a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/></svg>
+                                                        </button>
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => RequestDelete(sub)" title="Supprimer">
+                                                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-trash" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                    @if (!showPluginCreate)
+                                    {
+                                        <button class="btn btn-outline-success btn-sm mt-2" @onclick="() => { parentForNewProduct = selectedProduct?.Id; showPluginCreate = true; }">+ Ajouter un plugin</button>
+                                    }
+                                }
                             </div>
                         }
                     </div>
@@ -744,7 +976,7 @@
     private Product? productToDelete;
     private string deleteMessage = "";
 
-    // Types de licences
+    // Types de licences (chargés par produit dans LoadProductData)
     private List<LicenseType> LicenseTypes = new();
     private string newTypeName = "";
     private string newTypeSlug = "";
@@ -755,6 +987,24 @@
     private Guid? editingTypeId;
     private LicenseType? typeToDelete;
     private string deleteTypeMsg = "";
+
+    // Custom params par type de licence
+    private Guid? expandedTypeParamsId;
+    private List<LicenseTypeCustomParam> typeParams = new();
+    private string newParamKey = "";
+    private string newParamName = "";
+    private string newParamValue = "";
+
+    // Sous-produits (plugins)
+    private HashSet<Guid> expandedProducts = new();
+    private Guid? parentForNewProduct = null;
+    private bool showPluginCreate = false;
+
+    private void ToggleExpand(Guid id)
+    {
+        if (expandedProducts.Contains(id)) expandedProducts.Remove(id);
+        else expandedProducts.Add(id);
+    }
 
     protected override async Task OnInitializedAsync()
     {
@@ -785,9 +1035,8 @@
 
     private async Task LoadData()
     {
-        LicenseTypes = await Db.LicenseTypes.Include(t => t.Licenses).OrderBy(t => t.Name).ToListAsync();
-
-        var query = Db.Products.AsQueryable();
+        // Seulement les produits racines (sans parent)
+        var query = Db.Products.Where(p => p.ParentProductId == null).AsQueryable();
         TotalCount = await query.CountAsync();
 
         if (CurrentPage > TotalPages && TotalPages > 0) CurrentPage = TotalPages;
@@ -795,6 +1044,7 @@
 
         ProductsList = await query
             .Include(p => p.Licenses).ThenInclude(l => l.Type)
+            .Include(p => p.SubProducts).ThenInclude(s => s.Licenses)
             .OrderBy(p => p.Name)
             .Skip((CurrentPage - 1) * PageSize)
             .Take(PageSize)
@@ -821,6 +1071,13 @@
     private async Task LoadProductData()
     {
         if (selectedProduct == null) return;
+
+        // Types de licences du produit
+        LicenseTypes = await Db.LicenseTypes
+            .Include(t => t.Licenses)
+            .Where(t => t.ProductId == selectedProduct.Id)
+            .OrderBy(t => t.Name)
+            .ToListAsync();
 
         // Stats KPIs
         prodActivations = await Db.Licenses.CountAsync(l => l.ProductId == selectedProduct.Id && l.ActivationDate != null);
@@ -886,19 +1143,21 @@
 
     private async Task CreateLicenseType()
     {
+        if (selectedProduct == null) { Toast.ShowError("Aucun produit sélectionné."); return; }
         if (string.IsNullOrWhiteSpace(newTypeName) || string.IsNullOrWhiteSpace(newTypeSlug))
         {
             Toast.ShowError("Nom et Slug requis."); return;
         }
 
         var slug = newTypeSlug.Trim().ToUpper().Replace(" ", "_");
-        if (await Db.LicenseTypes.AnyAsync(t => t.Slug == slug))
+        if (await Db.LicenseTypes.AnyAsync(t => t.ProductId == selectedProduct.Id && t.Slug == slug))
         {
-            Toast.ShowError("Ce Slug existe déjà."); return;
+            Toast.ShowError("Ce Slug existe déjà pour ce produit."); return;
         }
 
         var lt = new LicenseType
         {
+            ProductId = selectedProduct.Id,
             Name = newTypeName, Slug = slug,
             DefaultDurationDays = newTypeDuration,
             DefaultMaxSeats = newMaxSeats,
@@ -908,7 +1167,7 @@
         await Db.SaveChangesAsync();
         Toast.ShowSuccess($"Type '{slug}' ajouté.");
         newTypeName = ""; newTypeSlug = ""; newTypeDuration = 30; newMaxSeats = 1; isRecurring = false;
-        await LoadData();
+        await LoadProductData();
     }
 
     private async Task SaveTypeEdit(LicenseType lt)
@@ -954,6 +1213,55 @@
             await LoadData();
         }
         typeToDelete = null;
+    }
+
+    // --- CUSTOM PARAMS PAR TYPE ---
+
+    private async Task ToggleTypeParams(LicenseType type)
+    {
+        if (expandedTypeParamsId == type.Id)
+        {
+            expandedTypeParamsId = null;
+            typeParams = new();
+            return;
+        }
+        expandedTypeParamsId = type.Id;
+        typeParams = await Db.LicenseTypeCustomParams
+            .Where(p => p.LicenseTypeId == type.Id)
+            .OrderBy(p => p.Key)
+            .ToListAsync();
+        newParamKey = ""; newParamName = ""; newParamValue = "";
+    }
+
+    private async Task AddTypeParam(LicenseType type)
+    {
+        var key = newParamKey.Trim();
+        if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(newParamName))
+        {
+            Toast.ShowError("Clé et Nom requis."); return;
+        }
+        if (!System.Text.RegularExpressions.Regex.IsMatch(key, @"^[a-zA-Z0-9_]+$"))
+        {
+            Toast.ShowError("La clé ne doit contenir que des caractères alphanumériques ou des underscores."); return;
+        }
+        if (await Db.LicenseTypeCustomParams.AnyAsync(p => p.LicenseTypeId == type.Id && p.Key == key))
+        {
+            Toast.ShowError($"La clé '{key}' existe déjà pour ce type."); return;
+        }
+        var param = new LicenseTypeCustomParam { LicenseTypeId = type.Id, Key = key, Name = newParamName.Trim(), Value = newParamValue.Trim() };
+        Db.LicenseTypeCustomParams.Add(param);
+        await Db.SaveChangesAsync();
+        Toast.ShowSuccess($"Paramètre '{key}' ajouté.");
+        newParamKey = ""; newParamName = ""; newParamValue = "";
+        typeParams = await Db.LicenseTypeCustomParams.Where(p => p.LicenseTypeId == type.Id).OrderBy(p => p.Key).ToListAsync();
+    }
+
+    private async Task DeleteTypeParam(LicenseTypeCustomParam param)
+    {
+        Db.LicenseTypeCustomParams.Remove(param);
+        await Db.SaveChangesAsync();
+        typeParams.Remove(param);
+        Toast.ShowSuccess("Paramètre supprimé.");
     }
 
     // --- PRODUITS ---
@@ -1042,11 +1350,12 @@
             StateHasChanged();
             await Task.Delay(500);
 
-            var p = new Product 
-            { 
-                Name = NewProductName, 
-                PrivateKeyXml = encryptedKey, 
-                PublicKeyXml = keys.PublicKey 
+            var p = new Product
+            {
+                Name = NewProductName,
+                PrivateKeyXml = encryptedKey,
+                PublicKeyXml = keys.PublicKey,
+                ParentProductId = parentForNewProduct
             };
             
             Db.Products.Add(p);
@@ -1093,11 +1402,13 @@
     private async Task FinishCreation()
     {
         Toast.ShowSuccess($"Logiciel '{NewProductName}' prêt.");
-        NewProductName = ""; 
+        NewProductName = "";
         showCreate = false;
         isCreating = false;
         creationStep = 0;
         generatedPrivateKey = null;
+        parentForNewProduct = null;
+        showPluginCreate = false;
         await LoadData();
     }
 

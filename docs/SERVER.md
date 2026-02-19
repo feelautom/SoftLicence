@@ -7,7 +7,7 @@ Le serveur SoftLicence fait office d'**Autorité de Certification** et de **Cons
 Le serveur est entièrement conteneurisé. Pour le déployer sur un VPS (via Docker ou Docker direct) :
 
 1. Poussez votre code sur votre dépôt Git.
-2. Utilisez le fichier `Docker/docker-compose.yml`.
+2. Utilisez le fichier `docker/docker-compose.yml`.
 3. Configurez les **Variables d'Environnement** dans Docker :
 
 | Variable | Description | Exemple |
@@ -22,7 +22,7 @@ Le serveur est entièrement conteneurisé. Pour le déployer sur un VPS (via Doc
 | `SmtpSettings__Username` | User SMTP | `contact@EXAMPLE.COM` |
 | `SmtpSettings__Password` | Pass SMTP | `app_password` |
 | `SmtpSettings__FromEmail` | Email expéditeur | `noreply@EXAMPLE.COM` |
-| `SmtpSettings__FromName` | Nom expéditeur | `FeelAutom` |
+| `SmtpSettings__FromName` | Nom expéditeur | `YOUR_COMPANY_NAME` |
 | `FORCE_DB_RESET` | Supprimer et recréer la BDD | `true` ou `false` |
 
 ## 📡 API Publique (Activation)
@@ -49,9 +49,30 @@ Enregistre un produit sur une machine.
     *   "Cette licence n'est pas valide pour la version X.Y.Z".
     *   "Nombre maximum d'activations atteint (X)".
 
-### 2. Auto-Trial (Activation sans clé)
-Le serveur permet une activation automatique au premier lancement via `/api/activation/trial` ou en utilisant une clé se terminant par `-FREE-TRIAL`.
-- **Fonctionnement** : Si le matériel est inconnu, le serveur crée une licence avec la durée définie dans les paramètres du type de licence.
+### 2. Auto-Trial / Community (`POST /api/activation/trial`)
+Activation automatique au premier lancement, ou renouvellement d'une licence récurrente (Community).
+
+**Payload :**
+```json
+{
+  "HardwareId": "FINGERPRINT_DU_PC",
+  "AppName": "YOUR_APP_NAME",
+  "TypeSlug": "SIPLINE-COMMUNITY",
+  "AppVersion": "1.2.3"
+}
+```
+
+**Comportement quand une licence existe déjà pour ce HardwareId :**
+
+| Cas | Résultat |
+|---|---|
+| `IsActive = false` (révoquée) | `403 Forbidden` |
+| `IsRecurring = true` + expirée | Renouvellement auto : `ExpirationDate += DefaultDurationDays`, historique `RENEWED`, renvoi licence signée |
+| Sinon (active ou expirée non-récurrente) | Renvoi tel quel (le client gère le blocage) |
+
+**Première demande (HardwareId inconnu) :** crée une licence avec la durée `DefaultDurationDays` du type.
+
+**Alternative :** Une clé se terminant par `-FREE-TRIAL` dans `POST /api/activation` déclenche le même flux.
 
 ### 3. Système de Reset (Self-Service)
 Le serveur permet aux clients de délier eux-mêmes leur licence de leur matériel (Reset HWID) via une double validation par email :

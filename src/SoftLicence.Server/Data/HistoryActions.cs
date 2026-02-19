@@ -11,4 +11,5 @@ public static class HistoryActions
     public const string UnlinkedManual = "UNLINKED_MANUAL";
     public const string UnlinkedAdminTool = "UNLINKED_ADMIN_TOOL";
     public const string GlobalReset = "GLOBAL_RESET";
+    public const string Renewed = "RENEWED";
 }

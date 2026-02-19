@@ -11,6 +11,7 @@ SoftLicence provides an industrial-grade licensing solution using RSA-4096 crypt
 - **Trial Support**: Easily implement auto-trial periods for your software.
 - **Online & Offline Validation**: Robust verification logic even without an active internet connection.
 - **Typed Results**: Modern API with clear success/error states.
+- **Custom Parameters**: Inject typed per-license-type parameters (features, limits) signed into the license file.
 
 ## 🛠️ Quick Start
 
@@ -40,6 +41,21 @@ if (status.IsValid)
     Console.WriteLine("License is valid!");
 }
 ```
+
+### 4. Read Custom Parameters
+
+Parameters defined per license type on the server are signed into the license and accessible via `GetParam<T>`:
+
+```csharp
+var validation = client.ValidateLocal(licenseFile, hardwareId);
+if (validation.IsValid)
+{
+    int maxAccounts = validation.License!.GetParam<int>("maxAccounts", fallback: 1);
+    bool withLogo   = validation.License!.GetParam<bool>("withLogo", fallback: true);
+}
+```
+
+Supported types: `string`, `int`, `long`, `double`, `bool`, `Guid`.
 
 ## 📚 Documentation
 

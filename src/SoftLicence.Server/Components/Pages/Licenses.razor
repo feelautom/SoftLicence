@@ -425,7 +425,7 @@
 
     private Guid? ExpandedLicenseId;
     private string activeDetailTab = "seats";
-    
+
     private bool isAuthorized = false;
 
     // Pagination
@@ -478,6 +478,7 @@
         HistoryActions.UnlinkedApi => "bg-info",
         HistoryActions.UnlinkedManual => "bg-warning text-dark",
         HistoryActions.UnlinkedAdminTool => "bg-danger",
+        HistoryActions.Renewed => "bg-success",
         _ => "bg-secondary"
     };
 
@@ -536,8 +537,8 @@
             LicenseKey = key,
             IsActive = true,
             MaxSeats = newMaxSeats,
-            ExpirationDate = (newValidityDays.HasValue && newValidityDays.Value > 0) 
-                ? DateTime.UtcNow.AddDays(newValidityDays.Value) 
+            ExpirationDate = (newValidityDays.HasValue && newValidityDays.Value > 0)
+                ? DateTime.UtcNow.AddDays(newValidityDays.Value)
                 : null
         };
 
