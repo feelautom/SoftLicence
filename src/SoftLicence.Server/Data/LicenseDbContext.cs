@@ -24,6 +24,7 @@ namespace SoftLicence.Server.Data
         public DbSet<SystemSetting> SystemSettings { get; set; }
         public DbSet<AdminRole> AdminRoles { get; set; }
         public DbSet<AdminUser> AdminUsers { get; set; }
+        public DbSet<LicenseTypeCustomParam> LicenseTypeCustomParams { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -41,8 +42,15 @@ namespace SoftLicence.Server.Data
                 .HasForeignKey(l => l.ProductId)
                 .OnDelete(DeleteBehavior.Restrict); // Protection : On ne supprime pas un produit s'il a des licences
 
+            // LicenseType appartient à un produit — slug unique par produit
             modelBuilder.Entity<LicenseType>()
-                .HasIndex(t => t.Slug)
+                .HasOne(t => t.Product)
+                .WithMany(p => p.LicenseTypes)
+                .HasForeignKey(t => t.ProductId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            modelBuilder.Entity<LicenseType>()
+                .HasIndex(t => new { t.ProductId, t.Slug })
                 .IsUnique();
 
             // Protection : empêcher la suppression d'un type s'il a des licences
@@ -50,6 +58,13 @@ namespace SoftLicence.Server.Data
                 .HasOne(l => l.Type)
                 .WithMany(t => t.Licenses)
                 .HasForeignKey(l => l.LicenseTypeId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            // Hiérarchie produit / plugin (self-referencing)
+            modelBuilder.Entity<Product>()
+                .HasOne(p => p.ParentProduct)
+                .WithMany(p => p.SubProducts)
+                .HasForeignKey(p => p.ParentProductId)
                 .OnDelete(DeleteBehavior.Restrict);
 
             // Empêcher les doublons de seat actif (même licence + même machine)
@@ -98,6 +113,17 @@ namespace SoftLicence.Server.Data
                 .WithMany(l => l.History)
                 .HasForeignKey(h => h.LicenseId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            // Paramètres personnalisés par type de licence — clé unique par type
+            modelBuilder.Entity<LicenseTypeCustomParam>()
+                .HasOne(p => p.LicenseType)
+                .WithMany(t => t.CustomParams)
+                .HasForeignKey(p => p.LicenseTypeId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            modelBuilder.Entity<LicenseTypeCustomParam>()
+                .HasIndex(p => new { p.LicenseTypeId, p.Key })
+                .IsUnique();
         }
     }
 }

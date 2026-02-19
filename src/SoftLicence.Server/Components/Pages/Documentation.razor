@@ -54,10 +54,18 @@ if (vm.IsLicensed) { /* Lancer MainWindow */ }</code></pre>
                 <h4>🛠 Gestion du parc</h4>
                 <h5 class="mt-3">Logiciels</h5>
                 <p>Chaque logiciel possède son propre couple de clés RSA-4096. Ne partagez jamais la clé privée (stockée en base).</p>
-                
+
+                <h5 class="mt-3">Types de licences</h5>
+                <p>Chaque produit peut définir plusieurs types de licences, identifiés par un <strong>Slug</strong> (ex : <code>YOUR_APP_NAME-PRO</code>, <code>YOUR_APP_NAME-COMMUNITY</code>). Deux modes de fonctionnement existent :</p>
+                <ul>
+                    <li><span class="badge bg-secondary">FIXE</span> — Durée fixe non renouvelable (<code>IsRecurring = false</code>). Utilisé pour les <strong>versions Trial</strong> : une fois expirée, le Hardware ID ne peut plus obtenir de nouvelle licence de ce type. C'est le comportement par défaut.</li>
+                    <li><span class="badge bg-primary">ABONNEMENT</span> — Durée renouvelable automatiquement (<code>IsRecurring = true</code>). Utilisé pour les <strong>versions Community</strong> : à chaque expiration, le client redemande une licence via l'endpoint <code>/api/activation/trial</code> et le serveur prolonge automatiquement la période sans créer de nouvelle entrée. L'historique enregistre un événement <code>RENEWED</code>.</li>
+                </ul>
+                <p>Le mode s'active en cochant <strong>Abonnement</strong> lors de la création ou de l'édition d'un type de licence dans l'onglet Produits.</p>
+
                 <h5 class="mt-3">Licences</h5>
                 <p>Une licence est liée à un <strong>Hardware ID</strong> unique lors de sa première activation. Le client ne pourra pas copier son fichier de licence sur un autre PC.</p>
-                
+
                 <h5 class="mt-3">Réinitialisation (Reset HWID)</h5>
                 <p>Si un client change de matériel, utilisez le bouton "Reset HWID" pour lui permettre de ré-associer sa licence à sa nouvelle machine.</p>
             </div>
@@ -114,6 +122,28 @@ if (vm.IsLicensed) { /* Lancer MainWindow */ }</code></pre>
   "Reference": "STRIPE-123"
 }</code></pre>
                     <p class="small text-muted mt-1"><code>Reference</code> est optionnel : ID de commande, référence client, etc. Ce champ est inclus dans le fichier de licence signé.</p>
+                </div>
+
+                <h5 class="text-info mt-4">3b. Trial / Community (Public)</h5>
+                <p class="small">Permet à un client d'obtenir automatiquement une licence gratuite (Trial ou Community) sans clé d'activation. Le type de licence est déterminé par le <code>TypeSlug</code> configuré sur le produit.</p>
+
+                <div class="api-box">
+                    <span class="badge bg-success">POST</span> <code>/api/activation/trial</code>
+                    <p class="mt-2">Crée ou renouvelle une licence gratuite pour la machine courante.</p>
+                    <strong>Paramètres (JSON) :</strong>
+                    <pre><code>{
+  "HardwareId": "ABC-123-XYZ",
+  "AppName": "MySoftware",
+  "AppId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "TypeSlug": "YOUR_APP_NAME-COMMUNITY",
+  "AppVersion": "1.0.0"
+}</code></pre>
+                    <strong>Comportement selon le mode :</strong>
+                    <ul class="mt-2">
+                        <li><span class="badge bg-secondary">FIXE</span> — Crée une licence une seule fois. Si elle est expirée, retourne une erreur : le Trial ne peut pas être renouvelé.</li>
+                        <li><span class="badge bg-primary">ABONNEMENT</span> — Crée la licence à la première demande. Si elle est expirée, <strong>prolonge automatiquement</strong> la date d'expiration de <code>DefaultDurationDays</code> jours supplémentaires et retourne la licence mise à jour.</li>
+                    </ul>
+                    <p class="small text-muted mt-2">Si le <code>TypeSlug</code> n'existe pas sur le produit, l'appel retourne HTTP 400. Un slug doit être explicitement configuré pour autoriser ce mode de licence.</p>
                 </div>
 
                 <h5 class="text-info mt-4">4. Réinitialisation (Public)</h5>

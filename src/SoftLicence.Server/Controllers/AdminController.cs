@@ -182,7 +182,7 @@ namespace SoftLicence.Server.Controllers
                 var product = await _db.Products.FirstOrDefaultAsync(p => p.Name == req.ProductName);
                 if (product == null) return NotFound(_localizer["Api_ProductNotFound"].Value);
         
-                var type = await _db.LicenseTypes.FirstOrDefaultAsync(t => t.Slug == req.TypeSlug);
+                var type = await _db.LicenseTypes.FirstOrDefaultAsync(t => t.ProductId == product.Id && t.Slug == req.TypeSlug);
                 if (type == null) return BadRequest(string.Format(_localizer["Api_LicenseTypeUnknown"].Value, req.TypeSlug));
         
                 var licenseKey = Guid.NewGuid().ToString("D").ToUpper();

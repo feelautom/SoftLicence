@@ -216,6 +216,7 @@
   <data name="Products_SoftwareDeleted" xml:space="preserve"><value>Logiciel supprimé.</value></data>
   <data name="Products_ApiKeyRegenerated" xml:space="preserve"><value>Clé API régénérée avec succès.</value></data>
   <data name="Products_TypeDeleted" xml:space="preserve"><value>Type supprimé.</value></data>
+  <data name="Products_Abo_Short" xml:space="preserve"><value>Abo.</value></data>
   <data name="Products_DownloadStarted" xml:space="preserve"><value>Téléchargement lancé.</value></data>
 
   <!-- Audit -->
