@@ -49,6 +49,8 @@ namespace SoftLicence.Server.Controllers
             public required string AppName { get; set; }
             public string? AppId { get; set; } // Identifiant unique du produit
             public string? AppVersion { get; set; } // Nouvelle version client
+            public string? CustomerEmail { get; set; }
+            public string? CustomerName { get; set; }
         }
 
         public class TrialRequest
@@ -58,6 +60,8 @@ namespace SoftLicence.Server.Controllers
             public string? AppId { get; set; } // Identifiant unique du produit
             public required string TypeSlug { get; set; } // ex: "TRIAL"
             public string? AppVersion { get; set; }
+            public string? CustomerEmail { get; set; }
+            public string? CustomerName { get; set; }
         }
 
         private async Task<Product?> FindProductAsync(string name, string? id)
@@ -131,10 +135,16 @@ namespace SoftLicence.Server.Controllers
                 .FirstOrDefaultAsync(t => t.ProductId == product.Id && t.Slug.ToUpper() == req.TypeSlug.Trim().ToUpper());
             if (type == null) return BadRequest(string.Format(_localizer["Api_LicenseTypeUnknown"].Value, req.TypeSlug));
 
-            // Vérifier si ce PC a déjà une licence pour ce produit (Trial ou autre)
+            // Vérifier si ce PC a déjà une licence pour ce produit
+            // Priorité : même type demandé > active > expiration la plus récente
+            var requestedSlug = req.TypeSlug.Trim().ToUpper();
             var existing = await _db.Licenses
                 .Include(l => l.Type).ThenInclude(t => t!.CustomParams)
-                .FirstOrDefaultAsync(l => l.ProductId == product.Id && l.HardwareId == req.HardwareId);
+                .Where(l => l.ProductId == product.Id && l.HardwareId == req.HardwareId)
+                .OrderByDescending(l => l.Type != null && l.Type.Slug.ToUpper() == requestedSlug ? 1 : 0)
+                .ThenByDescending(l => l.IsActive ? 1 : 0)
+                .ThenByDescending(l => l.ExpirationDate)
+                .FirstOrDefaultAsync();
 
             if (existing != null)
             {
@@ -142,8 +152,12 @@ namespace SoftLicence.Server.Controllers
                 if (!existing.IsActive)
                     return StatusCode(403, _localizer["Api_AccessRevoked"].Value);
 
-                // Récurrent (Community) + expirée → renouvellement automatique
-                if (existing.Type?.IsRecurring == true && existing.ExpirationDate.HasValue && DateTime.UtcNow > existing.ExpirationDate.Value)
+                bool isExpired = existing.ExpirationDate.HasValue && DateTime.UtcNow > existing.ExpirationDate.Value;
+                bool isDifferentType = !string.Equals(existing.Type?.Slug, req.TypeSlug.Trim(), StringComparison.OrdinalIgnoreCase);
+                bool isCommunitySlug = string.Equals(existing.Type?.Slug, "YOUR_APP_NAME-COMMUNITY", StringComparison.OrdinalIgnoreCase);
+
+                // Renouvellement automatique : UNIQUEMENT Community gratuite expirée qui redemande Community
+                if (isCommunitySlug && existing.Type?.IsRecurring == true && isExpired && !isDifferentType)
                 {
                     existing.ExpirationDate = DateTime.UtcNow.AddDays(existing.Type.DefaultDurationDays);
                     _db.LicenseHistories.Add(new LicenseHistory {
@@ -153,49 +167,64 @@ namespace SoftLicence.Server.Controllers
                         PerformedBy = "System"
                     });
                     await _db.SaveChangesAsync();
-                    _logger.LogInformation("Renouvellement {TypeSlug} : {HardwareId} → expiration {Expiry}", existing.Type.Slug, req.HardwareId, existing.ExpirationDate);
+                    _logger.LogInformation("Renouvellement Community : {HardwareId} → expiration {Expiry}", req.HardwareId, existing.ExpirationDate);
                 }
 
-                // Sinon → renvoi tel quel (trial non renouvelable reste expiré côté client)
-
-                // S'assurer que le siège existe
-                var seat = await _db.LicenseSeats.FirstOrDefaultAsync(s => s.LicenseId == existing.Id && s.HardwareId == req.HardwareId && s.IsActive);
-                if (seat == null)
+                // Licence expirée + type différent demandé → créer une nouvelle licence
+                // Couvre : Trial FIXE expiré → Community, plan payant expiré → Community
+                if (isExpired && isDifferentType)
                 {
-                    _db.LicenseSeats.Add(new LicenseSeat {
-                        LicenseId = existing.Id, HardwareId = req.HardwareId,
-                        FirstActivatedAt = DateTime.UtcNow, LastCheckInAt = DateTime.UtcNow,
-                        IsActive = true
-                    });
+                    _logger.LogInformation("Licence expirée ({OldType}) → création d'une nouvelle licence {NewType} pour {HardwareId}",
+                        existing.Type?.Slug, req.TypeSlug, req.HardwareId);
+                    // Fall through to licence creation below
+                }
+                else
+                {
+                    // Retourner la licence existante (valide, ou plan payant actif non expiré)
+                    // Mise à jour des infos client si fournies
+                    if (!string.IsNullOrWhiteSpace(req.CustomerEmail))
+                        existing.CustomerEmail = req.CustomerEmail;
+                    if (!string.IsNullOrWhiteSpace(req.CustomerName))
+                        existing.CustomerName = req.CustomerName;
+
+                    var seat = await _db.LicenseSeats.FirstOrDefaultAsync(s => s.LicenseId == existing.Id && s.HardwareId == req.HardwareId && s.IsActive);
+                    if (seat == null)
+                    {
+                        _db.LicenseSeats.Add(new LicenseSeat {
+                            LicenseId = existing.Id, HardwareId = req.HardwareId,
+                            FirstActivatedAt = DateTime.UtcNow, LastCheckInAt = DateTime.UtcNow,
+                            IsActive = true
+                        });
+                    }
                     await _db.SaveChangesAsync();
-                }
 
-                var model = new LicenseModel
-                {
-                    Id = existing.Id,
-                    LicenseKey = existing.LicenseKey,
-                    CustomerName = existing.CustomerName,
-                    CustomerEmail = existing.CustomerEmail,
-                    TypeSlug = existing.Type?.Slug ?? "STANDARD",
-                    Reference = existing.Reference,
-                    CreationDate = existing.CreationDate,
-                    ExpirationDate = existing.ExpirationDate,
-                    HardwareId = existing.HardwareId ?? string.Empty,
-                    Features = BuildFeatures(existing.Type?.CustomParams)
-                };
+                    var model = new LicenseModel
+                    {
+                        Id = existing.Id,
+                        LicenseKey = existing.LicenseKey,
+                        CustomerName = existing.CustomerName,
+                        CustomerEmail = existing.CustomerEmail,
+                        TypeSlug = existing.Type?.Slug ?? "STANDARD",
+                        Reference = existing.Reference,
+                        CreationDate = existing.CreationDate,
+                        ExpirationDate = existing.ExpirationDate,
+                        HardwareId = existing.HardwareId ?? string.Empty,
+                        Features = BuildFeatures(existing.Type?.CustomParams)
+                    };
 
-                try
-                {
-                    var decryptedKey = _encryption.Decrypt(product.PrivateKeyXml);
-                    if (decryptedKey == "ERROR_DECRYPTION_FAILED") return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
-                    var signed = LicenseService.GenerateLicense(model, decryptedKey);
-                    _logger.LogInformation("Trial Recovery : Renvoi de la licence existante pour {HardwareId}", req.HardwareId);
-                    return Ok(new { LicenseFile = signed });
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Erreur signature trial recovery pour {HardwareId}", req.HardwareId);
-                    return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
+                    try
+                    {
+                        var decryptedKey = _encryption.Decrypt(product.PrivateKeyXml);
+                        if (decryptedKey == "ERROR_DECRYPTION_FAILED") return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
+                        var signed = LicenseService.GenerateLicense(model, decryptedKey);
+                        _logger.LogInformation("Licence recovery : Renvoi de la licence existante ({TypeSlug}) pour {HardwareId}", existing.Type?.Slug, req.HardwareId);
+                        return Ok(new { LicenseFile = signed });
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Erreur signature licence recovery pour {HardwareId}", req.HardwareId);
+                        return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
+                    }
                 }
             }
 
@@ -209,8 +238,8 @@ namespace SoftLicence.Server.Controllers
                 ProductId = product.Id,
                 LicenseTypeId = type.Id,
                 LicenseKey = newKey,
-                CustomerName = "Auto Trial",
-                CustomerEmail = "trial@auto.local",
+                CustomerName = req.CustomerName ?? "Auto Trial",
+                CustomerEmail = req.CustomerEmail ?? "trial@auto.local",
                 HardwareId = req.HardwareId,
                 ActivationDate = DateTime.UtcNow,
                 CreationDate = DateTime.UtcNow,
@@ -349,6 +378,14 @@ namespace SoftLicence.Server.Controllers
                         await _db.SaveChangesAsync();
                     }
 
+                    // Mise à jour des infos client si fournies
+                    if (!string.IsNullOrWhiteSpace(req.CustomerEmail))
+                        existing.CustomerEmail = req.CustomerEmail;
+                    if (!string.IsNullOrWhiteSpace(req.CustomerName))
+                        existing.CustomerName = req.CustomerName;
+                    if (!string.IsNullOrWhiteSpace(req.CustomerEmail) || !string.IsNullOrWhiteSpace(req.CustomerName))
+                        await _db.SaveChangesAsync();
+
                     // On met à jour le log avec la vraie clé trouvée
                     HttpContext.Items[LogKeys.LicenseKey] = existing.LicenseKey;
 
@@ -380,7 +417,7 @@ namespace SoftLicence.Server.Controllers
                 var newKey = Guid.NewGuid().ToString("D").ToUpper();
                 var newLic = new License {
                     ProductId = product.Id, LicenseTypeId = type.Id, LicenseKey = newKey,
-                    CustomerName = "Auto Trial", CustomerEmail = "trial@auto.local",
+                    CustomerName = req.CustomerName ?? "Auto Trial", CustomerEmail = req.CustomerEmail ?? "trial@auto.local",
                     HardwareId = req.HardwareId, ActivationDate = DateTime.UtcNow, CreationDate = DateTime.UtcNow,
                     ExpirationDate = DateTime.UtcNow.AddDays(type.DefaultDurationDays), IsActive = true
                 };
@@ -522,6 +559,12 @@ namespace SoftLicence.Server.Controllers
 
                 _logger.LogInformation("Nouveau poste active ({Count}/{Max}) : Cle '{LicenseKey}' sur HWID '{HardwareId}'", currentSeatsCount + 1, license.MaxSeats, cleanKey, req.HardwareId);
             }
+
+            // Mise à jour des infos client si fournies par le client WPF
+            if (!string.IsNullOrWhiteSpace(req.CustomerEmail))
+                license.CustomerEmail = req.CustomerEmail;
+            if (!string.IsNullOrWhiteSpace(req.CustomerName))
+                license.CustomerName = req.CustomerName;
 
             await _db.SaveChangesAsync();
 

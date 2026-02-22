@@ -29,5 +29,6 @@ namespace SoftLicence.Server.Data
         public ICollection<License> Licenses { get; set; } = new List<License>();
         public ICollection<LicenseType> LicenseTypes { get; set; } = new List<LicenseType>();
         public ICollection<TelemetryRecord> TelemetryRecords { get; set; } = new List<TelemetryRecord>();
+        public ICollection<ProductWebhook> Webhooks { get; set; } = new List<ProductWebhook>();
     }
 }

@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using SoftLicence.Server.Data;
@@ -11,9 +12,11 @@ using SoftLicence.Server.Data;
 namespace SoftLicence.Server.Migrations
 {
     [DbContext(typeof(LicenseDbContext))]
-    partial class LicenseDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260220141226_AddIpThreatScores")]
+    partial class AddIpThreatScores
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -483,46 +486,6 @@ namespace SoftLicence.Server.Migrations
                     b.ToTable("Products");
                 });
 
-            modelBuilder.Entity("SoftLicence.Server.Data.ProductWebhook", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<bool>("IsEnabled")
-                        .HasColumnType("boolean");
-
-                    b.Property<string>("LastError")
-                        .HasColumnType("text");
-
-                    b.Property<DateTime?>("LastTriggeredAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)");
-
-                    b.Property<Guid>("ProductId")
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Secret")
-                        .HasColumnType("text");
-
-                    b.Property<string>("Url")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ProductId");
-
-                    b.ToTable("ProductWebhooks");
-                });
-
             modelBuilder.Entity("SoftLicence.Server.Data.SystemSetting", b =>
                 {
                     b.Property<string>("Key")
@@ -833,17 +796,6 @@ namespace SoftLicence.Server.Migrations
                     b.Navigation("ParentProduct");
                 });
 
-            modelBuilder.Entity("SoftLicence.Server.Data.ProductWebhook", b =>
-                {
-                    b.HasOne("SoftLicence.Server.Data.Product", "Product")
-                        .WithMany("Webhooks")
-                        .HasForeignKey("ProductId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Product");
-                });
-
             modelBuilder.Entity("SoftLicence.Server.Data.TelemetryDiagnostic", b =>
                 {
                     b.HasOne("SoftLicence.Server.Data.TelemetryRecord", "Record")
@@ -937,8 +889,6 @@ namespace SoftLicence.Server.Migrations
                     b.Navigation("SubProducts");
 
                     b.Navigation("TelemetryRecords");
-
-                    b.Navigation("Webhooks");
                 });
 
             modelBuilder.Entity("SoftLicence.Server.Data.TelemetryDiagnostic", b =>

@@ -21,18 +21,32 @@ SoftLicence provides an industrial-grade licensing solution using RSA-4096 crypt
 var client = new SoftLicenceClient("https://your-licence-server.com", "YOUR_PUBLIC_KEY_XML");
 ```
 
-### 2. Request a Trial
+### 2. Activate a License
 
 ```csharp
-var result = await client.RequestTrialAsync("YourAppName", "TRIAL");
-if (result.IsSuccess) 
+var result = await client.ActivateAsync("YOUR-LICENSE-KEY", "YourAppName",
+    customerEmail: "user@example.com",   // optional — stored on the server
+    customerName: "John Doe");           // optional — stored on the server
+if (result.IsSuccess)
+{
+    File.WriteAllText("license.lic", result.LicenseFile);
+}
+```
+
+### 3. Request a Trial
+
+```csharp
+var result = await client.RequestTrialAsync("YourAppName",
+    customerEmail: "user@example.com",   // optional
+    customerName: "John Doe");           // optional
+if (result.IsSuccess)
 {
     Console.WriteLine("Trial activated!");
     File.WriteAllText("license.lic", result.LicenseFile);
 }
 ```
 
-### 3. Check License Status
+### 4. Check License Status
 
 ```csharp
 var status = await client.CheckStatusAsync("YOUR_LICENSE_KEY", "YourAppName");
@@ -42,7 +56,7 @@ if (status.IsValid)
 }
 ```
 
-### 4. Read Custom Parameters
+### 5. Read Custom Parameters
 
 Parameters defined per license type on the server are signed into the license and accessible via `GetParam<T>`:
 

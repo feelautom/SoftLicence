@@ -1,0 +1,83 @@
+# SoftLicence
+
+> DRM and license management platform for .NET WPF applications.
+> RSA-4096 cryptographic license signing with hardware fingerprinting.
+> Security follows Kerckhoffs's principle: everything is public except the private key.
+
+## How to Use This Documentation
+
+This server exposes a complete, machine-readable documentation API. No authentication required.
+All endpoints are public and designed for LLM consumption.
+
+### Quick Start — Get Full Context in One Request
+
+To understand the entire SoftLicence system, fetch the complete documentation (~35 KB of Markdown):
+
+  GET /api/docs
+
+This returns all 15 sections in a single response — architecture, cryptography, database schema,
+API reference, security mechanisms, client integration, and more. This is the recommended approach
+when you need full system knowledge.
+
+### Targeted Reading — Fetch a Specific Section
+
+If you only need information on a specific topic, fetch a single section by ID:
+
+  GET /api/docs/{section-id}
+
+Example: GET /api/docs/crypto returns everything about RSA-4096 signing and verification.
+Example: GET /api/docs/database returns the complete schema with all 20 tables and fields.
+
+### Discover Available Sections
+
+To see what sections exist before fetching them:
+
+  GET /api/docs/sections
+
+Returns a JSON array with id, title, and url for each section.
+
+### Search the Documentation
+
+To find specific information across all sections:
+
+  GET /api/docs/search?q={query}
+
+Multi-word queries use AND logic (all terms must appear on the same line).
+Example: GET /api/docs/search?q=zombie returns all mentions of zombie detection.
+Example: GET /api/docs/search?q=hardware+sha returns lines about hardware ID hashing.
+
+### JSON Format
+
+By default, endpoints return raw Markdown (text/markdown). To get a JSON wrapper instead:
+
+  Accept: application/json
+
+The JSON response includes metadata alongside the Markdown content:
+  { "section": "crypto", "content": "## 3. Cryptography..." }
+
+## Available Sections (15)
+
+| Section ID | Topic | What You'll Learn |
+|------------|-------|-------------------|
+| overview | System Overview | What SoftLicence is, Kerckhoffs's principle, 5 projects and their roles |
+| architecture | Architecture | ASP.NET middleware pipeline, service registrations, database config, Blazor UI |
+| crypto | Cryptography | RSA-4096 key generation, license signing/verification step by step, encryption at rest |
+| hardware | Hardware Fingerprinting | 5 WMI components, SHA-256 algorithm, 16-char hex ID, fallback behavior |
+| products | Products & Plugins | 3-level hierarchy, RSA keys per product, ApiSecret, creation via API and UI |
+| licenses | License Lifecycle | Creation, activation, multi-seat, renewal, revocation, self-service reset, version masking |
+| security | Security System | Threat scoring (0-200+), quarantine throttling, ban escalation, zombie detection, rate limiting |
+| database | Database Schema | All 20 tables with every field, type, constraint, index, and relationship |
+| api-public | Public API Reference | Activation, status check, trial, reset, telemetry — request/response formats |
+| api-admin | Admin API Reference | Product and license management — auth, endpoints, request/response formats |
+| client-integration | WPF Integration | SDK setup, ViewModel, activation flow, local cache, periodic checks, XAML binding |
+| rbac | Users & Roles | Root account, AdminUser, AdminRole, permissions CSV, cookie auth, stealth mode |
+| webhooks | Webhook Notifications | 6 triggers, payload format, ntfy integration, error handling |
+| config | Configuration & Deployment | appsettings.json, Docker, environment variables, backups, retention |
+| troubleshooting | Troubleshooting | RSA key diagnostics, decryption errors, hardware ID issues, common error codes |
+
+## Technical Details
+
+- Rate limit: 30 requests/minute (plenty for fetching all sections + searches)
+- Cache: responses are cached for 1 hour (Cache-Control: public, max-age=3600)
+- No authentication required on any documentation endpoint
+- Content is in English

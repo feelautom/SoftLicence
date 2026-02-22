@@ -25,6 +25,8 @@ namespace SoftLicence.Server.Data
         public DbSet<AdminRole> AdminRoles { get; set; }
         public DbSet<AdminUser> AdminUsers { get; set; }
         public DbSet<LicenseTypeCustomParam> LicenseTypeCustomParams { get; set; }
+        public DbSet<IpThreatScore> IpThreatScores { get; set; }
+        public DbSet<ProductWebhook> ProductWebhooks { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -124,6 +126,13 @@ namespace SoftLicence.Server.Data
             modelBuilder.Entity<LicenseTypeCustomParam>()
                 .HasIndex(p => new { p.LicenseTypeId, p.Key })
                 .IsUnique();
+
+            // Webhooks télémétrie par produit
+            modelBuilder.Entity<ProductWebhook>()
+                .HasOne(w => w.Product)
+                .WithMany(p => p.Webhooks)
+                .HasForeignKey(w => w.ProductId)
+                .OnDelete(DeleteBehavior.Cascade);
         }
     }
 }

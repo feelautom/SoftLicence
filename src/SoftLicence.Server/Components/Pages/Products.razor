@@ -1,4 +1,6 @@
 @page "/products"
+@page "/products/{ProductId:guid}"
+@inject NavigationManager Nav
 @inject SoftLicence.Server.Services.AuthService Auth
 @inject LicenseDbContext Db
 @inject IDbContextFactory<LicenseDbContext> DbFactory
@@ -69,7 +71,7 @@
                             <button class="btn btn-outline-info" @onclick="DownloadPrivateKey">
                                 📥 @L["Products_DownloadPrivateKey"]
                             </button>
-                            <button class="btn btn-primary mt-2" @onclick="FinishCreation">
+                            <button class="btn btn-primary mt-2" @onclick="() => FinishCreation()">
                                 @L["Products_BackupDone"]
                             </button>
                         </div>
@@ -93,13 +95,13 @@
             else
             {
                 <div class="d-flex gap-2">
-                    @if (selectedProduct?.ParentProductId == null)
+                    @if (selectedProductDepth < 3)
                     {
-                        <button class="btn btn-outline-success btn-sm" @onclick='() => { parentForNewProduct = selectedProduct?.Id; activeTab = "plugins"; showPluginCreate = true; }' title="Ajouter un plugin associé à ce logiciel">
+                        <button class="btn btn-outline-success btn-sm" @onclick='() => { activeTab = "plugins"; parentForNewProduct = selectedProduct?.Id; showPluginCreate = true; }' title="Ajouter un plugin associé à ce logiciel">
                             + Plugin
                         </button>
                     }
-                    <button class="btn btn-outline-secondary" @onclick="() => { selectedProduct = null; parentForNewProduct = null; showPluginCreate = false; }">@L["Products_BackToList"]</button>
+                    <button class="btn btn-outline-secondary" @onclick="BackToList">@L["Products_BackToList"]</button>
                 </div>
             }
         </div>
@@ -274,8 +276,14 @@
                             {
                                 @foreach (var sub in p.SubProducts)
                                 {
-                                    <tr style="cursor:pointer; background:rgba(255,255,255,0.03);" @onclick="() => SelectProduct(sub)">
+                                    <tr style="cursor:pointer; background:rgba(80,120,200,0.06);" @onclick="() => SelectProduct(sub)">
                                         <td style="padding-left:2.5rem;">
+                                            @if (sub.SubProducts.Any())
+                                            {
+                                                <button class="btn btn-link btn-sm p-0 me-1 text-muted" style="font-size:0.75rem;" @onclick:stopPropagation="true" @onclick="() => ToggleExpand(sub.Id)" title="Sous-plugins">
+                                                    @(expandedProducts.Contains(sub.Id) ? "▼" : "▶")
+                                                </button>
+                                            }
                                             <span class="text-muted me-1">└</span>
                                             <span class="badge bg-secondary me-1" style="font-size:0.6rem;">PLUGIN</span>
                                             <span class="fw-bold">@sub.Name</span>
@@ -293,6 +301,31 @@
                                             </div>
                                         </td>
                                     </tr>
+                                    @if (expandedProducts.Contains(sub.Id))
+                                    {
+                                        @foreach (var subsub in sub.SubProducts)
+                                        {
+                                            <tr style="cursor:pointer; background:rgba(80,200,160,0.06);" @onclick="() => SelectProduct(subsub)">
+                                                <td style="padding-left:5rem;">
+                                                    <span class="text-muted me-1">└</span>
+                                                    <span class="badge bg-dark border border-secondary me-1" style="font-size:0.6rem;">SUB</span>
+                                                    <span class="fw-bold">@subsub.Name</span>
+                                                </td>
+                                                <td><small class="text-muted">@subsub.Id</small></td>
+                                                <td class="text-center"><span class="badge bg-primary">@subsub.Licenses.Count</span></td>
+                                                <td class="text-end" @onclick:stopPropagation="true">
+                                                    <div class="d-flex gap-2 justify-content-end">
+                                                        <button class="btn btn-sm btn-outline-info" @onclick="() => ShowPublicKey(subsub)" title="@L["Products_PublicKeyXml"]">
+                                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-key" viewBox="0 0 16 16"><path d="M0 8a4 4 0 0 1 7.465-2H14a.5.5 0 0 1 .354.146l1.5 1.5a.5.5 0 0 1 0 .708l-1.5 1.5a.5.5 0 0 1-.708 0L13 9.207l-.646.647a.5.5 0 0 1-.708 0L11 9.207l-.646.647a.5.5 0 0 1-.708 0L9 9.207l-.646.647A.5.5 0 0 1 8 10h-.535A4 4 0 0 1 0 8zm4-3a3 3 0 1 0 2.712 4.285A.5.5 0 0 1 7.163 9h.63l.853-.854a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.793-.793-1-1h-6.63a.5.5 0 0 1-.451-.285A3 3 0 0 0 4 5z"/><path d="M4 8a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/></svg>
+                                                        </button>
+                                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => RequestDelete(subsub)" title="@L["Common_Delete"]">
+                                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-trash" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
+                                                        </button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -303,7 +336,7 @@
         else
         {
             <!-- VUE DÉTAILLÉE / STATISTIQUES -->
-            <div class="animate-fade">
+            <div class="animate-fade" style="@(selectedProductDepth == 2 ? "background:rgba(80,120,200,0.08); border-radius:10px; padding:6px;" : selectedProductDepth == 3 ? "background:rgba(80,200,160,0.10); border-radius:10px; padding:6px;" : "")">
                 <div class="row g-3 mb-4">
                     <div class="col-md-8">
                         <div class="card h-100 p-4">
@@ -379,6 +412,52 @@
                                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-arrow-clockwise" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/><path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/></svg>
                                 </button>
                             </div>
+
+                            <hr class="my-4 border-secondary" />
+
+                            <h6>Webhooks Télémétrie</h6>
+                            <p class="small text-muted">Recevez un POST JSON à chaque événement télémétrie de ce produit.</p>
+
+                            @if (productWebhooks.Any())
+                            {
+                                <div class="list-group list-group-flush mb-3">
+                                    @foreach (var wh in productWebhooks)
+                                    {
+                                        <div class="list-group-item bg-transparent border-secondary d-flex justify-content-between align-items-center px-0 py-2">
+                                            <div>
+                                                <span class="fw-bold small">@wh.Name</span>
+                                                <br />
+                                                <code class="small text-info">@(wh.Url.Length > 45 ? wh.Url[..45] + "…" : wh.Url)</code>
+                                                @if (!string.IsNullOrEmpty(wh.Secret))
+                                                {
+                                                    <span class="badge bg-info text-dark ms-1" style="font-size:0.6rem;">SECRET</span>
+                                                }
+                                            </div>
+                                            <button class="btn btn-sm btn-outline-danger" @onclick="() => DeleteWebhook(wh.Id)">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="bi bi-trash" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z"/><path d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4zM2.5 3h11V2h-11z"/></svg>
+                                            </button>
+                                        </div>
+                                    }
+                                </div>
+                            }
+
+                            <div class="row g-2 align-items-end">
+                                <div class="col-12 col-sm-4">
+                                    <label class="form-label small text-muted mb-0">Nom</label>
+                                    <input class="form-control form-control-sm" @bind="newWebhookName" placeholder="Mon Site" />
+                                </div>
+                                <div class="col-12 col-sm-4">
+                                    <label class="form-label small text-muted mb-0">URL</label>
+                                    <input class="form-control form-control-sm" @bind="newWebhookUrl" placeholder="https://..." />
+                                </div>
+                                <div class="col-12 col-sm-3">
+                                    <label class="form-label small text-muted mb-0">Secret <span class="text-muted">(opt.)</span></label>
+                                    <input class="form-control form-control-sm" @bind="newWebhookSecret" placeholder="mon-secret" />
+                                </div>
+                                <div class="col-12 col-sm-1 d-grid">
+                                    <button class="btn btn-sm btn-outline-success" @onclick="AddWebhook" disabled="@(string.IsNullOrWhiteSpace(newWebhookName) || string.IsNullOrWhiteSpace(newWebhookUrl))">+</button>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -400,7 +479,7 @@
                             <li class="nav-item">
                                 <button class="nav-link @(activeTab == "types" ? "active" : "")" @onclick="@(() => activeTab = "types")">@L["Products_LicenseTypes"]</button>
                             </li>
-                            @if (selectedProduct?.ParentProductId == null)
+                            @if (selectedProductDepth < 3)
                             {
                                 <li class="nav-item">
                                     <button class="nav-link @(activeTab == "plugins" ? "active" : "")" @onclick="@(() => activeTab = "plugins")">
@@ -625,9 +704,24 @@
                                                                         var param = p;
                                                                         <tr>
                                                                             <td><code class="text-warning">@p.Key</code></td>
-                                                                            <td class="text-muted">@p.Name</td>
-                                                                            <td>@p.Value</td>
-                                                                            <td class="text-end"><button class="btn btn-sm btn-link text-danger p-0" @onclick="() => DeleteTypeParam(param)">✕</button></td>
+                                                                            @if (editingParamId == p.Id)
+                                                                            {
+                                                                                <td><input class="form-control form-control-sm" style="min-width:120px;" @bind="editingParamName" /></td>
+                                                                                <td><input class="form-control form-control-sm font-monospace" style="min-width:80px;" @bind="editingParamValue" /></td>
+                                                                                <td class="text-end" style="white-space:nowrap;">
+                                                                                    <button class="btn btn-sm btn-success p-0 px-1 me-1" @onclick="SaveEditParam" title="Enregistrer">✓</button>
+                                                                                    <button class="btn btn-sm btn-link text-muted p-0" @onclick="CancelEditParam" title="Annuler">✕</button>
+                                                                                </td>
+                                                                            }
+                                                                            else
+                                                                            {
+                                                                                <td class="text-muted">@p.Name</td>
+                                                                                <td>@p.Value</td>
+                                                                                <td class="text-end" style="white-space:nowrap;">
+                                                                                    <button class="btn btn-sm btn-link text-warning p-0 me-1" @onclick="() => StartEditParam(param)" title="Modifier">✎</button>
+                                                                                    <button class="btn btn-sm btn-link text-danger p-0" @onclick="() => DeleteTypeParam(param)" title="Supprimer">✕</button>
+                                                                                </td>
+                                                                            }
                                                                         </tr>
                                                                     }
                                                                 </tbody>
@@ -637,10 +731,14 @@
                                                         {
                                                             <p class="text-muted small mb-2">Aucun paramètre défini.</p>
                                                         }
-                                                        <div class="d-flex gap-2 align-items-center">
+                                                        <div class="d-flex gap-2 align-items-center flex-wrap">
                                                             <input class="form-control form-control-sm font-monospace" style="max-width:140px;" placeholder="clé (ex: maxAccounts)" @bind="newParamKey" />
                                                             <input class="form-control form-control-sm" style="max-width:160px;" placeholder="Nom (ex: Comptes max)" @bind="newParamName" />
                                                             <input class="form-control form-control-sm" style="max-width:120px;" placeholder="Valeur (ex: 50)" @bind="newParamValue" />
+                                                            <div class="form-check form-check-inline mb-0" title="Ajoute ce paramètre à tous les types de ce produit (skip si déjà existant)">
+                                                                <input class="form-check-input" type="checkbox" id="applyToAll_@type.Id" @bind="newParamApplyToAll" />
+                                                                <label class="form-check-label small text-warning" for="applyToAll_@type.Id">Tous les types</label>
+                                                            </div>
                                                             <button class="btn btn-sm btn-success" @onclick="() => AddTypeParam(type)">+ Ajouter</button>
                                                         </div>
                                                     </td>
@@ -721,6 +819,10 @@
                                             <button class="btn btn-success" @onclick="CreateProduct">Créer</button>
                                             <button class="btn btn-outline-secondary" @onclick='() => { showPluginCreate = false; NewProductName = ""; parentForNewProduct = null; }'>Annuler</button>
                                         </div>
+                                        @if (selectedProductDepth == 2)
+                                        {
+                                            <small class="text-muted mt-1 d-block">Le certificat RSA du plugin parent sera partagé automatiquement.</small>
+                                        }
                                     </div>
                                 }
 
@@ -731,7 +833,7 @@
                                         <div class="text-center py-5 text-muted">
                                             <div style="font-size:2rem;">🔌</div>
                                             <p class="mt-2">Aucun plugin associé à ce produit.</p>
-                                            <button class="btn btn-outline-success btn-sm" @onclick="() => { parentForNewProduct = selectedProduct?.Id; showPluginCreate = true; }">+ Ajouter un plugin</button>
+                                            <button class="btn btn-outline-success btn-sm" @onclick='() => { parentForNewProduct = selectedProduct?.Id; showPluginCreate = true; }'>+ Ajouter un plugin</button>
                                         </div>
                                     }
                                 }
@@ -901,6 +1003,8 @@
 </style>
 
 @code {
+    [Parameter] public Guid? ProductId { get; set; }
+
     private List<Product> ProductsList = new();
     private string NewProductName = "";
     private string? ShowKey;
@@ -943,6 +1047,12 @@
     private int telPageSize = 10;
     private int telTotal = 0;
     private int telTotalPages => (int)Math.Ceiling((double)telTotal / telPageSize);
+
+    // Webhooks produit
+    private List<ProductWebhook> productWebhooks = new();
+    private string newWebhookName = "";
+    private string newWebhookUrl = "";
+    private string newWebhookSecret = "";
 
     // Pagination AUDIT (Détails produit)
     private List<AccessLog> prodLogs = new();
@@ -994,11 +1104,16 @@
     private string newParamKey = "";
     private string newParamName = "";
     private string newParamValue = "";
+    private bool newParamApplyToAll = false;
+    private Guid? editingParamId;
+    private string editingParamName = "";
+    private string editingParamValue = "";
 
     // Sous-produits (plugins)
     private HashSet<Guid> expandedProducts = new();
     private Guid? parentForNewProduct = null;
     private bool showPluginCreate = false;
+    private int selectedProductDepth = 1;
 
     private void ToggleExpand(Guid id)
     {
@@ -1009,8 +1124,49 @@
     protected override async Task OnInitializedAsync()
     {
         isAuthorized = await Auth.HasPermissionAsync("products.view");
-        if (isAuthorized)
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!isAuthorized) return;
+
+        if (ProductId.HasValue)
         {
+            if (!ProductsList.Any())
+                await LoadData();
+
+            // Cherche dans la liste racine puis dans les sous-produits
+            var found = ProductsList.FirstOrDefault(p => p.Id == ProductId.Value)
+                        ?? ProductsList.SelectMany(p => p.SubProducts).FirstOrDefault(s => s.Id == ProductId.Value);
+
+            if (found != null)
+            {
+                selectedProduct = found;
+            }
+            else
+            {
+                // Plugin pas encore en mémoire : charger directement depuis la BDD
+                selectedProduct = await Db.Products
+                    .Include(p => p.Licenses).ThenInclude(l => l.Type)
+                    .Include(p => p.SubProducts).ThenInclude(s => s.Licenses)
+                    .Include(p => p.SubProducts).ThenInclude(s => s.SubProducts).ThenInclude(ss => ss.Licenses)
+                    .FirstOrDefaultAsync(p => p.Id == ProductId.Value);
+            }
+
+            if (selectedProduct != null)
+            {
+                licPage = 1; telPage = 1; logPage = 1;
+                showPluginCreate = false;
+                parentForNewProduct = null;
+                activeTab = "lic";
+                await LoadProductData();
+            }
+        }
+        else
+        {
+            selectedProduct = null;
+            parentForNewProduct = null;
+            showPluginCreate = false;
             await LoadData();
         }
     }
@@ -1045,15 +1201,17 @@
         ProductsList = await query
             .Include(p => p.Licenses).ThenInclude(l => l.Type)
             .Include(p => p.SubProducts).ThenInclude(s => s.Licenses)
+            .Include(p => p.SubProducts).ThenInclude(s => s.SubProducts).ThenInclude(ss => ss.Licenses)
             .OrderBy(p => p.Name)
             .Skip((CurrentPage - 1) * PageSize)
             .Take(PageSize)
             .ToListAsync();
 
-        if (selectedProduct != null) 
+        if (selectedProduct != null)
         {
-            var updated = ProductsList.FirstOrDefault(p => p.Id == selectedProduct.Id);
-            if (updated != null) 
+            var updated = ProductsList.FirstOrDefault(p => p.Id == selectedProduct.Id)
+                          ?? ProductsList.SelectMany(p => p.SubProducts).FirstOrDefault(s => s.Id == selectedProduct.Id);
+            if (updated != null)
             {
                 selectedProduct = updated;
                 await LoadProductData();
@@ -1061,11 +1219,14 @@
         }
     }
 
-    private async Task SelectProduct(Product p)
+    private void SelectProduct(Product p)
     {
-        selectedProduct = p;
-        licPage = 1; telPage = 1; logPage = 1;
-        await LoadProductData();
+        Nav.NavigateTo($"/products/{p.Id}");
+    }
+
+    private void BackToList()
+    {
+        Nav.NavigateTo("/products");
     }
 
     private async Task LoadProductData()
@@ -1105,8 +1266,56 @@
         logTotal = await logQuery.CountAsync();
         prodLogs = await logQuery.OrderByDescending(l => l.Timestamp)
                                  .Skip((logPage - 1) * logPageSize).Take(logPageSize).ToListAsync();
-        
+
+        // Webhooks produit
+        productWebhooks = await Db.ProductWebhooks
+            .Where(w => w.ProductId == selectedProduct.Id)
+            .OrderBy(w => w.CreatedAt)
+            .ToListAsync();
+
+        // Calcul de la profondeur (1 = produit racine, 2 = plugin, 3 = sous-plugin)
+        selectedProductDepth = 1;
+        if (selectedProduct.ParentProductId.HasValue)
+        {
+            var parent = await Db.Products
+                .Select(p => new { p.Id, p.ParentProductId })
+                .FirstOrDefaultAsync(p => p.Id == selectedProduct.ParentProductId.Value);
+            selectedProductDepth = parent?.ParentProductId.HasValue == true ? 3 : 2;
+        }
+
         StateHasChanged();
+    }
+
+    private async Task AddWebhook()
+    {
+        if (selectedProduct == null || string.IsNullOrWhiteSpace(newWebhookName) || string.IsNullOrWhiteSpace(newWebhookUrl)) return;
+
+        var webhook = new ProductWebhook
+        {
+            ProductId = selectedProduct.Id,
+            Name = newWebhookName.Trim(),
+            Url = newWebhookUrl.Trim(),
+            Secret = string.IsNullOrWhiteSpace(newWebhookSecret) ? null : newWebhookSecret.Trim()
+        };
+
+        Db.ProductWebhooks.Add(webhook);
+        await Db.SaveChangesAsync();
+
+        productWebhooks.Add(webhook);
+        newWebhookName = "";
+        newWebhookUrl = "";
+        newWebhookSecret = "";
+    }
+
+    private async Task DeleteWebhook(Guid webhookId)
+    {
+        var webhook = await Db.ProductWebhooks.FindAsync(webhookId);
+        if (webhook != null)
+        {
+            Db.ProductWebhooks.Remove(webhook);
+            await Db.SaveChangesAsync();
+            productWebhooks.RemoveAll(w => w.Id == webhookId);
+        }
     }
 
     private string FormatJson(string? json)
@@ -1230,7 +1439,7 @@
             .Where(p => p.LicenseTypeId == type.Id)
             .OrderBy(p => p.Key)
             .ToListAsync();
-        newParamKey = ""; newParamName = ""; newParamValue = "";
+        newParamKey = ""; newParamName = ""; newParamValue = ""; newParamApplyToAll = false; editingParamId = null;
     }
 
     private async Task AddTypeParam(LicenseType type)
@@ -1248,20 +1457,71 @@
         {
             Toast.ShowError($"La clé '{key}' existe déjà pour ce type."); return;
         }
-        var param = new LicenseTypeCustomParam { LicenseTypeId = type.Id, Key = key, Name = newParamName.Trim(), Value = newParamValue.Trim() };
-        Db.LicenseTypeCustomParams.Add(param);
-        await Db.SaveChangesAsync();
-        Toast.ShowSuccess($"Paramètre '{key}' ajouté.");
-        newParamKey = ""; newParamName = ""; newParamValue = "";
+        if (newParamApplyToAll)
+        {
+            // Appliquer à tous les types du même produit (skip si clé déjà présente)
+            var allTypes = await Db.LicenseTypes.Where(t => t.ProductId == type.ProductId).ToListAsync();
+            var existingKeys = await Db.LicenseTypeCustomParams
+                .Where(p => allTypes.Select(t => t.Id).Contains(p.LicenseTypeId) && p.Key == key)
+                .Select(p => p.LicenseTypeId)
+                .ToListAsync();
+            int added = 0;
+            foreach (var t in allTypes)
+            {
+                if (!existingKeys.Contains(t.Id))
+                {
+                    Db.LicenseTypeCustomParams.Add(new LicenseTypeCustomParam { LicenseTypeId = t.Id, Key = key, Name = newParamName.Trim(), Value = newParamValue.Trim() });
+                    added++;
+                }
+            }
+            await Db.SaveChangesAsync();
+            Toast.ShowSuccess($"Paramètre '{key}' ajouté à {added}/{allTypes.Count} types (déjà présent sur {allTypes.Count - added}).");
+        }
+        else
+        {
+            Db.LicenseTypeCustomParams.Add(new LicenseTypeCustomParam { LicenseTypeId = type.Id, Key = key, Name = newParamName.Trim(), Value = newParamValue.Trim() });
+            await Db.SaveChangesAsync();
+            Toast.ShowSuccess($"Paramètre '{key}' ajouté.");
+        }
+        newParamKey = ""; newParamName = ""; newParamValue = ""; newParamApplyToAll = false; editingParamId = null;
         typeParams = await Db.LicenseTypeCustomParams.Where(p => p.LicenseTypeId == type.Id).OrderBy(p => p.Key).ToListAsync();
     }
 
     private async Task DeleteTypeParam(LicenseTypeCustomParam param)
     {
+        var confirmed = await JS.InvokeAsync<bool>("confirm", $"Supprimer le paramètre « {param.Key} » ? Cette action est irréversible.");
+        if (!confirmed) return;
         Db.LicenseTypeCustomParams.Remove(param);
         await Db.SaveChangesAsync();
         typeParams.Remove(param);
         Toast.ShowSuccess("Paramètre supprimé.");
+    }
+
+    private void StartEditParam(LicenseTypeCustomParam param)
+    {
+        editingParamId = param.Id;
+        editingParamName = param.Name;
+        editingParamValue = param.Value;
+    }
+
+    private void CancelEditParam()
+    {
+        editingParamId = null;
+        editingParamName = "";
+        editingParamValue = "";
+    }
+
+    private async Task SaveEditParam()
+    {
+        if (editingParamId == null) return;
+        var param = typeParams.FirstOrDefault(p => p.Id == editingParamId);
+        if (param == null) { CancelEditParam(); return; }
+        param.Name = editingParamName.Trim();
+        param.Value = editingParamValue.Trim();
+        Db.LicenseTypeCustomParams.Update(param);
+        await Db.SaveChangesAsync();
+        Toast.ShowSuccess($"Paramètre '{param.Key}' modifié.");
+        CancelEditParam();
     }
 
     // --- PRODUITS ---
@@ -1319,21 +1579,38 @@
     {
         if (string.IsNullOrWhiteSpace(NewProductName)) { Toast.ShowError("Nom requis."); return; }
         
+        // Vérification des doublons (insensible à la casse)
+        var exists = await Db.Products.AnyAsync(p => p.Name.ToLower() == NewProductName.ToLower());
+        if (exists) { Toast.ShowError("Un logiciel avec ce nom existe déjà."); return; }
+
+        // Niveau 3 (sous-plugin) : copie automatique du certificat du plugin parent
+        if (parentForNewProduct.HasValue && selectedProductDepth == 2)
+        {
+            var parentPlugin = await Db.Products.FindAsync(parentForNewProduct.Value);
+            if (parentPlugin != null)
+            {
+                var p = new Product
+                {
+                    Name = NewProductName,
+                    PrivateKeyXml = parentPlugin.PrivateKeyXml,
+                    PublicKeyXml = parentPlugin.PublicKeyXml,
+                    ParentProductId = parentForNewProduct
+                };
+                Db.Products.Add(p);
+                await Db.SaveChangesAsync();
+                Toast.ShowSuccess($"Plugin '{NewProductName}' créé avec le certificat de '{parentPlugin.Name}'.");
+                await FinishCreation(showToast: false);
+                return;
+            }
+        }
+
+        // Niveau 1 (produit racine) ou niveau 2 (premier plugin) : overlay complet + backup
         isCreating = true;
         creationStep = 1;
         StateHasChanged();
 
-        try 
+        try
         {
-            // Vérification des doublons (insensible à la casse)
-            var exists = await Db.Products.AnyAsync(p => p.Name.ToLower() == NewProductName.ToLower());
-            if (exists)
-            {
-                Toast.ShowError("Un logiciel avec ce nom existe déjà.");
-                isCreating = false;
-                return;
-            }
-
             // ÉTAPE 1 : GÉNÉRATION
             await Task.Delay(500); // Pour le visuel
             var keys = await Task.Run(() => LicenseService.GenerateKeys());
@@ -1399,9 +1676,9 @@
         Toast.ShowInfo("Téléchargement lancé.");
     }
 
-    private async Task FinishCreation()
+    private async Task FinishCreation(bool showToast = true)
     {
-        Toast.ShowSuccess($"Logiciel '{NewProductName}' prêt.");
+        if (showToast) Toast.ShowSuccess($"Logiciel '{NewProductName}' prêt.");
         NewProductName = "";
         showCreate = false;
         isCreating = false;
@@ -1434,8 +1711,7 @@
             Db.Products.Remove(productToDelete);
             await Db.SaveChangesAsync();
             Toast.ShowSuccess("Logiciel supprimé.");
-            selectedProduct = null;
-            await LoadData();
+            Nav.NavigateTo("/products");
         }
         productToDelete = null;
     }

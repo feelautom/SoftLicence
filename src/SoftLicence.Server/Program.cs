@@ -30,6 +30,15 @@ builder.Services.AddRateLimiter(options =>
         opt.PermitLimit = 100;
         opt.Window = TimeSpan.FromMinutes(1);
     });
+
+    // Politique pour la documentation LLM (Modérée)
+    options.AddFixedWindowLimiter("DocsAPI", opt =>
+    {
+        opt.PermitLimit = 30;
+        opt.Window = TimeSpan.FromMinutes(1);
+        opt.QueueLimit = 0;
+        opt.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+    });
 });
 
 // Configuration DataProtection (Persistance des clés de session)
@@ -81,6 +90,7 @@ builder.Services.AddRazorComponents()
         options.DetailedErrors = true;
     });
 
+builder.Services.AddSingleton<SoftLicence.Server.Services.DocumentationService>(); // Documentation LLM
 builder.Services.AddScoped<SoftLicence.Server.Services.ToastService>();
 builder.Services.AddSingleton<SoftLicence.Server.Services.SettingsService>(); 
 builder.Services.AddScoped<SoftLicence.Server.Services.AuthService>(); // Service d'autorisation custom

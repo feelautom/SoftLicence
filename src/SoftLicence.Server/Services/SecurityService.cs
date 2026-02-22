@@ -75,15 +75,46 @@ public class SecurityService
         if (IsWhitelisted(ip)) return;
 
         var now = DateTime.UtcNow;
+
+        // Restauration depuis la BDD si absent de la mémoire (ex : redémarrage serveur)
+        if (!_threatScores.ContainsKey(ip))
+        {
+            using var dbRestore = await _dbFactory.CreateDbContextAsync();
+            var dbScore = await dbRestore.IpThreatScores.FindAsync(ip);
+            if (dbScore != null)
+                _threatScores.TryAdd(ip, (dbScore.Score, dbScore.LastHit));
+        }
+
+        // Accumulation permanente — plus de décroissance 1h (score persisté)
         var entry = _threatScores.AddOrUpdate(ip,
             (points, now),
-            (key, old) =>
+            (key, old) => (old.Score + points, now));
+
+        // Persistance en BDD (fire-and-forget, best effort)
+        _ = Task.Run(async () =>
+        {
+            try
             {
-                // Décroissance : si le dernier hit date de plus d'1h, on repart de zéro
-                if (now - old.LastHit > TimeSpan.FromHours(1))
-                    return (points, now);
-                return (old.Score + points, now);
-            });
+                using var db = await _dbFactory.CreateDbContextAsync();
+                var existing = await db.IpThreatScores.FindAsync(ip);
+                if (existing != null)
+                {
+                    existing.Score = entry.Score;
+                    existing.LastHit = entry.LastHit;
+                }
+                else
+                {
+                    db.IpThreatScores.Add(new Data.IpThreatScore
+                    {
+                        IpAddress = ip,
+                        Score = entry.Score,
+                        LastHit = entry.LastHit
+                    });
+                }
+                await db.SaveChangesAsync();
+            }
+            catch { /* Best effort */ }
+        });
 
         if (entry.Score >= 200)
         {
@@ -95,15 +126,7 @@ public class SecurityService
     public int GetThreatScore(string ip)
     {
         if (_threatScores.TryGetValue(ip, out var entry))
-        {
-            // Score expiré (> 1h sans activité) → on le considère à 0
-            if (DateTime.UtcNow - entry.LastHit > TimeSpan.FromHours(1))
-            {
-                _threatScores.TryRemove(ip, out _);
-                return 0;
-            }
             return entry.Score;
-        }
         return 0;
     }
 
@@ -156,6 +179,22 @@ public class SecurityService
                 "🚫 IP BANNIE",
                 $"IP: {ip}\nRaison: {reason}\nScore dépassé.");
         }
+
+        // Remettre le score à zéro en BDD après le ban — l'IP repart de 0 après sa peine
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scoreDb = await _dbFactory.CreateDbContextAsync();
+                var scoreEntry = await scoreDb.IpThreatScores.FindAsync(ip);
+                if (scoreEntry != null)
+                {
+                    scoreDb.IpThreatScores.Remove(scoreEntry);
+                    await scoreDb.SaveChangesAsync();
+                }
+            }
+            catch { /* Best effort */ }
+        });
     }
 
     public async Task CheckForZombieAsync(string hardwareId, string currentIp)
