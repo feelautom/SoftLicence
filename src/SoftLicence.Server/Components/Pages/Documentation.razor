@@ -4,7 +4,7 @@
 
 <div class="d-flex justify-content-between align-items-center mb-4">
     <h3>@L["Docs_Title"]</h3>
-    <span class="badge bg-primary">Version 1.1</span>
+    <span class="badge bg-primary">Version 2.0</span>
 </div>
 
 <div class="card p-0 mt-4 overflow-hidden border-0">
@@ -29,10 +29,10 @@
         @if (activeTab == "client")
         {
             <div class="doc-content animate-fade">
-                <h4>🚀 Intégration dans votre logiciel</h4>
-                <p>Pour protéger une application, suivez ces étapes :</p>
+                <h4>Intégration dans votre logiciel</h4>
+                <p>Pour protéger une application WPF, suivez ces étapes :</p>
                 <ol>
-                    <li>Récupérez la <strong>Clé Publique XML</strong> du logiciel sur ce dashboard.</li>
+                    <li>Récupérez la <strong>Clé Publique XML</strong> du logiciel sur ce dashboard (onglet Produits).</li>
                     <li>Utilisez le <code>LicenseActivationViewModel</code> dans votre <code>App.xaml.cs</code>.</li>
                     <li>Appelez <code>await vm.InitializeAsync()</code> au démarrage.</li>
                 </ol>
@@ -46,87 +46,192 @@ if (vm.IsLicensed) { /* Lancer MainWindow */ }</code></pre>
 
                 <h5 class="mt-4">Vérification en temps réel (Live)</h5>
                 <p>Le client intègre un timer qui vérifie la validité de la licence toutes les 2 heures. Si vous révoquez une licence sur ce dashboard, l'application du client se fermera automatiquement dans ce délai.</p>
+
+                <h5 class="mt-4">Multi-sièges</h5>
+                <p>Une licence peut autoriser l'activation sur <strong>plusieurs machines</strong> simultanément. Le nombre de sièges est configurable par licence (champ <code>MaxSeats</code>, défaut : 1). Chaque activation crée un <strong>Seat</strong> lié au Hardware ID de la machine. Le serveur suit l'état de chaque siège (date d'activation, dernier check-in, statut actif/délié).</p>
+
+                <h5 class="mt-4">Masque de versions</h5>
+                <p>Le champ <code>AllowedVersions</code> permet de restreindre quelles versions du logiciel peuvent utiliser une licence. Exemples :</p>
+                <ul>
+                    <li><code>*</code> — Toutes les versions (défaut)</li>
+                    <li><code>1.*</code> — Toutes les versions 1.x</li>
+                    <li><code>2.1.0</code> — Version exacte uniquement</li>
+                </ul>
+                <p>Le client envoie <code>AppVersion</code> lors de l'activation et le serveur vérifie la correspondance.</p>
+
+                <h5 class="mt-4">Auto-Trial (FREE-TRIAL)</h5>
+                <p>Si le client envoie une clé se terminant par <code>-FREE-TRIAL</code> ou égale à <code>FREE-TRIAL</code>, le serveur déclenche automatiquement la création d'une licence Trial sans intervention admin.</p>
+
+                <h5 class="mt-4">Paramètres personnalisés</h5>
+                <p>Chaque type de licence peut embarquer des <strong>paramètres personnalisés</strong> (clé/valeur), par exemple <code>MaxAccounts = 50</code> ou <code>FeatureX = true</code>. Ces paramètres sont inclus dans le fichier de licence signé et peuvent être lus côté client pour activer/désactiver des fonctionnalités.</p>
+
+                <h5 class="mt-4">Obfuscation (Obfuscar)</h5>
+                <p>Pour protéger votre code contre la décompilation (dnSpy, ILSpy), utilisez le fichier <code>obfuscar.xml</code> fourni dans le dossier <code>samples/</code>.</p>
             </div>
         }
         else if (activeTab == "server")
         {
             <div class="doc-content animate-fade">
-                <h4>🛠 Gestion du parc</h4>
-                <h5 class="mt-3">Logiciels</h5>
-                <p>Chaque logiciel possède son propre couple de clés RSA-4096. Ne partagez jamais la clé privée (stockée en base).</p>
+                <h4>Gestion du parc</h4>
 
-                <h5 class="mt-3">Types de licences</h5>
-                <p>Chaque produit peut définir plusieurs types de licences, identifiés par un <strong>Slug</strong> (ex : <code>YOUR_APP_NAME-PRO</code>, <code>YOUR_APP_NAME-COMMUNITY</code>). Deux modes de fonctionnement existent :</p>
+                <h5 class="mt-3">Produits &amp; Plugins (Hiérarchie)</h5>
+                <p>Le système supporte une <strong>hiérarchie à 3 niveaux</strong> de produits :</p>
+                <table class="table table-dark table-sm mt-2">
+                    <thead><tr><th>Niveau</th><th>Type</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td><span class="badge bg-primary">Niveau 1</span></td><td>Produit principal</td><td>Logiciel racine avec son propre couple de clés RSA-4096</td></tr>
+                        <tr><td><span class="badge bg-info">Niveau 2</span></td><td>Plugin</td><td>Extension rattachée à un produit principal</td></tr>
+                        <tr><td><span class="badge bg-secondary">Niveau 3</span></td><td>Sous-plugin</td><td>Extension rattachée à un plugin de niveau 2</td></tr>
+                    </tbody>
+                </table>
+                <p>Les plugins de <strong>niveau 3</strong> héritent automatiquement du certificat RSA de leur parent. Les produits de niveau 1 et 2 possèdent chacun leur propre couple de clés.</p>
+                <p>L'ajout de plugins se fait depuis l'onglet <strong>Plugins</strong> dans le détail d'un produit (disponible aux niveaux 1 et 2 uniquement).</p>
+
+                <h5 class="mt-4">Types de licences</h5>
+                <p>Chaque produit définit ses propres types de licences, identifiés par un <strong>Slug</strong> unique par produit (ex : <code>PRO</code>, <code>COMMUNITY</code>). Deux modes :</p>
                 <ul>
-                    <li><span class="badge bg-secondary">FIXE</span> — Durée fixe non renouvelable (<code>IsRecurring = false</code>). Utilisé pour les <strong>versions Trial</strong> : une fois expirée, le Hardware ID ne peut plus obtenir de nouvelle licence de ce type. C'est le comportement par défaut.</li>
-                    <li><span class="badge bg-primary">ABONNEMENT</span> — Durée renouvelable automatiquement (<code>IsRecurring = true</code>). Utilisé pour les <strong>versions Community</strong> : à chaque expiration, le client redemande une licence via l'endpoint <code>/api/activation/trial</code> et le serveur prolonge automatiquement la période sans créer de nouvelle entrée. L'historique enregistre un événement <code>RENEWED</code>.</li>
+                    <li><span class="badge bg-secondary">FIXE</span> — Durée fixe non renouvelable (<code>IsRecurring = false</code>). Utilisé pour les <strong>versions Trial</strong> : une fois expirée, le Hardware ID ne peut plus obtenir de nouvelle licence de ce type.</li>
+                    <li><span class="badge bg-primary">ABONNEMENT</span> — Durée renouvelable (<code>IsRecurring = true</code>). Utilisé pour les <strong>versions Community ou Pro</strong> : à chaque expiration, le serveur prolonge automatiquement de <code>DefaultDurationDays</code> jours. L'historique enregistre un événement <code>RENEWED</code>.</li>
                 </ul>
-                <p>Le mode s'active en cochant <strong>Abonnement</strong> lors de la création ou de l'édition d'un type de licence dans l'onglet Produits.</p>
 
-                <h5 class="mt-3">Licences</h5>
-                <p>Une licence est liée à un <strong>Hardware ID</strong> unique lors de sa première activation. Le client ne pourra pas copier son fichier de licence sur un autre PC.</p>
+                <h5 class="mt-4">Paramètres personnalisés par type</h5>
+                <p>Chaque type de licence peut définir des <strong>paramètres clé/valeur</strong> (onglet Types de licences &gt; Paramètres). Ces paramètres sont signés dans le fichier de licence et permettent au client de débloquer des fonctionnalités selon le type acheté.</p>
+                <pre><code>Exemple :
+  Key: "MaxUsers"    Name: "Nombre max d'utilisateurs"  Value: "50"
+  Key: "FeatureVoIP" Name: "Module VoIP"                Value: "true"</code></pre>
 
-                <h5 class="mt-3">Réinitialisation (Reset HWID)</h5>
-                <p>Si un client change de matériel, utilisez le bouton "Reset HWID" pour lui permettre de ré-associer sa licence à sa nouvelle machine.</p>
+                <h5 class="mt-4">Licences &amp; Multi-sièges</h5>
+                <p>Une licence est liée à un ou plusieurs <strong>Hardware ID</strong> via le système de sièges. Le champ <code>MaxSeats</code> (défaut : 1) définit le nombre de machines autorisées simultanément. Chaque siège suit :</p>
+                <ul>
+                    <li>Date de première activation</li>
+                    <li>Dernier check-in (indicateur "en ligne")</li>
+                    <li>Statut actif / délié</li>
+                </ul>
+                <p>La gestion individuelle des sièges (délier, consulter l'historique) se fait depuis le détail d'une licence dans l'onglet <strong>Licences</strong>.</p>
+
+                <h5 class="mt-4">Réinitialisation (Reset HWID)</h5>
+                <p>Deux mécanismes disponibles :</p>
+                <ul>
+                    <li><strong>Self-Service</strong> — Le client demande un code par email (<code>/api/activation/reset-request</code>), puis confirme (<code>/api/activation/reset-confirm</code>). Le code expire après 15 minutes.</li>
+                    <li><strong>Admin</strong> — Depuis l'onglet Resets ou le détail d'une licence, l'admin peut délier un siège ou tous les sièges d'un clic.</li>
+                </ul>
+
+                <h5 class="mt-4">Renouvellement (Abonnements)</h5>
+                <p>L'endpoint <code>POST /api/admin/licenses/{key}/renew</code> permet le renouvellement programmatique depuis un système de paiement (Stripe, etc.). Le champ <code>TransactionId</code> garantit l'idempotence (pas de double renouvellement).</p>
+
+                <h5 class="mt-4">Webhooks</h5>
+                <p>Configurez des webhooks depuis la page <strong>Maintenance</strong> pour recevoir des notifications en temps réel (licence créée, activée, révoquée, IP bannie, etc.). Chaque webhook peut cibler des événements spécifiques.</p>
+
+                <h5 class="mt-4">Utilisateurs &amp; Rôles (RBAC)</h5>
+                <p>Le système supporte plusieurs comptes administrateurs avec des <strong>rôles</strong> et <strong>permissions granulaires</strong> :</p>
+                <ul>
+                    <li><strong>Root</strong> — Compte principal (configuré dans <code>appsettings.json</code>), accès total</li>
+                    <li><strong>Utilisateurs</strong> — Comptes créés dans l'onglet Utilisateurs, assignés à un rôle</li>
+                    <li><strong>Rôles</strong> — Permissions par page : <code>dashboard.view</code>, <code>products.view</code>, <code>licenses.view</code>, <code>audit.view</code>, etc.</li>
+                </ul>
+                <p>Chaque utilisateur peut avoir son propre <strong>chemin de connexion personnalisé</strong> (ex : <code>/mon-acces</code>).</p>
+
+                <h5 class="mt-4">Sauvegardes</h5>
+                <p>Le système intègre des sauvegardes automatiques quotidiennes via <strong>rclone</strong>. Configuration et historique disponibles dans l'onglet <strong>Sauvegardes</strong>. Possibilité de déclencher un backup manuel à tout moment.</p>
             </div>
         }
         else if (activeTab == "security")
         {
             <div class="doc-content animate-fade">
-                <h4>🛡 Protection & surveillance</h4>
-                
-                <h5 class="mt-3 text-warning">Obfuscation (Obfuscar)</h5>
-                <p>Pour protéger votre code contre la décompilation (dnSpy), utilisez le fichier <code>obfuscar.xml</code> fourni dans les exemples.</p>
+                <h4>Protection &amp; surveillance</h4>
 
-                <h5 class="mt-4 text-info">Audit Log (Middleware)</h5>
-                <p>Toutes les requêtes vers l'API sont logguées dans l'onglet <strong>Audit</strong>. Nous capturons l'IP réelle, la durée et le statut HTTP.</p>
+                <h5 class="mt-3 text-info">Audit Log (Middleware)</h5>
+                <p>Toutes les requêtes vers l'API sont logguées dans l'onglet <strong>Audit</strong>. Pour chaque requête, le système capture : IP réelle, durée, statut HTTP, User-Agent, pays (GeoIP), FAI, détection VPN/proxy, score de menace.</p>
+
+                <h5 class="mt-4 text-warning">Système de Threat Scoring</h5>
+                <p>Chaque IP accumule un <strong>score de menace persistant</strong> (survit aux redémarrages du serveur). Le score définit 3 zones :</p>
+                <table class="table table-dark table-sm mt-2">
+                    <thead><tr><th>Zone</th><th>Score</th><th>Effet</th></tr></thead>
+                    <tbody>
+                        <tr><td><span class="badge bg-success">Normal</span></td><td>0 – 99</td><td>Aucune pénalité</td></tr>
+                        <tr><td><span class="badge bg-warning text-dark">Quarantaine</span></td><td>100 – 199</td><td>Throttling progressif : 5s + 1s par tranche de 10 pts au-dessus de 100 (max 15s)</td></tr>
+                        <tr><td><span class="badge bg-danger">Ban</span></td><td>&ge; 200</td><td>Blocage immédiat (1 jour &rarr; 7 jours &rarr; 30 jours pour les récidivistes)</td></tr>
+                    </tbody>
+                </table>
+
+                <h5 class="mt-4">Points par événement</h5>
+                <p class="small text-muted">Multipliés par <code>Math.Max(1, banCount * 2)</code> pour les récidivistes.</p>
+                <table class="table table-dark table-sm mt-2">
+                    <thead><tr><th>Événement</th><th>Points de base</th><th>Notes</th></tr></thead>
+                    <tbody>
+                        <tr><td>Scan proactif (<code>.php</code>, <code>.env</code>, <code>wp-*</code>, etc.)</td><td>20</td><td>Ban instantané (&ge; 200) si &ge; 5 bans précédents</td></tr>
+                        <tr><td>404 (IP propre)</td><td>2</td><td></td></tr>
+                        <tr><td>404 (IP en quarantaine / avec historique)</td><td>10</td><td></td></tr>
+                        <tr><td>Échec d'authentification (401/403)</td><td>50</td><td></td></tr>
+                        <tr><td>Toute requête avec &ge; 5 bans</td><td>200</td><td>Tolérance zéro, ban instantané</td></tr>
+                    </tbody>
+                </table>
+                <p>Le score se remet à zéro uniquement après expiration d'un ban (nouveau départ).</p>
+
+                <h5 class="mt-4 text-danger">Détection Zombie</h5>
+                <p>Si un même <code>HardwareId</code> est vu sur <strong>plus de 5 adresses IP distinctes</strong> en 24 heures, la licence est <strong>révoquée automatiquement</strong>. Cela protège contre le partage de fichiers de licence.</p>
+
+                <h5 class="mt-4">Gestion des Bans</h5>
+                <p>Les bans actifs sont consultables dans l'onglet <strong>Audit &gt; Bans actifs</strong>. Chaque ban affiche le nombre de récidives, la date initiale, la dernière infraction et le temps restant. Un admin peut lever un ban manuellement.</p>
+                <p>Durées progressives : <strong>1 jour</strong> (1er ban) &rarr; <strong>7 jours</strong> (2e) &rarr; <strong>30 jours</strong> (3e et suivants).</p>
+
+                <h5 class="mt-4">Rate Limiting</h5>
+                <ul>
+                    <li><strong>API publique</strong> : 10 requêtes/min par IP</li>
+                    <li><strong>API admin</strong> : 100 requêtes/min</li>
+                </ul>
+
+                <h5 class="mt-4">Détection VPN / Proxy</h5>
+                <p>Les requêtes passant par un VPN ou un proxy sont identifiées et affichées avec un badge dans les logs d'audit.</p>
             </div>
         }
         else if (activeTab == "api")
         {
             <div class="doc-content animate-fade">
-                <h4>📡 API reference</h4>
+                <h4>API Reference</h4>
                 <p>Toutes les requêtes doivent être envoyées avec le header <code>Content-Type: application/json</code>.</p>
+                <p>Rate limiting : <span class="badge bg-info">Public</span> 10 req/min &bull; <span class="badge bg-warning text-dark">Admin</span> 100 req/min</p>
 
+                @* ───── ACTIVATION (Public) ───── *@
                 <h5 class="text-info mt-4">1. Activation (Public)</h5>
                 <div class="api-box">
                     <span class="badge bg-success">POST</span> <code>/api/activation</code>
-                    <p class="mt-2">Active une licence sur une machine.</p>
+                    <p class="mt-2">Active une licence sur une machine. Supporte le multi-sièges.</p>
                     <strong>Paramètres (JSON) :</strong>
                     <pre><code>{
   "LicenseKey": "AAAA-BBBB-CCCC",
   "HardwareId": "ABC-123-XYZ",
-  "AppName": "MySoftware"
+  "AppName": "MySoftware",
+  "AppId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "AppVersion": "1.2.0"
 }</code></pre>
+                    <p class="small text-muted mt-1"><code>AppId</code> (UUID produit) et <code>AppVersion</code> sont optionnels. Si <code>LicenseKey</code> se termine par <code>-FREE-TRIAL</code>, un Trial est créé automatiquement.</p>
+                    <strong>Réponse (200) :</strong>
+                    <pre><code>{ "licenseFile": "...fichier licence signé RSA..." }</code></pre>
                 </div>
 
+                @* ───── CHECK STATUS ───── *@
                 <h5 class="text-info mt-4">2. Vérification Statut (Public)</h5>
                 <div class="api-box">
                     <span class="badge bg-success">POST</span> <code>/api/activation/check</code>
-                    <p class="mt-2">Vérifie si une licence est toujours valide.</p>
-                </div>
-
-                <h5 class="text-warning mt-4">3. Gestion (Admin)</h5>
-                <p class="small italic">Nécessite le header <code>X-Admin-Secret</code>.</p>
-                
-                <div class="api-box">
-                    <span class="badge bg-success">POST</span> <code>/api/admin/licenses</code>
-                    <p class="mt-2">Génère une nouvelle licence.</p>
+                    <p class="mt-2">Vérifie si une licence est toujours valide sans réactiver.</p>
                     <strong>Paramètres (JSON) :</strong>
                     <pre><code>{
-  "ProductName": "MySoftware",
-  "CustomerName": "Jean Dupont",
-  "CustomerEmail": "jean@mail.com",
-  "TypeSlug": "PRO",
-  "DaysValidity": 365,
-  "Reference": "STRIPE-123"
+  "LicenseKey": "AAAA-BBBB-CCCC",
+  "HardwareId": "ABC-123-XYZ",
+  "AppName": "MySoftware",
+  "AppId": "...",
+  "AppVersion": "1.2.0"
 }</code></pre>
-                    <p class="small text-muted mt-1"><code>Reference</code> est optionnel : ID de commande, référence client, etc. Ce champ est inclus dans le fichier de licence signé.</p>
+                    <strong>Réponse (200) :</strong>
+                    <pre><code>{ "status": "VALID" }
+// Statuts possibles : VALID, REVOKED, EXPIRED,
+// REQUIRES_ACTIVATION, HARDWARE_MISMATCH</code></pre>
                 </div>
 
-                <h5 class="text-info mt-4">3b. Trial / Community (Public)</h5>
-                <p class="small">Permet à un client d'obtenir automatiquement une licence gratuite (Trial ou Community) sans clé d'activation. Le type de licence est déterminé par le <code>TypeSlug</code> configuré sur le produit.</p>
-
+                @* ───── TRIAL ───── *@
+                <h5 class="text-info mt-4">3. Trial / Community (Public)</h5>
+                <p class="small">Permet à un client d'obtenir automatiquement une licence gratuite sans clé d'activation.</p>
                 <div class="api-box">
                     <span class="badge bg-success">POST</span> <code>/api/activation/trial</code>
                     <p class="mt-2">Crée ou renouvelle une licence gratuite pour la machine courante.</p>
@@ -135,54 +240,167 @@ if (vm.IsLicensed) { /* Lancer MainWindow */ }</code></pre>
   "HardwareId": "ABC-123-XYZ",
   "AppName": "MySoftware",
   "AppId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-  "TypeSlug": "YOUR_APP_NAME-COMMUNITY",
+  "TypeSlug": "COMMUNITY",
   "AppVersion": "1.0.0"
 }</code></pre>
                     <strong>Comportement selon le mode :</strong>
                     <ul class="mt-2">
-                        <li><span class="badge bg-secondary">FIXE</span> — Crée une licence une seule fois. Si elle est expirée, retourne une erreur : le Trial ne peut pas être renouvelé.</li>
-                        <li><span class="badge bg-primary">ABONNEMENT</span> — Crée la licence à la première demande. Si elle est expirée, <strong>prolonge automatiquement</strong> la date d'expiration de <code>DefaultDurationDays</code> jours supplémentaires et retourne la licence mise à jour.</li>
+                        <li><span class="badge bg-secondary">FIXE</span> — Crée une licence une seule fois. Si expirée, retourne une erreur.</li>
+                        <li><span class="badge bg-primary">ABONNEMENT</span> — Crée la licence à la première demande. Si expirée, <strong>prolonge automatiquement</strong> de <code>DefaultDurationDays</code> jours.</li>
                     </ul>
-                    <p class="small text-muted mt-2">Si le <code>TypeSlug</code> n'existe pas sur le produit, l'appel retourne HTTP 400. Un slug doit être explicitement configuré pour autoriser ce mode de licence.</p>
+                    <p class="small text-muted mt-2">Si le <code>TypeSlug</code> n'existe pas sur le produit, retourne HTTP 400.</p>
                 </div>
 
-                <h5 class="text-info mt-4">4. Réinitialisation (Public)</h5>
-                <p class="small">Permet à un utilisateur de délier sa licence pour l'utiliser sur un autre poste (Self-Service).</p>
-                
+                @* ───── RESET ───── *@
+                <h5 class="text-info mt-4">4. Réinitialisation Self-Service (Public)</h5>
+                <p class="small">Permet à un utilisateur de délier sa licence pour l'utiliser sur un autre poste.</p>
                 <div class="api-box">
                     <span class="badge bg-success">POST</span> <code>/api/activation/reset-request</code>
-                    <p class="mt-2">Demande l'envoi d'un code de réinitialisation par email.</p>
-                    <strong>Paramètres (JSON) :</strong>
-                    <pre><code>{
-  "LicenseKey": "AAAA-BBBB-CCCC",
-  "AppName": "MySoftware"
-}</code></pre>
-                </div>
-
-                <div class="api-box mt-3">
-                    <span class="badge bg-success">POST</span> <code>/api/activation/reset-confirm</code>
-                    <p class="mt-2">Valide le reset avec le code reçu par email.</p>
+                    <p class="mt-2">Demande l'envoi d'un code de réinitialisation par email (expire en 15 min).</p>
                     <strong>Paramètres (JSON) :</strong>
                     <pre><code>{
   "LicenseKey": "AAAA-BBBB-CCCC",
   "AppName": "MySoftware",
+  "AppId": "..."
+}</code></pre>
+                </div>
+                <div class="api-box mt-3">
+                    <span class="badge bg-success">POST</span> <code>/api/activation/reset-confirm</code>
+                    <p class="mt-2">Valide le reset avec le code reçu par email. Délie <strong>tous les sièges actifs</strong>.</p>
+                    <strong>Paramètres (JSON) :</strong>
+                    <pre><code>{
+  "LicenseKey": "AAAA-BBBB-CCCC",
+  "AppName": "MySoftware",
+  "AppId": "...",
   "ResetCode": "123456"
 }</code></pre>
                 </div>
 
-                <h5 class="text-info mt-4">5. Lecture Télémétrie (Public / API Key)</h5>
-                <p class="small">Permet de récupérer les données de télémétrie d'un produit pour les afficher sur un site externe.</p>
-                
+                @* ───── ADMIN : PRODUITS ───── *@
+                <h5 class="text-warning mt-5">5. Gestion Produits (Admin)</h5>
+                <p class="small">Nécessite le header <code>X-Admin-Secret</code>.</p>
+                <div class="api-box">
+                    <span class="badge bg-success">POST</span> <code>/api/admin/products</code>
+                    <p class="mt-2">Crée un nouveau produit avec génération automatique des clés RSA-4096.</p>
+                    <strong>Body :</strong> nom du produit (string brut)
+                    <pre><code>"MonLogiciel"</code></pre>
+                    <strong>Réponse (200) :</strong>
+                    <pre><code>{ "id": "uuid", "name": "MonLogiciel", "publicKeyXml": "..." }</code></pre>
+                </div>
+                <div class="api-box mt-3">
+                    <span class="badge bg-primary">GET</span> <code>/api/admin/products</code>
+                    <p class="mt-2">Liste tous les produits.</p>
+                </div>
+                <div class="api-box mt-3">
+                    <span class="badge bg-primary">GET</span> <code>/api/admin/products/{id}/key-check</code>
+                    <p class="mt-2">Diagnostic de la paire de clés RSA d'un produit (vérifie cohérence public/privé).</p>
+                    <strong>Réponse (200) :</strong>
+                    <pre><code>{ "status": "OK", "keysMatch": true, "publicModulus": "...", "privateModulus": "..." }</code></pre>
+                </div>
+                <div class="api-box mt-3">
+                    <span class="badge bg-warning text-dark">PUT</span> <code>/api/admin/products/{id}/keys</code>
+                    <p class="mt-2">Réinjecte une paire de clés RSA (rotation ou restauration).</p>
+                    <strong>Paramètres (JSON) :</strong>
+                    <pre><code>{ "PrivateKeyXml": "&lt;RSAKeyValue&gt;...&lt;/RSAKeyValue&gt;" }</code></pre>
+                    <p class="small text-muted mt-1">La clé publique est extraite automatiquement de la clé privée.</p>
+                </div>
+
+                @* ───── ADMIN : LICENCES ───── *@
+                <h5 class="text-warning mt-5">6. Gestion Licences (Admin)</h5>
+                <p class="small">Nécessite le header <code>X-Admin-Secret</code>.</p>
+                <div class="api-box">
+                    <span class="badge bg-success">POST</span> <code>/api/admin/licenses</code>
+                    <p class="mt-2">Génère une nouvelle licence.</p>
+                    <strong>Paramètres (JSON) :</strong>
+                    <pre><code>{
+  "ProductName": "MySoftware",
+  "CustomerName": "Jean Dupont",
+  "CustomerEmail": "jean@@mail.com",
+  "TypeSlug": "PRO",
+  "DaysValidity": 365,
+  "Reference": "STRIPE-123"
+}</code></pre>
+                    <p class="small text-muted mt-1"><code>DaysValidity</code> : null = licence à vie. <code>Reference</code> : optionnel (ID commande, référence client). <code>MaxSeats</code> hérité du type de licence.</p>
+                </div>
+                <div class="api-box mt-3">
+                    <span class="badge bg-primary">GET</span> <code>/api/admin/licenses</code>
+                    <p class="mt-2">Liste les licences. Filtre optionnel : <code>?productName=MySoftware</code></p>
+                </div>
+                <div class="api-box mt-3">
+                    <span class="badge bg-success">POST</span> <code>/api/admin/licenses/{licenseKey}/renew</code>
+                    <p class="mt-2">Renouvelle une licence abonnement. Idempotent via <code>TransactionId</code>.</p>
+                    <strong>Paramètres (JSON) :</strong>
+                    <pre><code>{
+  "TransactionId": "stripe_pi_123456",
+  "Reference": "ORDER-789"
+}</code></pre>
+                    <strong>Réponse (200) :</strong>
+                    <pre><code>{
+  "licenseKey": "AAAA-BBBB-CCCC",
+  "newExpirationDate": "2027-02-22T00:00:00Z",
+  "reference": "ORDER-789",
+  "message": "Extended by 30 days"
+}</code></pre>
+                    <p class="small text-muted mt-1">Retourne <code>409 Conflict</code> si le <code>TransactionId</code> a déjà été traité.</p>
+                </div>
+
+                @* ───── TELEMETRIE ───── *@
+                <h5 class="text-info mt-5">7. Télémétrie (Public)</h5>
+
+                <div class="api-box">
+                    <span class="badge bg-success">POST</span> <code>/api/telemetry/event</code>
+                    <p class="mt-2">Envoie un événement applicatif.</p>
+                    <pre><code>{
+  "HardwareId": "ABC-123-XYZ",
+  "AppName": "MySoftware",
+  "Version": "1.0.0",
+  "EventName": "FeatureUsed",
+  "Properties": { "feature": "export", "format": "pdf" }
+}</code></pre>
+                </div>
+                <div class="api-box mt-3">
+                    <span class="badge bg-success">POST</span> <code>/api/telemetry/diagnostic</code>
+                    <p class="mt-2">Envoie un rapport de diagnostic système.</p>
+                    <pre><code>{
+  "HardwareId": "ABC-123-XYZ",
+  "AppName": "MySoftware",
+  "Version": "1.0.0",
+  "EventName": "SystemCheck",
+  "Score": 85,
+  "Results": [
+    { "ModuleName": "DirectX", "Success": true, "Severity": "Info", "Message": "OK" },
+    { "ModuleName": "DotNet8", "Success": false, "Severity": "Error", "Message": "Missing" }
+  ],
+  "Ports": [
+    { "Name": "SIP", "ExternalPort": 5060, "Protocol": "UDP" }
+  ]
+}</code></pre>
+                </div>
+                <div class="api-box mt-3">
+                    <span class="badge bg-success">POST</span> <code>/api/telemetry/error</code>
+                    <p class="mt-2">Envoie un rapport d'erreur / crash.</p>
+                    <pre><code>{
+  "HardwareId": "ABC-123-XYZ",
+  "AppName": "MySoftware",
+  "Version": "1.0.0",
+  "EventName": "CrashReport",
+  "ErrorType": "NullReferenceException",
+  "Message": "Object reference not set",
+  "StackTrace": "at MyApp.Main() in ..."
+}</code></pre>
+                </div>
+
+                <h5 class="text-info mt-4">8. Lecture Télémétrie (API Key)</h5>
                 <div class="api-box">
                     <span class="badge bg-primary">GET</span> <code>/api/telemetry</code>
-                    <p class="mt-2">Récupère la liste paginée des événements.</p>
+                    <p class="mt-2">Récupère la liste paginée des événements d'un produit.</p>
                     <strong>Header requis :</strong>
                     <pre><code>X-Product-Key: &lt;VOTRE_API_SECRET_PRODUIT&gt;</code></pre>
                     <strong>Paramètres optionnels (Query) :</strong>
                     <ul>
                         <li><code>page</code> : Numéro de page (défaut: 1)</li>
-                        <li><code>pageSize</code> : Taille de page (défaut: 50)</li>
-                        <li><code>type</code> : Filtre (Event, Diagnostic, Error)</li>
+                        <li><code>pageSize</code> : Taille de page (défaut: 50, max: 100)</li>
+                        <li><code>type</code> : Filtre — <code>Event</code>, <code>Diagnostic</code>, <code>Error</code></li>
                     </ul>
                 </div>
             </div>
@@ -196,6 +414,7 @@ if (vm.IsLicensed) { /* Lancer MainWindow */ }</code></pre>
     .doc-content li { color: #ffffff !important; }
     .doc-content p { color: #e0e0e0 !important; }
     .doc-content pre { background: #000; padding: 15px; border-radius: 8px; border: 1px solid #333; color: #00ff00; font-family: 'Consolas', monospace; font-size: 0.9rem; }
+    .doc-content table { font-size: 0.9rem; }
     .api-box { background: #1a1a1a; padding: 15px; border-left: 4px solid #0d6efd; border-radius: 0 8px 8px 0; margin-top: 10px; }
     .nav-pills .nav-link { color: #aaa; border-radius: 5px; margin-right: 5px; cursor: pointer; }
     .nav-pills .nav-link.active { background-color: var(--accent-color) !important; color: #fff; }

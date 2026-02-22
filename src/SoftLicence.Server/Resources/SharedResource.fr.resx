@@ -470,6 +470,7 @@
   <data name="Nav_Telemetry" xml:space="preserve"><value>Télémétrie</value></data>
   <data name="Nav_Backups" xml:space="preserve"><value>Sauvegardes</value></data>
   <data name="Nav_Users" xml:space="preserve"><value>Utilisateurs</value></data>
+  <data name="Nav_Documentation" xml:space="preserve"><value>Documentation</value></data>
 
   <!-- Layout -->
   <data name="Layout_AdminConsole" xml:space="preserve"><value>Administration Console</value></data>

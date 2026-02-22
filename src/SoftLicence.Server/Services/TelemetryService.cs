@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Net.Http.Json;
 using Microsoft.EntityFrameworkCore;
 using SoftLicence.Server.Data;
 using SoftLicence.Server.Models;
@@ -10,12 +11,14 @@ public class TelemetryService
     private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
     private readonly ILogger<TelemetryService> _logger;
     private readonly GeoIpService _geoIp;
+    private readonly IHttpClientFactory _httpFactory;
 
-    public TelemetryService(IDbContextFactory<LicenseDbContext> dbFactory, ILogger<TelemetryService> logger, GeoIpService geoIp)
+    public TelemetryService(IDbContextFactory<LicenseDbContext> dbFactory, ILogger<TelemetryService> logger, GeoIpService geoIp, IHttpClientFactory httpFactory)
     {
         _dbFactory = dbFactory;
         _logger = logger;
         _geoIp = geoIp;
+        _httpFactory = httpFactory;
     }
 
     public async Task SaveEventAsync(TelemetryEventRequest req, string? ip = null)
@@ -44,6 +47,14 @@ public class TelemetryService
 
         db.TelemetryRecords.Add(record);
         await db.SaveChangesAsync();
+
+        if (productId.HasValue)
+        {
+            var hwShort = req.HardwareId.Length > 8 ? req.HardwareId[..8] : req.HardwareId;
+            FireProductWebhooks(db, productId.Value, "Telemetry.Event",
+                $"Event: {req.EventName}",
+                $"{req.AppName} v{req.Version} — {hwShort}", req);
+        }
     }
 
     public async Task SaveDiagnosticAsync(TelemetryDiagnosticRequest req, string? ip = null)
@@ -85,6 +96,14 @@ public class TelemetryService
 
         db.TelemetryRecords.Add(record);
         await db.SaveChangesAsync();
+
+        if (productId.HasValue)
+        {
+            var hwShort = req.HardwareId.Length > 8 ? req.HardwareId[..8] : req.HardwareId;
+            FireProductWebhooks(db, productId.Value, "Telemetry.Diagnostic",
+                $"Diagnostic: {req.EventName}",
+                $"{req.AppName} v{req.Version} — {hwShort}", req);
+        }
     }
 
     public async Task SaveErrorAsync(TelemetryErrorRequest req, string? ip = null)
@@ -115,6 +134,14 @@ public class TelemetryService
 
         db.TelemetryRecords.Add(record);
         await db.SaveChangesAsync();
+
+        if (productId.HasValue)
+        {
+            var hwShort = req.HardwareId.Length > 8 ? req.HardwareId[..8] : req.HardwareId;
+            FireProductWebhooks(db, productId.Value, "Telemetry.Error",
+                $"Error: {req.ErrorType}",
+                $"{req.AppName} v{req.Version} — {hwShort}", req);
+        }
     }
 
     public async Task<List<TelemetryResponse>> GetTelemetryForProductAsync(string apiSecret, int page = 1, int pageSize = 50, TelemetryType? type = null)
@@ -154,6 +181,62 @@ public class TelemetryService
             Type = r.Type.ToString(),
             Data = GetSpecializedData(r)
         }).ToList();
+    }
+
+    private void FireProductWebhooks(LicenseDbContext db, Guid productId, string trigger, string title, string message, object data)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var webhooks = await db.ProductWebhooks
+                    .Where(w => w.ProductId == productId && w.IsEnabled)
+                    .ToListAsync();
+
+                if (!webhooks.Any()) return;
+
+                var client = _httpFactory.CreateClient();
+                var payload = new
+                {
+                    trigger,
+                    title,
+                    message,
+                    timestamp = DateTime.UtcNow,
+                    data
+                };
+
+                foreach (var hook in webhooks)
+                {
+                    try
+                    {
+                        var request = new HttpRequestMessage(HttpMethod.Post, hook.Url)
+                        {
+                            Content = JsonContent.Create(payload)
+                        };
+
+                        if (!string.IsNullOrWhiteSpace(hook.Secret))
+                        {
+                            request.Headers.Add("X-Webhook-Secret", hook.Secret);
+                        }
+
+                        await client.SendAsync(request);
+                        hook.LastTriggeredAt = DateTime.UtcNow;
+                        hook.LastError = null;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Echec webhook produit {Name} ({Url})", hook.Name, hook.Url);
+                        hook.LastError = ex.Message;
+                    }
+                }
+
+                await db.SaveChangesAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Erreur globale webhooks produit");
+            }
+        });
     }
 
     private object? GetSpecializedData(TelemetryRecord r)

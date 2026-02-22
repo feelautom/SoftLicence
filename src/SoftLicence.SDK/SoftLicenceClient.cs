@@ -17,19 +17,21 @@ namespace SoftLicence.SDK
             _httpClient = httpClient ?? new HttpClient();
         }
 
-        public async Task<ActivationResult> ActivateAsync(string licenseKey, string appName, string? appId = null, string? appVersion = null)
+        public async Task<ActivationResult> ActivateAsync(string licenseKey, string appName, string? appId = null, string? appVersion = null, string? customerEmail = null, string? customerName = null)
         {
             try
             {
                 var hwId = HardwareInfo.GetHardwareId();
-                var payload = new
+                var payload = new Dictionary<string, string?>
                 {
-                    LicenseKey = licenseKey,
-                    HardwareId = hwId,
-                    AppName = appName,
-                    AppId = appId,
-                    AppVersion = appVersion
-                };
+                    ["LicenseKey"] = licenseKey,
+                    ["HardwareId"] = hwId,
+                    ["AppName"] = appName,
+                    ["AppId"] = appId,
+                    ["AppVersion"] = appVersion,
+                    ["CustomerEmail"] = customerEmail,
+                    ["CustomerName"] = customerName
+                }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
 
                 var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
                 var response = await _httpClient.PostAsync($"{_serverUrl}/api/activation", content);
@@ -57,19 +59,21 @@ namespace SoftLicence.SDK
             }
         }
 
-        public async Task<ActivationResult> RequestTrialAsync(string appName, string? appId = null, string typeSlug = "TRIAL", string? appVersion = null)
+        public async Task<ActivationResult> RequestTrialAsync(string appName, string? appId = null, string typeSlug = "TRIAL", string? appVersion = null, string? customerEmail = null, string? customerName = null)
         {
             try
             {
                 var hwId = HardwareInfo.GetHardwareId();
-                var payload = new
+                var payload = new Dictionary<string, string?>
                 {
-                    HardwareId = hwId,
-                    AppName = appName,
-                    AppId = appId,
-                    TypeSlug = typeSlug,
-                    AppVersion = appVersion
-                };
+                    ["HardwareId"] = hwId,
+                    ["AppName"] = appName,
+                    ["AppId"] = appId,
+                    ["TypeSlug"] = typeSlug,
+                    ["AppVersion"] = appVersion,
+                    ["CustomerEmail"] = customerEmail,
+                    ["CustomerName"] = customerName
+                }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
 
                 var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
                 var response = await _httpClient.PostAsync($"{_serverUrl}/api/activation/trial", content);
