@@ -12,6 +12,7 @@ SoftLicence provides an industrial-grade licensing solution using RSA-4096 crypt
 - **Online & Offline Validation**: Robust verification logic even without an active internet connection.
 - **Typed Results**: Modern API with clear success/error states.
 - **Custom Parameters**: Inject typed per-license-type parameters (features, limits) signed into the license file.
+- **Device Transfer**: Built-in deactivation and email-reset flows for license transfers between machines.
 
 ## 🛠️ Quick Start
 
@@ -54,6 +55,22 @@ if (status.IsValid)
 {
     Console.WriteLine("License is valid!");
 }
+```
+
+### 5. Transfer to Another Machine
+
+```csharp
+// Option A — Machine is accessible (unlinks this seat only, instant)
+var result = await client.DeactivateAsync("YOUR-LICENSE-KEY", "YourAppName");
+if (result.IsSuccess)
+{
+    // Delete local license.lic, user can activate on the new machine
+}
+
+// Option B — Machine is lost/inaccessible (unlinks ALL seats via email)
+bool sent = await client.ResetRequestAsync("YOUR-LICENSE-KEY", "YourAppName");
+// User receives a 6-digit code by email (expires in 15 min)
+bool confirmed = await client.ResetConfirmAsync("YOUR-LICENSE-KEY", "YourAppName", "123456");
 ```
 
 ### 5. Read Custom Parameters

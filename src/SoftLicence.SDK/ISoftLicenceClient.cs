@@ -36,5 +36,22 @@ namespace SoftLicence.SDK
         /// Valide une licence pour la machine actuelle de manière asynchrone.
         /// </summary>
         Task<(bool IsValid, LicenseModel? License, string ErrorMessage)> ValidateForCurrentMachineAsync(string licenseString);
+
+        /// <summary>
+        /// Délie uniquement la machine actuelle de la licence (sans email).
+        /// Utile pour un bouton "Transférer ce poste" dans l'application.
+        /// </summary>
+        Task<DeactivationResult> DeactivateAsync(string licenseKey, string appName, string? appId = null);
+
+        /// <summary>
+        /// Demande un code de reset envoyé par email. Délie tous les postes après confirmation.
+        /// Utile si la machine est perdue ou inaccessible.
+        /// </summary>
+        Task<bool> ResetRequestAsync(string licenseKey, string appName, string? appId = null);
+
+        /// <summary>
+        /// Confirme le reset avec le code reçu par email. Délie tous les postes actifs.
+        /// </summary>
+        Task<bool> ResetConfirmAsync(string licenseKey, string appName, string resetCode, string? appId = null);
     }
 }
