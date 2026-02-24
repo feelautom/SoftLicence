@@ -1007,6 +1007,44 @@ public class DocumentationService
 
         ---
 
+        ### POST /api/activation/deactivate
+
+        Deactivate the calling device only (no email required). Use this to implement
+        a "Transfer to another machine" button directly in your application.
+
+        **Request Body:**
+        ```json
+        {
+          "licenseKey": "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
+          "hardwareId": "A1B2C3D4E5F67890",
+          "appName": "MyProduct",
+          "appId": "optional-product-guid"
+        }
+        ```
+
+        **Success Response (200):**
+        ```json
+        {
+          "message": "Unlink successful"
+        }
+        ```
+
+        **Behavior:**
+        - Finds the active LicenseSeat matching `licenseKey` + `hardwareId`
+        - Sets `IsActive = false`, records `UnlinkedAt`
+        - Creates `UNLINKED_API` history entry
+        - The freed seat can be immediately claimed by another device
+        - Unlike `reset-confirm`, only affects the specific seat (not all seats)
+
+        **SDK:** `await client.DeactivateAsync(licenseKey, appName)`
+        — automatically uses the current machine's hardware ID.
+
+        **Error cases:**
+        - `400` — License not found or app unknown
+        - `404` — Device not found or already unlinked
+
+        ---
+
         ### POST /api/telemetry/event
 
         Send a client telemetry event.
@@ -1098,12 +1136,22 @@ public class DocumentationService
 
         ### Authentication
 
-        All admin endpoints require:
-        - **Header**: `X-Admin-Secret: {secret}` — compared using fixed-time comparison
-        - **IP Whitelist** (optional): `AdminSettings:AllowedIps` in config (comma-separated)
+        Admin endpoints support two levels of access via `X-Admin-Secret` header:
+
+        **Global secret** — full access to all endpoints:
+        - Configured in `AdminSettings:ApiSecret` (appsettings.json / Docker env var)
+        - Optional IP whitelist: `AdminSettings:AllowedIps` (comma-separated)
+        - Can be disabled from the Settings page without touching config
         - Localhost (127.0.0.1, ::1) always allowed
 
+        **Per-product secret** — scoped access, only for that product's licenses:
+        - Each product has its own `ApiSecret` (auto-generated, visible in the Products UI)
+        - Can create/list/renew licenses for that product only
+        - Cannot manage products, keys, or other products' licenses
+        - Ideal for e-commerce integrations (Stripe webhooks, etc.)
+
         Unauthorized requests return `401 Unauthorized`.
+        Using a per-product secret on a cross-product or management endpoint returns `401`.
 
         ---
 
@@ -1263,6 +1311,33 @@ public class DocumentationService
         - Extends expiration by `LicenseType.DefaultDurationDays`
         - Reactivates license if it was expired
         - Creates `LicenseRenewal` record and `RENEWED` history entry
+
+        ---
+
+        ### DELETE /api/admin/licenses/{licenseKey}/seats/{hardwareId}
+
+        Unlink a specific device from a license. Use this from your e-commerce backend
+        to free a seat without requiring the user to act.
+
+        **Headers:** `X-Admin-Secret` required (global or per-product secret)
+
+        **Response (200):**
+        ```json
+        {
+          "message": "Appareil délié avec succès."
+        }
+        ```
+
+        **Behavior:**
+        - Finds the active `LicenseSeat` matching `licenseKey` + `hardwareId`
+        - Sets `IsActive = false`, records `UnlinkedAt`
+        - Creates `UNLINKED_API` history entry with `PerformedBy = "Admin (API)"`
+        - Freed seat is immediately available for another device
+        - With per-product secret: returns `401` if license belongs to another product
+
+        **Error cases:**
+        - `401` — Invalid secret or cross-product access attempt
+        - `404` — License not found, or seat not found / already unlinked
         """;
 
     // ── Section 11: WPF Client Integration ────────────────────────────
@@ -1292,7 +1367,24 @@ public class DocumentationService
         // Trial (with optional customer info)
         var trial = await client.RequestTrialAsync(appName, typeSlug: "TRIAL",
             customerEmail: "user@example.com", customerName: "John Doe");
+
+        // Deactivate current machine (instant, no email — frees one seat)
+        var deact = await client.DeactivateAsync(licenseKey, appName);
+        // deact.IsSuccess, deact.ErrorMessage
+
+        // Transfer via email reset (unlinks ALL seats — use when machine is inaccessible)
+        bool sent = await client.ResetRequestAsync(licenseKey, appName);
+        bool confirmed = await client.ResetConfirmAsync(licenseKey, appName, "123456");
         ```
+
+        **Deactivation strategies:**
+
+        | Scenario | Method |
+        |----------|--------|
+        | User clicks "Transfer to new machine" in app | `DeactivateAsync` — unlinks this seat only |
+        | Machine is lost/broken, user has email access | `ResetRequestAsync` + `ResetConfirmAsync` — unlinks all seats |
+        | Admin unlinks from e-commerce backend | `DELETE /api/admin/licenses/{key}/seats/{hwid}` |
+        | Admin unlinks from Blazor UI | Trash icon on the seat row |
 
         ### LicenseActivationViewModel (High-Level MVVM)
 
