@@ -5,6 +5,7 @@
 @inject SoftLicence.Server.Services.NotificationService Notifier
 @inject IHttpClientFactory HttpFactory
 @inject Microsoft.Extensions.Options.IOptions<SoftLicence.Server.Services.SmtpSettings> SmtpOptions
+@inject SoftLicence.Server.Services.SettingsService Settings
 @inject SoftLicence.Server.Services.GeoIpService GeoIp
 @inject SoftLicence.Server.Services.TimeZoneService TZ
 @using Microsoft.EntityFrameworkCore
@@ -184,6 +185,37 @@
             </div>
         </div>
     </div>
+
+    <!-- SECURITE API -->
+    <div class="col-md-4">
+        <div class="card border-warning h-100 shadow-sm">
+            <div class="card-body">
+                <h5 class="text-warning">Clé API globale</h5>
+                <p class="text-muted small">
+                    La clé API globale (configurée dans Docker) permet un accès complet à tous les produits.
+                    Désactivez-la si vous n'en avez pas besoin — les secrets par produit continueront de fonctionner.
+                </p>
+                <div class="d-flex align-items-center gap-3 mt-3">
+                    <div class="form-check form-switch mb-0">
+                        <input class="form-check-input" type="checkbox" id="globalApiToggle"
+                               checked="@globalApiSecretEnabled"
+                               @onchange="ToggleGlobalApiSecret" />
+                        <label class="form-check-label text-white" for="globalApiToggle">
+                            @(globalApiSecretEnabled ? "Activée" : "Désactivée")
+                        </label>
+                    </div>
+                    @if (!globalApiSecretEnabled)
+                    {
+                        <span class="badge bg-danger">Accès global bloqué</span>
+                    }
+                    else
+                    {
+                        <span class="badge bg-warning text-dark">Accès global autorisé</span>
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 
 <style>
@@ -300,6 +332,8 @@
     private bool isSending = false;
     private List<string> smtpLogs = new();
 
+    private bool globalApiSecretEnabled = true;
+
     protected override async Task OnInitializedAsync()
     {
         await LoadData();
@@ -308,6 +342,14 @@
     private async Task LoadData()
     {
         Webhooks = await Db.Webhooks.OrderByDescending(w => w.CreatedAt).ToListAsync();
+        globalApiSecretEnabled = await Settings.GetBoolSettingAsync("GlobalApiSecretEnabled", true);
+    }
+
+    private async Task ToggleGlobalApiSecret(ChangeEventArgs e)
+    {
+        globalApiSecretEnabled = e.Value is bool b && b;
+        await Settings.SetSettingAsync("GlobalApiSecretEnabled", globalApiSecretEnabled.ToString());
+        Toast.ShowSuccess(globalApiSecretEnabled ? "Clé API globale activée." : "Clé API globale désactivée.");
     }
 
     // --- WEBHOOKS LOGIC ---

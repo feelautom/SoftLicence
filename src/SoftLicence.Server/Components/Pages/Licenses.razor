@@ -460,6 +460,7 @@
         if (!l.History.Any())
         {
             var history = await Db.LicenseHistories
+                .AsNoTracking()
                 .Where(h => h.LicenseId == l.Id)
                 .OrderByDescending(h => h.Timestamp)
                 .ToListAsync();

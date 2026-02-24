@@ -184,6 +184,81 @@ namespace SoftLicence.SDK
             return await Task.Run(() => ValidateForCurrentMachine(licenseString));
         }
 
+        public async Task<DeactivationResult> DeactivateAsync(string licenseKey, string appName, string? appId = null)
+        {
+            try
+            {
+                var hwId = HardwareInfo.GetHardwareId();
+                var payload = new Dictionary<string, string?>
+                {
+                    ["LicenseKey"] = licenseKey,
+                    ["HardwareId"] = hwId,
+                    ["AppName"] = appName,
+                    ["AppId"] = appId
+                }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
+
+                var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+                var response = await _httpClient.PostAsync($"{_serverUrl}/api/activation/deactivate", content);
+
+                if (response.IsSuccessStatusCode)
+                    return DeactivationResult.Ok();
+
+                var errorBody = await response.Content.ReadAsStringAsync();
+                return DeactivationResult.Fail(errorBody);
+            }
+            catch (HttpRequestException ex)
+            {
+                return DeactivationResult.Fail(ex.Message);
+            }
+            catch (TaskCanceledException ex)
+            {
+                return DeactivationResult.Fail(ex.Message);
+            }
+        }
+
+        public async Task<bool> ResetRequestAsync(string licenseKey, string appName, string? appId = null)
+        {
+            try
+            {
+                var payload = new Dictionary<string, string?>
+                {
+                    ["LicenseKey"] = licenseKey,
+                    ["AppName"] = appName,
+                    ["AppId"] = appId
+                }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
+
+                var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+                var response = await _httpClient.PostAsync($"{_serverUrl}/api/activation/reset-request", content);
+                return response.IsSuccessStatusCode;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public async Task<bool> ResetConfirmAsync(string licenseKey, string appName, string resetCode, string? appId = null)
+        {
+            try
+            {
+                var payload = new Dictionary<string, string?>
+                {
+                    ["LicenseKey"] = licenseKey,
+                    ["AppName"] = appName,
+                    ["ResetCode"] = resetCode,
+                    ["AppId"] = appId
+                }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
+
+                var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+                var response = await _httpClient.PostAsync($"{_serverUrl}/api/activation/reset-confirm", content);
+                return response.IsSuccessStatusCode;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private static string? ExtractLicenseFile(string json)
         {
             try

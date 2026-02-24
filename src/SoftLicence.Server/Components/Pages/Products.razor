@@ -407,7 +407,20 @@
                             <h6>@L["Products_ProductApiKey"]</h6>
                             <p class="small text-muted">@L["Products_ApiKeyDescription"] (header <code>X-Product-Key</code>).</p>
                             <div class="input-group">
-                                <input class="form-control form-control-sm font-monospace text-warning" value="@selectedProduct.ApiSecret" readonly />
+                                <input class="form-control form-control-sm font-monospace text-warning" value="@(showApiKey ? selectedProduct.ApiSecret : "••••••••••••••••••••••••••••••••")" readonly />
+                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showApiKey = !showApiKey" title="@(showApiKey ? "Masquer" : "Afficher")">
+                                    @if (showApiKey)
+                                    {
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-eye-slash" viewBox="0 0 16 16"><path d="M13.359 11.238C15.06 9.72 16 8 16 8s-3-5.5-8-5.5a7 7 0 0 0-2.79.588l.77.771A6 6 0 0 1 8 3.5c2.12 0 3.879 1.168 5.168 2.457A13 13 0 0 1 14.828 8q-.086.13-.195.288c-.335.48-.83 1.12-1.465 1.755q-.247.248-.517.486z"/><path d="M11.297 9.176a3.5 3.5 0 0 0-4.474-4.474l.823.823a2.5 2.5 0 0 1 2.829 2.829zm-2.943 1.299.822.822a3.5 3.5 0 0 1-4.474-4.474l.823.823a2.5 2.5 0 0 0 2.829 2.829"/><path d="M3.35 5.47q-.27.24-.518.487A13 13 0 0 0 1.172 8l.195.288c.335.48.83 1.12 1.465 1.755C4.121 11.332 5.881 12.5 8 12.5c.716 0 1.39-.133 2.02-.36l.77.772A7 7 0 0 1 8 13.5C3 13.5 0 8 0 8s.939-1.721 2.641-3.238l.708.709zm10.296 8.884-12-12 .708-.708 12 12z"/></svg>
+                                    }
+                                    else
+                                    {
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-eye" viewBox="0 0 16 16"><path d="M16 8s-3-5.5-8-5.5S0 8 0 8s3 5.5 8 5.5S16 8 16 8M1.173 8a13 13 0 0 1 1.66-2.043C4.12 4.668 5.88 3.5 8 3.5s3.879 1.168 5.168 2.457A13 13 0 0 1 14.828 8q-.086.13-.195.288c-.335.48-.83 1.12-1.465 1.755C11.879 11.332 10.119 12.5 8 12.5s-3.879-1.168-5.168-2.457A13 13 0 0 1 1.172 8z"/><path d="M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5M4.5 8a3.5 3.5 0 1 1 7 0 3.5 3.5 0 0 1-7 0"/></svg>
+                                    }
+                                </button>
+                                <button class="btn btn-sm btn-outline-info" @onclick="@(async () => { await JS.InvokeVoidAsync("navigator.clipboard.writeText", selectedProduct.ApiSecret); Toast.ShowSuccess("Clé copiée !"); })" title="Copier">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-clipboard" viewBox="0 0 16 16"><path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1z"/><path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0z"/></svg>
+                                </button>
                                 <button class="btn btn-sm btn-outline-warning" @onclick="() => modalRegen.Show()" title="@L["Products_RegenApiKey"]">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-arrow-clockwise" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/><path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/></svg>
                                 </button>
@@ -1114,6 +1127,7 @@
     private Guid? parentForNewProduct = null;
     private bool showPluginCreate = false;
     private int selectedProductDepth = 1;
+    private bool showApiKey = false;
 
     private void ToggleExpand(Guid id)
     {
@@ -1159,6 +1173,7 @@
                 showPluginCreate = false;
                 parentForNewProduct = null;
                 activeTab = "lic";
+                showApiKey = false;
                 await LoadProductData();
             }
         }
@@ -1191,6 +1206,7 @@
 
     private async Task LoadData()
     {
+        Db.ChangeTracker.Clear();
         // Seulement les produits racines (sans parent)
         var query = Db.Products.Where(p => p.ParentProductId == null).AsQueryable();
         TotalCount = await query.CountAsync();

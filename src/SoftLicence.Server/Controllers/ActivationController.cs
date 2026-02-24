@@ -746,5 +746,52 @@ namespace SoftLicence.Server.Controllers
 
             return Ok(new { Message = _localizer["Api_UnlinkSuccess"].Value });
         }
+
+        public class DeactivateRequest
+        {
+            public required string LicenseKey { get; set; }
+            public required string HardwareId { get; set; }
+            public required string AppName { get; set; }
+            public string? AppId { get; set; }
+        }
+
+        [HttpPost("deactivate")]
+        public async Task<IActionResult> Deactivate([FromBody] DeactivateRequest req)
+        {
+            var cleanKey = req.LicenseKey.Trim().ToUpper();
+            HttpContext.Items[LogKeys.AppName] = req.AppName;
+            HttpContext.Items[LogKeys.LicenseKey] = cleanKey;
+            HttpContext.Items[LogKeys.HardwareId] = req.HardwareId;
+            HttpContext.Items[LogKeys.Endpoint] = "DEACTIVATE";
+
+            var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
+            if (product == null) return BadRequest(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
+
+            HttpContext.Items[LogKeys.AppName] = product.Name;
+
+            var license = await _db.Licenses
+                .Include(l => l.Seats)
+                .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
+
+            if (license == null) return BadRequest(_localizer["Api_InvalidLicenseKey"].Value);
+
+            var seat = license.Seats?.FirstOrDefault(s => s.HardwareId == req.HardwareId && s.IsActive);
+            if (seat == null) return NotFound("Appareil non trouvé ou déjà délié.");
+
+            seat.IsActive = false;
+            seat.UnlinkedAt = DateTime.UtcNow;
+
+            _db.LicenseHistories.Add(new LicenseHistory
+            {
+                LicenseId = license.Id,
+                Action = HistoryActions.UnlinkedApi,
+                Details = string.Format(_localizer["Licenses_Action_UnlinkedApi"].Value, req.HardwareId),
+                PerformedBy = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown"
+            });
+
+            await _db.SaveChangesAsync();
+
+            return Ok(new { Message = _localizer["Api_UnlinkSuccess"].Value });
+        }
     }
 }

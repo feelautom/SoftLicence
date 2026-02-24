@@ -252,11 +252,27 @@ if (vm.IsLicensed) { /* Lancer MainWindow */ }</code></pre>
                 </div>
 
                 @* ───── RESET ───── *@
-                <h5 class="text-info mt-4">4. Réinitialisation Self-Service (Public)</h5>
-                <p class="small">Permet à un utilisateur de délier sa licence pour l'utiliser sur un autre poste.</p>
+                <h5 class="text-info mt-4">4. Transfert / Réinitialisation (Public)</h5>
+                <p class="small">Deux méthodes pour délier une licence selon le scénario.</p>
+
                 <div class="api-box">
+                    <span class="badge bg-success">POST</span> <code>/api/activation/deactivate</code>
+                    <span class="badge bg-info text-dark ms-2">SDK : DeactivateAsync</span>
+                    <p class="mt-2">Délie <strong>uniquement le poste appelant</strong>. Sans email, instantané. Idéal pour un bouton "Transférer cette licence" dans l'application.</p>
+                    <strong>Paramètres (JSON) :</strong>
+                    <pre><code>{
+  "LicenseKey": "AAAA-BBBB-CCCC",
+  "HardwareId": "A1B2C3D4...",
+  "AppName": "MySoftware",
+  "AppId": "..."
+}</code></pre>
+                    <p class="small text-muted mt-1">Libère un seul siège. Les autres postes actifs ne sont pas affectés.</p>
+                </div>
+
+                <div class="api-box mt-3">
                     <span class="badge bg-success">POST</span> <code>/api/activation/reset-request</code>
-                    <p class="mt-2">Demande l'envoi d'un code de réinitialisation par email (expire en 15 min).</p>
+                    <span class="badge bg-info text-dark ms-2">SDK : ResetRequestAsync</span>
+                    <p class="mt-2">Envoie un code de réinitialisation par email (expire en 15 min). À utiliser si la machine est inaccessible.</p>
                     <strong>Paramètres (JSON) :</strong>
                     <pre><code>{
   "LicenseKey": "AAAA-BBBB-CCCC",
@@ -266,6 +282,7 @@ if (vm.IsLicensed) { /* Lancer MainWindow */ }</code></pre>
                 </div>
                 <div class="api-box mt-3">
                     <span class="badge bg-success">POST</span> <code>/api/activation/reset-confirm</code>
+                    <span class="badge bg-info text-dark ms-2">SDK : ResetConfirmAsync</span>
                     <p class="mt-2">Valide le reset avec le code reçu par email. Délie <strong>tous les sièges actifs</strong>.</p>
                     <strong>Paramètres (JSON) :</strong>
                     <pre><code>{
@@ -278,7 +295,7 @@ if (vm.IsLicensed) { /* Lancer MainWindow */ }</code></pre>
 
                 @* ───── ADMIN : PRODUITS ───── *@
                 <h5 class="text-warning mt-5">5. Gestion Produits (Admin)</h5>
-                <p class="small">Nécessite le header <code>X-Admin-Secret</code>.</p>
+                <p class="small">Nécessite le header <code>X-Admin-Secret</code>. Réservé au secret global uniquement (pas de secret produit).</p>
                 <div class="api-box">
                     <span class="badge bg-success">POST</span> <code>/api/admin/products</code>
                     <p class="mt-2">Crée un nouveau produit avec génération automatique des clés RSA-4096.</p>
@@ -307,7 +324,11 @@ if (vm.IsLicensed) { /* Lancer MainWindow */ }</code></pre>
 
                 @* ───── ADMIN : LICENCES ───── *@
                 <h5 class="text-warning mt-5">6. Gestion Licences (Admin)</h5>
-                <p class="small">Nécessite le header <code>X-Admin-Secret</code>.</p>
+                <p class="small">
+                    Nécessite le header <code>X-Admin-Secret</code>.<br/>
+                    Accepte le <strong>secret global</strong> (accès complet) ou un <strong>secret produit</strong> (scopé : uniquement les licences de ce produit).<br/>
+                    Les secrets produit sont visibles dans la page Produits de l'UI admin.
+                </p>
                 <div class="api-box">
                     <span class="badge bg-success">POST</span> <code>/api/admin/licenses</code>
                     <p class="mt-2">Génère une nouvelle licence.</p>
@@ -342,6 +363,13 @@ if (vm.IsLicensed) { /* Lancer MainWindow */ }</code></pre>
   "message": "Extended by 30 days"
 }</code></pre>
                     <p class="small text-muted mt-1">Retourne <code>409 Conflict</code> si le <code>TransactionId</code> a déjà été traité.</p>
+                </div>
+                <div class="api-box mt-3">
+                    <span class="badge bg-danger">DELETE</span> <code>/api/admin/licenses/{licenseKey}/seats/{hardwareId}</code>
+                    <p class="mt-2">Délie un poste spécifique depuis le backend (site commercial, Stripe webhook, etc.).</p>
+                    <p class="small text-muted">Avec un secret produit : retourne <code>401</code> si la licence appartient à un autre produit.</p>
+                    <strong>Réponse (200) :</strong>
+                    <pre><code>{ "message": "Appareil délié avec succès." }</code></pre>
                 </div>
 
                 @* ───── TELEMETRIE ───── *@
