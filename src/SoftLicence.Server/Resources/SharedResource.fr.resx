@@ -41,6 +41,9 @@
   <data name="Common_Loading" xml:space="preserve"><value>Chargement...</value></data>
   <data name="Common_Select" xml:space="preserve"><value>-- Choisir --</value></data>
   <data name="Common_Search" xml:space="preserve"><value>Rechercher...</value></data>
+  <data name="Common_All" xml:space="preserve"><value>Tous</value></data>
+  <data name="Common_Reset" xml:space="preserve"><value>Réinitialiser</value></data>
+  <data name="Licenses_SearchPlaceholder" xml:space="preserve"><value>Nom, email ou clé...</value></data>
   <data name="Common_Operations" xml:space="preserve"><value>opérations</value></data>
   <data name="Common_Files" xml:space="preserve"><value>fichiers</value></data>
   <data name="Common_Page" xml:space="preserve"><value>Page</value></data>
@@ -53,6 +56,11 @@
   <data name="Common_Active" xml:space="preserve"><value>Actif</value></data>
   <data name="Common_Valid" xml:space="preserve"><value>Valide</value></data>
   <data name="Common_Expired" xml:space="preserve"><value>Expiré</value></data>
+  <data name="Common_DaysRemaining" xml:space="preserve"><value>{0} j. restants</value></data>
+  <data name="Common_HoursRemaining" xml:space="preserve"><value>{0}h {1}min restantes</value></data>
+  <data name="Common_MinutesRemaining" xml:space="preserve"><value>{0} min restantes</value></data>
+  <data name="Common_Issued" xml:space="preserve"><value>Délivré</value></data>
+  <data name="Common_DaysValidity" xml:space="preserve"><value>{0} j. à l'activation</value></data>
   <data name="Common_Disabled" xml:space="preserve"><value>Désactivé</value></data>
   <data name="Common_Test" xml:space="preserve"><value>Tester</value></data>
   <data name="Common_Details" xml:space="preserve"><value>Détails</value></data>
@@ -428,6 +436,8 @@
   <data name="Api_LicenseDisabled" xml:space="preserve"><value>Cette licence a été désactivée.</value></data>
   <data name="Api_LicenseExpired" xml:space="preserve"><value>Licence expirée.</value></data>
   <data name="Api_MaxActivationsReached" xml:space="preserve"><value>Cette licence a atteint son nombre maximum d'activations ({0}). Veuillez délier un ancien poste ou contacter le support.</value></data>
+  <data name="Api_MaxDailyActivationsReached" xml:space="preserve"><value>Limite d'activations quotidiennes atteinte ({0}/jour). Réessayez demain.</value></data>
+  <data name="Api_MaxDailyUnlinksReached" xml:space="preserve"><value>Limite de déliements quotidiens atteinte ({0}/jour). Réessayez demain.</value></data>
   <data name="Api_InternalErrorServerKey" xml:space="preserve"><value>Erreur interne : La clé de signature du serveur est illisible.</value></data>
   <data name="Api_NoEmail" xml:space="preserve"><value>Aucun email n'est associé à cette licence. Contactez le support.</value></data>
   <data name="Api_CodeSent" xml:space="preserve"><value>Code envoyé par email.</value></data>
@@ -468,9 +478,47 @@
   <data name="Nav_Resets" xml:space="preserve"><value>Réinitialisations</value></data>
   <data name="Nav_Audit" xml:space="preserve"><value>Audit</value></data>
   <data name="Nav_Telemetry" xml:space="preserve"><value>Télémétrie</value></data>
+  <data name="Nav_TelemetryAnalytics" xml:space="preserve"><value>Analytique</value></data>
   <data name="Nav_Backups" xml:space="preserve"><value>Sauvegardes</value></data>
   <data name="Nav_Users" xml:space="preserve"><value>Utilisateurs</value></data>
   <data name="Nav_Documentation" xml:space="preserve"><value>Documentation</value></data>
+
+  <!-- Telemetry Analytics -->
+  <data name="TelemetryAnalytics_Title" xml:space="preserve"><value>Analytique Télémétrie</value></data>
+  <data name="TelemetryAnalytics_SelectProduct" xml:space="preserve"><value>Tous les produits</value></data>
+  <data name="TelemetryAnalytics_TotalRecords" xml:space="preserve"><value>Total Enregistrements</value></data>
+  <data name="TelemetryAnalytics_UniqueDevices" xml:space="preserve"><value>Appareils Uniques</value></data>
+  <data name="TelemetryAnalytics_Versions" xml:space="preserve"><value>versions</value></data>
+  <data name="TelemetryAnalytics_AvgDiagScore" xml:space="preserve"><value>Score Diagnostic Moyen</value></data>
+  <data name="TelemetryAnalytics_CoherenceAlerts" xml:space="preserve"><value>Alertes Cohérence</value></data>
+  <data name="TelemetryAnalytics_MismatchDetected" xml:space="preserve"><value>Incohérence détectée !</value></data>
+  <data name="TelemetryAnalytics_DailyVolume" xml:space="preserve"><value>Volume Quotidien</value></data>
+  <data name="TelemetryAnalytics_ActiveDevicesDay" xml:space="preserve"><value>Appareils Actifs / Jour</value></data>
+  <data name="TelemetryAnalytics_VersionDistribution" xml:space="preserve"><value>Distribution des Versions</value></data>
+  <data name="TelemetryAnalytics_TopEvents" xml:space="preserve"><value>Top Événements</value></data>
+  <data name="TelemetryAnalytics_TypeDistribution" xml:space="preserve"><value>Répartition par Type</value></data>
+  <data name="TelemetryAnalytics_DiagScoreDistribution" xml:space="preserve"><value>Distribution Scores Diagnostic</value></data>
+  <data name="TelemetryAnalytics_TopErrors" xml:space="preserve"><value>Top Erreurs</value></data>
+  <data name="TelemetryAnalytics_CoherenceDesc" xml:space="preserve"><value>Écarts entre les données de télémétrie et les paramètres personnalisés des licences.</value></data>
+  <data name="TelemetryAnalytics_Customer" xml:space="preserve"><value>Client</value></data>
+  <data name="TelemetryAnalytics_LicenseKey" xml:space="preserve"><value>Clé de Licence</value></data>
+  <data name="TelemetryAnalytics_Param" xml:space="preserve"><value>Paramètre</value></data>
+  <data name="TelemetryAnalytics_Expected" xml:space="preserve"><value>Attendu</value></data>
+  <data name="TelemetryAnalytics_Actual" xml:space="preserve"><value>Réel</value></data>
+  <data name="TelemetryAnalytics_NoData" xml:space="preserve"><value>Aucune donnée disponible.</value></data>
+
+  <!-- User Telemetry -->
+  <data name="UserTelemetry_Title" xml:space="preserve"><value>Télémétrie utilisateur</value></data>
+  <data name="UserTelemetry_Devices" xml:space="preserve"><value>appareil(s)</value></data>
+  <data name="UserTelemetry_TotalRecords" xml:space="preserve"><value>Total enregistrements</value></data>
+  <data name="UserTelemetry_LastActivity" xml:space="preserve"><value>Dernière activité</value></data>
+  <data name="UserTelemetry_FilterDevice" xml:space="preserve"><value>Filtrer par appareil :</value></data>
+  <data name="UserTelemetry_NoRecords" xml:space="preserve"><value>Aucune télémétrie trouvée pour cet utilisateur.</value></data>
+  <data name="UserTelemetry_ViewTelemetry" xml:space="preserve"><value>Voir la télémétrie</value></data>
+  <data name="UserTelemetry_Property" xml:space="preserve"><value>Propriété</value></data>
+  <data name="UserTelemetry_Value" xml:space="preserve"><value>Valeur</value></data>
+  <data name="UserTelemetry_ErrorType" xml:space="preserve"><value>Type d'erreur</value></data>
+  <data name="Common_Back" xml:space="preserve"><value>Retour</value></data>
 
   <!-- Layout -->
   <data name="Layout_AdminConsole" xml:space="preserve"><value>Administration Console</value></data>

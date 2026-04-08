@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using SoftLicence.Server.Data;
@@ -11,9 +12,11 @@ using SoftLicence.Server.Data;
 namespace SoftLicence.Server.Migrations
 {
     [DbContext(typeof(LicenseDbContext))]
-    partial class LicenseDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260309061517_AddValidityDaysToLicense")]
+    partial class AddValidityDaysToLicense
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -349,9 +352,6 @@ namespace SoftLicence.Server.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
-                    b.Property<string>("AppVersion")
-                        .HasColumnType("text");
-
                     b.Property<DateTime>("FirstActivatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -405,9 +405,6 @@ namespace SoftLicence.Server.Migrations
 
                     b.Property<bool>("IsRecurring")
                         .HasColumnType("boolean");
-
-                    b.Property<int>("MaxActivationsPerDay")
-                        .HasColumnType("integer");
 
                     b.Property<string>("Name")
                         .IsRequired()

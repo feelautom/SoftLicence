@@ -18,14 +18,20 @@ namespace SoftLicence.Server.Controllers
         private readonly Services.EncryptionService _encryption;
         private readonly IStringLocalizer<SharedResource> _localizer;
         private readonly Services.SettingsService _settings;
+        private readonly Services.SecurityService _security;
+        private readonly Services.NotificationService _notifier;
+        private readonly ILogger<AdminController> _logger;
 
-        public AdminController(LicenseDbContext db, IConfiguration config, Services.EncryptionService encryption, IStringLocalizer<SharedResource> localizer, Services.SettingsService settings)
+        public AdminController(LicenseDbContext db, IConfiguration config, Services.EncryptionService encryption, IStringLocalizer<SharedResource> localizer, Services.SettingsService settings, Services.SecurityService security, Services.NotificationService notifier, ILogger<AdminController> logger)
         {
             _db = db;
             _config = config;
             _encryption = encryption;
             _localizer = localizer;
             _settings = settings;
+            _security = security;
+            _notifier = notifier;
+            _logger = logger;
         }
 
         // Retourne (authorized, scopedProductId)
@@ -33,8 +39,14 @@ namespace SoftLicence.Server.Controllers
         // scopedProductId != null  → secret produit, accès limité à ce produit
         private async Task<(bool Authorized, Guid? ScopedProductId)> GetAuthContextAsync()
         {
+            var clientIp = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "";
+
             if (!Request.Headers.TryGetValue("X-Admin-Secret", out var secret))
+            {
+                _logger.LogWarning("[ADMIN_AUTH] No X-Admin-Secret header from {IP}", clientIp);
+                NotifyAuthFailure(clientIp, "No X-Admin-Secret header");
                 return (false, null);
+            }
 
             var secretStr = secret.ToString();
 
@@ -49,13 +61,20 @@ namespace SoftLicence.Server.Controllers
                     var expectedBytes = Encoding.UTF8.GetBytes(configuredSecret);
                     if (CryptographicOperations.FixedTimeEquals(secretBytes, expectedBytes))
                     {
+                        // Secret correct — vérifier la whitelist IP
                         var allowedIpsStr = _config["AdminSettings:AllowedIps"];
                         if (!string.IsNullOrEmpty(allowedIpsStr))
                         {
-                            var clientIp = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "";
-                            var allowedIps = allowedIpsStr.Split(',').Select(ip => ip.Trim()).ToList();
-                            if (!allowedIps.Contains(clientIp) && clientIp != "127.0.0.1" && clientIp != "::1")
-                                return (false, null);
+                            if (!_security.IsWhitelisted(clientIp))
+                            {
+                                var allowedIps = allowedIpsStr.Split(',').Select(ip => ip.Trim()).ToList();
+                                if (!allowedIps.Contains(clientIp))
+                                {
+                                    _logger.LogWarning("[ADMIN_AUTH] IP rejected: {IP} (AllowedIps: {AllowedIps})", clientIp, allowedIpsStr);
+                                    NotifyAuthFailure(clientIp, $"IP not in AllowedIps ({allowedIpsStr})");
+                                    return (false, null);
+                                }
+                            }
                         }
                         return (true, null); // accès complet
                     }
@@ -65,9 +84,35 @@ namespace SoftLicence.Server.Controllers
             // 2. Vérification des secrets par produit
             var product = await _db.Products.FirstOrDefaultAsync(p => p.ApiSecret == secretStr);
             if (product != null)
+            {
+                // Secret produit : aussi protégé par IP whitelist
+                var allowedIpsStr = _config["AdminSettings:AllowedIps"];
+                if (!string.IsNullOrEmpty(allowedIpsStr))
+                {
+                    if (!_security.IsWhitelisted(clientIp))
+                    {
+                        var allowedIps = allowedIpsStr.Split(',').Select(ip => ip.Trim()).ToList();
+                        if (!allowedIps.Contains(clientIp))
+                        {
+                            _logger.LogWarning("[ADMIN_AUTH] Product secret IP rejected: {IP} (Product: {Product})", clientIp, product.Name);
+                            NotifyAuthFailure(clientIp, $"Product secret IP rejected (Product: {product.Name})");
+                            return (false, null);
+                        }
+                    }
+                }
                 return (true, product.Id); // accès scopé à ce produit
+            }
 
+            _logger.LogWarning("[ADMIN_AUTH] Invalid secret from {IP}", clientIp);
+            NotifyAuthFailure(clientIp, "Invalid API secret");
             return (false, null);
+        }
+
+        private void NotifyAuthFailure(string clientIp, string reason)
+        {
+            _notifier.Notify(Services.NotificationService.Triggers.SecurityAuthFailure,
+                "⚠️ Admin Auth Failure",
+                $"IP: {clientIp}\nRaison: {reason}\nEndpoint: {HttpContext.Request.Path}");
         }
 
         private void TagLog(string action, string details = "")
@@ -77,6 +122,220 @@ namespace SoftLicence.Server.Controllers
             HttpContext.Items[LogKeys.LicenseKey] = details;
         }
 
+        // ── Helpers internes ──────────────────────────────────────────────────────
+
+        /// <summary>Autorise uniquement les IPs du réseau interne (Docker / RFC 1918).</summary>
+        private IActionResult? RequireInternalIp()
+        {
+            var ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "";
+            if (!_security.IsWhitelisted(ip))
+            {
+                _logger.LogWarning("[INTERNAL_API] Rejected external IP {IP}", ip);
+                return Forbid();
+            }
+            return null;
+        }
+
+        // ── License Types (interne uniquement) ───────────────────────────────────
+
+        public class CreateLicenseTypeRequest
+        {
+            public required string Name { get; set; }
+            public required string Slug { get; set; }
+            public string Description { get; set; } = "";
+            public int DefaultDurationDays { get; set; } = 30;
+            public bool IsRecurring { get; set; } = false;
+            public string DefaultAllowedVersions { get; set; } = "*";
+            public int DefaultMaxSeats { get; set; } = 1;
+            public int MaxActivationsPerDay { get; set; } = 0;
+            public List<LicenseTypeParamDto> Params { get; set; } = new();
+        }
+
+        public class LicenseTypeParamDto
+        {
+            public required string Key { get; set; }
+            public required string Name { get; set; }
+            public string Value { get; set; } = "";
+        }
+
+        public class UpdateLicenseTypeRequest
+        {
+            public string? Name { get; set; }
+            public string? Description { get; set; }
+            public int? DefaultDurationDays { get; set; }
+            public bool? IsRecurring { get; set; }
+            public string? DefaultAllowedVersions { get; set; }
+            public int? DefaultMaxSeats { get; set; }
+            public int? MaxActivationsPerDay { get; set; }
+        }
+
+        [HttpPost("products/{productName}/license-types")]
+        public async Task<IActionResult> CreateLicenseType(string productName, [FromBody] CreateLicenseTypeRequest req)
+        {
+            var deny = RequireInternalIp(); if (deny != null) return deny;
+            TagLog("CREATE_LICENSE_TYPE", $"{productName}/{req.Slug}");
+
+            if (string.IsNullOrWhiteSpace(req.Name) || string.IsNullOrWhiteSpace(req.Slug))
+                return BadRequest("Name et Slug sont requis.");
+
+            var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == productName.ToLower());
+            if (product == null) return NotFound(_localizer["Api_ProductNotFound"].Value);
+
+            var slug = req.Slug.Trim().ToUpper().Replace(" ", "_");
+            if (await _db.LicenseTypes.AnyAsync(t => t.ProductId == product.Id && t.Slug == slug))
+                return Conflict($"Un type avec le slug '{slug}' existe déjà pour ce produit.");
+
+            var licenseType = new LicenseType
+            {
+                ProductId = product.Id,
+                Name = req.Name.Trim(),
+                Slug = slug,
+                Description = req.Description,
+                DefaultDurationDays = req.DefaultDurationDays,
+                IsRecurring = req.IsRecurring,
+                DefaultAllowedVersions = req.DefaultAllowedVersions,
+                DefaultMaxSeats = req.DefaultMaxSeats,
+                MaxActivationsPerDay = req.MaxActivationsPerDay
+            };
+
+            foreach (var p in req.Params)
+            {
+                var key = p.Key.Trim();
+                if (string.IsNullOrWhiteSpace(key)) continue;
+                if (licenseType.CustomParams.Any(cp => cp.Key == key)) continue;
+                licenseType.CustomParams.Add(new LicenseTypeCustomParam { Key = key, Name = p.Name.Trim(), Value = p.Value });
+            }
+
+            _db.LicenseTypes.Add(licenseType);
+            await _db.SaveChangesAsync();
+
+            return Ok(new
+            {
+                licenseType.Id,
+                licenseType.Name,
+                licenseType.Slug,
+                licenseType.DefaultDurationDays,
+                licenseType.IsRecurring,
+                licenseType.DefaultMaxSeats,
+                licenseType.MaxActivationsPerDay,
+                Params = licenseType.CustomParams.Select(cp => new { cp.Key, cp.Name, cp.Value })
+            });
+        }
+
+        [HttpGet("products/{productName}/license-types")]
+        public async Task<IActionResult> GetLicenseTypes(string productName)
+        {
+            var deny = RequireInternalIp(); if (deny != null) return deny;
+            TagLog("LIST_LICENSE_TYPES", productName);
+
+            var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == productName.ToLower());
+            if (product == null) return NotFound(_localizer["Api_ProductNotFound"].Value);
+
+            var types = await _db.LicenseTypes
+                .Include(t => t.CustomParams)
+                .Where(t => t.ProductId == product.Id)
+                .Select(t => new
+                {
+                    t.Id,
+                    t.Name,
+                    t.Slug,
+                    t.Description,
+                    t.DefaultDurationDays,
+                    t.IsRecurring,
+                    t.DefaultAllowedVersions,
+                    t.DefaultMaxSeats,
+                    t.MaxActivationsPerDay,
+                    Params = t.CustomParams.Select(cp => new { cp.Key, cp.Name, cp.Value })
+                })
+                .ToListAsync();
+
+            return Ok(types);
+        }
+
+        [HttpPut("license-types/{typeId:guid}")]
+        public async Task<IActionResult> UpdateLicenseType(Guid typeId, [FromBody] UpdateLicenseTypeRequest req)
+        {
+            var deny = RequireInternalIp(); if (deny != null) return deny;
+            TagLog("UPDATE_LICENSE_TYPE", typeId.ToString());
+
+            var lt = await _db.LicenseTypes.FindAsync(typeId);
+            if (lt == null) return NotFound("Type de licence introuvable.");
+
+            if (req.Name != null) lt.Name = req.Name.Trim();
+            if (req.Description != null) lt.Description = req.Description;
+            if (req.DefaultDurationDays.HasValue) lt.DefaultDurationDays = req.DefaultDurationDays.Value;
+            if (req.IsRecurring.HasValue) lt.IsRecurring = req.IsRecurring.Value;
+            if (req.DefaultAllowedVersions != null) lt.DefaultAllowedVersions = req.DefaultAllowedVersions;
+            if (req.DefaultMaxSeats.HasValue) lt.DefaultMaxSeats = req.DefaultMaxSeats.Value;
+            if (req.MaxActivationsPerDay.HasValue) lt.MaxActivationsPerDay = req.MaxActivationsPerDay.Value;
+
+            await _db.SaveChangesAsync();
+            return Ok(new { lt.Id, lt.Name, lt.Slug, lt.DefaultDurationDays, lt.IsRecurring, lt.DefaultMaxSeats, lt.MaxActivationsPerDay });
+        }
+
+        [HttpDelete("license-types/{typeId:guid}")]
+        public async Task<IActionResult> DeleteLicenseType(Guid typeId)
+        {
+            var deny = RequireInternalIp(); if (deny != null) return deny;
+            TagLog("DELETE_LICENSE_TYPE", typeId.ToString());
+
+            var lt = await _db.LicenseTypes.Include(t => t.Licenses).FirstOrDefaultAsync(t => t.Id == typeId);
+            if (lt == null) return NotFound("Type de licence introuvable.");
+            if (lt.Licenses.Any()) return Conflict("Ce type a des licences associées, supprimez-les d'abord.");
+
+            _db.LicenseTypes.Remove(lt);
+            await _db.SaveChangesAsync();
+            return Ok(new { Message = $"Type '{lt.Slug}' supprimé." });
+        }
+
+        [HttpPost("license-types/{typeId:guid}/params")]
+        public async Task<IActionResult> AddLicenseTypeParam(Guid typeId, [FromBody] LicenseTypeParamDto req)
+        {
+            var deny = RequireInternalIp(); if (deny != null) return deny;
+            TagLog("ADD_TYPE_PARAM", $"{typeId}/{req.Key}");
+
+            var lt = await _db.LicenseTypes.FindAsync(typeId);
+            if (lt == null) return NotFound("Type de licence introuvable.");
+
+            var key = req.Key.Trim();
+            if (await _db.LicenseTypeCustomParams.AnyAsync(p => p.LicenseTypeId == typeId && p.Key == key))
+                return Conflict($"Un paramètre avec la clé '{key}' existe déjà sur ce type.");
+
+            var param = new LicenseTypeCustomParam { LicenseTypeId = typeId, Key = key, Name = req.Name.Trim(), Value = req.Value };
+            _db.LicenseTypeCustomParams.Add(param);
+            await _db.SaveChangesAsync();
+            return Ok(new { param.Key, param.Name, param.Value });
+        }
+
+        [HttpPut("license-types/{typeId:guid}/params/{key}")]
+        public async Task<IActionResult> UpdateLicenseTypeParam(Guid typeId, string key, [FromBody] LicenseTypeParamDto req)
+        {
+            var deny = RequireInternalIp(); if (deny != null) return deny;
+            TagLog("UPDATE_TYPE_PARAM", $"{typeId}/{key}");
+
+            var param = await _db.LicenseTypeCustomParams.FirstOrDefaultAsync(p => p.LicenseTypeId == typeId && p.Key == key);
+            if (param == null) return NotFound($"Paramètre '{key}' introuvable.");
+
+            param.Name = req.Name.Trim();
+            param.Value = req.Value;
+            await _db.SaveChangesAsync();
+            return Ok(new { param.Key, param.Name, param.Value });
+        }
+
+        [HttpDelete("license-types/{typeId:guid}/params/{key}")]
+        public async Task<IActionResult> DeleteLicenseTypeParam(Guid typeId, string key)
+        {
+            var deny = RequireInternalIp(); if (deny != null) return deny;
+            TagLog("DELETE_TYPE_PARAM", $"{typeId}/{key}");
+
+            var param = await _db.LicenseTypeCustomParams.FirstOrDefaultAsync(p => p.LicenseTypeId == typeId && p.Key == key);
+            if (param == null) return NotFound($"Paramètre '{key}' introuvable.");
+
+            _db.LicenseTypeCustomParams.Remove(param);
+            await _db.SaveChangesAsync();
+            return Ok(new { Message = $"Paramètre '{key}' supprimé." });
+        }
+
         [HttpPost("products")]
         public async Task<IActionResult> CreateProduct([FromBody] string name)
         {
@@ -84,7 +343,7 @@ namespace SoftLicence.Server.Controllers
             var (authorized, scopedProductId) = await GetAuthContextAsync();
             if (!authorized || scopedProductId != null) return Unauthorized();
             if (string.IsNullOrWhiteSpace(name)) return BadRequest(_localizer["Products_NameRequired"].Value);
-            if (await _db.Products.AnyAsync(p => p.Name == name)) return BadRequest(_localizer["Api_Exists"].Value);
+            if (await _db.Products.AnyAsync(p => p.Name.ToLower() == name.ToLower())) return BadRequest(_localizer["Api_Exists"].Value);
 
             var keys = LicenseService.GenerateKeys();
             var encryptedKey = _encryption.Encrypt(keys.PrivateKey);
@@ -199,6 +458,7 @@ namespace SoftLicence.Server.Controllers
             public required string TypeSlug { get; set; }
             public int? DaysValidity { get; set; }
             public string? Reference { get; set; }
+            public Guid? PluginId { get; set; }
         }
 
         [HttpPost("licenses")]
@@ -208,26 +468,48 @@ namespace SoftLicence.Server.Controllers
             var (authorized, scopedProductId) = await GetAuthContextAsync();
             if (!authorized) return Unauthorized();
 
-            var product = await _db.Products.FirstOrDefaultAsync(p => p.Name == req.ProductName);
+            var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.ProductName.ToLower());
             if (product == null) return NotFound(_localizer["Api_ProductNotFound"].Value);
 
             // Si accès scopé, vérifier que le produit demandé correspond au secret utilisé
             if (scopedProductId != null && product.Id != scopedProductId)
                 return Unauthorized();
 
-            var type = await _db.LicenseTypes.FirstOrDefaultAsync(t => t.ProductId == product.Id && t.Slug == req.TypeSlug);
+            // Si un PluginId est fourni, résoudre le sous-produit correspondant
+            var targetProduct = product;
+            if (req.PluginId.HasValue)
+            {
+                var plugin = await _db.Products.FirstOrDefaultAsync(p => p.Id == req.PluginId.Value);
+                if (plugin == null) return NotFound(_localizer["Api_ProductNotFound"].Value);
+
+                // Vérifier que le plugin appartient bien à la hiérarchie du produit parent
+                var current = plugin;
+                var belongsToProduct = false;
+                while (current != null)
+                {
+                    if (current.Id == product.Id) { belongsToProduct = true; break; }
+                    current = current.ParentProductId.HasValue
+                        ? await _db.Products.FirstOrDefaultAsync(p => p.Id == current.ParentProductId.Value)
+                        : null;
+                }
+                if (!belongsToProduct) return BadRequest("Plugin does not belong to the specified product.");
+
+                targetProduct = plugin;
+            }
+
+            var type = await _db.LicenseTypes.FirstOrDefaultAsync(t => t.ProductId == targetProduct.Id && t.Slug.ToLower() == req.TypeSlug.Trim().ToLower());
             if (type == null) return BadRequest(string.Format(_localizer["Api_LicenseTypeUnknown"].Value, req.TypeSlug));
 
             var licenseKey = Guid.NewGuid().ToString("D").ToUpper();
             var license = new License
             {
-                ProductId = product.Id,
+                ProductId = targetProduct.Id,
                 LicenseKey = licenseKey,
                 CustomerName = req.CustomerName,
                 CustomerEmail = req.CustomerEmail,
                 LicenseTypeId = type.Id,
                 Reference = req.Reference,
-                ExpirationDate = req.DaysValidity.HasValue ? DateTime.UtcNow.AddDays(req.DaysValidity.Value) : null
+                ValidityDays = req.DaysValidity
             };
 
             _db.Licenses.Add(license);
@@ -240,6 +522,11 @@ namespace SoftLicence.Server.Controllers
             });
 
             await _db.SaveChangesAsync();
+
+            _notifier.Notify(Services.NotificationService.Triggers.LicenseCreated,
+                "✨ Nouvelle Licence Créée",
+                $"Produit: {targetProduct.Name}\nClient: {req.CustomerName}\nType: {req.TypeSlug}\nClé: {licenseKey}");
+
             return Ok(new { LicenseKey = licenseKey });
         }
 
@@ -259,7 +546,7 @@ namespace SoftLicence.Server.Controllers
             }
             else if (!string.IsNullOrEmpty(productName))
             {
-                query = query.Where(l => l.Product!.Name == productName);
+                query = query.Where(l => l.Product!.Name.ToLower() == productName.ToLower());
             }
 
             var list = await query.Select(l => new
@@ -268,8 +555,10 @@ namespace SoftLicence.Server.Controllers
                 Product = l.Product != null ? l.Product.Name : "Unknown",
                 l.LicenseKey,
                 l.CustomerName,
+                l.CustomerEmail,
+                l.Reference,
                 Type = l.Type != null ? l.Type.Slug : "UNKNOWN",
-                l.IsActive,
+                IsActive = l.IsActive && (!l.ExpirationDate.HasValue || l.ExpirationDate > DateTime.UtcNow),
                 l.HardwareId,
                 l.ExpirationDate
             }).ToListAsync();
@@ -309,6 +598,66 @@ namespace SoftLicence.Server.Controllers
 
             await _db.SaveChangesAsync();
             return Ok(new { Message = "Appareil délié avec succès." });
+        }
+
+        public class RevokeByEmailRequest
+        {
+            public required string Email { get; set; }
+            public string? ProductName { get; set; }
+        }
+
+        [HttpPost("licenses/revoke-by-email")]
+        public async Task<IActionResult> RevokeByEmail([FromBody] RevokeByEmailRequest req)
+        {
+            TagLog("REVOKE_BY_EMAIL", req.Email);
+            var (authorized, scopedProductId) = await GetAuthContextAsync();
+            if (!authorized) return Unauthorized();
+
+            if (string.IsNullOrWhiteSpace(req.Email))
+                return BadRequest("Email est requis.");
+
+            IQueryable<License> query = _db.Licenses.Include(l => l.Product);
+
+            if (scopedProductId != null)
+            {
+                query = query.Where(l => l.ProductId == scopedProductId);
+            }
+            else if (!string.IsNullOrEmpty(req.ProductName))
+            {
+                query = query.Where(l => l.Product!.Name.ToLower() == req.ProductName.ToLower());
+            }
+
+            var licenses = await query
+                .Where(l => l.CustomerEmail.ToLower() == req.Email.ToLower() && l.IsActive)
+                .ToListAsync();
+
+            if (licenses.Count == 0)
+                return NotFound("Aucune licence active trouvée pour cet email.");
+
+            foreach (var license in licenses)
+            {
+                license.IsActive = false;
+
+                _db.LicenseHistories.Add(new LicenseHistory
+                {
+                    LicenseId = license.Id,
+                    Action = HistoryActions.Revoked,
+                    Details = $"Révoquée via API admin (par email: {req.Email})",
+                    PerformedBy = "Admin (API)"
+                });
+            }
+
+            await _db.SaveChangesAsync();
+
+            _notifier.Notify(Services.NotificationService.Triggers.LicenseRevoked,
+                "🚫 Licences Révoquées par Email",
+                $"Email: {req.Email}\nLicences révoquées: {licenses.Count}\nClés: {string.Join(", ", licenses.Select(l => l.LicenseKey))}");
+
+            return Ok(new
+            {
+                Message = $"{licenses.Count} licence(s) révoquée(s).",
+                RevokedKeys = licenses.Select(l => new { l.LicenseKey, Product = l.Product?.Name ?? "Unknown" })
+            });
         }
 
         public class RenewLicenseRequest

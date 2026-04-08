@@ -6,6 +6,7 @@
 @inject SoftLicence.Server.Services.ToastService Toast
 @inject SoftLicence.Server.Services.EmailService Mailer
 @inject SoftLicence.Server.Services.TimeZoneService TZ
+@inject NavigationManager Nav
 @using SoftLicence.SDK
 @using Microsoft.EntityFrameworkCore
 @using SoftLicence.Server.Components.Shared
@@ -47,7 +48,13 @@
                     </div>
                     <div class="col-md-2">
                         <label class="small text-muted">@L["Licenses_Client"]</label>
-                        <input class="form-control form-control-sm" placeholder="@L["Licenses_NamePlaceholder"]" @bind="NewClientName" />
+                        <input class="form-control form-control-sm" list="existingClients" placeholder="@L["Licenses_NamePlaceholder"]" value="@NewClientName" @onchange="OnClientNameChanged" />
+                        <datalist id="existingClients">
+                            @foreach (var c in ExistingClients)
+                            {
+                                <option value="@c.Name" />
+                            }
+                        </datalist>
                     </div>
                     <div class="col-md-2">
                         <label class="small text-muted">@L["Licenses_Email"]</label>
@@ -59,7 +66,7 @@
                             <option value="">@L["Common_Select"]</option>
                             @foreach (var t in LicenseTypes)
                             {
-                                <option value="@t.Id">@t.Name</option>
+                                <option value="@t.Id">@(t.Product?.Name ?? "?") — @t.Name</option>
                             }
                         </select>
                     </div>
@@ -89,6 +96,48 @@
             </div>
         }
 
+        <div class="row g-2 mb-3 align-items-end">
+            <div class="col-md-3">
+                <label class="small text-muted">@L["Common_Search"]</label>
+                <input class="form-control form-control-sm" placeholder="@L["Licenses_SearchPlaceholder"]" @bind="searchText" @bind:event="oninput" @onkeyup="OnSearchKeyUp" />
+            </div>
+            <div class="col-md-2">
+                <label class="small text-muted">@L["Licenses_Software"]</label>
+                <select class="form-select form-select-sm" @bind="filterProduct" @bind:after="ApplyFilters">
+                    <option value="">@L["Common_All"]</option>
+                    @foreach (var p in Products)
+                    {
+                        <option value="@p.Id">@p.Name</option>
+                    }
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="small text-muted">@L["Common_Status"]</label>
+                <select class="form-select form-select-sm" @bind="filterStatus" @bind:after="ApplyFilters">
+                    <option value="">@L["Common_All"]</option>
+                    <option value="active">@L["Common_Active"]</option>
+                    <option value="expired">@L["Common_Expired"]</option>
+                    <option value="issued">@L["Common_Issued"]</option>
+                    <option value="revoked">@L["Licenses_Revoked"]</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="small text-muted">@L["Common_Type"]</label>
+                <select class="form-select form-select-sm" @bind="filterType" @bind:after="ApplyFilters">
+                    <option value="">@L["Common_All"]</option>
+                    @foreach (var t in LicenseTypes)
+                    {
+                        <option value="@t.Slug">@t.Name</option>
+                    }
+                </select>
+            </div>
+            <div class="col-md-1 d-flex align-items-end">
+                <button class="btn btn-sm btn-outline-secondary w-100" @onclick="ResetFilters" title="@L["Common_Reset"]">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-x-circle" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/></svg>
+                </button>
+            </div>
+        </div>
+
         <div class="table-responsive">
             <table class="table table-hover align-middle">
                 <thead>
@@ -112,7 +161,10 @@
                             <td class="fw-bold">@l.Product?.Name</td>
                             <td>
                                 <div class="d-flex flex-column">
-                                    <span>@l.CustomerName</span>
+                                    <a href="/user-telemetry/@l.Id" class="text-info text-decoration-none" style="cursor:pointer" title="@L["UserTelemetry_ViewTelemetry"]">
+                                        @l.CustomerName
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" fill="currentColor" class="bi bi-graph-up ms-1 opacity-50" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M0 0h1v15h15v1H0V0Zm14.817 3.113a.5.5 0 0 1 .07.704l-4.5 5.5a.5.5 0 0 1-.74.037L7.06 6.767l-3.656 5.027a.5.5 0 0 1-.808-.588l4-5.5a.5.5 0 0 1 .758-.06l2.609 2.61 4.15-5.073a.5.5 0 0 1 .704-.07Z"/></svg>
+                                    </a>
                                     <small class="text-muted">@l.CustomerEmail</small>
                                 </div>
                             </td>
@@ -134,8 +186,12 @@
                             </td>
                             <td><span class="badge border border-secondary text-info">@l.Type?.Slug</span></td>
                             <td>
-                                @if (l.IsActive) { <span class="text-success small">● @L["Common_Active"]</span> }
-                                else { 
+                                @{
+                                    var isActivated = !string.IsNullOrEmpty(l.HardwareId) || (l.Seats?.Any(s => s.IsActive) ?? false);
+                                    var isExpired = l.ExpirationDate.HasValue && DateTime.UtcNow >= l.ExpirationDate.Value;
+                                }
+                                @if (!l.IsActive)
+                                {
                                     <div class="d-flex flex-column">
                                         <span class="text-danger small">● @L["Licenses_Revoked"]</span>
                                         @if(!string.IsNullOrEmpty(l.RevocationReason)) {
@@ -143,11 +199,48 @@
                                         }
                                     </div>
                                 }
+                                else if (!isActivated)
+                                {
+                                    <div class="d-flex flex-column">
+                                        <span class="text-secondary small">● @L["Common_Issued"]</span>
+                                        @if (l.ValidityDays.HasValue)
+                                        {
+                                            <small class="text-muted" style="font-size: 0.65rem">@string.Format(L["Common_DaysValidity"], l.ValidityDays.Value)</small>
+                                        }
+                                    </div>
+                                }
+                                else if (isExpired)
+                                {
+                                    <div class="d-flex flex-column">
+                                        <span class="text-warning small">● @L["Common_Expired"]</span>
+                                        <small class="text-muted" style="font-size: 0.65rem">@l.ExpirationDate!.Value.ToLocalTime().ToString("dd/MM/yyyy")</small>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <span class="text-success small">● @L["Common_Active"]</span>
+                                    @if (l.ExpirationDate.HasValue)
+                                    {
+                                        var timeLeft = l.ExpirationDate.Value - DateTime.UtcNow;
+                                        @if (timeLeft.TotalDays >= 1)
+                                        {
+                                            <small class="text-muted d-block" style="font-size: 0.65rem">@string.Format(L["Common_DaysRemaining"], (int)timeLeft.TotalDays)</small>
+                                        }
+                                        else if (timeLeft.TotalMinutes >= 60)
+                                        {
+                                            <small class="text-warning d-block" style="font-size: 0.65rem">@string.Format(L["Common_HoursRemaining"], timeLeft.Hours, timeLeft.Minutes)</small>
+                                        }
+                                        else if (timeLeft.TotalMinutes > 0)
+                                        {
+                                            <small class="text-danger d-block" style="font-size: 0.65rem">@string.Format(L["Common_MinutesRemaining"], (int)timeLeft.TotalMinutes)</small>
+                                        }
+                                    }
+                                }
                             </td>
                             <td class="text-center">
                                 @if (l.RecoveryCount > 0)
                                 {
-                                    <span class="badge rounded-pill bg-warning text-dark">@l.RecoveryCount</span>
+                                    <span class="badge rounded-pill bg-secondary text-white">@l.RecoveryCount</span>
                                 }
                                 else { <span class="text-muted small">-</span> }
                             </td>
@@ -157,7 +250,7 @@
                             <td class="text-center">
                                 @{
                                     var used = l.Seats?.Count(s => s.IsActive) ?? 0;
-                                    var color = used >= l.MaxSeats ? "text-warning" : "text-success";
+                                    var color = used > 0 ? "text-success" : "text-secondary";
                                 }
                                 <div class="d-flex flex-column align-items-center" style="cursor: pointer" @onclick="() => ToggleSeats(l.Id)">
                                     <span class="fw-bold @color">@used / @l.MaxSeats</span>
@@ -413,7 +506,8 @@
     private List<License> LicensesList = new();
     private List<Product> Products = new();
     private List<LicenseType> LicenseTypes = new();
-    
+    private List<(string Name, string Email)> ExistingClients = new();
+
     private bool showCreate = false;
     private string SelectedProductId = "";
     private string SelectedTypeId = "";
@@ -428,11 +522,27 @@
 
     private bool isAuthorized = false;
 
+    // Filtres
+    private string searchText = "";
+    private string? filterProduct = null;
+    private string? filterStatus = null;
+    private string? filterType = null;
+
     // Pagination
     private int CurrentPage = 1;
     private int PageSize = 25;
     private int TotalCount = 0;
     private int TotalPages => (int)Math.Ceiling((double)TotalCount / PageSize);
+
+    private void OnClientNameChanged(ChangeEventArgs e)
+    {
+        NewClientName = e.Value?.ToString() ?? "";
+        var match = ExistingClients.FirstOrDefault(c => c.Name == NewClientName);
+        if (!string.IsNullOrEmpty(match.Name))
+        {
+            NewClientEmail = match.Email;
+        }
+    }
 
     protected override async Task OnInitializedAsync()
     {
@@ -456,10 +566,11 @@
     private async Task SwitchToHistoryTab(License l)
     {
         activeDetailTab = "history";
-        // Lazy-load history on-demand
+        // Lazy-load history on-demand via fresh context
         if (!l.History.Any())
         {
-            var history = await Db.LicenseHistories
+            using var db = await DbFactory.CreateDbContextAsync();
+            var history = await db.LicenseHistories
                 .AsNoTracking()
                 .Where(h => h.LicenseId == l.Id)
                 .OrderByDescending(h => h.Timestamp)
@@ -497,14 +608,82 @@
         await LoadData();
     }
 
+    private CancellationTokenSource? _searchCts;
+
+    private async Task OnSearchKeyUp()
+    {
+        _searchCts?.Cancel();
+        _searchCts = new CancellationTokenSource();
+        var token = _searchCts.Token;
+        try
+        {
+            await Task.Delay(300, token);
+            await ApplyFilters();
+        }
+        catch (TaskCanceledException) { }
+    }
+
+    private async Task ApplyFilters()
+    {
+        CurrentPage = 1;
+        await LoadData();
+    }
+
+    private async Task ResetFilters()
+    {
+        searchText = "";
+        filterProduct = null;
+        filterStatus = null;
+        filterType = null;
+        CurrentPage = 1;
+        await LoadData();
+    }
+
     private async Task LoadData()
     {
         try
         {
-            Products = await Db.Products.ToListAsync();
-            LicenseTypes = await Db.LicenseTypes.OrderBy(t => t.Name).ToListAsync();
-            
-            var query = Db.Licenses.AsQueryable();
+            await using var db = await DbFactory.CreateDbContextAsync();
+
+            Products = await db.Products.ToListAsync();
+            LicenseTypes = await db.LicenseTypes.Include(t => t.Product).OrderBy(t => t.Product!.Name).ThenBy(t => t.Name).ToListAsync();
+
+            ExistingClients = (await db.Licenses
+                .Where(l => l.CustomerName != "")
+                .Select(l => new { l.CustomerName, l.CustomerEmail })
+                .Distinct()
+                .OrderBy(c => c.CustomerName)
+                .ToListAsync())
+                .Select(c => (c.CustomerName, c.CustomerEmail))
+                .ToList();
+
+            var query = db.Licenses.AsQueryable();
+
+            if (!string.IsNullOrWhiteSpace(searchText))
+            {
+                var search = searchText.Trim();
+                query = query.Where(l => l.CustomerName.Contains(search)
+                    || l.CustomerEmail.Contains(search)
+                    || l.LicenseKey.Contains(search)
+                    || (l.HardwareId != null && l.HardwareId.Contains(search))
+                    || l.Seats.Any(s => s.HardwareId.Contains(search)));
+            }
+
+            if (!string.IsNullOrEmpty(filterProduct))
+                query = query.Where(l => l.ProductId.ToString() == filterProduct);
+
+            if (!string.IsNullOrEmpty(filterType))
+                query = query.Where(l => l.Type != null && l.Type.Slug == filterType);
+
+            if (filterStatus == "active")
+                query = query.Where(l => l.IsActive && l.HardwareId != null && (!l.ExpirationDate.HasValue || l.ExpirationDate > DateTime.UtcNow));
+            else if (filterStatus == "expired")
+                query = query.Where(l => l.IsActive && l.ExpirationDate.HasValue && l.ExpirationDate <= DateTime.UtcNow);
+            else if (filterStatus == "issued")
+                query = query.Where(l => l.IsActive && (l.HardwareId == null || l.HardwareId == ""));
+            else if (filterStatus == "revoked")
+                query = query.Where(l => !l.IsActive);
+
             TotalCount = await query.CountAsync();
 
             if (CurrentPage > TotalPages && TotalPages > 0) CurrentPage = TotalPages;
@@ -538,13 +717,12 @@
             LicenseKey = key,
             IsActive = true,
             MaxSeats = newMaxSeats,
-            ExpirationDate = (newValidityDays.HasValue && newValidityDays.Value > 0)
-                ? DateTime.UtcNow.AddDays(newValidityDays.Value)
-                : null
+            ValidityDays = (newValidityDays.HasValue && newValidityDays.Value > 0) ? newValidityDays.Value : null
         };
 
-        Db.Licenses.Add(lic);
-        
+        using var db = await DbFactory.CreateDbContextAsync();
+        db.Licenses.Add(lic);
+
         var historyMsg = L["Licenses_Action_Created"].Value
             .Replace("{0}", LicenseTypes.First(t => t.Id == lic.LicenseTypeId).Name)
             .Replace("{1}", lic.MaxSeats.ToString());
@@ -555,7 +733,7 @@
             PerformedBy = "Admin"
         });
 
-        await Db.SaveChangesAsync();
+        await db.SaveChangesAsync();
         GeneratedKey = key;
         
         if (!string.IsNullOrWhiteSpace(NewClientEmail))
@@ -571,49 +749,47 @@
         await LoadData();
     }
 
-    private async Task Reactivate(License l) 
-    { 
-        l.IsActive = true; 
-        l.RevocationReason = null;
-        l.RevokedAt = null;
+    private async Task Reactivate(License l)
+    {
+        using var db = await DbFactory.CreateDbContextAsync();
+        var dbLic = await db.Licenses.FirstOrDefaultAsync(x => x.Id == l.Id);
+        if (dbLic == null) { Toast.ShowError(L["Resets_MsgNotFound"]); return; }
 
-        l.History.Add(new LicenseHistory {
+        dbLic.IsActive = true;
+        dbLic.RevocationReason = null;
+        dbLic.RevokedAt = null;
+
+        db.LicenseHistories.Add(new LicenseHistory {
+            LicenseId = l.Id,
             Action = HistoryActions.Reactivated,
             PerformedBy = "Admin"
         });
 
-        await Db.SaveChangesAsync(); 
-        Toast.ShowSuccess(L["Licenses_MsgReactivated"]); 
-        await LoadData(); 
+        await db.SaveChangesAsync();
+        Toast.ShowSuccess(L["Licenses_MsgReactivated"]);
+        await LoadData();
     }
     
     private async Task DeleteSeat(LicenseSeat seat)
     {
-        // On ne supprime plus, on délie (historisation)
-        seat.IsActive = false;
-        seat.UnlinkedAt = DateTime.UtcNow;
-        
-        var historyMsg = L["Licenses_Action_UnlinkedManual"].Value.Replace("{0}", seat.HardwareId);
-        
-        if (seat.License != null)
-        {
-            seat.License.History.Add(new LicenseHistory {
-                Action = HistoryActions.UnlinkedManual,
-                Details = historyMsg,
-                PerformedBy = "Admin"
-            });
-        }
-        else
-        {
-            Db.LicenseHistories.Add(new LicenseHistory {
-                LicenseId = seat.LicenseId,
-                Action = HistoryActions.UnlinkedManual,
-                Details = historyMsg,
-                PerformedBy = "Admin"
-            });
-        }
+        using var db = await DbFactory.CreateDbContextAsync();
+        var dbSeat = await db.LicenseSeats.FirstOrDefaultAsync(s => s.Id == seat.Id);
+        if (dbSeat == null) { Toast.ShowError(L["Resets_MsgNotFound"]); return; }
 
-        await Db.SaveChangesAsync();
+        // On ne supprime plus, on délie (historisation)
+        dbSeat.IsActive = false;
+        dbSeat.UnlinkedAt = DateTime.UtcNow;
+
+        var historyMsg = L["Licenses_Action_UnlinkedManual"].Value.Replace("{0}", dbSeat.HardwareId);
+
+        db.LicenseHistories.Add(new LicenseHistory {
+            LicenseId = dbSeat.LicenseId,
+            Action = HistoryActions.UnlinkedManual,
+            Details = historyMsg,
+            PerformedBy = "Admin"
+        });
+
+        await db.SaveChangesAsync();
         Toast.ShowSuccess(L["Licenses_MsgSeatUnlinked"]);
         await LoadData();
     }
@@ -634,32 +810,35 @@
     {
         if (licenseToReset == null) return;
 
-        if (licenseToReset.Seats != null)
+        using var db = await DbFactory.CreateDbContextAsync();
+        var dbLic = await db.Licenses.Include(l => l.Seats)
+            .FirstOrDefaultAsync(l => l.Id == licenseToReset.Id);
+        if (dbLic == null) { Toast.ShowError(L["Resets_MsgNotFound"]); licenseToReset = null; return; }
+
+        int count = 0;
+        foreach (var seat in dbLic.Seats.Where(s => s.IsActive))
         {
-            int count = 0;
-            foreach (var seat in licenseToReset.Seats.Where(s => s.IsActive))
-            {
-                seat.IsActive = false;
-                seat.UnlinkedAt = DateTime.UtcNow;
-                count++;
-            }
-            licenseToReset.HardwareId = null; // Reset v1 compat
-            licenseToReset.ActivationDate = null;
-            licenseToReset.RecoveryCount = 0; // On reset le compteur d'abus lors d'un reset global manuel
-            
-            var historyMsg = L["Licenses_Action_GlobalReset"].Value.Replace("{0}", count.ToString());
-
-            licenseToReset.History.Add(new LicenseHistory {
-                Action = HistoryActions.GlobalReset,
-                Details = historyMsg,
-                PerformedBy = "Admin"
-            });
-
-            await Db.SaveChangesAsync();
-            Toast.ShowSuccess(L["Licenses_MsgAllSeatsUnlinked"]);
-            licenseToReset = null;
-            await LoadData();
+            seat.IsActive = false;
+            seat.UnlinkedAt = DateTime.UtcNow;
+            count++;
         }
+        dbLic.HardwareId = null; // Reset v1 compat
+        dbLic.ActivationDate = null;
+        dbLic.RecoveryCount = 0; // On reset le compteur d'abus lors d'un reset global manuel
+
+        var historyMsg = L["Licenses_Action_GlobalReset"].Value.Replace("{0}", count.ToString());
+
+        db.LicenseHistories.Add(new LicenseHistory {
+            LicenseId = dbLic.Id,
+            Action = HistoryActions.GlobalReset,
+            Details = historyMsg,
+            PerformedBy = "Admin"
+        });
+
+        await db.SaveChangesAsync();
+        Toast.ShowSuccess(L["Licenses_MsgAllSeatsUnlinked"]);
+        licenseToReset = null;
+        await LoadData();
     }
 
     private void ConfirmDelete(License l)
@@ -671,13 +850,18 @@
     {
         if (licenseToDelete == null) return;
 
+        using var db = await DbFactory.CreateDbContextAsync();
+        var dbLic = await db.Licenses.Include(l => l.Seats)
+            .FirstOrDefaultAsync(l => l.Id == licenseToDelete.Id);
+        if (dbLic == null) { Toast.ShowError(L["Resets_MsgNotFound"]); licenseToDelete = null; return; }
+
         // On supprime vraiment les seats liés lors de la suppression de la licence parente
-        if (licenseToDelete.Seats != null && licenseToDelete.Seats.Any())
+        if (dbLic.Seats != null && dbLic.Seats.Any())
         {
-            Db.LicenseSeats.RemoveRange(licenseToDelete.Seats);
+            db.LicenseSeats.RemoveRange(dbLic.Seats);
         }
-        Db.Licenses.Remove(licenseToDelete);
-        await Db.SaveChangesAsync();
+        db.Licenses.Remove(dbLic);
+        await db.SaveChangesAsync();
         Toast.ShowSuccess(L["Licenses_MsgDeleted"]);
         licenseToDelete = null;
         await LoadData();
@@ -704,26 +888,26 @@
         var lid = licenseToRevoke.Id;
         var reason = revocationReason;
 
-        try 
+        try
         {
-            // 1. Récupération d'une instance fraîche pour éviter DbUpdateConcurrencyException
-            var dbLic = await Db.Licenses.Include(l => l.History).FirstOrDefaultAsync(l => l.Id == lid);
+            using var db = await DbFactory.CreateDbContextAsync();
+            var dbLic = await db.Licenses.FirstOrDefaultAsync(l => l.Id == lid);
             if (dbLic == null) { Toast.ShowError(L["Resets_MsgNotFound"]); return; }
 
             dbLic.IsActive = false;
             dbLic.RevocationReason = reason;
             dbLic.RevokedAt = DateTime.UtcNow;
 
-            // 2. Formatage sécurisé du message (remplace {0} par le motif)
             var historyDetail = L["Licenses_Action_Revoked"].Value.Replace("{0}", reason);
 
-            dbLic.History.Add(new LicenseHistory {
+            db.LicenseHistories.Add(new LicenseHistory {
+                LicenseId = lid,
                 Action = HistoryActions.Revoked,
                 Details = historyDetail,
                 PerformedBy = "Admin"
             });
 
-            await Db.SaveChangesAsync();
+            await db.SaveChangesAsync();
             
             Toast.ShowInfo(L["Licenses_MsgRevoked"]);
             licenseToRevoke = null;

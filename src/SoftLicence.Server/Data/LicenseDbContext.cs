@@ -1,10 +1,41 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace SoftLicence.Server.Data
 {
     public class LicenseDbContext : DbContext
     {
-        public LicenseDbContext(DbContextOptions<LicenseDbContext> options) : base(options) { }
+        private readonly ILogger<LicenseDbContext>? _logger;
+
+        public LicenseDbContext(DbContextOptions<LicenseDbContext> options, ILogger<LicenseDbContext>? logger = null) : base(options)
+        {
+            _logger = logger;
+        }
+
+        public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                return await base.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateConcurrencyException ex)
+            {
+                foreach (var entry in ex.Entries)
+                {
+                    var entityType = entry.Entity.GetType().Name;
+                    var state = entry.State;
+                    var primaryKey = entry.Properties
+                        .Where(p => p.Metadata.IsPrimaryKey())
+                        .Select(p => $"{p.Metadata.Name}={p.CurrentValue}")
+                        .FirstOrDefault() ?? "?";
+
+                    var msg = $"[CONCURRENCY] Entity={entityType} PK={primaryKey} State={state} — row missing or modified";
+                    _logger?.LogError(msg);
+                    Console.Error.WriteLine(msg);
+                }
+                throw;
+            }
+        }
 
         public DbSet<Product> Products { get; set; }
         public DbSet<License> Licenses { get; set; }

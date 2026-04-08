@@ -19,6 +19,8 @@ public class LicenseSeat
     
     public string? MachineName { get; set; }
 
+    public string? AppVersion { get; set; }
+
     public bool IsActive { get; set; } = true;
     public DateTime? UnlinkedAt { get; set; }
 }

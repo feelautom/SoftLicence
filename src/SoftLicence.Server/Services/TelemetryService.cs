@@ -51,7 +51,7 @@ public class TelemetryService
         if (productId.HasValue)
         {
             var hwShort = req.HardwareId.Length > 8 ? req.HardwareId[..8] : req.HardwareId;
-            FireProductWebhooks(db, productId.Value, "Telemetry.Event",
+            FireProductWebhooks(productId.Value, "Telemetry.Event",
                 $"Event: {req.EventName}",
                 $"{req.AppName} v{req.Version} — {hwShort}", req);
         }
@@ -100,7 +100,7 @@ public class TelemetryService
         if (productId.HasValue)
         {
             var hwShort = req.HardwareId.Length > 8 ? req.HardwareId[..8] : req.HardwareId;
-            FireProductWebhooks(db, productId.Value, "Telemetry.Diagnostic",
+            FireProductWebhooks(productId.Value, "Telemetry.Diagnostic",
                 $"Diagnostic: {req.EventName}",
                 $"{req.AppName} v{req.Version} — {hwShort}", req);
         }
@@ -138,13 +138,13 @@ public class TelemetryService
         if (productId.HasValue)
         {
             var hwShort = req.HardwareId.Length > 8 ? req.HardwareId[..8] : req.HardwareId;
-            FireProductWebhooks(db, productId.Value, "Telemetry.Error",
+            FireProductWebhooks(productId.Value, "Telemetry.Error",
                 $"Error: {req.ErrorType}",
                 $"{req.AppName} v{req.Version} — {hwShort}", req);
         }
     }
 
-    public async Task<List<TelemetryResponse>> GetTelemetryForProductAsync(string apiSecret, int page = 1, int pageSize = 50, TelemetryType? type = null)
+    public async Task<List<TelemetryResponse>> GetTelemetryForProductAsync(string apiSecret, int page = 1, int pageSize = 50, TelemetryType? type = null, List<string>? excludeHwids = null)
     {
         using var db = await _dbFactory.CreateDbContextAsync();
         var product = await db.Products.AsNoTracking().FirstOrDefaultAsync(p => p.ApiSecret == apiSecret);
@@ -162,6 +162,11 @@ public class TelemetryService
         if (type.HasValue)
         {
             query = query.Where(t => t.Type == type.Value);
+        }
+
+        if (excludeHwids is { Count: > 0 })
+        {
+            query = query.Where(t => !excludeHwids.Contains(t.HardwareId));
         }
 
         var records = await query
@@ -183,12 +188,13 @@ public class TelemetryService
         }).ToList();
     }
 
-    private void FireProductWebhooks(LicenseDbContext db, Guid productId, string trigger, string title, string message, object data)
+    private void FireProductWebhooks(Guid productId, string trigger, string title, string message, object data)
     {
         _ = Task.Run(async () =>
         {
             try
             {
+                using var db = await _dbFactory.CreateDbContextAsync();
                 var webhooks = await db.ProductWebhooks
                     .Where(w => w.ProductId == productId && w.IsEnabled)
                     .ToListAsync();

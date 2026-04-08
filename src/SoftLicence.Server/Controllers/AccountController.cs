@@ -9,29 +9,41 @@ using System.Security.Claims;
 namespace SoftLicence.Server.Controllers
 {
     [Route("account")]
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("PublicAPI")]
     public class AccountController : Controller
     {
         private readonly IConfiguration _configuration;
         private readonly LicenseDbContext _db;
         private readonly SecurityService _security;
+        private readonly NotificationService _notifier;
+        private readonly ILogger<AccountController> _logger;
 
-        public AccountController(IConfiguration configuration, LicenseDbContext db, SecurityService security)
+        public AccountController(IConfiguration configuration, LicenseDbContext db, SecurityService security, NotificationService notifier, ILogger<AccountController> logger)
         {
             _configuration = configuration;
             _db = db;
             _security = security;
+            _notifier = notifier;
+            _logger = logger;
         }
 
         [HttpPost("login")]
         public async Task<IActionResult> Login([FromForm] string username, [FromForm] string password, [FromForm] string returnUrl = "/")
         {
-            var adminUser = _configuration["AdminSettings:Username"] ?? "admin";
-            var adminPass = _configuration["AdminSettings:Password"] ?? "password";
+            var adminUser = _configuration["AdminSettings:Username"];
+            var adminPass = _configuration["AdminSettings:Password"];
             var loginPathValue = (_configuration["AdminSettings:LoginPath"] ?? "login").Replace("\"", "").Trim().Trim('/');
             var loginPath = "/" + loginPathValue;
 
+            if (string.IsNullOrEmpty(adminUser) || string.IsNullOrEmpty(adminPass))
+            {
+                _logger.LogCritical("[LOGIN] AdminSettings:Username or Password is not configured!");
+                return StatusCode(500);
+            }
+
             var claims = new List<Claim>();
             bool authenticated = false;
+            var clientIp = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown";
 
             // 1. Vérification du compte ROOT (Super Admin)
             if (username == adminUser && password == adminPass)
@@ -78,6 +90,16 @@ namespace SoftLicence.Server.Controllers
 
                 return LocalRedirect(returnUrl);
             }
+
+            // Échec login — scoring de menace + notification
+            _logger.LogWarning("[LOGIN] Failed login attempt for user '{Username}' from {IP}", username, clientIp);
+            if (!_security.IsWhitelisted(clientIp))
+            {
+                await _security.ReportThreatAsync(clientIp, 50, $"Failed login attempt (user: {username})");
+            }
+            _notifier.Notify(NotificationService.Triggers.SecurityAuthFailure,
+                "⚠️ Failed Login Attempt",
+                $"User: {username}\nIP: {clientIp}");
 
             return Redirect($"{loginPath}?error=Invalid credentials&returnUrl={Uri.EscapeDataString(returnUrl)}");
         }

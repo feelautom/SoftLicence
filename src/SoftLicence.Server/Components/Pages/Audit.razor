@@ -4,6 +4,7 @@
 @inject SoftLicence.Server.Services.GeoIpService GeoIp
 @inject SoftLicence.Server.Services.ToastService Toast
 @inject SoftLicence.Server.Services.AuditNotifier AuditNotifier
+@inject SoftLicence.Server.Services.SecurityService Security
 @implements IDisposable
 @using SoftLicence.Server.Data
 @using Microsoft.EntityFrameworkCore
@@ -277,8 +278,11 @@
                                             @ban.Reason
                                         </div>
                                     </div>
-                                    <div class="text-end mt-3 border-top border-secondary border-opacity-25 pt-2">
+                                    <div class="d-flex justify-content-between align-items-center mt-3 border-top border-secondary border-opacity-25 pt-2">
                                         <small class="text-muted" style="font-size: 0.65rem;">@L["Audit_BannedOn"] @TZ.ToLocal(ban.BannedAt).ToString("dd/MM/yyyy à HH:mm")</small>
+                                        <button class="btn btn-sm btn-link text-danger p-0" title="@L["Common_Delete"]" @onclick="() => DeleteBan(ban.IpAddress)">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                                        </button>
                                     </div>
                                 </div>
                             </div>
@@ -428,7 +432,25 @@
         {
             ban.IsActive = false;
             await db.SaveChangesAsync();
+            Security.EvictBanCache(ip);
             Toast.ShowSuccess($"IP {ip} {L["Audit_IpPardoned"]}");
+            await Refresh();
+        }
+    }
+
+    private async Task DeleteBan(string ip)
+    {
+        using var db = await DbFactory.CreateDbContextAsync();
+        var ban = await db.BannedIps.FindAsync(ip);
+        if (ban != null)
+        {
+            db.BannedIps.Remove(ban);
+            // Also remove threat score if any
+            var threat = await db.IpThreatScores.FindAsync(ip);
+            if (threat != null) db.IpThreatScores.Remove(threat);
+            await db.SaveChangesAsync();
+            Security.EvictBanCache(ip);
+            Toast.ShowSuccess($"IP {ip} supprimée de l'historique");
             await Refresh();
         }
     }
@@ -525,6 +547,18 @@
 
             // 2. IPs Bannies (actives + historique)
             var allBans = await db.BannedIps.OrderByDescending(b => b.BannedAt).ToListAsync();
+
+            // Auto-expire bans that have passed their expiration date
+            var nowExpired = allBans.Where(b => b.IsActive && b.ExpiresAt.HasValue && b.ExpiresAt <= DateTime.UtcNow).ToList();
+            foreach (var ban in nowExpired)
+            {
+                ban.IsActive = false;
+            }
+            if (nowExpired.Any())
+            {
+                await db.SaveChangesAsync();
+            }
+
             ActiveBans = allBans.Where(b => b.IsActive).ToList();
             ExpiredBans = allBans.Where(b => !b.IsActive).ToList();
             foreach (var ban in allBans)

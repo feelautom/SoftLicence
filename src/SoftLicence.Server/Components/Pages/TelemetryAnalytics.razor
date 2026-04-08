@@ -1,0 +1,443 @@
+@page "/telemetry/analytics"
+@inject SoftLicence.Server.Services.AuthService Auth
+@inject SoftLicence.Server.Services.TelemetryAnalyticsService AnalyticsService
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@inject IStringLocalizer<SharedResource> L
+@inject IDbContextFactory<LicenseDbContext> DbFactory
+@using SoftLicence.Server.Data
+@using SoftLicence.Server.Services
+@using Microsoft.EntityFrameworkCore
+
+<PageTitle>@L["TelemetryAnalytics_Title"]</PageTitle>
+
+@if (!isAuthorized)
+{
+    <div class="text-center py-5">
+        <h2 class="text-white">@L["Common_AccessDenied"]</h2>
+        <p class="text-muted">@L["Common_NoPermission"]</p>
+    </div>
+}
+else
+{
+    <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
+        <h3 class="mb-0">@L["TelemetryAnalytics_Title"]</h3>
+        <div class="d-flex gap-2 align-items-center flex-wrap">
+            <select class="form-select form-select-sm" style="width: 180px;" @bind:get="selectedProductId" @bind:set="OnProductChanged">
+                <option value="">@L["TelemetryAnalytics_SelectProduct"]</option>
+                @foreach (var p in products)
+                {
+                    <option value="@p.Id.ToString()">@p.Name</option>
+                }
+            </select>
+            <div class="btn-group btn-group-sm">
+                <button class="btn @(selectedDays == 7 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetDays(7)">7d</button>
+                <button class="btn @(selectedDays == 30 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetDays(30)">30d</button>
+                <button class="btn @(selectedDays == 90 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetDays(90)">90d</button>
+            </div>
+            <button class="btn btn-outline-secondary btn-sm" @onclick="LoadData" disabled="@loading">@L["Common_Refresh"]</button>
+        </div>
+    </div>
+
+    @if (loading)
+    {
+        <div class="text-center py-5">
+            <div class="spinner-border text-primary" role="status"></div>
+            <p class="mt-2 text-muted">@L["Common_Loading"]</p>
+        </div>
+    }
+    else if (data != null)
+    {
+        <!-- KPIs -->
+        <div class="row g-3 mb-4">
+            <div class="col-md-3">
+                <div class="card stat-card h-100">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small fw-bold">@L["TelemetryAnalytics_TotalRecords"]</h6>
+                        <div class="d-flex align-items-center mt-2">
+                            <h2 class="mb-0">@data.TotalRecords</h2>
+                            <div class="ms-auto icon-circle bg-primary-soft text-primary">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                            </div>
+                        </div>
+                        <div class="mt-2 small text-muted">
+                            <span class="text-primary fw-bold">@data.EventCount</span> events /
+                            <span class="text-success fw-bold">@data.DiagnosticCount</span> diag /
+                            <span class="text-danger fw-bold">@data.ErrorCount</span> err
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-3">
+                <div class="card stat-card h-100" style="border-left-color: #198754;">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small fw-bold">@L["TelemetryAnalytics_UniqueDevices"]</h6>
+                        <div class="d-flex align-items-center mt-2">
+                            <h2 class="mb-0">@data.UniqueDevices</h2>
+                            <div class="ms-auto icon-circle bg-success-soft text-success">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8m-4-4v4"/></svg>
+                            </div>
+                        </div>
+                        <div class="mt-2 small text-muted">
+                            @data.UniqueVersions @L["TelemetryAnalytics_Versions"]
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-3">
+                <div class="card stat-card h-100" style="border-left-color: #ffc107;">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small fw-bold">@L["TelemetryAnalytics_AvgDiagScore"]</h6>
+                        <div class="d-flex align-items-center mt-2">
+                            <h2 class="mb-0">@data.AvgDiagnosticScore<small class="text-muted">/100</small></h2>
+                            <div class="ms-auto icon-circle bg-warning-soft text-warning">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 20V10m6 10V4M6 20v-4"/></svg>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-3">
+                <div class="card stat-card h-100" style="border-left-color: @(data.AlertCount > 0 ? "#dc3545" : "#6c757d");">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small fw-bold">@L["TelemetryAnalytics_CoherenceAlerts"]</h6>
+                        <div class="d-flex align-items-center mt-2">
+                            <h2 class="mb-0 @(data.AlertCount > 0 ? "text-danger" : "")">@data.AlertCount</h2>
+                            <div class="ms-auto icon-circle @(data.AlertCount > 0 ? "bg-danger-soft text-danger" : "bg-secondary-soft text-secondary")">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4m0 4h.01"/></svg>
+                            </div>
+                        </div>
+                        @if (data.AlertCount > 0)
+                        {
+                            <div class="mt-2 small text-danger fw-bold">@L["TelemetryAnalytics_MismatchDetected"]</div>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Charts Row 1: Volume quotidien + Appareils actifs -->
+        <div class="row g-3 mb-4">
+            <div class="col-md-6">
+                <div class="card p-4 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h6 class="mb-0">@L["TelemetryAnalytics_DailyVolume"]</h6>
+                        <div class="d-flex gap-3 small">
+                            <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-primary"></span> @L["Telemetry_Events"]</span>
+                            <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-success"></span> @L["Telemetry_Diagnostics"]</span>
+                            <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-danger"></span> @L["Telemetry_Errors"]</span>
+                        </div>
+                    </div>
+                    <div class="chart-container d-flex align-items-end justify-content-around" style="height: 180px;">
+                        @{
+                            var maxVol = data.DailyVolume.Count > 0 ? data.DailyVolume.Max(d => d.Total) : 1;
+                            if (maxVol == 0) maxVol = 1;
+                        }
+                        @foreach (var day in data.DailyVolume)
+                        {
+                            var pctEvents = (int)((day.Events * 100.0) / maxVol);
+                            var pctDiag = (int)((day.Diagnostics * 100.0) / maxVol);
+                            var pctErrors = (int)((day.Errors * 100.0) / maxVol);
+                            var pctTotal = (int)((day.Total * 100.0) / maxVol);
+
+                            <div class="d-flex flex-column align-items-center flex-fill" style="min-width: 0;">
+                                @if (day.Total > 0)
+                                {
+                                    <div class="small text-muted mb-1" style="font-size: 0.65rem;">@day.Total</div>
+                                }
+                                <div class="bar-container position-relative rounded" style="height: 140px; width: 20px;">
+                                    @if (pctTotal > 0)
+                                    {
+                                        <!-- Stacked: errors at bottom, then diag, then events on top -->
+                                        <div class="bar-fill bg-danger position-absolute bottom-0 w-100 rounded-bottom" style="height: @pctTotal%;"></div>
+                                        <div class="bar-fill bg-success position-absolute bottom-0 w-100" style="height: @(pctEvents + pctDiag)%;"></div>
+                                        <div class="bar-fill bg-primary position-absolute bottom-0 w-100 rounded-top" style="height: @pctEvents%;"></div>
+                                    }
+                                </div>
+                                <span class="mt-1 text-muted" style="font-size: 0.6rem;">@TZ.ToLocal(day.Date).ToString("dd/MM")</span>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-6">
+                <div class="card p-4 h-100">
+                    <h6 class="mb-3">@L["TelemetryAnalytics_ActiveDevicesDay"]</h6>
+                    <div class="chart-container d-flex align-items-end justify-content-around" style="height: 180px;">
+                        @{
+                            var maxDev = data.DailyDevices.Count > 0 ? data.DailyDevices.Max(d => d.Count) : 1;
+                            if (maxDev == 0) maxDev = 1;
+                        }
+                        @foreach (var day in data.DailyDevices)
+                        {
+                            var pctDev = (int)((day.Count * 100.0) / maxDev);
+                            <div class="d-flex flex-column align-items-center flex-fill" style="min-width: 0;">
+                                @if (day.Count > 0)
+                                {
+                                    <div class="small text-muted mb-1" style="font-size: 0.65rem;">@day.Count</div>
+                                }
+                                <div class="bar-container position-relative rounded" style="height: 140px; width: 20px;">
+                                    @if (pctDev > 0)
+                                    {
+                                        <div class="bar-fill bg-info position-absolute bottom-0 w-100 rounded-bottom" style="height: @pctDev%;"></div>
+                                    }
+                                </div>
+                                <span class="mt-1 text-muted" style="font-size: 0.6rem;">@TZ.ToLocal(day.Date).ToString("dd/MM")</span>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Charts Row 2: Versions + Top Events -->
+        <div class="row g-3 mb-4">
+            <div class="col-md-6">
+                <div class="card p-4 h-100">
+                    <h6 class="mb-3">@L["TelemetryAnalytics_VersionDistribution"]</h6>
+                    @if (data.VersionDistribution.Count > 0)
+                    {
+                        var maxVer = data.VersionDistribution.Max(v => v.Count);
+                        if (maxVer == 0) maxVer = 1;
+                        @foreach (var ver in data.VersionDistribution)
+                        {
+                            var pctVer = (int)((ver.Count * 100.0) / maxVer);
+                            <div class="d-flex align-items-center mb-2">
+                                <span class="text-muted small me-2" style="min-width: 80px; text-align: right;">@ver.Version</span>
+                                <div class="flex-fill bar-container rounded" style="height: 20px;">
+                                    <div class="bar-fill bg-primary rounded h-100" style="width: @pctVer%;"></div>
+                                </div>
+                                <span class="text-muted small ms-2">@ver.Count</span>
+                            </div>
+                        }
+                    }
+                    else
+                    {
+                        <p class="text-muted small">@L["TelemetryAnalytics_NoData"]</p>
+                    }
+                </div>
+            </div>
+
+            <div class="col-md-6">
+                <div class="card p-4 h-100">
+                    <h6 class="mb-3">@L["TelemetryAnalytics_TopEvents"]</h6>
+                    @if (data.TopEvents.Count > 0)
+                    {
+                        var maxEv = data.TopEvents.Max(e => e.Count);
+                        if (maxEv == 0) maxEv = 1;
+                        @foreach (var ev in data.TopEvents)
+                        {
+                            var pctEv = (int)((ev.Count * 100.0) / maxEv);
+                            <div class="d-flex align-items-center mb-2">
+                                <span class="text-muted small me-2" style="min-width: 120px; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">@ev.Name</span>
+                                <div class="flex-fill bar-container rounded" style="height: 20px;">
+                                    <div class="bar-fill bg-success rounded h-100" style="width: @pctEv%;"></div>
+                                </div>
+                                <span class="text-muted small ms-2">@ev.Count</span>
+                            </div>
+                        }
+                    }
+                    else
+                    {
+                        <p class="text-muted small">@L["TelemetryAnalytics_NoData"]</p>
+                    }
+                </div>
+            </div>
+        </div>
+
+        <!-- Charts Row 3: Répartition types + Scores diagnostic -->
+        <div class="row g-3 mb-4">
+            <div class="col-md-6">
+                <div class="card p-4 h-100">
+                    <h6 class="mb-3">@L["TelemetryAnalytics_TypeDistribution"]</h6>
+                    <div class="chart-container d-flex align-items-end justify-content-around" style="height: 180px;">
+                        @{
+                            var maxType = Math.Max(1, new[] { data.EventCount, data.DiagnosticCount, data.ErrorCount }.Max());
+                        }
+                        @foreach (var (label, count, color) in new[] { (L["Telemetry_Events"].Value, data.EventCount, "bg-primary"), (L["Telemetry_Diagnostics"].Value, data.DiagnosticCount, "bg-success"), (L["Telemetry_Errors"].Value, data.ErrorCount, "bg-danger") })
+                        {
+                            var pct = (int)((count * 100.0) / maxType);
+                            <div class="d-flex flex-column align-items-center" style="width: 80px;">
+                                @if (count > 0)
+                                {
+                                    <div class="small text-muted mb-1">@count</div>
+                                }
+                                <div class="bar-container position-relative rounded" style="height: 140px; width: 40px;">
+                                    @if (pct > 0)
+                                    {
+                                        <div class="bar-fill @color position-absolute bottom-0 w-100 rounded" style="height: @pct%;"></div>
+                                    }
+                                </div>
+                                <span class="mt-2 text-muted" style="font-size: 0.7rem;">@label</span>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-6">
+                <div class="card p-4 h-100">
+                    <h6 class="mb-3">@L["TelemetryAnalytics_DiagScoreDistribution"]</h6>
+                    <div class="chart-container d-flex align-items-end justify-content-around" style="height: 180px;">
+                        @{
+                            var maxBucket = data.DiagnosticScoreBuckets.Count > 0 ? Math.Max(1, data.DiagnosticScoreBuckets.Max(b => b.Count)) : 1;
+                        }
+                        @foreach (var bucket in data.DiagnosticScoreBuckets)
+                        {
+                            var pctB = (int)((bucket.Count * 100.0) / maxBucket);
+                            <div class="d-flex flex-column align-items-center" style="width: 60px;">
+                                @if (bucket.Count > 0)
+                                {
+                                    <div class="small text-muted mb-1">@bucket.Count</div>
+                                }
+                                <div class="bar-container position-relative rounded" style="height: 140px; width: 36px;">
+                                    @if (pctB > 0)
+                                    {
+                                        <div class="bar-fill bg-warning position-absolute bottom-0 w-100 rounded" style="height: @pctB%;"></div>
+                                    }
+                                </div>
+                                <span class="mt-2 text-muted" style="font-size: 0.65rem;">@bucket.Label</span>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Top Erreurs -->
+        @if (data.TopErrors.Count > 0)
+        {
+            <div class="card p-4 mb-4">
+                <h6 class="mb-3">@L["TelemetryAnalytics_TopErrors"]</h6>
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover align-middle" style="font-size: 0.85rem;">
+                        <thead>
+                            <tr>
+                                <th>@L["Common_Type"]</th>
+                                <th>Message</th>
+                                <th class="text-end">Count</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var err in data.TopErrors)
+                            {
+                                <tr>
+                                    <td><code class="text-danger">@err.ErrorType</code></td>
+                                    <td class="text-muted" style="max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">@err.Message</td>
+                                    <td class="text-end fw-bold">@err.Count</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        }
+
+        <!-- Alertes de cohérence -->
+        @if (data.CoherenceAlerts.Count > 0)
+        {
+            <div class="card p-4 mb-4 border-danger">
+                <div class="d-flex align-items-center mb-3">
+                    <h6 class="mb-0 text-danger">@L["TelemetryAnalytics_CoherenceAlerts"]</h6>
+                    <span class="badge bg-danger ms-2">@data.CoherenceAlerts.Count</span>
+                </div>
+                <p class="text-muted small mb-3">@L["TelemetryAnalytics_CoherenceDesc"]</p>
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover align-middle" style="font-size: 0.85rem;">
+                        <thead>
+                            <tr>
+                                <th>@L["Telemetry_HardwareId"]</th>
+                                <th>@L["TelemetryAnalytics_Customer"]</th>
+                                <th>@L["TelemetryAnalytics_LicenseKey"]</th>
+                                <th>@L["TelemetryAnalytics_Param"]</th>
+                                <th>@L["TelemetryAnalytics_Expected"]</th>
+                                <th>@L["TelemetryAnalytics_Actual"]</th>
+                                <th>@L["Common_DateLocal"]</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var alert in data.CoherenceAlerts)
+                            {
+                                <tr>
+                                    <td><code class="small">@alert.HardwareId</code></td>
+                                    <td>@alert.Customer</td>
+                                    <td><code class="small">@MaskKey(alert.LicenseKey)</code></td>
+                                    <td><span class="badge bg-secondary">@alert.ParamKey</span></td>
+                                    <td class="text-success fw-bold">@alert.ExpectedValue</td>
+                                    <td class="text-danger fw-bold">@alert.ActualValue</td>
+                                    <td class="text-nowrap">@TZ.ToLocal(alert.DetectedAt).ToString("dd/MM HH:mm")</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        }
+    }
+}
+
+<style>
+    .bg-primary-soft { background-color: rgba(13, 110, 253, 0.15); }
+    .bg-success-soft { background-color: rgba(25, 135, 84, 0.15); }
+    .bg-warning-soft { background-color: rgba(255, 193, 7, 0.15); }
+    .bg-danger-soft { background-color: rgba(220, 53, 69, 0.15); }
+    .bg-secondary-soft { background-color: rgba(108, 117, 125, 0.15); }
+
+    .bar-container { background-color: rgba(255,255,255,0.05) !important; overflow: hidden; }
+    .bar-fill { transition: height 0.5s ease, width 0.5s ease; }
+    .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+</style>
+
+@code {
+    private bool isAuthorized;
+    private bool loading = true;
+    private TelemetryAnalyticsData? data;
+    private List<Product> products = new();
+    private string selectedProductId = "";
+    private int selectedDays = 30;
+
+    protected override async Task OnInitializedAsync()
+    {
+        isAuthorized = await Auth.HasPermissionAsync("telemetry.view");
+        if (!isAuthorized) { loading = false; return; }
+
+        using var db = await DbFactory.CreateDbContextAsync();
+        products = await db.Products.OrderBy(p => p.Name).ToListAsync();
+
+        await LoadData();
+    }
+
+    private async Task OnProductChanged(string value)
+    {
+        selectedProductId = value;
+        await LoadData();
+    }
+
+    private async Task SetDays(int days)
+    {
+        selectedDays = days;
+        await LoadData();
+    }
+
+    private async Task LoadData()
+    {
+        loading = true;
+        StateHasChanged();
+
+        Guid? productId = null;
+        if (!string.IsNullOrEmpty(selectedProductId) && Guid.TryParse(selectedProductId, out var pid))
+            productId = pid;
+
+        data = await AnalyticsService.GetAnalyticsAsync(productId, selectedDays);
+        loading = false;
+    }
+
+    private string MaskKey(string key)
+    {
+        if (key.Length <= 8) return key;
+        return key[..4] + "..." + key[^4..];
+    }
+}

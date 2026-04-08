@@ -26,6 +26,21 @@ public class SecurityService
     public bool IsWhitelisted(string ip)
     {
         if (ip == "127.0.0.1" || ip == "::1") return true;
+        // Exempt all private networks (RFC 1918) from threat scoring
+        if (System.Net.IPAddress.TryParse(ip, out var addr))
+        {
+            // Handle IPv4-mapped IPv6 addresses (e.g. ::ffff:10.0.1.50 → 10.0.1.50)
+            if (addr.IsIPv4MappedToIPv6)
+                addr = addr.MapToIPv4();
+
+            var bytes = addr.GetAddressBytes();
+            if (bytes.Length == 4 && (
+                bytes[0] == 10 ||                                          // 10.0.0.0/8
+                (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) ||   // 172.16.0.0/12
+                (bytes[0] == 192 && bytes[1] == 168) ||                    // 192.168.0.0/16
+                (bytes[0] == 127)))                                        // 127.0.0.0/8 (loopback)
+                return true;
+        }
         var allowedIpsStr = _config["AdminSettings:AllowedIps"];
         if (string.IsNullOrEmpty(allowedIpsStr)) return false;
         var allowedIps = allowedIpsStr.Split(',').Select(i => i.Trim()).ToList();
@@ -34,7 +49,7 @@ public class SecurityService
 
     public async Task<bool> IsBannedAsync(string ip)
     {
-        if (ip == "127.0.0.1" || ip == "::1") return false;
+        if (IsWhitelisted(ip)) return false;
 
         if (_bannedCache.TryGetValue(ip, out var expiry))
         {
@@ -123,6 +138,13 @@ public class SecurityService
         }
     }
 
+    /// <summary>Purge le cache mémoire de ban pour cette IP (à appeler après un unban en BDD).</summary>
+    public void EvictBanCache(string ip)
+    {
+        _bannedCache.TryRemove(ip, out _);
+        _threatScores.TryRemove(ip, out _);
+    }
+
     public int GetThreatScore(string ip)
     {
         if (_threatScores.TryGetValue(ip, out var entry))
@@ -132,6 +154,8 @@ public class SecurityService
 
     public async Task BanIpAsync(string ip, string reason)
     {
+        if (IsWhitelisted(ip)) return;
+
         using var db = await _dbFactory.CreateDbContextAsync();
         var existing = await db.BannedIps.FirstOrDefaultAsync(b => b.IpAddress == ip);
 
@@ -200,6 +224,7 @@ public class SecurityService
     public async Task CheckForZombieAsync(string hardwareId, string currentIp)
     {
         if (string.IsNullOrEmpty(hardwareId) || hardwareId == "Unknown") return;
+        if (IsWhitelisted(currentIp)) return;
 
         using var db = await _dbFactory.CreateDbContextAsync();
 

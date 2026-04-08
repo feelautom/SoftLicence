@@ -21,16 +21,18 @@ namespace SoftLicence.Server.Controllers
         private readonly Services.GeoIpService _geoIp;
         private readonly IConfiguration _config;
         private readonly IStringLocalizer<SharedResource> _localizer;
+        private readonly Services.NotificationService _notifier;
 
         public ActivationController(
-            LicenseDbContext db, 
-            ILogger<ActivationController> logger, 
+            LicenseDbContext db,
+            ILogger<ActivationController> logger,
             Services.EncryptionService encryption,
             Services.EmailService mailer,
             Services.TelemetryService telemetry,
             Services.GeoIpService geoIp,
             IConfiguration config,
-            IStringLocalizer<SharedResource> localizer)
+            IStringLocalizer<SharedResource> localizer,
+            Services.NotificationService notifier)
         {
             _db = db;
             _logger = logger;
@@ -40,6 +42,7 @@ namespace SoftLicence.Server.Controllers
             _geoIp = geoIp;
             _config = config;
             _localizer = localizer;
+            _notifier = notifier;
         }
 
         public class ActivationRequest
@@ -101,6 +104,26 @@ namespace SoftLicence.Server.Controllers
         {
             if (customParams == null) return new Dictionary<string, string>();
             return customParams.ToDictionary(p => p.Key, p => p.Value);
+        }
+
+        /// <summary>
+        /// Retourne tous les IDs de la hiérarchie produit (racine + enfants + petits-enfants, max 3 niveaux).
+        /// </summary>
+        private async Task<List<Guid>> GetProductHierarchyIds(Guid rootProductId)
+        {
+            var ids = new List<Guid> { rootProductId };
+            var childIds = await _db.Products
+                .Where(p => p.ParentProductId == rootProductId)
+                .Select(p => p.Id).ToListAsync();
+            ids.AddRange(childIds);
+            if (childIds.Count > 0)
+            {
+                var grandChildIds = await _db.Products
+                    .Where(p => p.ParentProductId != null && childIds.Contains(p.ParentProductId.Value))
+                    .Select(p => p.Id).ToListAsync();
+                ids.AddRange(grandChildIds);
+            }
+            return ids;
         }
 
         private bool IsVersionAllowed(string? clientVersion, string allowedMask)
@@ -326,8 +349,8 @@ namespace SoftLicence.Server.Controllers
                 HttpContext.Items[LogKeys.Endpoint] = "TRIAL_AUTO";
                 
                 // On cherche d'abord une correspondance exacte du Slug avec la clé, sinon le slug "TRIAL" — toujours filtré par produit
-                var type = await _db.LicenseTypes.Include(t => t.CustomParams).FirstOrDefaultAsync(t => t.ProductId == product.Id && t.Slug == cleanKey)
-                           ?? await _db.LicenseTypes.Include(t => t.CustomParams).FirstOrDefaultAsync(t => t.ProductId == product.Id && t.Slug == "TRIAL");
+                var type = await _db.LicenseTypes.Include(t => t.CustomParams).FirstOrDefaultAsync(t => t.ProductId == product.Id && t.Slug.ToLower() == cleanKey.ToLower())
+                           ?? await _db.LicenseTypes.Include(t => t.CustomParams).FirstOrDefaultAsync(t => t.ProductId == product.Id && t.Slug.ToLower() == "trial");
 
                 if (type == null) 
                 {
@@ -473,10 +496,11 @@ namespace SoftLicence.Server.Controllers
             }
             // --- FIN INTERCEPTION ---
 
+            var productIds = await GetProductHierarchyIds(product.Id);
             var license = await _db.Licenses
                 .Include(l => l.Product)
                 .Include(l => l.Type).ThenInclude(t => t!.CustomParams)
-                .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
+                .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && productIds.Contains(l.ProductId));
 
             if (license == null) 
             {
@@ -510,6 +534,8 @@ namespace SoftLicence.Server.Controllers
             {
                 // Poste déjà connu : On met à jour la date de passage
                 existingSeat.LastCheckInAt = DateTime.UtcNow;
+                if (!string.IsNullOrEmpty(req.AppVersion)) existingSeat.AppVersion = req.AppVersion;
+                var resolvedVersion = req.AppVersion ?? existingSeat.AppVersion ?? "Unknown";
                 license.RecoveryCount++;
                 TagLog(req, "RECOVERY");
                 _logger.LogInformation("Recovery reussi (Multi-Seat) : Cle '{LicenseKey}' sur HWID '{HardwareId}'", cleanKey, req.HardwareId);
@@ -517,7 +543,7 @@ namespace SoftLicence.Server.Controllers
                 _db.LicenseHistories.Add(new LicenseHistory {
                     LicenseId = license.Id,
                     Action = HistoryActions.Recovery,
-                    Details = string.Format(_localizer["Licenses_Action_Activated"].Value, req.HardwareId, req.AppVersion ?? "Unknown"),
+                    Details = string.Format(_localizer["Licenses_Action_Activated"].Value, req.HardwareId, resolvedVersion),
                     PerformedBy = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown"
                 });
             }
@@ -525,11 +551,24 @@ namespace SoftLicence.Server.Controllers
             {
                 // Nouveau poste : On vérifie si on a encore de la place
                 var currentSeatsCount = await _db.LicenseSeats.CountAsync(s => s.LicenseId == license.Id && s.IsActive);
-                
+
                 if (currentSeatsCount >= license.MaxSeats)
                 {
                     _logger.LogWarning("Activation echouee : Limite de postes atteinte ({Max}) pour la clé '{LicenseKey}'", license.MaxSeats, cleanKey);
                     return BadRequest(string.Format(_localizer["Api_MaxActivationsReached"].Value, license.MaxSeats));
+                }
+
+                // Vérification du quota d'activations par jour
+                var maxPerDay = license.Type?.MaxActivationsPerDay ?? 0;
+                if (maxPerDay > 0)
+                {
+                    var todayStart = DateTime.UtcNow.Date;
+                    var activationsToday = await _db.LicenseSeats.CountAsync(s => s.LicenseId == license.Id && s.FirstActivatedAt >= todayStart);
+                    if (activationsToday >= maxPerDay)
+                    {
+                        _logger.LogWarning("Activation echouee : Limite quotidienne atteinte ({Max}/jour) pour la clé '{LicenseKey}'", maxPerDay, cleanKey);
+                        return BadRequest(string.Format(_localizer["Api_MaxDailyActivationsReached"].Value, maxPerDay));
+                    }
                 }
 
                 // On crée le nouveau siège
@@ -539,10 +578,11 @@ namespace SoftLicence.Server.Controllers
                     HardwareId = req.HardwareId,
                     FirstActivatedAt = DateTime.UtcNow,
                     LastCheckInAt = DateTime.UtcNow,
+                    AppVersion = req.AppVersion,
                     IsActive = true
                 };
                 _db.LicenseSeats.Add(newSeat);
-                
+
                 _db.LicenseHistories.Add(new LicenseHistory {
                     LicenseId = license.Id,
                     Action = HistoryActions.Activated,
@@ -555,9 +595,19 @@ namespace SoftLicence.Server.Controllers
                 {
                     license.HardwareId = req.HardwareId;
                     license.ActivationDate = DateTime.UtcNow;
+
+                    // Démarrer le décompte de validité à la première activation
+                    if (license.ValidityDays.HasValue && !license.ExpirationDate.HasValue)
+                    {
+                        license.ExpirationDate = DateTime.UtcNow.AddDays(license.ValidityDays.Value);
+                    }
                 }
 
                 _logger.LogInformation("Nouveau poste active ({Count}/{Max}) : Cle '{LicenseKey}' sur HWID '{HardwareId}'", currentSeatsCount + 1, license.MaxSeats, cleanKey, req.HardwareId);
+
+                _notifier.Notify(Services.NotificationService.Triggers.LicenseActivated,
+                    "✅ Licence Activée",
+                    $"Produit: {product.Name}\nType: {license.Type?.Name ?? license.Type?.Slug ?? "Standard"}\nClient: {license.CustomerName}\nClé: {cleanKey}\nHWID: {req.HardwareId}\nPoste: {currentSeatsCount + 1}/{license.MaxSeats}");
             }
 
             // Mise à jour des infos client si fournies par le client WPF
@@ -579,16 +629,18 @@ namespace SoftLicence.Server.Controllers
                 Reference = license.Reference,
                 CreationDate = license.CreationDate,
                 ExpirationDate = license.ExpirationDate,
-                HardwareId = license.HardwareId ?? string.Empty,
+                HardwareId = req.HardwareId,
                 Features = BuildFeatures(license.Type?.CustomParams)
             };
 
             try
             {
-                var decryptedKey = _encryption.Decrypt(product.PrivateKeyXml);
+                // Utiliser la clé privée du produit auquel la licence appartient (peut être un sous-produit/plugin)
+                var signingProduct = license.Product ?? product;
+                var decryptedKey = _encryption.Decrypt(signingProduct.PrivateKeyXml);
                 if (decryptedKey == "ERROR_DECRYPTION_FAILED")
                 {
-                    _logger.LogError("ERREUR CRITIQUE : Impossible de dechiffrer la cle privee du produit '{ProductName}'. Les cles de DataProtection sont peut-etre manquantes ou invalides.", product.Name);
+                    _logger.LogError("ERREUR CRITIQUE : Impossible de dechiffrer la cle privee du produit '{ProductName}'. Les cles de DataProtection sont peut-etre manquantes ou invalides.", signingProduct.Name);
                     return StatusCode(500, _localizer["Api_InternalErrorServerKey"].Value);
                 }
 
@@ -613,10 +665,13 @@ namespace SoftLicence.Server.Controllers
 
             // Utiliser le nom canonique pour le log
             HttpContext.Items[LogKeys.AppName] = product.Name;
-            
+
+            var checkProductIds = await GetProductHierarchyIds(product.Id);
             var license = await _db.Licenses
                 .Include(l => l.Type)
-                .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
+                    .ThenInclude(t => t!.CustomParams)
+                .Include(l => l.Product)
+                .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && checkProductIds.Contains(l.ProductId));
 
             if (license == null) return NotFound(_localizer["Api_LicenseNotFound"].Value);
 
@@ -637,7 +692,40 @@ namespace SoftLicence.Server.Controllers
                 }
             }
 
-            return Ok(new { Status = status });
+            // Générer un fichier de licence frais avec les paramètres actuels du LicenseType
+            string? licenseFile = null;
+            if (status == "VALID")
+            {
+                try
+                {
+                    var licenseModel = new LicenseModel
+                    {
+                        Id = license.Id,
+                        LicenseKey = license.LicenseKey,
+                        CustomerName = license.CustomerName,
+                        CustomerEmail = license.CustomerEmail,
+                        TypeSlug = license.Type?.Slug ?? "STANDARD",
+                        Reference = license.Reference,
+                        CreationDate = license.CreationDate,
+                        ExpirationDate = license.ExpirationDate,
+                        HardwareId = req.HardwareId,
+                        Features = BuildFeatures(license.Type?.CustomParams)
+                    };
+
+                    var signingProduct = license.Product ?? product;
+                    var decryptedKey = _encryption.Decrypt(signingProduct.PrivateKeyXml);
+                    if (decryptedKey != "ERROR_DECRYPTION_FAILED")
+                    {
+                        licenseFile = LicenseService.GenerateLicense(licenseModel, decryptedKey);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Impossible de generer le fichier de licence frais lors du check pour '{LicenseKey}'", cleanKey);
+                }
+            }
+
+            return Ok(new { Status = status, LicenseFile = licenseFile });
         }
 
         public class ResetRequest
@@ -664,8 +752,9 @@ namespace SoftLicence.Server.Controllers
 
             // Utiliser le nom canonique pour le log
             HttpContext.Items[LogKeys.AppName] = product.Name;
-            
-            var cleanKey = req.LicenseKey.Trim().ToUpper();            var license = await _db.Licenses.FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
+
+            var resetProductIds = await GetProductHierarchyIds(product.Id);
+            var cleanKey = req.LicenseKey.Trim().ToUpper();            var license = await _db.Licenses.FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && resetProductIds.Contains(l.ProductId));
             if (license == null) return BadRequest(_localizer["Api_InvalidLicenseKey"].Value);
             
             HttpContext.Items[LogKeys.HardwareId] = license.HardwareId; // On logge le HWID actuel qui va etre delie
@@ -703,12 +792,13 @@ namespace SoftLicence.Server.Controllers
 
             // Utiliser le nom canonique pour le log
             HttpContext.Items[LogKeys.AppName] = product.Name;
-            
+
+            var confirmProductIds = await GetProductHierarchyIds(product.Id);
             var cleanKey = req.LicenseKey.Trim().ToUpper();
             var license = await _db.Licenses
                 .Include(l => l.Seats)
-                .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
-            
+                .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && confirmProductIds.Contains(l.ProductId));
+
             if (license == null) return BadRequest(_localizer["Api_InvalidLicenseKey"].Value);
 
             if (license.ResetCode == null || license.ResetCodeExpiry < DateTime.UtcNow ||
@@ -769,11 +859,26 @@ namespace SoftLicence.Server.Controllers
 
             HttpContext.Items[LogKeys.AppName] = product.Name;
 
+            var deactivateProductIds = await GetProductHierarchyIds(product.Id);
             var license = await _db.Licenses
                 .Include(l => l.Seats)
-                .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && l.ProductId == product.Id);
+                .Include(l => l.Type)
+                .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && deactivateProductIds.Contains(l.ProductId));
 
             if (license == null) return BadRequest(_localizer["Api_InvalidLicenseKey"].Value);
+
+            // Vérification du quota de déliements par jour
+            var maxPerDay = license.Type?.MaxActivationsPerDay ?? 0;
+            if (maxPerDay > 0)
+            {
+                var todayStart = DateTime.UtcNow.Date;
+                var unlinksToday = await _db.LicenseSeats.CountAsync(s => s.LicenseId == license.Id && !s.IsActive && s.UnlinkedAt >= todayStart);
+                if (unlinksToday >= maxPerDay)
+                {
+                    _logger.LogWarning("Deliement refuse : Limite quotidienne atteinte ({Max}/jour) pour la clé '{LicenseKey}'", maxPerDay, cleanKey);
+                    return BadRequest(string.Format(_localizer["Api_MaxDailyUnlinksReached"].Value, maxPerDay));
+                }
+            }
 
             var seat = license.Seats?.FirstOrDefault(s => s.HardwareId == req.HardwareId && s.IsActive);
             if (seat == null) return NotFound("Appareil non trouvé ou déjà délié.");

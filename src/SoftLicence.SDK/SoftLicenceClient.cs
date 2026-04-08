@@ -135,9 +135,17 @@ namespace SoftLicence.SDK
                         doc.RootElement.TryGetProperty("Status", out prop))
                     {
                         var status = prop.GetString();
-                        return status != null
-                            ? LicenseStatusResult.Ok(status)
-                            : LicenseStatusResult.Fail(StatusErrorCode.UnknownResponse, "Null status in response");
+                        if (status == null)
+                            return LicenseStatusResult.Fail(StatusErrorCode.UnknownResponse, "Null status in response");
+
+                        string? licenseFile = null;
+                        if (doc.RootElement.TryGetProperty("licenseFile", out var lfProp) ||
+                            doc.RootElement.TryGetProperty("LicenseFile", out lfProp))
+                        {
+                            licenseFile = lfProp.GetString();
+                        }
+
+                        return LicenseStatusResult.Ok(status, licenseFile);
                     }
                 }
 
