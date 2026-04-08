@@ -6,39 +6,65 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
+using System.Net;
 using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Réseaux privés exemptés du rate limiting (Docker, loopback)
+static bool IsPrivateNetwork(IPAddress? ip)
+{
+    if (ip == null) return false;
+    if (IPAddress.IsLoopback(ip)) return true;
+    if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+    var bytes = ip.GetAddressBytes();
+    if (bytes.Length != 4) return false;
+    return bytes[0] == 10                                           // 10.0.0.0/8
+        || (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31)   // 172.16.0.0/12
+        || (bytes[0] == 192 && bytes[1] == 168);                   // 192.168.0.0/16
+}
+
+static string GetRateLimitPartition(HttpContext ctx)
+{
+    var ip = ctx.Connection.RemoteIpAddress;
+    return IsPrivateNetwork(ip) ? "__unlimited__" : (ip?.ToString() ?? "unknown");
+}
 
 // Configuration du Rate Limiting (Protection anti-spam)
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
-    
-    // Politique pour l'activation client (Stricte)
-    options.AddFixedWindowLimiter("PublicAPI", opt =>
-    {
-        opt.PermitLimit = 10;
-        opt.Window = TimeSpan.FromMinutes(1);
-        opt.QueueLimit = 0;
-        opt.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
-    });
 
-    // Politique pour l'administration (Plus souple)
-    options.AddFixedWindowLimiter("AdminAPI", opt =>
-    {
-        opt.PermitLimit = 100;
-        opt.Window = TimeSpan.FromMinutes(1);
-    });
+    // Politique pour l'activation client (Stricte) — IPs privées exemptées
+    options.AddPolicy("PublicAPI", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(GetRateLimitPartition(ctx), key =>
+            new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = key == "__unlimited__" ? 10000 : 10,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst
+            }));
 
-    // Politique pour la documentation LLM (Modérée)
-    options.AddFixedWindowLimiter("DocsAPI", opt =>
-    {
-        opt.PermitLimit = 30;
-        opt.Window = TimeSpan.FromMinutes(1);
-        opt.QueueLimit = 0;
-        opt.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
-    });
+    // Politique pour l'administration (Plus souple) — IPs privées exemptées
+    options.AddPolicy("AdminAPI", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(GetRateLimitPartition(ctx), key =>
+            new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = key == "__unlimited__" ? 10000 : 100,
+                Window = TimeSpan.FromMinutes(1)
+            }));
+
+    // Politique pour la documentation LLM (Modérée) — IPs privées exemptées
+    options.AddPolicy("DocsAPI", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(GetRateLimitPartition(ctx), key =>
+            new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = key == "__unlimited__" ? 10000 : 30,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst
+            }));
 });
 
 // Configuration DataProtection (Persistance des clés de session)
@@ -99,11 +125,12 @@ builder.Services.AddScoped<SoftLicence.Server.Services.SecurityService>(); // D�
 builder.Services.AddScoped<SoftLicence.Server.Services.EncryptionService>(); // Chiffrement des clés
 builder.Services.AddSingleton<SoftLicence.Server.Services.BackupService>(); // Sauvegardes Drive (rclone)
 builder.Services.AddMemoryCache();
-builder.Services.AddScoped<SoftLicence.Server.Services.GeoIpService>(); // Intelligence Geo-IP
+builder.Services.AddSingleton<SoftLicence.Server.Services.GeoIpService>(); // Intelligence Geo-IP
 builder.Services.AddTransient<SoftLicence.Server.Services.EmailService>();
 builder.Services.AddSingleton<SoftLicence.Server.Services.AuditNotifier>(); // Push temps réel audit logs
 builder.Services.AddSingleton<SoftLicence.Server.Services.NotificationService>(); // Webhooks & Alertes
 builder.Services.AddTransient<SoftLicence.Server.Services.StatsService>(); // Stats
+builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryAnalyticsService>(); // Telemetry Analytics
 builder.Services.AddScoped<SoftLicence.Server.Services.TelemetryService>(); // Télémétrie
 builder.Services.AddHostedService<SoftLicence.Server.Services.CleanupService>(); // Nettoyage Automatique
 builder.Services.Configure<SoftLicence.Server.Services.SmtpSettings>(builder.Configuration.GetSection("SmtpSettings"));

@@ -110,7 +110,8 @@ public class TelemetryController : ControllerBase
         [FromHeader(Name = "X-Product-Key")] string? productKey,
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 50,
-        [FromQuery] TelemetryType? type = null)
+        [FromQuery] TelemetryType? type = null,
+        [FromQuery] List<string>? excludeHwids = null)
     {
         if (string.IsNullOrEmpty(productKey))
         {
@@ -120,7 +121,7 @@ public class TelemetryController : ControllerBase
         page = Math.Max(1, page);
         pageSize = Math.Clamp(pageSize, 1, 100);
 
-        var results = await _telemetryService.GetTelemetryForProductAsync(productKey, page, pageSize, type);
+        var results = await _telemetryService.GetTelemetryForProductAsync(productKey, page, pageSize, type, excludeHwids);
         
         // On pourrait vérifier si la liste est vide pour renvoyer 401, 
         // mais le service renvoie déjà une liste vide si la clé est mauvaise.

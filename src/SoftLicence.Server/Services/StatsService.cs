@@ -21,7 +21,8 @@ namespace SoftLicence.Server.Services
             // KPIs
             stats.TotalProducts = await db.Products.CountAsync();
             stats.TotalLicenses = await db.Licenses.CountAsync();
-            stats.ActiveLicenses = await db.Licenses.CountAsync(l => l.IsActive);
+            var now = DateTime.UtcNow;
+            stats.ActiveLicenses = await db.Licenses.CountAsync(l => l.IsActive && (!l.ExpirationDate.HasValue || l.ExpirationDate > now));
             stats.RevokedLicenses = await db.Licenses.CountAsync(l => !l.IsActive);
 
             // Audit Stats (Derniers 30 jours)

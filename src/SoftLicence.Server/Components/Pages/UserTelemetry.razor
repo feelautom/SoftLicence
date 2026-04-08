@@ -1,0 +1,475 @@
+@page "/user-telemetry/{LicenseId:guid}"
+@inject IDbContextFactory<LicenseDbContext> DbFactory
+@inject SoftLicence.Server.Services.AuthService Auth
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@inject SoftLicence.Server.Services.ToastService Toast
+@inject NavigationManager Nav
+@inject IStringLocalizer<SharedResource> L
+@using SoftLicence.Server.Data
+@using Microsoft.EntityFrameworkCore
+@using System.Text.Json
+
+<div class="container-fluid animate-fade">
+    @if (!isAuthorized)
+    {
+        <div class="text-center py-5">
+            <h2 class="text-white">@L["Common_AccessDenied"]</h2>
+            <p class="text-muted">@L["Common_NoPermission"]</p>
+        </div>
+    }
+    else if (license == null)
+    {
+        <div class="text-center py-5">
+            <h2 class="text-muted">@L["Common_Loading"]</h2>
+        </div>
+    }
+    else
+    {
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <div class="d-flex align-items-center gap-3">
+                <button class="btn btn-sm btn-outline-secondary" @onclick="GoBack" title="@L["Common_Back"]">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M15 8a.5.5 0 0 0-.5-.5H2.707l3.147-3.146a.5.5 0 1 0-.708-.708l-4 4a.5.5 0 0 0 0 .708l4 4a.5.5 0 0 0 .708-.708L2.707 8.5H14.5A.5.5 0 0 0 15 8z"/></svg>
+                </button>
+                <div>
+                    <h3 class="mb-0">@L["UserTelemetry_Title"]</h3>
+                    <small class="text-muted">@license.CustomerName — @(license.Product?.Name ?? "?")</small>
+                </div>
+            </div>
+            <div class="d-flex gap-2">
+                <select class="form-select form-select-sm" style="width: 130px;" @bind:get="FilterType" @bind:set="async (v) => { FilterType = v; CurrentPage = 1; await Refresh(); }">
+                    <option value="">@L["Telemetry_AllTypes"]</option>
+                    <option value="Event">@L["Telemetry_Events"]</option>
+                    <option value="Diagnostic">@L["Telemetry_Diagnostics"]</option>
+                    <option value="Error">@L["Telemetry_Errors"]</option>
+                </select>
+                <button class="btn btn-primary btn-sm" @onclick="Refresh">@L["Common_Refresh"]</button>
+            </div>
+        </div>
+
+        <!-- License summary card -->
+        <div class="card bg-dark border-secondary mb-4">
+            <div class="card-body py-3">
+                <div class="row">
+                    <div class="col-md-3">
+                        <small class="text-muted d-block">@L["Licenses_Client"]</small>
+                        <span class="fw-bold">@license.CustomerName</span>
+                        <div class="small text-muted">@license.CustomerEmail</div>
+                    </div>
+                    <div class="col-md-2">
+                        <small class="text-muted d-block">@L["Licenses_Software"]</small>
+                        <span class="fw-bold">@(license.Product?.Name ?? "-")</span>
+                    </div>
+                    <div class="col-md-3">
+                        <small class="text-muted d-block">@L["Licenses_Key"]</small>
+                        <code class="small">@license.LicenseKey</code>
+                    </div>
+                    <div class="col-md-2">
+                        <small class="text-muted d-block">@L["Licenses_Seats"]</small>
+                        <span>@hardwareIds.Count @L["UserTelemetry_Devices"]</span>
+                    </div>
+                    <div class="col-md-2">
+                        <small class="text-muted d-block">@L["UserTelemetry_TotalRecords"]</small>
+                        <span class="fw-bold text-info">@TotalCount</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- KPI cards -->
+        @if (TotalCount > 0)
+        {
+            <div class="row g-3 mb-4">
+                <div class="col-md-3">
+                    <div class="card bg-dark border-primary text-center py-2">
+                        <div class="small text-muted">@L["Telemetry_Events"]</div>
+                        <div class="fs-4 fw-bold text-primary">@eventCount</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card bg-dark border-success text-center py-2">
+                        <div class="small text-muted">@L["Telemetry_Diagnostics"]</div>
+                        <div class="fs-4 fw-bold text-success">@diagnosticCount</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card bg-dark border-danger text-center py-2">
+                        <div class="small text-muted">@L["Telemetry_Errors"]</div>
+                        <div class="fs-4 fw-bold text-danger">@errorCount</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card bg-dark border-info text-center py-2">
+                        <div class="small text-muted">@L["UserTelemetry_LastActivity"]</div>
+                        <div class="fs-6 fw-bold text-info">@(lastActivity.HasValue ? TZ.ToLocal(lastActivity.Value).ToString("dd/MM/yyyy HH:mm") : "-")</div>
+                    </div>
+                </div>
+            </div>
+        }
+
+        <!-- Hardware IDs list -->
+        @if (hardwareIds.Count > 1)
+        {
+            <div class="mb-3">
+                <small class="text-muted me-2">@L["UserTelemetry_FilterDevice"]</small>
+                <button class="btn btn-sm @(FilterHardwareId == null ? "btn-outline-info active" : "btn-outline-secondary") me-1" @onclick="async () => { FilterHardwareId = null; CurrentPage = 1; await Refresh(); }">
+                    @L["Common_All"]
+                </button>
+                @foreach (var hwId in hardwareIds)
+                {
+                    <button class="btn btn-sm @(FilterHardwareId == hwId ? "btn-outline-info active" : "btn-outline-secondary") me-1"
+                            @onclick="async () => { FilterHardwareId = hwId; CurrentPage = 1; await Refresh(); }">
+                        <code class="small">@hwId[..Math.Min(12, hwId.Length)]...</code>
+                    </button>
+                }
+            </div>
+        }
+
+        <!-- Telemetry table -->
+        <div class="table-responsive">
+            <table class="table table-hover table-sm align-middle" style="font-size: 0.85rem;">
+                <thead>
+                    <tr>
+                        <th>@L["Common_DateLocal"]</th>
+                        <th>@L["Common_Type"]</th>
+                        <th>@L["Telemetry_Event"]</th>
+                        <th>Version</th>
+                        <th>@L["Telemetry_HardwareId"]</th>
+                        <th>IP / ISP</th>
+                        <th class="text-center">@L["Telemetry_EventData"]</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var rec in Records)
+                    {
+                        var isExpanded = ExpandedRecordId == rec.Id;
+                        <tr style="cursor: pointer" class="@(isExpanded ? "table-active" : "")" @onclick="() => ToggleRecord(rec.Id)">
+                            <td class="text-nowrap">@TZ.ToLocal(rec.Timestamp).ToString("dd/MM HH:mm:ss")</td>
+                            <td><span class="badge @GetTypeBadgeClass(rec.Type)">@rec.Type</span></td>
+                            <td>@rec.EventName</td>
+                            <td><small class="text-muted">@rec.Version</small></td>
+                            <td><code class="small">@rec.HardwareId</code></td>
+                            <td class="text-nowrap" title="IP: @rec.ClientIp | ISP: @(rec.Isp ?? "Unknown")">
+                                @if (!string.IsNullOrEmpty(rec.ClientIp))
+                                {
+                                    <code class="small">@rec.ClientIp</code>
+                                    @if (!string.IsNullOrEmpty(rec.Isp))
+                                    {
+                                        <div class="text-muted" style="font-size: 0.65rem; max-width: 120px; overflow: hidden; text-overflow: ellipsis;">@rec.Isp</div>
+                                    }
+                                }
+                                else
+                                {
+                                    <span class="text-muted small">-</span>
+                                }
+                            </td>
+                            <td class="text-center">
+                                <span class="text-muted small">@(isExpanded ? "▲" : "▼")</span>
+                            </td>
+                        </tr>
+                        @if (isExpanded)
+                        {
+                            <tr class="bg-dark bg-opacity-25 animate-fade">
+                                <td colspan="7" class="p-0 border-start border-4 border-info">
+                                    <div class="p-3">
+                                        @if (rec.Type == TelemetryType.Event && rec.EventData != null)
+                                        {
+                                            var props = ParseJsonProperties(rec.EventData.PropertiesJson);
+                                            if (props.Any())
+                                            {
+                                                <table class="table table-sm table-dark mb-0" style="font-size: 0.8rem;">
+                                                    <thead><tr><th style="width: 200px">@L["UserTelemetry_Property"]</th><th>@L["UserTelemetry_Value"]</th></tr></thead>
+                                                    <tbody>
+                                                        @foreach (var kv in props)
+                                                        {
+                                                            <tr>
+                                                                <td class="text-info fw-bold">@kv.Key</td>
+                                                                <td class="text-light">@kv.Value</td>
+                                                            </tr>
+                                                        }
+                                                    </tbody>
+                                                </table>
+                                            }
+                                            else
+                                            {
+                                                <span class="text-muted small italic">@L["Telemetry_NoExtraData"]</span>
+                                            }
+                                        }
+                                        else if (rec.Type == TelemetryType.Error && rec.ErrorData != null)
+                                        {
+                                            <table class="table table-sm table-dark mb-0" style="font-size: 0.8rem;">
+                                                <tbody>
+                                                    <tr>
+                                                        <td class="text-info fw-bold" style="width: 200px">@L["UserTelemetry_ErrorType"]</td>
+                                                        <td class="text-danger fw-bold">@rec.ErrorData.ErrorType</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <td class="text-info fw-bold">Message</td>
+                                                        <td class="text-light">@rec.ErrorData.Message</td>
+                                                    </tr>
+                                                    @if (!string.IsNullOrEmpty(rec.ErrorData.StackTrace))
+                                                    {
+                                                        <tr>
+                                                            <td class="text-info fw-bold">Stack Trace</td>
+                                                            <td><pre class="small text-muted mb-0" style="max-height: 200px; overflow-y: auto; white-space: pre-wrap;">@rec.ErrorData.StackTrace</pre></td>
+                                                        </tr>
+                                                    }
+                                                </tbody>
+                                            </table>
+                                        }
+                                        else if (rec.Type == TelemetryType.Diagnostic && rec.DiagnosticData != null)
+                                        {
+                                            <div class="mb-2">@L["Telemetry_GlobalScore"] <span class="badge bg-info">@rec.DiagnosticData.Score / 100</span></div>
+                                            <table class="table table-sm table-dark mb-0" style="font-size: 0.8rem;">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Module</th>
+                                                        <th class="text-center" style="width: 80px">@L["Common_Status"]</th>
+                                                        <th>Message</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    @foreach (var r in rec.DiagnosticData.Results)
+                                                    {
+                                                        <tr>
+                                                            <td class="fw-bold">@r.ModuleName</td>
+                                                            <td class="text-center"><span class="badge @(r.Success ? "bg-success" : "bg-danger")">@(r.Success ? "OK" : "KO")</span></td>
+                                                            <td class="text-light">@r.Message</td>
+                                                        </tr>
+                                                    }
+                                                </tbody>
+                                            </table>
+                                            @if (rec.DiagnosticData.Ports.Any())
+                                            {
+                                                <h6 class="mt-3 mb-1 small text-muted">@L["Telemetry_Ports"]</h6>
+                                                <table class="table table-sm table-dark mb-0" style="font-size: 0.8rem;">
+                                                    <thead><tr><th>@L["Common_Name"]</th><th>Port</th><th>Proto</th></tr></thead>
+                                                    <tbody>
+                                                        @foreach (var p in rec.DiagnosticData.Ports)
+                                                        {
+                                                            <tr><td>@p.Name</td><td>@p.ExternalPort</td><td>@p.Protocol</td></tr>
+                                                        }
+                                                    </tbody>
+                                                </table>
+                                            }
+                                        }
+                                        else
+                                        {
+                                            <span class="text-muted small italic">@L["Telemetry_NoExtraData"]</span>
+                                        }
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    }
+                    @if (!Records.Any())
+                    {
+                        <tr><td colspan="7" class="text-center py-4 text-muted">@L["UserTelemetry_NoRecords"]</td></tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        @if (TotalCount > 0)
+        {
+            <div class="d-flex justify-content-between align-items-center mt-3">
+                <div class="d-flex align-items-center gap-2">
+                    <small class="text-muted">@L["Common_Show"]</small>
+                    <select class="form-select form-select-sm" style="width: 80px;" @bind:get="PageSize" @bind:set="ChangePageSize">
+                        <option value="10">10</option>
+                        <option value="25">25</option>
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                    </select>
+                    <small class="text-muted">@L["Common_Of"] @TotalCount @L["Common_Entries"]</small>
+                </div>
+                <nav>
+                    <ul class="pagination pagination-sm mb-0">
+                        <li class="page-item @(CurrentPage == 1 ? "disabled" : "")">
+                            <button class="page-link" @onclick="() => GoToPage(CurrentPage - 1)">@L["Common_Previous"]</button>
+                        </li>
+                        <li class="page-item disabled"><span class="page-link">@L["Common_Page"] @CurrentPage / @TotalPages</span></li>
+                        <li class="page-item @(CurrentPage >= TotalPages ? "disabled" : "")">
+                            <button class="page-link" @onclick="() => GoToPage(CurrentPage + 1)">@L["Common_Next"]</button>
+                        </li>
+                    </ul>
+                </nav>
+            </div>
+        }
+    }
+</div>
+
+
+@code {
+    [Parameter] public Guid LicenseId { get; set; }
+
+    private bool isAuthorized;
+    private License? license;
+    private List<string> hardwareIds = new();
+    private List<TelemetryRecord> Records = new();
+    private Guid? ExpandedRecordId;
+
+    private string FilterType = "";
+    private string? FilterHardwareId;
+
+    // KPIs
+    private int eventCount, diagnosticCount, errorCount;
+    private DateTime? lastActivity;
+
+    // Pagination
+    private int CurrentPage = 1;
+    private int PageSize = 25;
+    private int TotalCount = 0;
+    private int TotalPages => (int)Math.Ceiling((double)TotalCount / PageSize);
+
+    protected override async Task OnInitializedAsync()
+    {
+        isAuthorized = await Auth.HasPermissionAsync("telemetry.view");
+        if (!isAuthorized) return;
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        license = await db.Licenses
+            .AsNoTracking()
+            .Include(l => l.Product)
+            .Include(l => l.Seats)
+            .FirstOrDefaultAsync(l => l.Id == LicenseId);
+
+        if (license == null) return;
+
+        // Collect all HardwareIds (active + historical) + legacy HardwareId
+        hardwareIds = license.Seats
+            .Select(s => s.HardwareId)
+            .Distinct()
+            .ToList();
+
+        if (!string.IsNullOrEmpty(license.HardwareId) && !hardwareIds.Contains(license.HardwareId))
+            hardwareIds.Add(license.HardwareId);
+
+        await LoadKpis();
+        await Refresh();
+    }
+
+    private async Task LoadKpis()
+    {
+        if (!hardwareIds.Any()) return;
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var query = db.TelemetryRecords.AsNoTracking()
+            .Where(t => hardwareIds.Contains(t.HardwareId));
+
+        if (license!.ProductId != Guid.Empty)
+            query = query.Where(t => t.ProductId == license.ProductId);
+
+        eventCount = await query.CountAsync(t => t.Type == TelemetryType.Event);
+        diagnosticCount = await query.CountAsync(t => t.Type == TelemetryType.Diagnostic);
+        errorCount = await query.CountAsync(t => t.Type == TelemetryType.Error);
+        lastActivity = await query.OrderByDescending(t => t.Timestamp).Select(t => (DateTime?)t.Timestamp).FirstOrDefaultAsync();
+    }
+
+    private async Task Refresh()
+    {
+        if (!hardwareIds.Any())
+        {
+            Records = new();
+            TotalCount = 0;
+            return;
+        }
+
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var query = db.TelemetryRecords
+                .AsNoTracking()
+                .AsSplitQuery()
+                .Include(t => t.Product)
+                .Include(t => t.EventData)
+                .Include(t => t.DiagnosticData).ThenInclude(d => d!.Results)
+                .Include(t => t.DiagnosticData).ThenInclude(d => d!.Ports)
+                .Include(t => t.ErrorData)
+                .Where(t => hardwareIds.Contains(t.HardwareId));
+
+            if (license!.ProductId != Guid.Empty)
+                query = query.Where(t => t.ProductId == license.ProductId);
+
+            if (FilterHardwareId != null)
+                query = query.Where(t => t.HardwareId == FilterHardwareId);
+
+            if (!string.IsNullOrEmpty(FilterType) && Enum.TryParse<TelemetryType>(FilterType, out var type))
+                query = query.Where(t => t.Type == type);
+
+            TotalCount = await query.CountAsync();
+
+            if (CurrentPage > TotalPages && TotalPages > 0) CurrentPage = TotalPages;
+            if (CurrentPage < 1) CurrentPage = 1;
+
+            Records = await query.OrderByDescending(t => t.Timestamp)
+                                 .Skip((CurrentPage - 1) * PageSize)
+                                 .Take(PageSize)
+                                 .ToListAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error refreshing user telemetry: {ex.Message}");
+        }
+    }
+
+    private async Task ChangePageSize(int size)
+    {
+        PageSize = size;
+        CurrentPage = 1;
+        await Refresh();
+    }
+
+    private async Task GoToPage(int page)
+    {
+        if (page < 1 || page > TotalPages) return;
+        CurrentPage = page;
+        await Refresh();
+    }
+
+    private void GoBack() => Nav.NavigateTo("/licenses");
+
+    private void ToggleRecord(Guid id)
+    {
+        ExpandedRecordId = ExpandedRecordId == id ? null : id;
+    }
+
+    private string GetTypeBadgeClass(TelemetryType type) => type switch
+    {
+        TelemetryType.Event => "bg-primary",
+        TelemetryType.Diagnostic => "bg-success",
+        TelemetryType.Error => "bg-danger",
+        _ => "bg-secondary"
+    };
+
+    private List<KeyValuePair<string, string>> ParseJsonProperties(string? json)
+    {
+        if (string.IsNullOrEmpty(json)) return new();
+        try
+        {
+            var element = JsonSerializer.Deserialize<JsonElement>(json);
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                return element.EnumerateObject()
+                    .Select(p => new KeyValuePair<string, string>(p.Name, FormatValue(p.Value)))
+                    .ToList();
+            }
+        }
+        catch { }
+        return new() { new("JSON", json) };
+    }
+
+    private string FormatValue(JsonElement value)
+    {
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString() ?? "",
+            JsonValueKind.Number => value.GetRawText(),
+            JsonValueKind.True => "true",
+            JsonValueKind.False => "false",
+            JsonValueKind.Null => "-",
+            JsonValueKind.Object or JsonValueKind.Array =>
+                JsonSerializer.Serialize(value, new JsonSerializerOptions { WriteIndented = true }),
+            _ => value.GetRawText()
+        };
+    }
+}

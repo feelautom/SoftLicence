@@ -175,6 +175,7 @@
                             <input class="form-control" placeholder="SLUG (ex: PRO)" @bind="newTypeSlug" />
                             <input class="form-control" type="number" style="max-width: 100px;" title="@L["Products_Duration"] (@L["Common_Days"])" @bind="newTypeDuration" />
                             <input class="form-control" type="number" style="max-width: 80px;" title="@L["Licenses_Seats"]" @bind="newMaxSeats" />
+                            <input class="form-control" type="number" style="max-width: 80px;" title="Max activations/jour (0 = illimité)" @bind="newMaxActivationsPerDay" placeholder="Act/j" />
                             <div class="input-group-text bg-dark border-secondary">
                                 <input class="form-check-input mt-0" type="checkbox" @bind="isRecurring" title="Abonnement récurrent" />
                                 <span class="ms-2 small text-muted">@L["Products_Abo_Short"]</span>
@@ -189,6 +190,7 @@
                                     <th>Slug</th>
                                     <th class="text-center">@L["Products_Duration"]</th>
                                     <th class="text-center">@L["Licenses_Seats"]</th>
+                                    <th class="text-center">Act/j</th>
                                     <th class="text-center">@L["Products_Mode"]</th>
                                     <th class="text-end">@L["Common_Actions"]</th>
                                 </tr>
@@ -209,6 +211,10 @@
                                         <td class="text-center">
                                             @if (editingTypeId == type.Id) { <input class="form-control form-control-sm mx-auto" type="number" style="width: 60px" @bind="type.DefaultMaxSeats" /> }
                                             else { @type.DefaultMaxSeats }
+                                        </td>
+                                        <td class="text-center">
+                                            @if (editingTypeId == type.Id) { <input class="form-control form-control-sm mx-auto" type="number" style="width: 60px" @bind="type.MaxActivationsPerDay" /> }
+                                            else { @(type.MaxActivationsPerDay == 0 ? "∞" : type.MaxActivationsPerDay) }
                                         </td>
                                         <td class="text-center">
                                             @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.IsRecurring" /> }
@@ -529,13 +535,47 @@
                                                     <td>@lic.CustomerName</td>
                                                     <td><span class="text-muted small">@lic.Type?.Name</span></td>
                                                     <td>
-                                                        @if (lic.IsActive) { <span class="text-success small">● @L["Common_Active"]</span> }
-                                                        else { <span class="text-danger small">● @L["Licenses_Revoked"]</span> }
+                                                        @{
+                                                            var licActivated = !string.IsNullOrEmpty(lic.HardwareId) || (lic.Seats?.Any(s => s.IsActive) ?? false);
+                                                            var licExpired = lic.ExpirationDate.HasValue && DateTime.UtcNow >= lic.ExpirationDate.Value;
+                                                        }
+                                                        @if (!lic.IsActive)
+                                                        {
+                                                            <span class="text-danger small">● @L["Licenses_Revoked"]</span>
+                                                        }
+                                                        else if (!licActivated)
+                                                        {
+                                                            <span class="text-secondary small">● @L["Common_Issued"]</span>
+                                                        }
+                                                        else if (licExpired)
+                                                        {
+                                                            <span class="text-warning small">● @L["Common_Expired"]</span>
+                                                        }
+                                                        else
+                                                        {
+                                                            <span class="text-success small">● @L["Common_Active"]</span>
+                                                            @if (lic.ExpirationDate.HasValue)
+                                                            {
+                                                                var timeLeft = lic.ExpirationDate.Value - DateTime.UtcNow;
+                                                                @if (timeLeft.TotalDays >= 1)
+                                                                {
+                                                                    <small class="text-muted d-block" style="font-size: 0.65rem">@string.Format(L["Common_DaysRemaining"], (int)timeLeft.TotalDays)</small>
+                                                                }
+                                                                else if (timeLeft.TotalMinutes >= 60)
+                                                                {
+                                                                    <small class="text-warning d-block" style="font-size: 0.65rem">@string.Format(L["Common_HoursRemaining"], timeLeft.Hours, timeLeft.Minutes)</small>
+                                                                }
+                                                                else if (timeLeft.TotalMinutes > 0)
+                                                                {
+                                                                    <small class="text-danger d-block" style="font-size: 0.65rem">@string.Format(L["Common_MinutesRemaining"], (int)timeLeft.TotalMinutes)</small>
+                                                                }
+                                                            }
+                                                        }
                                                     </td>
                                                     <td class="text-center">
                                                         @if (lic.RecoveryCount > 0)
                                                         {
-                                                            <span class="badge rounded-pill bg-warning text-dark">@lic.RecoveryCount</span>
+                                                            <span class="badge rounded-pill bg-secondary text-white">@lic.RecoveryCount</span>
                                                         }
                                                         else
                                                         {
@@ -645,6 +685,7 @@
                                     <input class="form-control" placeholder="SLUG (ex: PRO)" @bind="newTypeSlug" />
                                     <input class="form-control" type="number" style="max-width: 100px;" title="@L["Products_Duration"] (0 = Lifetime)" @bind="newTypeDuration" />
                                     <input class="form-control" type="number" style="max-width: 80px;" title="@L["Licenses_Seats"]" @bind="newMaxSeats" />
+                                    <input class="form-control" type="number" style="max-width: 80px;" title="Max activations/jour (0 = illimité)" @bind="newMaxActivationsPerDay" placeholder="Act/j" />
                                     <div class="input-group-text bg-dark border-secondary">
                                         <input class="form-check-input mt-0" type="checkbox" @bind="isRecurring" title="Abonnement récurrent" />
                                         <span class="ms-2 small text-muted">@L["Products_Abo_Short"]</span>
@@ -659,6 +700,7 @@
                                             <th>Slug</th>
                                             <th class="text-center">@L["Products_Duration"]</th>
                                             <th class="text-center">@L["Licenses_Seats"]</th>
+                                            <th class="text-center">Act/j</th>
                                             <th class="text-center">@L["Products_Mode"]</th>
                                             <th class="text-end">@L["Common_Actions"]</th>
                                         </tr>
@@ -682,6 +724,10 @@
                                                     else { @type.DefaultMaxSeats }
                                                 </td>
                                                 <td class="text-center">
+                                                    @if (editingTypeId == type.Id) { <input class="form-control form-control-sm mx-auto" type="number" style="width: 60px" @bind="type.MaxActivationsPerDay" /> }
+                                                    else { @(type.MaxActivationsPerDay == 0 ? "∞" : type.MaxActivationsPerDay) }
+                                                </td>
+                                                <td class="text-center">
                                                     @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.IsRecurring" /> }
                                                     else { <span class="badge @(type.IsRecurring ? "bg-primary" : "bg-secondary")">@(type.IsRecurring ? L["Products_Subscription"] : L["Products_Fixed"])</span> }
                                                 </td>
@@ -702,7 +748,7 @@
                                             @if (expandedTypeParamsId == type.Id)
                                             {
                                                 <tr class="bg-dark bg-opacity-50 animate-fade">
-                                                    <td colspan="6" class="p-3 border-start border-3 border-warning">
+                                                    <td colspan="7" class="p-3 border-start border-3 border-warning">
                                                         <div class="d-flex justify-content-between align-items-center mb-2">
                                                             <span class="small fw-bold text-warning">⚙ Paramètres — <code>@type.Slug</code></span>
                                                             <button class="btn btn-sm btn-link text-muted p-0" @onclick="() => ToggleTypeParams(type)">✕</button>
@@ -760,7 +806,7 @@
                                         }
                                         @if (!LicenseTypes.Any())
                                         {
-                                            <tr><td colspan="6" class="text-center py-4 text-muted">@L["Products_NoTypes"]</td></tr>
+                                            <tr><td colspan="7" class="text-center py-4 text-muted">@L["Products_NoTypes"]</td></tr>
                                         }
                                     </tbody>
                                 </table>
@@ -1105,6 +1151,7 @@
     private string newTypeSlug = "";
     private int newTypeDuration = 30;
     private int newMaxSeats = 1;
+    private int newMaxActivationsPerDay = 0;
     private bool isRecurring = false;
     private bool showTypes = false;
     private Guid? editingTypeId;
@@ -1162,6 +1209,7 @@
                 // Plugin pas encore en mémoire : charger directement depuis la BDD
                 selectedProduct = await Db.Products
                     .Include(p => p.Licenses).ThenInclude(l => l.Type)
+                    .Include(p => p.Licenses).ThenInclude(l => l.Seats)
                     .Include(p => p.SubProducts).ThenInclude(s => s.Licenses)
                     .Include(p => p.SubProducts).ThenInclude(s => s.SubProducts).ThenInclude(ss => ss.Licenses)
                     .FirstOrDefaultAsync(p => p.Id == ProductId.Value);
@@ -1216,6 +1264,7 @@
 
         ProductsList = await query
             .Include(p => p.Licenses).ThenInclude(l => l.Type)
+            .Include(p => p.Licenses).ThenInclude(l => l.Seats)
             .Include(p => p.SubProducts).ThenInclude(s => s.Licenses)
             .Include(p => p.SubProducts).ThenInclude(s => s.SubProducts).ThenInclude(ss => ss.Licenses)
             .OrderBy(p => p.Name)
@@ -1386,12 +1435,13 @@
             Name = newTypeName, Slug = slug,
             DefaultDurationDays = newTypeDuration,
             DefaultMaxSeats = newMaxSeats,
+            MaxActivationsPerDay = newMaxActivationsPerDay,
             IsRecurring = isRecurring
         };
         Db.LicenseTypes.Add(lt);
         await Db.SaveChangesAsync();
         Toast.ShowSuccess($"Type '{slug}' ajouté.");
-        newTypeName = ""; newTypeSlug = ""; newTypeDuration = 30; newMaxSeats = 1; isRecurring = false;
+        newTypeName = ""; newTypeSlug = ""; newTypeDuration = 30; newMaxSeats = 1; newMaxActivationsPerDay = 0; isRecurring = false;
         await LoadProductData();
     }
 
@@ -1406,6 +1456,7 @@
             dbType.Name = lt.Name;
             dbType.DefaultDurationDays = lt.DefaultDurationDays;
             dbType.DefaultMaxSeats = lt.DefaultMaxSeats;
+            dbType.MaxActivationsPerDay = lt.MaxActivationsPerDay;
             dbType.IsRecurring = lt.IsRecurring;
             
             await db.SaveChangesAsync();
