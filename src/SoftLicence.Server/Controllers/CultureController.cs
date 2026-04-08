@@ -17,13 +17,18 @@ public class CultureController : Controller
             );
         }
 
-        // Use Redirect instead of LocalRedirect because Nav.Uri from Blazor is absolute.
-        // We check if it's a relative URL or if it belongs to the same host for security.
-        if (Url.IsLocalUrl(redirectUri))
+        // Sécurité : uniquement les redirections locales ou même hôte (pas d'open redirect)
+        if (!string.IsNullOrEmpty(redirectUri))
         {
-            return LocalRedirect(redirectUri);
+            if (Url.IsLocalUrl(redirectUri))
+                return LocalRedirect(redirectUri);
+
+            // Blazor Nav.Uri envoie des URLs absolues — vérifier que c'est le même hôte
+            if (Uri.TryCreate(redirectUri, UriKind.Absolute, out var uri)
+                && uri.Host == HttpContext.Request.Host.Host)
+                return Redirect(redirectUri);
         }
-        
-        return Redirect(redirectUri ?? "/");
+
+        return LocalRedirect("/");
     }
 }

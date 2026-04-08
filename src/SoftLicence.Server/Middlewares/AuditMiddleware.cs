@@ -84,7 +84,7 @@ namespace SoftLicence.Server.Middlewares
             // 2. Détection proactive de scan (Dictionnaire étendu)
             var suspiciousPatterns = new[] { 
                 // Scripts & Frameworks (qu'on n'utilise pas)
-                ".php", ".aspx", ".asp", ".jsp", ".cgi", "wp-admin", "wp-content", "wp-includes", "xmlrpc",
+                ".php", ".aspx", ".asp", ".jsp", ".cgi", "wordpress", "wp-admin", "wp-content", "wp-includes", "wp-CHANGE_ME_LOGIN_PATH", "xmlrpc",
                 // Configuration & Secrets
                 ".env", ".git", ".ds_store", "web.config", "appsettings.json", "docker-compose", ".aws", ".ssh",
                 // Bases de données & Backups

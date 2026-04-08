@@ -20,7 +20,8 @@ namespace SoftLicence.Server.Data
         public LicenseType? Type { get; set; }
         
         public DateTime CreationDate { get; set; } = DateTime.UtcNow;
-        public DateTime? ExpirationDate { get; set; } // Null = Lifetime
+        public int? ValidityDays { get; set; } // Durée de validité en jours (décompte à l'activation)
+        public DateTime? ExpirationDate { get; set; } // Null = Lifetime (calculée à l'activation si ValidityDays est défini)
 
         // Verrouillage (Rempli lors de l'activation)
         public string? HardwareId { get; set; }

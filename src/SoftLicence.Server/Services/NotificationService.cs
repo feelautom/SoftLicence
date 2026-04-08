@@ -19,6 +19,7 @@ public class NotificationService
         public const string SecurityAuthFailure = "Security.AuthFailure";
         public const string LicenseCreated = "License.Created";
         public const string LicenseActivated = "License.Activated";
+        public const string LicenseRevoked = "License.Revoked";
         public const string SystemStartup = "System.Startup";
     }
 
@@ -29,6 +30,7 @@ public class NotificationService
         { Triggers.SecurityAuthFailure, "⚠️ Echec Authentification (Admin)" },
         { Triggers.LicenseCreated, "✨ Nouvelle Licence Créée" },
         { Triggers.LicenseActivated, "✅ Licence Activée" },
+        { Triggers.LicenseRevoked, "🚫 Licence Révoquée" },
         { Triggers.SystemStartup, "🚀 Démarrage Serveur" }
     };
 
@@ -42,7 +44,7 @@ public class NotificationService
     public virtual void Notify(string trigger, string title, string message, object? data = null)
     {
         // Fire-and-forget pour ne pas bloquer le thread appelant
-        _ = Task.Run(() => SendWebhooksAsync(trigger, title, message, data));
+        _ = Task.Run(async () => await SendWebhooksAsync(trigger, title, message, data));
     }
 
     private string GetEmojiForTrigger(string trigger) => trigger switch
@@ -52,6 +54,7 @@ public class NotificationService
         Triggers.SecurityAuthFailure => "warning",
         Triggers.LicenseCreated => "sparkles",
         Triggers.LicenseActivated => "white_check_mark",
+        Triggers.LicenseRevoked => "no_entry_sign",
         Triggers.SystemStartup => "rocket",
         _ => "bell"
     };

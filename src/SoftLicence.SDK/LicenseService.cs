@@ -34,7 +34,10 @@ namespace SoftLicence.SDK
             model.Signature = Convert.ToBase64String(signatureBytes);
 
             // 5. On retourne le tout encodé en Base64 pour faciliter le transport (copier-coller)
-            var finalJson = JsonSerializer.Serialize(model);
+            var finalJson = JsonSerializer.Serialize(model, new JsonSerializerOptions
+            {
+                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            });
             return Convert.ToBase64String(Encoding.UTF8.GetBytes(finalJson));
         }
 

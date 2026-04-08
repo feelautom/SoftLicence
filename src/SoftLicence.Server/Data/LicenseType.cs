@@ -23,6 +23,8 @@ namespace SoftLicence.Server.Data
 
         public int DefaultMaxSeats { get; set; } = 1;
 
+        public int MaxActivationsPerDay { get; set; } = 0; // 0 = illimité
+
         // Produit propriétaire
         public Guid ProductId { get; set; }
         public Product? Product { get; set; }

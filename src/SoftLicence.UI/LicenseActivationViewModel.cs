@@ -13,6 +13,7 @@ namespace SoftLicence.UI
     {
         private readonly string _publicKeyXml;
         private readonly string _appName;
+        private readonly string? _appVersion;
         private readonly string _appDataPath;
         private readonly ISoftLicenceClient _client;
 
@@ -36,10 +37,11 @@ namespace SoftLicence.UI
 
         private System.Timers.Timer? _validationTimer;
 
-        public LicenseActivationViewModel(string publicKeyXml, string appName, string serverUrl = "http://localhost:5000")
+        public LicenseActivationViewModel(string publicKeyXml, string appName, string serverUrl = "http://localhost:5000", string? appVersion = null)
         {
             _publicKeyXml = publicKeyXml;
             _appName = appName;
+            _appVersion = appVersion;
             _appDataPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), appName, "license.lic");
             _client = new SoftLicenceClient(serverUrl, publicKeyXml);
 
@@ -97,7 +99,7 @@ namespace SoftLicence.UI
 
         private async Task ActivateOnline(string key)
         {
-            var result = await _client.ActivateAsync(key, _appName);
+            var result = await _client.ActivateAsync(key, _appName, appVersion: _appVersion);
 
             if (result.Success && !string.IsNullOrEmpty(result.LicenseFile))
             {
@@ -164,6 +166,13 @@ namespace SoftLicence.UI
             if (string.IsNullOrEmpty(LicenseKey)) return;
 
             var result = await _client.CheckStatusAsync(LicenseKey, _appName);
+
+            if (result.Success && result.Status == "VALID" && !string.IsNullOrEmpty(result.LicenseFile))
+            {
+                // Mettre à jour le fichier de licence local avec les paramètres frais du serveur
+                await ValidateLocal(result.LicenseFile);
+                return;
+            }
 
             Application.Current.Dispatcher.Invoke(() =>
             {

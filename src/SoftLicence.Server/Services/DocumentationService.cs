@@ -342,6 +342,13 @@ public class DocumentationService
         - Level 3 (sub-plugins): Inherit keys from their parent (level 2) product
         - The `ApiSecret` is unique per product (used for telemetry ingestion auth)
 
+        ### Plugin Licensing
+
+        Each product (including plugins/sub-plugins) has its own license types.
+        To create a license for a plugin, use `POST /api/admin/licenses` with the `pluginId` field
+        set to the plugin's product ID. The `typeSlug` is resolved against the plugin's own license types,
+        not the root product's. See the Admin API Reference section for full details.
+
         ### Creating Products
 
         **Via Admin API:**
@@ -1036,7 +1043,7 @@ public class DocumentationService
         - The freed seat can be immediately claimed by another device
         - Unlike `reset-confirm`, only affects the specific seat (not all seats)
 
-        **SDK:** `await client.DeactivateAsync(licenseKey, appName)`
+        **SDK:** `await client.DeactivateAsync(licenseKey, appName, appId)`
         — automatically uses the current machine's hardware ID.
 
         **Error cases:**
@@ -1243,7 +1250,39 @@ public class DocumentationService
           "customerEmail": "john@example.com",
           "typeSlug": "PRO",
           "daysValidity": 365,
-          "reference": "INV-2024-001"
+          "reference": "INV-2024-001",
+          "pluginId": null
+        }
+        ```
+
+        | Field | Type | Required | Description |
+        |-------|------|----------|-------------|
+        | productName | string | Yes | Root product name |
+        | customerName | string | Yes | Customer display name |
+        | customerEmail | string | No | Customer email (defaults to "") |
+        | typeSlug | string | Yes | License type slug (e.g., "PRO", "TRIAL") |
+        | daysValidity | int | No | License duration in days (null = lifetime) |
+        | reference | string | No | External reference (e.g., invoice number) |
+        | pluginId | Guid | No | Sub-product (plugin) ID. When provided, the license is created on the plugin instead of the root product. The typeSlug is resolved against the plugin's own license types. |
+
+        **Plugin licensing:**
+        When `pluginId` is provided, the system:
+        1. Finds the root product by `productName`
+        2. Finds the plugin/sub-product by `pluginId`
+        3. Validates the plugin belongs to the root product's hierarchy
+        4. Resolves `typeSlug` against the plugin's license types (not the root product's)
+        5. Creates the license attached to the plugin
+
+        **Example — plugin license:**
+        ```json
+        {
+          "productName": "YOUR_APP_NAME",
+          "customerName": "John Doe",
+          "customerEmail": "john@example.com",
+          "typeSlug": "YOUR_APP_NAME.PLUGIN.DND",
+          "daysValidity": 36500,
+          "reference": "INV-2026-0005",
+          "pluginId": "04a7308a-7f37-4f18-905d-21b4605003ba"
         }
         ```
 
@@ -1255,6 +1294,10 @@ public class DocumentationService
         ```
 
         **Key format:** `Guid.NewGuid().ToString("D").ToUpper()` (e.g., `A1B2C3D4-E5F6-7890-ABCD-EF1234567890`)
+
+        **Errors:**
+        - `404` — Product or plugin not found
+        - `400` — Plugin does not belong to the specified product, or unknown license type
 
         ---
 
@@ -1369,12 +1412,12 @@ public class DocumentationService
             customerEmail: "user@example.com", customerName: "John Doe");
 
         // Deactivate current machine (instant, no email — frees one seat)
-        var deact = await client.DeactivateAsync(licenseKey, appName);
+        var deact = await client.DeactivateAsync(licenseKey, appName, appId);
         // deact.IsSuccess, deact.ErrorMessage
 
         // Transfer via email reset (unlinks ALL seats — use when machine is inaccessible)
-        bool sent = await client.ResetRequestAsync(licenseKey, appName);
-        bool confirmed = await client.ResetConfirmAsync(licenseKey, appName, "123456");
+        bool sent = await client.ResetRequestAsync(licenseKey, appName, appId);
+        bool confirmed = await client.ResetConfirmAsync(licenseKey, appName, "123456", appId);
         ```
 
         **Deactivation strategies:**
