@@ -46,6 +46,31 @@ namespace SoftLicence.SDK
             return GetWmiProperty("Win32_DiskDrive", "SerialNumber");
         }
 
+        /// <summary>
+        /// Returns individual SHA256 hashes of each hardware component (no salt).
+        /// Keys: FP_CPU, FP_MB, FP_BIOS, FP_DISK, FP_HOST
+        /// </summary>
+        public static Dictionary<string, string> GetComponentFingerprints()
+        {
+            return new Dictionary<string, string>
+            {
+                ["FP_CPU"] = ComputeComponentHash(GetCpuId()),
+                ["FP_MB"] = ComputeComponentHash(GetMotherboardId()),
+                ["FP_BIOS"] = ComputeComponentHash(GetBiosId()),
+                ["FP_DISK"] = ComputeComponentHash(GetDiskId()),
+                ["FP_HOST"] = ComputeComponentHash(Environment.MachineName)
+            };
+        }
+
+        private static string ComputeComponentHash(string value)
+        {
+            using (var sha256 = SHA256.Create())
+            {
+                var bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(value ?? "UNKNOWN"));
+                return BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant();
+            }
+        }
+
         private static string GetWmiProperty(string className, string propertyName)
         {
             try

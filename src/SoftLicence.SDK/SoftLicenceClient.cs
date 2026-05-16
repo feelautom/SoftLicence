@@ -22,7 +22,10 @@ namespace SoftLicence.SDK
             try
             {
                 var hwId = HardwareInfo.GetHardwareId();
-                var payload = new Dictionary<string, string?>
+                Dictionary<string, string>? fingerprints = null;
+                try { fingerprints = HardwareInfo.GetComponentFingerprints(); } catch { }
+
+                var payload = new Dictionary<string, object?>
                 {
                     ["LicenseKey"] = licenseKey,
                     ["HardwareId"] = hwId,
@@ -30,7 +33,8 @@ namespace SoftLicence.SDK
                     ["AppId"] = appId,
                     ["AppVersion"] = appVersion,
                     ["CustomerEmail"] = customerEmail,
-                    ["CustomerName"] = customerName
+                    ["CustomerName"] = customerName,
+                    ["ComponentFingerprints"] = fingerprints
                 }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
 
                 var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
@@ -64,7 +68,10 @@ namespace SoftLicence.SDK
             try
             {
                 var hwId = HardwareInfo.GetHardwareId();
-                var payload = new Dictionary<string, string?>
+                Dictionary<string, string>? fingerprints = null;
+                try { fingerprints = HardwareInfo.GetComponentFingerprints(); } catch { }
+
+                var payload = new Dictionary<string, object?>
                 {
                     ["HardwareId"] = hwId,
                     ["AppName"] = appName,
@@ -72,7 +79,8 @@ namespace SoftLicence.SDK
                     ["TypeSlug"] = typeSlug,
                     ["AppVersion"] = appVersion,
                     ["CustomerEmail"] = customerEmail,
-                    ["CustomerName"] = customerName
+                    ["CustomerName"] = customerName,
+                    ["ComponentFingerprints"] = fingerprints
                 }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
 
                 var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
@@ -106,12 +114,16 @@ namespace SoftLicence.SDK
             try
             {
                 var hwId = HardwareInfo.GetHardwareId();
+                Dictionary<string, string>? fingerprints = null;
+                try { fingerprints = HardwareInfo.GetComponentFingerprints(); } catch { }
+
                 var payload = new
                 {
                     LicenseKey = licenseKey,
                     HardwareId = hwId,
                     AppName = appName,
-                    AppId = appId
+                    AppId = appId,
+                    ComponentFingerprints = fingerprints
                 };
 
                 var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
