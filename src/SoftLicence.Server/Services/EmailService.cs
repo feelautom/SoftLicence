@@ -31,7 +31,7 @@ namespace SoftLicence.Server.Services
             if (string.IsNullOrEmpty(host) || host == "localhost") return;
 
             var message = new MimeMessage();
-            message.From.Add(new MailboxAddress(productName, _settings.FromEmail?.Trim('"')));
+            message.From.Add(new MailboxAddress(productName, _settings.FromEmail?.Trim('"') ?? ""));
             message.To.Add(new MailboxAddress(customerName, toEmail));
             message.Subject = $"Code de réinitialisation - {productName}";
 
@@ -83,7 +83,7 @@ namespace SoftLicence.Server.Services
             if (string.IsNullOrEmpty(host) || host == "localhost") return;
 
             var message = new MimeMessage();
-            message.From.Add(new MailboxAddress("SoftLicence Security", _settings.FromEmail?.Trim('"')));
+            message.From.Add(new MailboxAddress("SoftLicence Security", _settings.FromEmail?.Trim('"') ?? ""));
             message.To.Add(new MailboxAddress(username, toEmail));
             message.Subject = "Bienvenue sur SoftLicence - Vos accès Administrateur";
 
@@ -150,7 +150,7 @@ namespace SoftLicence.Server.Services
 
             var message = new MimeMessage();
             string senderName = isDiagnostic ? "FeelAutom Diagnostic" : productName;
-            message.From.Add(new MailboxAddress(senderName, _settings.FromEmail?.Trim('"')));
+            message.From.Add(new MailboxAddress(senderName, _settings.FromEmail?.Trim('"') ?? ""));
             message.To.Add(new MailboxAddress(customerName, toEmail));
             
             message.Subject = isDiagnostic 
