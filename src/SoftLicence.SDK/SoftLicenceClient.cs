@@ -134,6 +134,11 @@ namespace SoftLicence.SDK
                     return LicenseStatusResult.NotFound();
                 }
 
+                if (response.StatusCode == HttpStatusCode.Forbidden)
+                {
+                    return LicenseStatusResult.Revoked("Access denied by server");
+                }
+
                 if (!response.IsSuccessStatusCode)
                 {
                     var errorBody = await response.Content.ReadAsStringAsync();

@@ -32,6 +32,9 @@ namespace SoftLicence.SDK
         public static LicenseStatusResult NotFound() =>
             new LicenseStatusResult(true, "NOT_FOUND", StatusErrorCode.None, null);
 
+        public static LicenseStatusResult Revoked(string? message = null) =>
+            new LicenseStatusResult(true, "REVOKED", StatusErrorCode.None, message);
+
         public static LicenseStatusResult Fail(StatusErrorCode code, string? message = null) =>
             new LicenseStatusResult(false, null, code, message);
     }
