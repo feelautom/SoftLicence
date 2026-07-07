@@ -1,6 +1,6 @@
 @page "/resets"
 @inject SoftLicence.Server.Services.AuthService Auth
-@inject LicenseDbContext Db
+@inject IDbContextFactory<LicenseDbContext> DbFactory
 @inject SoftLicence.Server.Services.TimeZoneService TZ
 @inject SoftLicence.Server.Services.ToastService Toast
 @inject IStringLocalizer<SharedResource> L
@@ -172,13 +172,14 @@ else
     private async Task SearchLicense()
     {
         if (string.IsNullOrWhiteSpace(searchKey)) return;
-        
+
+        using var db = await DbFactory.CreateDbContextAsync();
         var key = searchKey.Trim().ToUpper();
-        foundLicense = await Db.Licenses
+        foundLicense = await db.Licenses
             .Include(l => l.Product)
             .Include(l => l.Seats)
             .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == key);
-            
+
         if (foundLicense == null) Toast.ShowInfo(L["Resets_MsgNotFound"]);
     }
 
@@ -188,11 +189,16 @@ else
 
         try
         {
+            using var db = await DbFactory.CreateDbContextAsync();
+            // Re-attach the license to this context
+            db.Attach(foundLicense);
+
             // Soft Reset des seats
             if (foundLicense.Seats != null)
             {
                 foreach (var seat in foundLicense.Seats.Where(s => s.IsActive))
                 {
+                    db.Attach(seat);
                     seat.IsActive = false;
                     seat.UnlinkedAt = DateTime.UtcNow;
 
@@ -211,9 +217,9 @@ else
             foundLicense.ResetCode = null;
             foundLicense.ResetCodeExpiry = null;
 
-            await Db.SaveChangesAsync();
+            await db.SaveChangesAsync();
             Toast.ShowSuccess(L["Resets_MsgSuccess"]);
-            
+
             searchKey = "";
             foundLicense = null;
             await Refresh();
@@ -248,10 +254,12 @@ else
     {
         try
         {
-            var query = Db.AccessLogs.Where(l => l.Endpoint == "RESET_REQUEST" || l.Endpoint == "RESET_CONFIRM");
+            using var db = await DbFactory.CreateDbContextAsync();
+            var query = db.AccessLogs.AsNoTracking()
+                .Where(l => l.Endpoint == "RESET_REQUEST" || l.Endpoint == "RESET_CONFIRM");
 
             TotalCount = await query.CountAsync();
-            
+
             if (CurrentPage > TotalPages && TotalPages > 0) CurrentPage = TotalPages;
             if (CurrentPage < 1) CurrentPage = 1;
 

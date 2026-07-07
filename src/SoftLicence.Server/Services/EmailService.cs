@@ -123,6 +123,77 @@ namespace SoftLicence.Server.Services
             await client.DisconnectAsync(true);
         }
 
+        public async Task SendCanaryAlertEmailAsync(string trigger, string hardwareId, string? machineName, string? userName, string? ip, string? appVersion, string? details, int severity, bool isNewBan, string? osVersion = null, bool? debuggerAttached = null)
+        {
+            var host = _settings.Host?.Trim('"', '\'', ' ', '\t') ?? "";
+            var user = _settings.Username?.Trim('"', '\'', ' ', '\t') ?? "";
+            var pass = _settings.Password?.Trim('"', '\'', ' ', '\t') ?? "";
+
+            if (string.IsNullOrEmpty(host) || host == "localhost") return;
+
+            var fromEmail = _settings.FromEmail?.Trim('"') ?? "";
+            var toEmail = !string.IsNullOrEmpty(user) ? user : fromEmail;
+            if (string.IsNullOrEmpty(toEmail)) return;
+
+            // Severity badge
+            var (sevLabel, sevColor) = severity switch
+            {
+                >= 3 => ("CRITICAL", "#c53030"),
+                2 => ("WARNING", "#dd6b20"),
+                _ => ("INFO", "#718096")
+            };
+            var sevBadge = $"<span style=\"background:{sevColor};color:white;padding:3px 10px;border-radius:4px;font-weight:bold;\">{sevLabel}</span>";
+
+            // Status badge
+            string statusBadge;
+            if (isNewBan)
+                statusBadge = "<span style=\"background:#c53030;color:white;padding:3px 10px;border-radius:4px;font-weight:bold;\">AUTO-BANNED</span>";
+            else if (severity >= 3)
+                statusBadge = "<span style=\"background:#e53e3e;color:white;padding:3px 10px;border-radius:4px;\">Critical - Not Banned (review)</span>";
+            else
+                statusBadge = "<span style=\"background:#38a169;color:white;padding:3px 10px;border-radius:4px;\">Monitoring</span>";
+
+            // Header color by severity
+            var headerColor = severity >= 3 ? "#c53030" : (severity >= 2 ? "#dd6b20" : "#4a5568");
+
+            var message = new MimeMessage();
+            message.From.Add(new MailboxAddress("SoftLicence Security", fromEmail));
+            message.To.Add(new MailboxAddress("Admin", toEmail));
+            message.Subject = $"[CANARY][{sevLabel}][{machineName ?? "?"}] {trigger}";
+
+            var builder = new BodyBuilder();
+            builder.HtmlBody = $@"
+<div style=""font-family:'Segoe UI',sans-serif;max-width:600px;margin:0 auto;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden;"">
+    <div style=""background-color:{headerColor};padding:20px 30px;color:white;"">
+        <h2 style=""margin:0;"">Canary Alert {sevBadge}</h2>
+        <p style=""margin:5px 0 0 0;opacity:0.9;"">{trigger}</p>
+    </div>
+    <div style=""padding:30px;color:#333;line-height:1.8;"">
+        <table style=""width:100%;border-collapse:collapse;"">
+            <tr><td style=""padding:5px 10px;font-weight:bold;width:140px;"">Machine</td><td>{machineName ?? "N/A"}</td></tr>
+            <tr><td style=""padding:5px 10px;font-weight:bold;"">User</td><td>{userName ?? "N/A"}</td></tr>
+            <tr><td style=""padding:5px 10px;font-weight:bold;"">Hardware ID</td><td><code>{hardwareId}</code></td></tr>
+            <tr><td style=""padding:5px 10px;font-weight:bold;"">IP</td><td>{ip ?? "N/A"}</td></tr>
+            <tr><td style=""padding:5px 10px;font-weight:bold;"">Version</td><td>{appVersion ?? "N/A"}</td></tr>
+            <tr><td style=""padding:5px 10px;font-weight:bold;"">OS</td><td>{osVersion ?? "N/A"}</td></tr>
+            <tr><td style=""padding:5px 10px;font-weight:bold;"">Debugger.IsAttached</td><td>{(debuggerAttached.HasValue ? debuggerAttached.Value.ToString() : "N/A")}</td></tr>
+            <tr><td style=""padding:5px 10px;font-weight:bold;"">Severity</td><td>{sevBadge}</td></tr>
+            <tr><td style=""padding:5px 10px;font-weight:bold;"">Action</td><td>{statusBadge}</td></tr>
+        </table>
+        {(string.IsNullOrEmpty(details) ? "" : $"<div style=\"margin-top:20px;padding:15px;background:#f7fafc;border-left:4px solid {headerColor};font-family:monospace;font-size:13px;white-space:pre-wrap;word-break:break-all;\">{details}</div>")}
+        <p style=""margin-top:20px;font-size:12px;color:#718096;"">Received at {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC</p>
+    </div>
+</div>";
+            builder.TextBody = $"CANARY ALERT [{sevLabel}]: {trigger}\nMachine: {machineName}\nUser: {userName}\nHWID: {hardwareId}\nIP: {ip}\nVersion: {appVersion}\nOS: {osVersion}\nDebugger.IsAttached: {debuggerAttached}\nSeverity: {severity}\nDetails: {details}\nBan: {(isNewBan ? "NEW" : "none")}";
+            message.Body = builder.ToMessageBody();
+
+            using var client = new SmtpClient();
+            await client.ConnectAsync(host, _settings.Port, _settings.Port == 465 ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.StartTls);
+            if (!string.IsNullOrEmpty(user)) await client.AuthenticateAsync(user, pass);
+            await client.SendAsync(message);
+            await client.DisconnectAsync(true);
+        }
+
         public async Task RunDiagnosticAsync(string toEmail, string customerName, string productName, string licenseKey, Action<string>? onProgress)
         {
             await SendEmailInternalAsync(toEmail, customerName, productName, licenseKey, true, onProgress);

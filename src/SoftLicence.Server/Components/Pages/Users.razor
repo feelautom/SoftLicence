@@ -1,6 +1,6 @@
 @page "/users"
 @inject SoftLicence.Server.Services.AuthService Auth
-@inject LicenseDbContext Db
+@inject IDbContextFactory<LicenseDbContext> DbFactory
 @inject SoftLicence.Server.Services.SecurityService Security
 @inject SoftLicence.Server.Services.ToastService Toast
 @inject SoftLicence.Server.Services.EmailService Mailer
@@ -292,8 +292,9 @@
 
     private async Task LoadData()
     {
-        AdminUsersList = await Db.AdminUsers.Include(u => u.Role).OrderBy(u => u.Username).ToListAsync();
-        AdminRolesList = await Db.AdminRoles.OrderBy(r => r.Name).ToListAsync();
+        using var db = await DbFactory.CreateDbContextAsync();
+        AdminUsersList = await db.AdminUsers.Include(u => u.Role).OrderBy(u => u.Username).ToListAsync();
+        AdminRolesList = await db.AdminRoles.OrderBy(r => r.Name).ToListAsync();
     }
 
     private void TogglePermission(string key, object? val)
@@ -316,10 +317,12 @@
         if (editingRole == null) return;
         if (string.IsNullOrWhiteSpace(newRoleName)) { Toast.ShowError(L["Users_RoleNameRequired"]); return; }
 
+        using var db = await DbFactory.CreateDbContextAsync();
+        db.Attach(editingRole);
         editingRole.Name = newRoleName;
         editingRole.Permissions = string.Join(",", selectedPermissions);
-        
-        await Db.SaveChangesAsync();
+
+        await db.SaveChangesAsync();
         Toast.ShowSuccess(L["Users_RoleUpdated"]);
         editingRole = null;
         newRoleName = "";
@@ -335,8 +338,11 @@
     private async Task SaveUserEdit()
     {
         if (userToEdit == null) return;
-        
-        await Db.SaveChangesAsync();
+
+        using var db = await DbFactory.CreateDbContextAsync();
+        db.Attach(userToEdit);
+        db.Entry(userToEdit).State = EntityState.Modified;
+        await db.SaveChangesAsync();
         Toast.ShowSuccess("Utilisateur mis à jour.");
         userToEdit = null;
         await LoadData();
@@ -351,8 +357,9 @@
             Permissions = string.Join(",", selectedPermissions)
         };
         
-        Db.AdminRoles.Add(role);
-        await Db.SaveChangesAsync();
+        using var db = await DbFactory.CreateDbContextAsync();
+        db.AdminRoles.Add(role);
+        await db.SaveChangesAsync();
         Toast.ShowSuccess($"Rôle '{newRoleName}' créé.");
         newRoleName = ""; selectedPermissions.Clear(); showRoleCreate = false;
         await LoadData();
@@ -386,7 +393,8 @@
             }
         }
 
-        if (await Db.AdminUsers.AnyAsync(u => u.Username == newUsername))
+        using var db = await DbFactory.CreateDbContextAsync();
+        if (await db.AdminUsers.AnyAsync(u => u.Username == newUsername))
         {
             Toast.ShowError(L["Users_UsernameInUse"]); return;
         }
@@ -408,8 +416,8 @@
                 AdminPath = adminPath
             };
 
-            Db.AdminUsers.Add(user);
-            await Db.SaveChangesAsync();
+            db.AdminUsers.Add(user);
+            await db.SaveChangesAsync();
 
             // 3. Envoi de l'e-mail
             await Mailer.SendAdminWelcomeEmailAsync(newEmail, newUsername, tempPass);
@@ -429,19 +437,20 @@
     }
 
     private void RequestDeleteUser(AdminUser u) { itemToDelete = u; deleteMsg = $"Supprimer l'utilisateur '{u.Username}' ?"; modalDelete.Show(); }
-    private void RequestDeleteRole(AdminRole r) { 
-        if (Db.AdminUsers.Any(u => u.RoleId == r.Id)) { Toast.ShowError(L["Users_RoleInUse"]); return; }
-        itemToDelete = r; deleteMsg = $"Supprimer le rôle '{r.Name}' ?"; modalDelete.Show(); 
+    private void RequestDeleteRole(AdminRole r) {
+        if (AdminUsersList.Any(u => u.RoleId == r.Id)) { Toast.ShowError(L["Users_RoleInUse"]); return; }
+        itemToDelete = r; deleteMsg = $"Supprimer le rôle '{r.Name}' ?"; modalDelete.Show();
     }
 
     private async Task OnConfirmDelete(bool confirmed)
     {
         if (confirmed && itemToDelete != null)
         {
-            if (itemToDelete is AdminUser u) Db.AdminUsers.Remove(u);
-            else if (itemToDelete is AdminRole r) Db.AdminRoles.Remove(r);
-            
-            await Db.SaveChangesAsync();
+            using var db = await DbFactory.CreateDbContextAsync();
+            if (itemToDelete is AdminUser u) db.AdminUsers.Remove(u);
+            else if (itemToDelete is AdminRole r) db.AdminRoles.Remove(r);
+
+            await db.SaveChangesAsync();
             Toast.ShowSuccess(L["Users_Deleted"]);
             await LoadData();
         }

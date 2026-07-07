@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using SoftLicence.SDK;
 using Xunit;
 
@@ -74,6 +75,69 @@ public class LicenseServiceTests
         Assert.NotNull(result.License);
         Assert.Equal("TEST-KEY-123", result.License.LicenseKey);
         Assert.Equal("PRO", result.License.TypeSlug);
+    }
+
+    [Fact]
+    public void GenerateLicense_StandardLicense_ShouldRemainCompatibleWithLegacyModel()
+    {
+        // Arrange
+        var keys = LicenseService.GenerateKeys();
+        var model = new LicenseModel
+        {
+            LicenseKey = "STANDARD-KEY",
+            CustomerName = "Jane Doe",
+            CustomerEmail = "jane@example.com",
+            TypeSlug = "PRO",
+            HardwareId = "HW-LEGACY",
+            CreationDate = DateTime.UtcNow,
+            ExpirationDate = DateTime.UtcNow.AddDays(30)
+        };
+
+        // Act
+        var licenseString = LicenseService.GenerateLicense(model, keys.PrivateKey);
+        var finalJson = Encoding.UTF8.GetString(Convert.FromBase64String(licenseString));
+        var legacyValid = ValidateWithLegacyModel(licenseString, keys.PublicKey);
+
+        // Assert
+        Assert.DoesNotContain("PluginId", finalJson);
+        Assert.DoesNotContain("PluginVersion", finalJson);
+        Assert.DoesNotContain("MinAppVersion", finalJson);
+        Assert.DoesNotContain("AllowedFeatures", finalJson);
+        Assert.True(legacyValid);
+    }
+
+    [Fact]
+    public void GenerateLicense_PluginLicense_ShouldIncludePluginContractFields()
+    {
+        // Arrange
+        var keys = LicenseService.GenerateKeys();
+        var model = new LicenseModel
+        {
+            LicenseKey = "PLUGIN-KEY",
+            CustomerName = "Plugin User",
+            CustomerEmail = "plugin@example.com",
+            TypeSlug = "PLUGIN",
+            PluginId = "com.YOUR_APP_NAME.dnd",
+            PluginVersion = "1.0.0",
+            MinAppVersion = "1.1.70",
+            AllowedFeatures = new[] { "*" },
+            HardwareId = "HW-PLUGIN",
+            CreationDate = DateTime.UtcNow,
+            ExpirationDate = DateTime.UtcNow.AddDays(30)
+        };
+
+        // Act
+        var licenseString = LicenseService.GenerateLicense(model, keys.PrivateKey);
+        var finalJson = Encoding.UTF8.GetString(Convert.FromBase64String(licenseString));
+        var result = LicenseService.ValidateLicense(licenseString, keys.PublicKey, "HW-PLUGIN");
+
+        // Assert
+        Assert.Contains("\"PluginId\":\"com.YOUR_APP_NAME.dnd\"", finalJson);
+        Assert.Contains("\"PluginVersion\":\"1.0.0\"", finalJson);
+        Assert.Contains("\"MinAppVersion\":\"1.1.70\"", finalJson);
+        Assert.Contains("\"AllowedFeatures\":[\"*\"]", finalJson);
+        Assert.True(result.IsValid);
+        Assert.Equal("com.YOUR_APP_NAME.dnd", result.License!.PluginId);
     }
 
     [Fact]
@@ -220,5 +284,41 @@ public class LicenseServiceTests
 
         // Assert
         Assert.Equal("REVOKED", result);
+    }
+
+    private static bool ValidateWithLegacyModel(string licenseString, string publicKeyXml)
+    {
+        var json = Encoding.UTF8.GetString(Convert.FromBase64String(licenseString));
+        var model = JsonSerializer.Deserialize<LegacyLicenseModel>(json);
+        if (model == null || string.IsNullOrEmpty(model.Signature))
+            return false;
+
+        var signature = model.Signature;
+        model.Signature = string.Empty;
+        var signedJson = JsonSerializer.Serialize(model);
+
+        using var rsa = System.Security.Cryptography.RSA.Create();
+        rsa.FromXmlString(publicKeyXml);
+        return rsa.VerifyData(
+            Encoding.UTF8.GetBytes(signedJson),
+            Convert.FromBase64String(signature),
+            System.Security.Cryptography.HashAlgorithmName.SHA256,
+            System.Security.Cryptography.RSASignaturePadding.Pkcs1);
+    }
+
+    private sealed class LegacyLicenseModel
+    {
+        public Guid Id { get; set; } = Guid.NewGuid();
+        public string LicenseKey { get; set; } = string.Empty;
+        public string CustomerName { get; set; } = string.Empty;
+        public string CustomerEmail { get; set; } = string.Empty;
+        public string TypeSlug { get; set; } = "STANDARD";
+        public string? Reference { get; set; }
+        public DateTime CreationDate { get; set; }
+        public DateTime? ExpirationDate { get; set; }
+        public string HardwareId { get; set; } = string.Empty;
+        public Dictionary<string, string> Features { get; set; } = new();
+        public string Signature { get; set; } = string.Empty;
+        public bool IsExpired => ExpirationDate.HasValue && DateTime.UtcNow > ExpirationDate.Value;
     }
 }

@@ -40,19 +40,12 @@ public class SettingsService
     public async Task SetSettingAsync(string key, string value)
     {
         using var db = await _dbFactory.CreateDbContextAsync();
-        var setting = await db.SystemSettings.FirstOrDefaultAsync(s => s.Key == key);
+        var now = DateTime.UtcNow;
 
-        if (setting == null)
-        {
-            db.SystemSettings.Add(new SystemSetting { Key = key, Value = value, LastUpdated = DateTime.UtcNow });
-        }
-        else
-        {
-            setting.Value = value;
-            setting.LastUpdated = DateTime.UtcNow;
-        }
+        // PostgreSQL UPSERT — avoids race condition with concurrent canary pings
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"INSERT INTO \"SystemSettings\" (\"Key\", \"Value\", \"LastUpdated\") VALUES ({key}, {value}, {now}) ON CONFLICT (\"Key\") DO UPDATE SET \"Value\" = {value}, \"LastUpdated\" = {now}");
 
-        await db.SaveChangesAsync();
         _logger.LogInformation("Setting '{Key}' updated to '{Value}'", key, value);
     }
 }

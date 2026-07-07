@@ -109,7 +109,7 @@ namespace SoftLicence.SDK
             }
         }
 
-        public async Task<LicenseStatusResult> CheckStatusAsync(string licenseKey, string appName, string? appId = null)
+        public async Task<LicenseStatusResult> CheckStatusAsync(string licenseKey, string appName, string? appId = null, string? appVersion = null)
         {
             try
             {
@@ -117,14 +117,15 @@ namespace SoftLicence.SDK
                 Dictionary<string, string>? fingerprints = null;
                 try { fingerprints = HardwareInfo.GetComponentFingerprints(); } catch { }
 
-                var payload = new
+                var payload = new Dictionary<string, object?>
                 {
-                    LicenseKey = licenseKey,
-                    HardwareId = hwId,
-                    AppName = appName,
-                    AppId = appId,
-                    ComponentFingerprints = fingerprints
-                };
+                    ["LicenseKey"] = licenseKey,
+                    ["HardwareId"] = hwId,
+                    ["AppName"] = appName,
+                    ["AppId"] = appId,
+                    ["AppVersion"] = appVersion,
+                    ["ComponentFingerprints"] = fingerprints
+                }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
 
                 var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
                 var response = await _httpClient.PostAsync($"{_serverUrl}/api/activation/check", content);
@@ -162,7 +163,14 @@ namespace SoftLicence.SDK
                             licenseFile = lfProp.GetString();
                         }
 
-                        return LicenseStatusResult.Ok(status, licenseFile);
+                        string? errorMessage = null;
+                        if (doc.RootElement.TryGetProperty("errorMessage", out var emProp) ||
+                            doc.RootElement.TryGetProperty("ErrorMessage", out emProp))
+                        {
+                            errorMessage = emProp.GetString();
+                        }
+
+                        return LicenseStatusResult.Ok(status, licenseFile, errorMessage);
                     }
                 }
 

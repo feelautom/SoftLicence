@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json.Serialization;
 
 namespace SoftLicence.SDK
 {
@@ -12,6 +13,32 @@ namespace SoftLicence.SDK
         public string CustomerEmail { get; set; } = string.Empty;
         
         public string TypeSlug { get; set; } = "STANDARD"; // Le slug choisi par l'admin
+
+        /// <summary>
+        /// Optional signed plugin/sub-product identifier. Standard product licenses omit this field when null.
+        /// </summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? PluginId { get; set; }
+
+        /// <summary>
+        /// Optional signed plugin version. Standard product licenses omit this field when null.
+        /// </summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? PluginVersion { get; set; }
+
+        /// <summary>
+        /// Optional minimum host application version required by this plugin license.
+        /// </summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? MinAppVersion { get; set; }
+
+        /// <summary>
+        /// Optional signed feature allow-list for a plugin/sub-product license.
+        /// Standard product licenses omit this field when null.
+        /// </summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string[]? AllowedFeatures { get; set; }
+
         public string? Reference { get; set; } // Champ personnalisé (ex: ID Commande, Ref Client)
         
         public DateTime CreationDate { get; set; }

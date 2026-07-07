@@ -165,7 +165,7 @@ namespace SoftLicence.UI
         {
             if (string.IsNullOrEmpty(LicenseKey)) return;
 
-            var result = await _client.CheckStatusAsync(LicenseKey, _appName);
+            var result = await _client.CheckStatusAsync(LicenseKey, _appName, appVersion: _appVersion);
 
             if (result.Success && result.Status == "VALID" && !string.IsNullOrEmpty(result.LicenseFile))
             {
@@ -180,9 +180,15 @@ namespace SoftLicence.UI
                 {
                     if (!IsLicensed) IsLicensed = true;
                 }
-                else if (result.Success && (result.Status == "REVOKED" || result.Status == "HARDWARE_MISMATCH" || result.Status == "EXPIRED" || result.Status == "NOT_FOUND"))
+                else if (result.Success && (result.Status == "REVOKED" || result.Status == "HARDWARE_MISMATCH" || result.Status == "EXPIRED" || result.Status == "NOT_FOUND" || result.Status == "FREEMIUM_HWID_ALREADY_CONSUMED" || result.Status == "UPDATE_REQUIRED"))
                 {
-                    StatusMessage = result.Status == "NOT_FOUND" ? "LICENCE INTROUVABLE. Accès bloqué." : $"LICENCE RÉVOQUÉE ({result.Status}). Accès bloqué.";
+                    StatusMessage = result.Status switch
+                    {
+                        "NOT_FOUND" => "LICENCE INTROUVABLE. Accès bloqué.",
+                        "FREEMIUM_HWID_ALREADY_CONSUMED" => "FREEMIUM DÉJÀ UTILISÉ SUR CETTE MACHINE. Accès bloqué.",
+                        "UPDATE_REQUIRED" => "MISE À JOUR OBLIGATOIRE. Accès bloqué.",
+                        _ => $"LICENCE RÉVOQUÉE ({result.Status}). Accès bloqué."
+                    };
                     IsLicensed = false;
                     StopTimer();
                     DeleteLocalLicense();

@@ -95,7 +95,44 @@ public class SecurityServiceTests
     }
 
     [Fact]
-    public async Task CheckForZombie_ShouldRevokeLicense_WhenMultipleIpsDetected()
+    public async Task BanIpAsync_WhenExistingBanIsInactive_ShouldReactivateAndEscalate()
+    {
+        // Arrange
+        var ip = "9.9.9.9";
+        using (var db = new LicenseDbContext(_dbOptions))
+        {
+            db.BannedIps.Add(new BannedIp
+            {
+                IpAddress = ip,
+                Reason = "Previous ban",
+                BannedAt = DateTime.UtcNow.AddDays(-2),
+                ExpiresAt = DateTime.UtcNow.AddDays(-1),
+                BanCount = 1,
+                IsActive = false
+            });
+            await db.SaveChangesAsync();
+        }
+
+        // Act
+        await _service.BanIpAsync(ip, "Repeated scan");
+
+        // Assert
+        using var db2 = new LicenseDbContext(_dbOptions);
+        var ban = await db2.BannedIps.SingleAsync(b => b.IpAddress == ip);
+        Assert.True(ban.IsActive);
+        Assert.Equal(2, ban.BanCount);
+        Assert.Equal("Repeated scan", ban.Reason);
+        Assert.True(ban.ExpiresAt > DateTime.UtcNow.AddDays(6));
+        Assert.True(await _service.IsBannedAsync(ip));
+        _notifierMock.Verify(n => n.Notify(
+            NotificationService.Triggers.SecurityIpBanned,
+            It.Is<string>(title => title.Contains("x2")),
+            It.Is<string>(message => message.Contains("Repeated scan")),
+            It.IsAny<object>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task CheckForZombie_ShouldNotifyWithoutRevoking_WhenMultipleSubnetsDetected()
     {
         // Arrange
         var hwid = "ZOMBIE-PC";
@@ -121,16 +158,70 @@ public class SecurityServiceTests
             await db.SaveChangesAsync();
         }
 
-        // Act: Test with a 6th IP (triggers revocation)
+        // Act: Test with a 6th subnet (triggers surveillance notification)
         await _service.CheckForZombieAsync(hwid, "6.6.6.6");
 
         // Assert
         using (var db = new LicenseDbContext(_dbOptions))
         {
             var updatedLicense = await db.Licenses.FirstAsync(l => l.LicenseKey == "FRAUD-KEY");
-            Assert.False(updatedLicense.IsActive);
-            Assert.Contains("ZOMBIE", updatedLicense.RevocationReason);
+            Assert.True(updatedLicense.IsActive);
+            Assert.Null(updatedLicense.RevocationReason);
         }
         _notifierMock.Verify(n => n.Notify(NotificationService.Triggers.SecurityZombieDetected, It.IsAny<string>(), It.IsAny<string>(), It.IsAny<object>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task BanComponentAsync_WhenCalledWithFingerprintAlias_ShouldStoreCanonicalTypeAndBeEnforced()
+    {
+        // Arrange
+        var productId = Guid.NewGuid();
+        const string hash = "mb-hash";
+
+        // Act
+        await _service.BanComponentAsync("FP_MB", hash, "manual test", productId);
+
+        // Assert
+        using (var db = new LicenseDbContext(_dbOptions))
+        {
+            var ban = await db.BannedComponents.SingleAsync();
+            Assert.Equal("MB", ban.ComponentType);
+            Assert.Equal(hash, ban.ComponentHash);
+        }
+
+        var result = await _service.IsComponentBannedAsync(new Dictionary<string, string>
+        {
+            ["FP_MB"] = hash
+        }, productId);
+
+        Assert.True(result.IsBanned);
+        Assert.Equal("MB", result.ComponentType);
+    }
+
+    [Fact]
+    public async Task BanComponentAsync_WhenCalledWithBinaryFingerprint_ShouldKeepBinaryTypeAndBeEnforced()
+    {
+        // Arrange
+        var productId = Guid.NewGuid();
+        const string hash = "exe-hash";
+
+        // Act
+        await _service.BanComponentAsync("FP_EXE", hash, "binary test", productId);
+
+        // Assert
+        using (var db = new LicenseDbContext(_dbOptions))
+        {
+            var ban = await db.BannedComponents.SingleAsync();
+            Assert.Equal("FP_EXE", ban.ComponentType);
+            Assert.Equal(hash, ban.ComponentHash);
+        }
+
+        var result = await _service.IsComponentBannedAsync(new Dictionary<string, string>
+        {
+            ["FP_EXE"] = hash
+        }, productId);
+
+        Assert.True(result.IsBanned);
+        Assert.Equal("FP_EXE", result.ComponentType);
     }
 }

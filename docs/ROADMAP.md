@@ -31,8 +31,11 @@ Here is the progress status of the industrial license management solution.
 - [x] **I18N Validation**: Automatic time zone conversion tests.
 
 ## 🌟 Phase 5: Portal & Ecosystem (v1.2)
-- [x] **Seat Management UI**: Administration interface to view and release machines linked to a license.
-- [ ] **Self-Service Customer Portal**: Dedicated space for customers to manage their keys and perform resets.
+- [x] **Seat Management UI**: Admin interface for viewing and releasing machines linked to a license.
+- [ ] **Differentiated Anti-Zombie Security**: Implement distinct IP thresholds per license type.
+  - **Freemium**: Strict blocking (3 IPs/24h).
+  - **Paid Licenses**: Increased tolerance (6 IPs/24h) for professional mobility and VPNs.
+- [ ] **Self-Service Customer Portal**: A dedicated area for customers to manage their keys and perform resets.
 - [ ] **Stripe Connector**: Total automation of sales and license generation.
 - [ ] **Advanced Anti-Tamper**: Debugger and VM detection in the Core.
 

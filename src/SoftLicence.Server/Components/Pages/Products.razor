@@ -1,8 +1,7 @@
-@page "/products"
+﻿@page "/products"
 @page "/products/{ProductId:guid}"
 @inject NavigationManager Nav
 @inject SoftLicence.Server.Services.AuthService Auth
-@inject LicenseDbContext Db
 @inject IDbContextFactory<LicenseDbContext> DbFactory
 @inject SoftLicence.Server.Services.ToastService Toast
 @inject SoftLicence.Server.Services.TimeZoneService TZ
@@ -11,10 +10,12 @@
 @inject IJSRuntime JS
 @inject IWebHostEnvironment Env
 @inject IStringLocalizer<SharedResource> L
+@inject ILogger<Products> Logger
 @using SoftLicence.SDK
 @using Microsoft.EntityFrameworkCore
 @using SoftLicence.Server.Components.Shared
 @using SoftLicence.Server.Data
+@using System.Diagnostics
 
 <div class="container-fluid animate-fade">
     @if (!isAuthorized)
@@ -180,6 +181,18 @@
                                 <input class="form-check-input mt-0" type="checkbox" @bind="isRecurring" title="Abonnement récurrent" />
                                 <span class="ms-2 small text-muted">@L["Products_Abo_Short"]</span>
                             </div>
+                            <div class="input-group-text bg-dark border-secondary">
+                                <input class="form-check-input mt-0" type="checkbox" @bind="isAnonymous" title="Clé anonyme (sans email/nom)" />
+                                <span class="ms-2 small text-muted">Anon</span>
+                            </div>
+                            <div class="input-group-text bg-dark border-secondary">
+                                <input class="form-check-input mt-0" type="checkbox" @bind="newEnforceSingleUsePerHardwareId" title="Un HWID ne peut consommer ce type qu'une seule fois" />
+                                <span class="ms-2 small text-muted">HWID unique</span>
+                            </div>
+                            <div class="input-group-text bg-dark border-secondary">
+                                <input class="form-check-input mt-0" type="checkbox" @bind="newDisableNewActivations" title="Bloque uniquement les nouvelles activations" />
+                                <span class="ms-2 small text-muted">Act. off</span>
+                            </div>
                             <button class="btn btn-success" @onclick="CreateLicenseType">@L["Common_Add"]</button>
                         </div>
 
@@ -192,6 +205,9 @@
                                     <th class="text-center">@L["Licenses_Seats"]</th>
                                     <th class="text-center">Act/j</th>
                                     <th class="text-center">@L["Products_Mode"]</th>
+                                    <th class="text-center">Anon</th>
+                                    <th class="text-center">HWID unique</th>
+                                    <th class="text-center">Act. off</th>
                                     <th class="text-end">@L["Common_Actions"]</th>
                                 </tr>
                             </thead>
@@ -219,6 +235,21 @@
                                         <td class="text-center">
                                             @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.IsRecurring" /> }
                                             else { <span class="badge @(type.IsRecurring ? "bg-primary" : "bg-secondary")">@(type.IsRecurring ? L["Products_Subscription"] : L["Products_Fixed"])</span> }
+                                        </td>
+                                        <td class="text-center">
+                                            @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.AllowAnonymous" /> }
+                                            else if (type.AllowAnonymous) { <span class="badge bg-warning text-dark">Anon</span> }
+                                            else { <span class="text-secondary">—</span> }
+                                        </td>
+                                        <td class="text-center">
+                                            @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.EnforceSingleUsePerHardwareId" /> }
+                                            else if (type.EnforceSingleUsePerHardwareId) { <span class="badge bg-danger">HWID unique</span> }
+                                            else { <span class="text-secondary">—</span> }
+                                        </td>
+                                        <td class="text-center">
+                                            @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.DisableNewActivations" /> }
+                                            else if (type.DisableNewActivations) { <span class="badge bg-warning text-dark">Act. off</span> }
+                                            else { <span class="text-secondary">—</span> }
                                         </td>
                                         <td class="text-end">
                                             @if (editingTypeId == type.Id)
@@ -265,7 +296,7 @@
                                 </td>
                                 <td><small class="text-muted">@p.Id</small></td>
                                 <td class="text-center">
-                                    <span class="badge bg-primary">@p.Licenses.Count</span>
+                                    <span class="badge bg-primary">@GetProductLicenseCount(p.Id)</span>
                                 </td>
                                 <td class="text-end" @onclick:stopPropagation="true">
                                     <div class="d-flex gap-2 justify-content-end">
@@ -295,7 +326,7 @@
                                             <span class="fw-bold">@sub.Name</span>
                                         </td>
                                         <td><small class="text-muted">@sub.Id</small></td>
-                                        <td class="text-center"><span class="badge bg-primary">@sub.Licenses.Count</span></td>
+                                        <td class="text-center"><span class="badge bg-primary">@GetProductLicenseCount(sub.Id)</span></td>
                                         <td class="text-end" @onclick:stopPropagation="true">
                                             <div class="d-flex gap-2 justify-content-end">
                                                 <button class="btn btn-sm btn-outline-info" @onclick="() => ShowPublicKey(sub)" title="@L["Products_PublicKeyXml"]">
@@ -318,7 +349,7 @@
                                                     <span class="fw-bold">@subsub.Name</span>
                                                 </td>
                                                 <td><small class="text-muted">@subsub.Id</small></td>
-                                                <td class="text-center"><span class="badge bg-primary">@subsub.Licenses.Count</span></td>
+                                                <td class="text-center"><span class="badge bg-primary">@GetProductLicenseCount(subsub.Id)</span></td>
                                                 <td class="text-end" @onclick:stopPropagation="true">
                                                     <div class="d-flex gap-2 justify-content-end">
                                                         <button class="btn btn-sm btn-outline-info" @onclick="() => ShowPublicKey(subsub)" title="@L["Products_PublicKeyXml"]">
@@ -365,7 +396,7 @@
                                     <p class="text-muted small">@L["Products_Checks24h"]</p>
                                 </div>
                                 <div class="col-3 border-start border-secondary">
-                                    <h3 class="text-danger">@selectedProduct.Licenses.Count(l => !l.IsActive)</h3>
+                                    <h3 class="text-danger">@prodInactiveLicenses</h3>
                                     <p class="text-muted small">@L["Products_RevokedCount"]</p>
                                 </div>
                             </div>
@@ -388,7 +419,7 @@
                             <!-- Camembert -->
                             <div class="mt-4 d-flex justify-content-around align-items-center">
                                 @{
-                                    var activeCount = selectedProduct.Licenses.Count(l => l.IsActive);
+                                    var activeCount = prodActiveLicenses;
                                     var activePercent = licTotal > 0 ? (activeCount * 100 / licTotal) : 0;
                                 }
                                 <div class="pie-chart" style="background: conic-gradient(#198754 @(activePercent)%, #dc3545 0);">
@@ -398,6 +429,103 @@
                                     <div><span class="badge bg-success me-2">&nbsp;</span> @L["Common_Active"] / @L["Common_Valid"]</div>
                                     <div class="mt-1"><span class="badge bg-danger me-2">&nbsp;</span> @L["Licenses_Revoked"] / @L["Common_Expired"]</div>
                                 </div>
+                            </div>
+
+                            <hr class="my-4 border-secondary" />
+
+                            <div class="analytics-key-section">
+                                <div class="d-flex justify-content-between align-items-center gap-3 mb-2">
+                                    <div>
+                                        <h6 class="text-white mb-1">Clés analytics / MCP / LeadOps</h6>
+                                        <p class="text-muted small mb-0">Accès lecture aux endpoints <code>X-Analytics-Key</code> pour ce produit.</p>
+                                    </div>
+                                    <span class="badge bg-dark border border-secondary">@analyticsApiKeys.Count clé@(analyticsApiKeys.Count > 1 ? "s" : "")</span>
+                                </div>
+
+                                @if (!string.IsNullOrWhiteSpace(newAnalyticsApiKeyRaw))
+                                {
+                                    <div class="alert alert-warning bg-dark border-warning text-warning small mt-3 mb-3">
+                                        <div class="fw-bold mb-2">Nouvelle clé à conserver maintenant</div>
+                                        <div class="input-group input-group-sm">
+                                            <input class="form-control font-monospace text-warning bg-black border-warning" value="@newAnalyticsApiKeyRaw" readonly />
+                                            <button class="btn btn-outline-warning" @onclick="CopyNewAnalyticsApiKey">Copier</button>
+                                            <button class="btn btn-outline-secondary" @onclick="DismissNewAnalyticsApiKey">Masquer</button>
+                                        </div>
+                                        <div class="mt-2 text-muted">Cette valeur complète ne sera plus affichée après fermeture ou rechargement.</div>
+                                    </div>
+                                }
+
+                                <div class="input-group input-group-sm mt-3 mb-3">
+                                    <input class="form-control" placeholder="Nom de la clé (ex: LeadOps SoftLicence)" @bind="newAnalyticsApiKeyName" disabled="@isCreatingAnalyticsApiKey" />
+                                    <button class="btn btn-outline-info" @onclick="CreateAnalyticsApiKeyForProduct" disabled="@isCreatingAnalyticsApiKey">
+                                        @if (isCreatingAnalyticsApiKey)
+                                        {
+                                            <span class="spinner-border spinner-border-sm me-1"></span>
+                                        }
+                                        Créer
+                                    </button>
+                                </div>
+
+                                @if (!analyticsApiKeys.Any())
+                                {
+                                    <div class="text-muted small border border-secondary rounded p-3 bg-black">
+                                        Aucune clé analytics dédiée pour ce produit.
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="table-responsive">
+                                        <table class="table table-sm table-dark table-hover align-middle mb-0">
+                                            <thead>
+                                                <tr>
+                                                    <th>Nom</th>
+                                                    <th>Préfixe</th>
+                                                    <th>Scope</th>
+                                                    <th>Statut</th>
+                                                    <th>Créée</th>
+                                                    <th>Dernier usage</th>
+                                                    <th class="text-end">Action</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                @foreach (var key in analyticsApiKeys)
+                                                {
+                                                    <tr>
+                                                        <td class="small">@key.Name</td>
+                                                        <td><code class="text-info">@key.Prefix</code></td>
+                                                        <td><span class="badge bg-secondary">@key.Scopes</span></td>
+                                                        <td>
+                                                            <span class="badge @(key.IsActive ? "bg-success" : "bg-secondary")">
+                                                                @(key.IsActive ? "Active" : "Révoquée")
+                                                            </span>
+                                                        </td>
+                                                        <td><small class="text-muted">@TZ.ToLocal(key.CreatedAtUtc).ToString("dd/MM HH:mm")</small></td>
+                                                        <td>
+                                                            @if (key.LastUsedAtUtc.HasValue)
+                                                            {
+                                                                <small class="text-muted">@TZ.ToLocal(key.LastUsedAtUtc.Value).ToString("dd/MM HH:mm")</small>
+                                                                @if (!string.IsNullOrWhiteSpace(key.LastUsedIp))
+                                                                {
+                                                                    <br />
+                                                                    <code class="small text-muted">@key.LastUsedIp</code>
+                                                                }
+                                                            }
+                                                            else
+                                                            {
+                                                                <span class="text-muted small">Jamais</span>
+                                                            }
+                                                        </td>
+                                                        <td class="text-end">
+                                                            <button class="btn btn-sm btn-outline-danger" @onclick="() => RevokeAnalyticsApiKey(key)" disabled="@(!key.IsActive)">
+                                                                Révoquer
+                                                            </button>
+                                                        </td>
+                                                    </tr>
+                                                }
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                }
                             </div>
                         </div>
                     </div>
@@ -477,6 +605,30 @@
                                     <button class="btn btn-sm btn-outline-success" @onclick="AddWebhook" disabled="@(string.IsNullOrWhiteSpace(newWebhookName) || string.IsNullOrWhiteSpace(newWebhookUrl))">+</button>
                                 </div>
                             </div>
+
+                            <hr class="my-4 border-secondary" />
+
+                            <h6>Version Minimum Autorisee</h6>
+                            <p class="small text-muted">Les HWID envoyant de la telemetrie avec une version inferieure seront automatiquement bannis.</p>
+                            <div class="input-group">
+                                <input class="form-control form-control-sm font-monospace" @bind="minVersionInput" @bind:event="oninput" placeholder="ex: 2.1.602" />
+                                <button class="btn btn-sm btn-outline-warning" @onclick="SaveMinimumVersion"
+                                        disabled="@(minVersionInput == selectedProduct?.MinimumAllowedVersion)">
+                                    Appliquer
+                                </button>
+                                @if (!string.IsNullOrEmpty(selectedProduct?.MinimumAllowedVersion))
+                                {
+                                    <button class="btn btn-sm btn-outline-danger" @onclick="ClearMinimumVersion" title="Desactiver">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-x-lg" viewBox="0 0 16 16"><path d="M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8z"/></svg>
+                                    </button>
+                                }
+                            </div>
+                            @if (!string.IsNullOrEmpty(selectedProduct?.MinimumAllowedVersion))
+                            {
+                                <div class="mt-2">
+                                    <span class="badge bg-warning text-dark">Actif : &lt; @selectedProduct.MinimumAllowedVersion = auto-ban</span>
+                                </div>
+                            }
                         </div>
                     </div>
                 </div>
@@ -690,6 +842,18 @@
                                         <input class="form-check-input mt-0" type="checkbox" @bind="isRecurring" title="Abonnement récurrent" />
                                         <span class="ms-2 small text-muted">@L["Products_Abo_Short"]</span>
                                     </div>
+                                    <div class="input-group-text bg-dark border-secondary">
+                                        <input class="form-check-input mt-0" type="checkbox" @bind="isAnonymous" title="Clé anonyme (sans email/nom)" />
+                                        <span class="ms-2 small text-muted">Anon</span>
+                                    </div>
+                                    <div class="input-group-text bg-dark border-secondary">
+                                        <input class="form-check-input mt-0" type="checkbox" @bind="newEnforceSingleUsePerHardwareId" title="Un HWID ne peut consommer ce type qu'une seule fois" />
+                                        <span class="ms-2 small text-muted">HWID unique</span>
+                                    </div>
+                                    <div class="input-group-text bg-dark border-secondary">
+                                        <input class="form-check-input mt-0" type="checkbox" @bind="newDisableNewActivations" title="Bloque uniquement les nouvelles activations" />
+                                        <span class="ms-2 small text-muted">Act. off</span>
+                                    </div>
                                     <button class="btn btn-success" @onclick="CreateLicenseType">@L["Common_Add"]</button>
                                 </div>
 
@@ -702,6 +866,9 @@
                                             <th class="text-center">@L["Licenses_Seats"]</th>
                                             <th class="text-center">Act/j</th>
                                             <th class="text-center">@L["Products_Mode"]</th>
+                                            <th class="text-center">Anon</th>
+                                            <th class="text-center">HWID unique</th>
+                                            <th class="text-center">Act. off</th>
                                             <th class="text-end">@L["Common_Actions"]</th>
                                         </tr>
                                     </thead>
@@ -731,6 +898,21 @@
                                                     @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.IsRecurring" /> }
                                                     else { <span class="badge @(type.IsRecurring ? "bg-primary" : "bg-secondary")">@(type.IsRecurring ? L["Products_Subscription"] : L["Products_Fixed"])</span> }
                                                 </td>
+                                                <td class="text-center">
+                                                    @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.AllowAnonymous" /> }
+                                                    else if (type.AllowAnonymous) { <span class="badge bg-warning text-dark">Anon</span> }
+                                                    else { <span class="text-secondary">—</span> }
+                                                </td>
+                                                <td class="text-center">
+                                                    @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.EnforceSingleUsePerHardwareId" /> }
+                                                    else if (type.EnforceSingleUsePerHardwareId) { <span class="badge bg-danger">HWID unique</span> }
+                                                    else { <span class="text-secondary">—</span> }
+                                                </td>
+                                                <td class="text-center">
+                                                    @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.DisableNewActivations" /> }
+                                                    else if (type.DisableNewActivations) { <span class="badge bg-warning text-dark">Act. off</span> }
+                                                    else { <span class="text-secondary">—</span> }
+                                                </td>
                                                 <td class="text-end">
                                                     @if (editingTypeId == type.Id)
                                                     {
@@ -748,7 +930,7 @@
                                             @if (expandedTypeParamsId == type.Id)
                                             {
                                                 <tr class="bg-dark bg-opacity-50 animate-fade">
-                                                    <td colspan="7" class="p-3 border-start border-3 border-warning">
+                                                    <td colspan="10" class="p-3 border-start border-3 border-warning">
                                                         <div class="d-flex justify-content-between align-items-center mb-2">
                                                             <span class="small fw-bold text-warning">⚙ Paramètres — <code>@type.Slug</code></span>
                                                             <button class="btn btn-sm btn-link text-muted p-0" @onclick="() => ToggleTypeParams(type)">✕</button>
@@ -806,7 +988,7 @@
                                         }
                                         @if (!LicenseTypes.Any())
                                         {
-                                            <tr><td colspan="7" class="text-center py-4 text-muted">@L["Products_NoTypes"]</td></tr>
+                                            <tr><td colspan="10" class="text-center py-4 text-muted">@L["Products_NoTypes"]</td></tr>
                                         }
                                     </tbody>
                                 </table>
@@ -916,7 +1098,7 @@
                                                         @sub.Name
                                                     </td>
                                                     <td><small class="text-muted font-monospace">@sub.Id</small></td>
-                                                    <td class="text-center"><span class="badge bg-primary">@sub.Licenses.Count</span></td>
+                                                    <td class="text-center"><span class="badge bg-primary">@GetProductLicenseCount(sub.Id)</span></td>
                                                     <td class="text-end" @onclick:stopPropagation="true">
                                                         <button class="btn btn-sm btn-outline-info" @onclick="() => ShowPublicKey(sub)" title="Clé publique">
                                                             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-key" viewBox="0 0 16 16"><path d="M0 8a4 4 0 0 1 7.465-2H14a.5.5 0 0 1 .354.146l1.5 1.5a.5.5 0 0 1 0 .708l-1.5 1.5a.5.5 0 0 1-.708 0L13 9.207l-.646.647a.5.5 0 0 1-.708 0L11 9.207l-.646.647a.5.5 0 0 1-.708 0L9 9.207l-.646.647A.5.5 0 0 1 8 10h-.535A4 4 0 0 1 0 8zm4-3a3 3 0 1 0 2.712 4.285A.5.5 0 0 1 7.163 9h.63l.853-.854a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.646-.647a.5.5 0 0 1 .708 0l.646.647.793-.793-1-1h-6.63a.5.5 0 0 1-.451-.285A3 3 0 0 0 4 5z"/><path d="M4 8a1 1 0 1 1-2 0 1 1 0 0 1 2 0z"/></svg>
@@ -1084,6 +1266,8 @@
     
     private int prodActivations = 0;
     private int prodChecks = 0;
+    private int prodActiveLicenses = 0;
+    private int prodInactiveLicenses = 0;
     
     private bool isAuthorized = false;
 
@@ -1109,6 +1293,15 @@
 
     // Webhooks produit
     private List<ProductWebhook> productWebhooks = new();
+
+    // Clés analytics produit
+    private List<AnalyticsApiKey> analyticsApiKeys = new();
+    private string newAnalyticsApiKeyName = "";
+    private string? newAnalyticsApiKeyRaw;
+    private bool isCreatingAnalyticsApiKey = false;
+
+    // Version minimum
+    private string? minVersionInput;
     private string newWebhookName = "";
     private string newWebhookUrl = "";
     private string newWebhookSecret = "";
@@ -1144,6 +1337,7 @@
     private ConfirmModal modalDeleteType = default!;
     private Product? productToDelete;
     private string deleteMessage = "";
+    private Dictionary<Guid, int> productLicenseCounts = new();
 
     // Types de licences (chargés par produit dans LoadProductData)
     private List<LicenseType> LicenseTypes = new();
@@ -1153,10 +1347,15 @@
     private int newMaxSeats = 1;
     private int newMaxActivationsPerDay = 0;
     private bool isRecurring = false;
+    private bool isAnonymous = false;
+    private bool isFree = false;
+    private bool newEnforceSingleUsePerHardwareId = false;
+    private bool newDisableNewActivations = false;
     private bool showTypes = false;
     private Guid? editingTypeId;
     private LicenseType? typeToDelete;
     private string deleteTypeMsg = "";
+    private Dictionary<Guid, int> licenseTypeLicenseCounts = new();
 
     // Custom params par type de licence
     private Guid? expandedTypeParamsId;
@@ -1180,6 +1379,16 @@
     {
         if (expandedProducts.Contains(id)) expandedProducts.Remove(id);
         else expandedProducts.Add(id);
+    }
+
+    private int GetProductLicenseCount(Guid productId)
+    {
+        return productLicenseCounts.TryGetValue(productId, out var count) ? count : 0;
+    }
+
+    private int GetLicenseTypeLicenseCount(Guid licenseTypeId)
+    {
+        return licenseTypeLicenseCounts.TryGetValue(licenseTypeId, out var count) ? count : 0;
     }
 
     protected override async Task OnInitializedAsync()
@@ -1207,11 +1416,11 @@
             else
             {
                 // Plugin pas encore en mémoire : charger directement depuis la BDD
-                selectedProduct = await Db.Products
-                    .Include(p => p.Licenses).ThenInclude(l => l.Type)
-                    .Include(p => p.Licenses).ThenInclude(l => l.Seats)
-                    .Include(p => p.SubProducts).ThenInclude(s => s.Licenses)
-                    .Include(p => p.SubProducts).ThenInclude(s => s.SubProducts).ThenInclude(ss => ss.Licenses)
+                await using var dbParam = await DbFactory.CreateDbContextAsync();
+                selectedProduct = await dbParam.Products
+                    .AsNoTracking()
+                    .Include(p => p.SubProducts)
+                    .ThenInclude(s => s.SubProducts)
                     .FirstOrDefaultAsync(p => p.Id == ProductId.Value);
             }
 
@@ -1254,23 +1463,46 @@
 
     private async Task LoadData()
     {
-        Db.ChangeTracker.Clear();
+        var totalSw = Stopwatch.StartNew();
+        var stepSw = Stopwatch.StartNew();
+        await using var db = await DbFactory.CreateDbContextAsync();
         // Seulement les produits racines (sans parent)
-        var query = Db.Products.Where(p => p.ParentProductId == null).AsQueryable();
+        var query = db.Products.Where(p => p.ParentProductId == null).AsQueryable();
         TotalCount = await query.CountAsync();
+        LogProductsStep("list-total-count", stepSw);
 
         if (CurrentPage > TotalPages && TotalPages > 0) CurrentPage = TotalPages;
         if (CurrentPage < 1) CurrentPage = 1;
 
+        stepSw.Restart();
         ProductsList = await query
-            .Include(p => p.Licenses).ThenInclude(l => l.Type)
-            .Include(p => p.Licenses).ThenInclude(l => l.Seats)
-            .Include(p => p.SubProducts).ThenInclude(s => s.Licenses)
-            .Include(p => p.SubProducts).ThenInclude(s => s.SubProducts).ThenInclude(ss => ss.Licenses)
+            .AsNoTracking()
+            .Include(p => p.SubProducts)
+            .ThenInclude(s => s.SubProducts)
             .OrderBy(p => p.Name)
             .Skip((CurrentPage - 1) * PageSize)
             .Take(PageSize)
             .ToListAsync();
+        LogProductsStep("list-products-with-hierarchy", stepSw);
+
+        stepSw.Restart();
+        var visibleProductIds = ProductsList
+            .SelectMany(p => new[] { p }
+                .Concat(p.SubProducts)
+                .Concat(p.SubProducts.SelectMany(s => s.SubProducts)))
+            .Select(p => p.Id)
+            .Distinct()
+            .ToList();
+
+        productLicenseCounts = visibleProductIds.Count == 0
+            ? new()
+            : await db.Licenses
+                .AsNoTracking()
+                .Where(l => visibleProductIds.Contains(l.ProductId))
+                .GroupBy(l => l.ProductId)
+                .Select(g => new { ProductId = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(g => g.ProductId, g => g.Count);
+        LogProductsStep("list-license-counts", stepSw);
 
         if (selectedProduct != null)
         {
@@ -1282,6 +1514,14 @@
                 await LoadProductData();
             }
         }
+
+        Logger.LogInformation(
+            "Products page LoadData completed in {ElapsedMs}ms page={Page} pageSize={PageSize} totalRootProducts={TotalCount} visibleProducts={VisibleProducts}",
+            totalSw.ElapsedMilliseconds,
+            CurrentPage,
+            PageSize,
+            TotalCount,
+            visibleProductIds.Count);
     }
 
     private void SelectProduct(Product p)
@@ -1297,26 +1537,70 @@
     private async Task LoadProductData()
     {
         if (selectedProduct == null) return;
+        var totalSw = Stopwatch.StartNew();
+        var stepSw = Stopwatch.StartNew();
+        minVersionInput = selectedProduct.MinimumAllowedVersion;
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+
+        var selectedVisibleProductIds = new[] { selectedProduct }
+            .Concat(selectedProduct.SubProducts)
+            .Concat(selectedProduct.SubProducts.SelectMany(s => s.SubProducts))
+            .Select(p => p.Id)
+            .Distinct()
+            .ToList();
+
+        if (selectedVisibleProductIds.Count > 0)
+        {
+            var selectedProductCounts = await db.Licenses
+                .AsNoTracking()
+                .Where(l => selectedVisibleProductIds.Contains(l.ProductId))
+                .GroupBy(l => l.ProductId)
+                .Select(g => new { ProductId = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(g => g.ProductId, g => g.Count);
+
+            foreach (var productId in selectedVisibleProductIds)
+                productLicenseCounts[productId] = selectedProductCounts.GetValueOrDefault(productId);
+        }
+        LogProductsStep("detail-visible-product-counts", stepSw);
 
         // Types de licences du produit
-        LicenseTypes = await Db.LicenseTypes
-            .Include(t => t.Licenses)
+        stepSw.Restart();
+        LicenseTypes = await db.LicenseTypes
+            .AsNoTracking()
             .Where(t => t.ProductId == selectedProduct.Id)
             .OrderBy(t => t.Name)
             .ToListAsync();
+        LogProductsStep("detail-license-types", stepSw);
+
+        stepSw.Restart();
+        licenseTypeLicenseCounts = await db.Licenses
+            .AsNoTracking()
+            .Where(l => l.ProductId == selectedProduct.Id)
+            .GroupBy(l => l.LicenseTypeId)
+            .Select(g => new { LicenseTypeId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(g => g.LicenseTypeId, g => g.Count);
+        LogProductsStep("detail-license-type-counts", stepSw);
 
         // Stats KPIs
-        prodActivations = await Db.Licenses.CountAsync(l => l.ProductId == selectedProduct.Id && l.ActivationDate != null);
-        prodChecks = await Db.AccessLogs.CountAsync(l => l.AppName.ToLower() == selectedProduct.Name.ToLower() && l.Endpoint == "CHECK" && l.Timestamp >= DateTime.UtcNow.AddDays(-1));
-        
+        stepSw.Restart();
+        prodActivations = await db.Licenses.AsNoTracking().CountAsync(l => l.ProductId == selectedProduct.Id && l.ActivationDate != null);
+        prodActiveLicenses = await db.Licenses.AsNoTracking().CountAsync(l => l.ProductId == selectedProduct.Id && l.IsActive);
+        prodInactiveLicenses = await db.Licenses.AsNoTracking().CountAsync(l => l.ProductId == selectedProduct.Id && !l.IsActive);
+        prodChecks = await db.AccessLogs.AsNoTracking().CountAsync(l => l.AppName == selectedProduct.Name && l.Endpoint == "CHECK" && l.Timestamp >= DateTime.UtcNow.AddDays(-1));
+        LogProductsStep("detail-kpis", stepSw);
+
         // Licences
-        var licQuery = Db.Licenses.Where(l => l.ProductId == selectedProduct.Id);
+        stepSw.Restart();
+        var licQuery = db.Licenses.AsNoTracking().Where(l => l.ProductId == selectedProduct.Id);
         licTotal = await licQuery.CountAsync();
         prodLicenses = await licQuery.Include(l => l.Type).OrderByDescending(l => l.CreationDate)
                                      .Skip((licPage - 1) * licPageSize).Take(licPageSize).ToListAsync();
+        LogProductsStep("detail-licenses-page", stepSw);
 
         // Télémétrie
-        var telQuery = Db.TelemetryRecords.Where(t => t.ProductId == selectedProduct.Id);
+        stepSw.Restart();
+        var telQuery = db.TelemetryRecords.AsNoTracking().Where(t => t.ProductId == selectedProduct.Id);
         telTotal = await telQuery.CountAsync();
         recentTelemetry = await telQuery
             .Include(t => t.EventData)
@@ -1325,30 +1609,136 @@
             .Include(t => t.ErrorData)
             .OrderByDescending(t => t.Timestamp)
             .Skip((telPage - 1) * telPageSize).Take(telPageSize).ToListAsync();
+        LogProductsStep("detail-telemetry-page", stepSw);
 
-        // Audit Logs (Basé sur AppName - Case insensitive)
-        var logQuery = Db.AccessLogs.Where(l => l.AppName.ToLower() == selectedProduct.Name.ToLower());
+        // Audit Logs (basé sur AppName exact pour utiliser l'index AppName/Timestamp)
+        stepSw.Restart();
+        var logQuery = db.AccessLogs.AsNoTracking().Where(l => l.AppName == selectedProduct.Name);
         logTotal = await logQuery.CountAsync();
         prodLogs = await logQuery.OrderByDescending(l => l.Timestamp)
                                  .Skip((logPage - 1) * logPageSize).Take(logPageSize).ToListAsync();
+        LogProductsStep("detail-accesslogs-page", stepSw);
 
         // Webhooks produit
-        productWebhooks = await Db.ProductWebhooks
+        stepSw.Restart();
+        productWebhooks = await db.ProductWebhooks
             .Where(w => w.ProductId == selectedProduct.Id)
             .OrderBy(w => w.CreatedAt)
             .ToListAsync();
+        LogProductsStep("detail-webhooks", stepSw);
+
+        // Clés analytics produit
+        stepSw.Restart();
+        analyticsApiKeys = await db.AnalyticsApiKeys
+            .AsNoTracking()
+            .Where(k => k.ProductId == selectedProduct.Id)
+            .OrderByDescending(k => k.CreatedAtUtc)
+            .ToListAsync();
+        LogProductsStep("detail-analytics-api-keys", stepSw);
 
         // Calcul de la profondeur (1 = produit racine, 2 = plugin, 3 = sous-plugin)
         selectedProductDepth = 1;
         if (selectedProduct.ParentProductId.HasValue)
         {
-            var parent = await Db.Products
+            var parent = await db.Products
                 .Select(p => new { p.Id, p.ParentProductId })
                 .FirstOrDefaultAsync(p => p.Id == selectedProduct.ParentProductId.Value);
             selectedProductDepth = parent?.ParentProductId.HasValue == true ? 3 : 2;
         }
 
+        Logger.LogInformation(
+            "Products page LoadProductData completed in {ElapsedMs}ms productId={ProductId} productName={ProductName} licenses={LicenseTotal} telemetry={TelemetryTotal} logs={LogTotal}",
+            totalSw.ElapsedMilliseconds,
+            selectedProduct.Id,
+            selectedProduct.Name,
+            licTotal,
+            telTotal,
+            logTotal);
+
         StateHasChanged();
+    }
+
+    private void LogProductsStep(string step, Stopwatch sw)
+    {
+        Logger.LogInformation("Products page step {Step} completed in {ElapsedMs}ms", step, sw.ElapsedMilliseconds);
+    }
+
+    private async Task CreateAnalyticsApiKeyForProduct()
+    {
+        if (selectedProduct == null) return;
+
+        isCreatingAnalyticsApiKey = true;
+        StateHasChanged();
+
+        try
+        {
+            var rawKey = GenerateAnalyticsApiKey();
+            var key = new AnalyticsApiKey
+            {
+                ProductId = selectedProduct.Id,
+                Name = string.IsNullOrWhiteSpace(newAnalyticsApiKeyName)
+                    ? "LeadOps / MCP analytics"
+                    : newAnalyticsApiKeyName.Trim(),
+                Prefix = SoftLicence.Server.Services.AnalyticsApiKeyAuthService.BuildPrefix(rawKey),
+                KeyHash = SoftLicence.Server.Services.AnalyticsApiKeyAuthService.ComputeKeyHash(rawKey),
+                Scopes = AnalyticsApiKeyScopes.TelemetryRead,
+                IsActive = true
+            };
+
+            await using var db = await DbFactory.CreateDbContextAsync();
+            db.AnalyticsApiKeys.Add(key);
+            await db.SaveChangesAsync();
+
+            newAnalyticsApiKeyRaw = rawKey;
+            newAnalyticsApiKeyName = "";
+            Toast.ShowSuccess("Clé analytics créée. Copiez-la maintenant.");
+            await LoadProductData();
+        }
+        catch (Exception ex)
+        {
+            Toast.ShowError($"Erreur création clé analytics : {ex.Message}");
+        }
+        finally
+        {
+            isCreatingAnalyticsApiKey = false;
+        }
+    }
+
+    private async Task RevokeAnalyticsApiKey(AnalyticsApiKey key)
+    {
+        var confirmed = await JS.InvokeAsync<bool>("confirm", $"Révoquer la clé analytics « {key.Name} » ?");
+        if (!confirmed) return;
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var dbKey = await db.AnalyticsApiKeys.FindAsync(key.Id);
+        if (dbKey == null) return;
+
+        dbKey.IsActive = false;
+        await db.SaveChangesAsync();
+        Toast.ShowSuccess("Clé analytics révoquée.");
+        await LoadProductData();
+    }
+
+    private async Task CopyNewAnalyticsApiKey()
+    {
+        if (string.IsNullOrWhiteSpace(newAnalyticsApiKeyRaw)) return;
+
+        await JS.InvokeVoidAsync("navigator.clipboard.writeText", newAnalyticsApiKeyRaw);
+        Toast.ShowSuccess("Clé analytics copiée.");
+    }
+
+    private void DismissNewAnalyticsApiKey()
+    {
+        newAnalyticsApiKeyRaw = null;
+    }
+
+    private static string GenerateAnalyticsApiKey()
+    {
+        var bytes = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+        return "sla_" + Convert.ToBase64String(bytes)
+            .Replace("+", "-", StringComparison.Ordinal)
+            .Replace("/", "_", StringComparison.Ordinal)
+            .TrimEnd('=');
     }
 
     private async Task AddWebhook()
@@ -1363,8 +1753,9 @@
             Secret = string.IsNullOrWhiteSpace(newWebhookSecret) ? null : newWebhookSecret.Trim()
         };
 
-        Db.ProductWebhooks.Add(webhook);
-        await Db.SaveChangesAsync();
+        using var db = await DbFactory.CreateDbContextAsync();
+        db.ProductWebhooks.Add(webhook);
+        await db.SaveChangesAsync();
 
         productWebhooks.Add(webhook);
         newWebhookName = "";
@@ -1374,13 +1765,39 @@
 
     private async Task DeleteWebhook(Guid webhookId)
     {
-        var webhook = await Db.ProductWebhooks.FindAsync(webhookId);
+        using var db = await DbFactory.CreateDbContextAsync();
+        var webhook = await db.ProductWebhooks.FindAsync(webhookId);
         if (webhook != null)
         {
-            Db.ProductWebhooks.Remove(webhook);
-            await Db.SaveChangesAsync();
+            db.ProductWebhooks.Remove(webhook);
+            await db.SaveChangesAsync();
             productWebhooks.RemoveAll(w => w.Id == webhookId);
         }
+    }
+
+    private async Task SaveMinimumVersion()
+    {
+        if (selectedProduct == null) return;
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var prod = await db.Products.FindAsync(selectedProduct.Id);
+        if (prod == null) return;
+        prod.MinimumAllowedVersion = string.IsNullOrWhiteSpace(minVersionInput) ? null : minVersionInput.Trim();
+        await db.SaveChangesAsync();
+        selectedProduct.MinimumAllowedVersion = prod.MinimumAllowedVersion;
+        Toast.ShowSuccess($"Version minimum mise a jour : {prod.MinimumAllowedVersion ?? "aucune"}");
+    }
+
+    private async Task ClearMinimumVersion()
+    {
+        if (selectedProduct == null) return;
+        minVersionInput = null;
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var prod = await db.Products.FindAsync(selectedProduct.Id);
+        if (prod == null) return;
+        prod.MinimumAllowedVersion = null;
+        await db.SaveChangesAsync();
+        selectedProduct.MinimumAllowedVersion = null;
+        Toast.ShowSuccess("Version minimum desactivee");
     }
 
     private string FormatJson(string? json)
@@ -1423,8 +1840,9 @@
             Toast.ShowError("Nom et Slug requis."); return;
         }
 
+        using var db = await DbFactory.CreateDbContextAsync();
         var slug = newTypeSlug.Trim().ToUpper().Replace(" ", "_");
-        if (await Db.LicenseTypes.AnyAsync(t => t.ProductId == selectedProduct.Id && t.Slug == slug))
+        if (await db.LicenseTypes.AnyAsync(t => t.ProductId == selectedProduct.Id && t.Slug == slug))
         {
             Toast.ShowError("Ce Slug existe déjà pour ce produit."); return;
         }
@@ -1436,12 +1854,26 @@
             DefaultDurationDays = newTypeDuration,
             DefaultMaxSeats = newMaxSeats,
             MaxActivationsPerDay = newMaxActivationsPerDay,
-            IsRecurring = isRecurring
+            IsRecurring = isRecurring,
+            AllowAnonymous = isAnonymous,
+            IsFree = isFree,
+            EnforceSingleUsePerHardwareId = newEnforceSingleUsePerHardwareId,
+            DisableNewActivations = newDisableNewActivations
         };
-        Db.LicenseTypes.Add(lt);
-        await Db.SaveChangesAsync();
-        Toast.ShowSuccess($"Type '{slug}' ajouté.");
-        newTypeName = ""; newTypeSlug = ""; newTypeDuration = 30; newMaxSeats = 1; newMaxActivationsPerDay = 0; isRecurring = false;
+        // Auto-copy custom params from existing license types of the same product
+        var existingParams = await db.LicenseTypeCustomParams
+            .Where(cp => cp.LicenseType!.ProductId == selectedProduct.Id)
+            .ToListAsync();
+        foreach (var g in existingParams.GroupBy(cp => cp.Key))
+        {
+            var source = g.First();
+            lt.CustomParams.Add(new LicenseTypeCustomParam { Key = source.Key, Name = source.Name, Value = source.Value });
+        }
+
+        db.LicenseTypes.Add(lt);
+        await db.SaveChangesAsync();
+        Toast.ShowSuccess($"Type '{slug}' ajouté ({lt.CustomParams.Count} paramètres copiés).");
+        newTypeName = ""; newTypeSlug = ""; newTypeDuration = 30; newMaxSeats = 1; newMaxActivationsPerDay = 0; isRecurring = false; isAnonymous = false; isFree = false; newEnforceSingleUsePerHardwareId = false; newDisableNewActivations = false;
         await LoadProductData();
     }
 
@@ -1450,41 +1882,93 @@
         var tid = lt.Id;
         using var db = await DbFactory.CreateDbContextAsync();
         var dbType = await db.LicenseTypes.FindAsync(tid);
-        
+
         if (dbType != null)
         {
+            var durationChanged = dbType.DefaultDurationDays != lt.DefaultDurationDays;
+            var oldDuration = dbType.DefaultDurationDays;
+
             dbType.Name = lt.Name;
             dbType.DefaultDurationDays = lt.DefaultDurationDays;
             dbType.DefaultMaxSeats = lt.DefaultMaxSeats;
             dbType.MaxActivationsPerDay = lt.MaxActivationsPerDay;
             dbType.IsRecurring = lt.IsRecurring;
-            
+            dbType.AllowAnonymous = lt.AllowAnonymous;
+            dbType.IsFree = lt.IsFree;
+            dbType.EnforceSingleUsePerHardwareId = lt.EnforceSingleUsePerHardwareId;
+            dbType.DisableNewActivations = lt.DisableNewActivations;
+
             await db.SaveChangesAsync();
+
+            // Propager le changement de durée à toutes les licences existantes de ce type
+            if (durationChanged)
+            {
+                var licenses = await db.Licenses.Where(l => l.LicenseTypeId == tid).ToListAsync();
+                var newDays = lt.DefaultDurationDays;
+
+                foreach (var lic in licenses)
+                {
+                    if (newDays == 0)
+                    {
+                        // Lifetime
+                        lic.ExpirationDate = null;
+                        lic.ValidityDays = null;
+                    }
+                    else
+                    {
+                        lic.ValidityDays = newDays;
+                        if (lic.ActivationDate.HasValue)
+                            lic.ExpirationDate = lic.ActivationDate.Value.AddDays(newDays);
+                        // Pas activée = pas d'expiration, sera calculée à l'activation
+                    }
+                }
+                await db.SaveChangesAsync();
+                Toast.ShowSuccess($"Durée modifiée : {licenses.Count} licences mises à jour.");
+            }
+            else
+            {
+                Toast.ShowSuccess("Modifications enregistrées.");
+            }
+
             editingTypeId = null;
-            Toast.ShowSuccess("Modifications enregistrées.");
             await LoadData();
         }
     }
 
-    private Task RequestDeleteType(LicenseType lt)
+    private async Task RequestDeleteType(LicenseType lt)
     {
         typeToDelete = lt;
-        if (lt.Licenses.Count > 0)
+        var licenseCount = GetLicenseTypeLicenseCount(lt.Id);
+        if (licenseCount == 0)
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            licenseCount = await db.Licenses.CountAsync(l => l.LicenseTypeId == lt.Id);
+        }
+
+        if (licenseCount > 0)
         {
             Toast.ShowError("Impossible de supprimer ce type : des licences l'utilisent encore.");
-            return Task.CompletedTask;
+            return;
         }
+
         deleteTypeMsg = $"Supprimer le type '{lt.Name}' ({lt.Slug}) ?";
         modalDeleteType.Show();
-        return Task.CompletedTask;
     }
 
     private async Task OnDeleteTypeConfirm(bool confirmed)
     {
         if (confirmed && typeToDelete != null)
         {
-            Db.LicenseTypes.Remove(typeToDelete);
-            await Db.SaveChangesAsync();
+            using var db = await DbFactory.CreateDbContextAsync();
+            var dbType = await db.LicenseTypes.FindAsync(typeToDelete.Id);
+            if (dbType == null)
+            {
+                typeToDelete = null;
+                return;
+            }
+
+            db.LicenseTypes.Remove(dbType);
+            await db.SaveChangesAsync();
             Toast.ShowSuccess("Type supprimé.");
             await LoadData();
         }
@@ -1502,7 +1986,8 @@
             return;
         }
         expandedTypeParamsId = type.Id;
-        typeParams = await Db.LicenseTypeCustomParams
+        using var db = await DbFactory.CreateDbContextAsync();
+        typeParams = await db.LicenseTypeCustomParams
             .Where(p => p.LicenseTypeId == type.Id)
             .OrderBy(p => p.Key)
             .ToListAsync();
@@ -1520,15 +2005,16 @@
         {
             Toast.ShowError("La clé ne doit contenir que des caractères alphanumériques ou des underscores."); return;
         }
-        if (await Db.LicenseTypeCustomParams.AnyAsync(p => p.LicenseTypeId == type.Id && p.Key == key))
+        using var db = await DbFactory.CreateDbContextAsync();
+        if (await db.LicenseTypeCustomParams.AnyAsync(p => p.LicenseTypeId == type.Id && p.Key == key))
         {
             Toast.ShowError($"La clé '{key}' existe déjà pour ce type."); return;
         }
         if (newParamApplyToAll)
         {
             // Appliquer à tous les types du même produit (skip si clé déjà présente)
-            var allTypes = await Db.LicenseTypes.Where(t => t.ProductId == type.ProductId).ToListAsync();
-            var existingKeys = await Db.LicenseTypeCustomParams
+            var allTypes = await db.LicenseTypes.Where(t => t.ProductId == type.ProductId).ToListAsync();
+            var existingKeys = await db.LicenseTypeCustomParams
                 .Where(p => allTypes.Select(t => t.Id).Contains(p.LicenseTypeId) && p.Key == key)
                 .Select(p => p.LicenseTypeId)
                 .ToListAsync();
@@ -1537,29 +2023,30 @@
             {
                 if (!existingKeys.Contains(t.Id))
                 {
-                    Db.LicenseTypeCustomParams.Add(new LicenseTypeCustomParam { LicenseTypeId = t.Id, Key = key, Name = newParamName.Trim(), Value = newParamValue.Trim() });
+                    db.LicenseTypeCustomParams.Add(new LicenseTypeCustomParam { LicenseTypeId = t.Id, Key = key, Name = newParamName.Trim(), Value = newParamValue.Trim() });
                     added++;
                 }
             }
-            await Db.SaveChangesAsync();
+            await db.SaveChangesAsync();
             Toast.ShowSuccess($"Paramètre '{key}' ajouté à {added}/{allTypes.Count} types (déjà présent sur {allTypes.Count - added}).");
         }
         else
         {
-            Db.LicenseTypeCustomParams.Add(new LicenseTypeCustomParam { LicenseTypeId = type.Id, Key = key, Name = newParamName.Trim(), Value = newParamValue.Trim() });
-            await Db.SaveChangesAsync();
+            db.LicenseTypeCustomParams.Add(new LicenseTypeCustomParam { LicenseTypeId = type.Id, Key = key, Name = newParamName.Trim(), Value = newParamValue.Trim() });
+            await db.SaveChangesAsync();
             Toast.ShowSuccess($"Paramètre '{key}' ajouté.");
         }
         newParamKey = ""; newParamName = ""; newParamValue = ""; newParamApplyToAll = false; editingParamId = null;
-        typeParams = await Db.LicenseTypeCustomParams.Where(p => p.LicenseTypeId == type.Id).OrderBy(p => p.Key).ToListAsync();
+        typeParams = await db.LicenseTypeCustomParams.Where(p => p.LicenseTypeId == type.Id).OrderBy(p => p.Key).ToListAsync();
     }
 
     private async Task DeleteTypeParam(LicenseTypeCustomParam param)
     {
         var confirmed = await JS.InvokeAsync<bool>("confirm", $"Supprimer le paramètre « {param.Key} » ? Cette action est irréversible.");
         if (!confirmed) return;
-        Db.LicenseTypeCustomParams.Remove(param);
-        await Db.SaveChangesAsync();
+        using var db = await DbFactory.CreateDbContextAsync();
+        db.LicenseTypeCustomParams.Remove(param);
+        await db.SaveChangesAsync();
         typeParams.Remove(param);
         Toast.ShowSuccess("Paramètre supprimé.");
     }
@@ -1585,8 +2072,9 @@
         if (param == null) { CancelEditParam(); return; }
         param.Name = editingParamName.Trim();
         param.Value = editingParamValue.Trim();
-        Db.LicenseTypeCustomParams.Update(param);
-        await Db.SaveChangesAsync();
+        using var db = await DbFactory.CreateDbContextAsync();
+        db.LicenseTypeCustomParams.Update(param);
+        await db.SaveChangesAsync();
         Toast.ShowSuccess($"Paramètre '{param.Key}' modifié.");
         CancelEditParam();
     }
@@ -1603,7 +2091,8 @@
 
         try
         {
-            var exists = await Db.Products.AnyAsync(p => p.Name.ToLower() == NewProductName.ToLower());
+            using var db = await DbFactory.CreateDbContextAsync();
+            var exists = await db.Products.AnyAsync(p => p.Name.ToLower() == NewProductName.ToLower());
             if (exists) { Toast.ShowError("Un logiciel avec ce nom existe déjà."); return; }
 
             // Extraire la clé publique depuis la clé privée
@@ -1621,8 +2110,8 @@
                 PublicKeyXml = publicKeyXml
             };
 
-            Db.Products.Add(p);
-            await Db.SaveChangesAsync();
+            db.Products.Add(p);
+            await db.SaveChangesAsync();
 
             Toast.ShowSuccess($"Produit '{NewProductName}' importé avec les clés existantes !");
             NewProductName = ""; importPrivateKeyXml = ""; showImport = false; showCreate = false;
@@ -1647,13 +2136,14 @@
         if (string.IsNullOrWhiteSpace(NewProductName)) { Toast.ShowError("Nom requis."); return; }
         
         // Vérification des doublons (insensible à la casse)
-        var exists = await Db.Products.AnyAsync(p => p.Name.ToLower() == NewProductName.ToLower());
+        using var db = await DbFactory.CreateDbContextAsync();
+        var exists = await db.Products.AnyAsync(p => p.Name.ToLower() == NewProductName.ToLower());
         if (exists) { Toast.ShowError("Un logiciel avec ce nom existe déjà."); return; }
 
         // Niveau 3 (sous-plugin) : copie automatique du certificat du plugin parent
         if (parentForNewProduct.HasValue && selectedProductDepth == 2)
         {
-            var parentPlugin = await Db.Products.FindAsync(parentForNewProduct.Value);
+            var parentPlugin = await db.Products.FindAsync(parentForNewProduct.Value);
             if (parentPlugin != null)
             {
                 var p = new Product
@@ -1663,8 +2153,8 @@
                     PublicKeyXml = parentPlugin.PublicKeyXml,
                     ParentProductId = parentForNewProduct
                 };
-                Db.Products.Add(p);
-                await Db.SaveChangesAsync();
+                db.Products.Add(p);
+                await db.SaveChangesAsync();
                 Toast.ShowSuccess($"Plugin '{NewProductName}' créé avec le certificat de '{parentPlugin.Name}'.");
                 await FinishCreation(showToast: false);
                 return;
@@ -1702,8 +2192,8 @@
                 ParentProductId = parentForNewProduct
             };
             
-            Db.Products.Add(p);
-            await Db.SaveChangesAsync();
+            db.Products.Add(p);
+            await db.SaveChangesAsync();
 
             // ÉTAPE 3.5 : SAUVEGARDE DRIVE (rclone)
             // On envoie la PAIRE de clés sur le Drive (le Drive doit être crypté via rclone)
@@ -1758,11 +2248,18 @@
 
     private void ShowPublicKey(Product p) { ShowKey = p.PublicKeyXml; ShowKeyName = p.Name; }
 
-    private void RequestDelete(Product p)
+    private async Task RequestDelete(Product p)
     {
-        if (p.Licenses.Any())
+        var licenseCount = GetProductLicenseCount(p.Id);
+        if (licenseCount == 0)
         {
-            Toast.ShowError($"Impossible de supprimer '{p.Name}' : ce logiciel possède {p.Licenses.Count} licence(s) active(s).");
+            await using var db = await DbFactory.CreateDbContextAsync();
+            licenseCount = await db.Licenses.CountAsync(l => l.ProductId == p.Id);
+        }
+
+        if (licenseCount > 0)
+        {
+            Toast.ShowError($"Impossible de supprimer '{p.Name}' : ce logiciel possède {licenseCount} licence(s) active(s).");
             return;
         }
 
@@ -1775,8 +2272,16 @@
     {
         if (confirmed && productToDelete != null)
         {
-            Db.Products.Remove(productToDelete);
-            await Db.SaveChangesAsync();
+            using var db = await DbFactory.CreateDbContextAsync();
+            var dbProduct = await db.Products.FindAsync(productToDelete.Id);
+            if (dbProduct == null)
+            {
+                productToDelete = null;
+                return;
+            }
+
+            db.Products.Remove(dbProduct);
+            await db.SaveChangesAsync();
             Toast.ShowSuccess("Logiciel supprimé.");
             Nav.NavigateTo("/products");
         }

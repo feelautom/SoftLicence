@@ -82,4 +82,19 @@ public class CleanupServiceTests
             Assert.True(db.AccessLogs.First().Timestamp > DateTime.UtcNow.AddDays(-6));
         }
     }
+
+    [Fact]
+    public void RunCleanup_Source_UsesBulkDeleteForRelationalPurge()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory,
+            "..", "..", "..", "..", "..",
+            "src", "SoftLicence.Server", "Services", "CleanupService.cs"));
+
+        Assert.Contains("ExecuteDeleteAsync", source);
+        Assert.DoesNotContain("var oldLogs = await db.AccessLogs", source);
+        Assert.DoesNotContain("RemoveRange(oldLogs)", source);
+        Assert.DoesNotContain("var oldTelemetry = await db.TelemetryRecords", source);
+        Assert.DoesNotContain("RemoveRange(oldTelemetry)", source);
+    }
 }

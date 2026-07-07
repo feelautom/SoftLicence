@@ -32,6 +32,9 @@ Voici l'état d'avancement de la solution industrielle de gestion de licences.
 
 ## 🌟 Phase 5 : Portail & Écosystème (v1.2)
 - [x] **UI Gestion des Postes** : Interface d'administration pour visualiser et libérer les machines liées à une licence.
+- [ ] **Sécurité Différenciée (Anti-Zombie)** : Implémenter des seuils d'IP distincts selon le type de licence.
+  - **Freemium** : Blocage strict (3 IPs/24h) pour limiter les abus.
+  - **Licences Payantes** : Tolérance accrue (6 IPs/24h) pour supporter VPN et mobilité professionnelle.
 - [ ] **Portail Client Self-Service** : Espace dédié pour que les clients gèrent leurs clés et effectuent des resets.
 - [ ] **Connecteur Stripe** : Automatisation totale de la vente et génération de licence.
 - [ ] **Anti-Tamper Avancé** : Détection de Debuggers et VM dans le Core.

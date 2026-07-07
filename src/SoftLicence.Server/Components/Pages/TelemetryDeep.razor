@@ -1,0 +1,1577 @@
+@page "/telemetry/deep"
+@inject IDbContextFactory<LicenseDbContext> DbFactory
+@inject SoftLicence.Server.Services.AuthService Auth
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@using SoftLicence.Server.Data
+@using Microsoft.EntityFrameworkCore
+@using System.Text.Json
+
+<PageTitle>Analyse profonde — Télémétrie</PageTitle>
+
+@if (!isAuthorized)
+{
+    <div class="text-center py-5">
+        <h2 class="text-white">Accès refusé</h2>
+        <p class="text-muted">Vous n'avez pas la permission d'accéder à cette page.</p>
+    </div>
+}
+else
+{
+    <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
+        <h3 class="mb-0">
+            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" class="me-2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            Analyse profonde — Télémétrie
+        </h3>
+        <div class="d-flex gap-2 align-items-center flex-wrap">
+            <select class="form-select form-select-sm" style="width: 180px;" @bind:get="selectedProductId" @bind:set="OnProductChanged">
+                <option value="">Tous les produits</option>
+                @foreach (var p in products)
+                {
+                    <option value="@p.Id.ToString()">@p.Name</option>
+                }
+            </select>
+            <div class="btn-group btn-group-sm">
+                <button class="btn @(selectedDays == 7 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetDays(7)">7j</button>
+                <button class="btn @(selectedDays == 30 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetDays(30)">30j</button>
+                <button class="btn @(selectedDays == 90 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetDays(90)">90j</button>
+                <button class="btn @(selectedDays == 180 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetDays(180)">180j</button>
+            </div>
+            <button class="btn btn-outline-secondary btn-sm" @onclick="RefreshCurrentTab">↺ Rafraîchir</button>
+        </div>
+    </div>
+
+    <div class="card p-0 overflow-hidden border-0 shadow-lg mb-4">
+        <div class="bg-dark p-2 border-bottom border-secondary">
+            <ul class="nav nav-pills" role="tablist" style="gap: 4px; flex-wrap: nowrap; overflow-x: auto;">
+                <li class="nav-item"><button class="nav-link text-nowrap @(activeTab == "overview" ? "active" : "")" @onclick='() => SwitchTab("overview")'>Vue d'ensemble</button></li>
+                <li class="nav-item"><button class="nav-link text-nowrap @(activeTab == "events" ? "active" : "")" @onclick='() => SwitchTab("events")'>Événements &amp; JSON</button></li>
+                <li class="nav-item"><button class="nav-link text-nowrap @(activeTab == "diagnostics" ? "active" : "")" @onclick='() => SwitchTab("diagnostics")'>Diagnostics</button></li>
+                <li class="nav-item"><button class="nav-link text-nowrap @(activeTab == "errors" ? "active" : "")" @onclick='() => SwitchTab("errors")'>Erreurs</button></li>
+                <li class="nav-item"><button class="nav-link text-nowrap @(activeTab == "machines" ? "active" : "")" @onclick='() => SwitchTab("machines")'>Machines</button></li>
+                <li class="nav-item"><button class="nav-link text-nowrap @(activeTab == "network" ? "active" : "")" @onclick='() => SwitchTab("network")'>Réseau &amp; ISP</button></li>
+                <li class="nav-item"><button class="nav-link text-nowrap @(activeTab == "explorer" ? "active" : "")" @onclick='() => SwitchTab("explorer")'>Explorateur brut</button></li>
+            </ul>
+        </div>
+
+        <div class="p-4">
+
+            @* ──────────────── TAB 1 : Vue d'ensemble ──────────────── *@
+            @if (activeTab == "overview")
+            {
+                @if (tab1Loading)
+                {
+                    <div class="text-center py-5"><div class="spinner-border text-primary" role="status"></div><p class="mt-2 text-muted">Chargement...</p></div>
+                }
+                else
+                {
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-3">
+                            <div class="card stat-card h-100">
+                                <div class="card-body">
+                                    <h6 class="text-muted text-uppercase small fw-bold">Total enregistrements</h6>
+                                    <div class="d-flex align-items-center mt-2">
+                                        <h2 class="mb-0">@t1TotalRecords</h2>
+                                        <div class="ms-auto icon-circle bg-primary-soft text-primary">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                                        </div>
+                                    </div>
+                                    <div class="mt-2 small text-muted">
+                                        <span class="text-primary fw-bold">@t1EventCount</span> events /
+                                        <span class="text-success fw-bold">@t1DiagCount</span> diag /
+                                        <span class="text-danger fw-bold">@t1ErrorCount</span> err
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="card stat-card h-100" style="border-left-color:#198754;">
+                                <div class="card-body">
+                                    <h6 class="text-muted text-uppercase small fw-bold">Machines uniques</h6>
+                                    <div class="d-flex align-items-center mt-2">
+                                        <h2 class="mb-0">@t1UniqueHwids</h2>
+                                        <div class="ms-auto icon-circle bg-success-soft text-success">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8m-4-4v4"/></svg>
+                                        </div>
+                                    </div>
+                                    <div class="mt-2 small text-muted"><span class="fw-bold">@t1UniqueVersions</span> versions</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="card stat-card h-100" style="border-left-color:#0dcaf0;">
+                                <div class="card-body">
+                                    <h6 class="text-muted text-uppercase small fw-bold">IPs uniques</h6>
+                                    <div class="d-flex align-items-center mt-2">
+                                        <h2 class="mb-0">@t1UniqueIps</h2>
+                                        <div class="ms-auto icon-circle bg-info-soft text-info">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                                        </div>
+                                    </div>
+                                    <div class="mt-2 small text-muted"><span class="fw-bold">@t1UniqueIsps</span> ISPs</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="card stat-card h-100" style="border-left-color:#ffc107;">
+                                <div class="card-body">
+                                    <h6 class="text-muted text-uppercase small fw-bold">Événements</h6>
+                                    <div class="d-flex align-items-center mt-2">
+                                        <h2 class="mb-0">@t1EventCount</h2>
+                                        <div class="ms-auto icon-circle bg-warning-soft text-warning">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                                        </div>
+                                    </div>
+                                    <div class="mt-2 small text-muted"><span class="fw-bold text-success">@t1DiagCount</span> diag / <span class="fw-bold text-danger">@t1ErrorCount</span> err</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-6">
+                            <div class="card p-4 h-100">
+                                <div class="d-flex justify-content-between align-items-center mb-3">
+                                    <h6 class="mb-0">Volume quotidien</h6>
+                                    <div class="d-flex gap-3 small">
+                                        <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-primary"></span> Events</span>
+                                        <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-success"></span> Diag</span>
+                                        <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-danger"></span> Err</span>
+                                    </div>
+                                </div>
+                                <div class="chart-container d-flex align-items-end justify-content-around" style="height:180px;">
+                                    @{
+                                        var maxVol = t1DailyVolume.Count > 0 ? Math.Max(1, t1DailyVolume.Max(d => d.Events + d.Diagnostics + d.Errors)) : 1;
+                                    }
+                                    @foreach (var day in t1DailyVolume)
+                                    {
+                                        var total = day.Events + day.Diagnostics + day.Errors;
+                                        var pE = (int)(day.Events * 100.0 / maxVol);
+                                        var pD = (int)((day.Events + day.Diagnostics) * 100.0 / maxVol);
+                                        var pT = (int)(total * 100.0 / maxVol);
+                                        <div class="d-flex flex-column align-items-center flex-fill" style="min-width:0;">
+                                            @if (total > 0) { <div class="small text-muted mb-1" style="font-size:.65rem;">@total</div> }
+                                            <div class="bar-container position-relative rounded" style="height:140px;width:20px;">
+                                                @if (pT > 0)
+                                                {
+                                                    <div class="bar-fill bg-danger position-absolute bottom-0 w-100 rounded-bottom" style="height:@pT%;"></div>
+                                                    <div class="bar-fill bg-success position-absolute bottom-0 w-100" style="height:@pD%;"></div>
+                                                    <div class="bar-fill bg-primary position-absolute bottom-0 w-100 rounded-top" style="height:@pE%;"></div>
+                                                }
+                                            </div>
+                                            <span class="mt-1 text-muted" style="font-size:.6rem;">@TZ.ToLocal(day.Date).ToString("dd/MM")</span>
+                                        </div>
+                                    }
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="card p-4 h-100">
+                                <h6 class="mb-3">Appareils actifs par jour</h6>
+                                <div class="chart-container d-flex align-items-end justify-content-around" style="height:180px;">
+                                    @{
+                                        var maxDev = t1DailyDevices.Count > 0 ? Math.Max(1, t1DailyDevices.Max(d => d.DevCount)) : 1;
+                                    }
+                                    @foreach (var day in t1DailyDevices)
+                                    {
+                                        var pct = (int)(day.DevCount * 100.0 / maxDev);
+                                        <div class="d-flex flex-column align-items-center flex-fill" style="min-width:0;">
+                                            @if (day.DevCount > 0) { <div class="small text-muted mb-1" style="font-size:.65rem;">@day.DevCount</div> }
+                                            <div class="bar-container position-relative rounded" style="height:140px;width:20px;">
+                                                @if (pct > 0) { <div class="bar-fill bg-info position-absolute bottom-0 w-100 rounded" style="height:@pct%;"></div> }
+                                            </div>
+                                            <span class="mt-1 text-muted" style="font-size:.6rem;">@TZ.ToLocal(day.Date).ToString("dd/MM")</span>
+                                        </div>
+                                    }
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="card p-4 h-100">
+                                <h6 class="mb-3">Répartition par type</h6>
+                                <div class="chart-container d-flex align-items-end justify-content-around" style="height:180px;">
+                                    @{
+                                        var maxType = Math.Max(1, new[] { t1EventCount, t1DiagCount, t1ErrorCount }.Max());
+                                    }
+                                    @foreach (var (label, count, color) in new[] { ("Events", t1EventCount, "bg-primary"), ("Diagnostics", t1DiagCount, "bg-success"), ("Erreurs", t1ErrorCount, "bg-danger") })
+                                    {
+                                        var pct = (int)(count * 100.0 / maxType);
+                                        <div class="d-flex flex-column align-items-center" style="width:80px;">
+                                            @if (count > 0) { <div class="small text-muted mb-1">@count</div> }
+                                            <div class="bar-container position-relative rounded" style="height:140px;width:40px;">
+                                                @if (pct > 0) { <div class="bar-fill @color position-absolute bottom-0 w-100 rounded" style="height:@pct%;"></div> }
+                                            </div>
+                                            <span class="mt-2 text-muted" style="font-size:.7rem;">@label</span>
+                                        </div>
+                                    }
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                }
+            }
+
+            @* ──────────────── TAB 2 : Événements & JSON ──────────────── *@
+            @if (activeTab == "events")
+            {
+                @if (tab2Loading)
+                {
+                    <div class="text-center py-5"><div class="spinner-border text-primary" role="status"></div><p class="mt-2 text-muted">Chargement...</p></div>
+                }
+                else
+                {
+                    <h6 class="fw-bold mb-3">Tous les EventNames</h6>
+                    <div class="table-responsive mb-4">
+                        <table class="table table-sm table-hover align-middle" style="font-size:.85rem;">
+                            <thead>
+                                <tr>
+                                    <th>EventName</th>
+                                    <th class="text-end">Count</th>
+                                    <th class="text-end">% total</th>
+                                    <th style="min-width:120px;">Barre</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @{
+                                    var maxEn = t2EventNames.Count > 0 ? Math.Max(1, t2EventNames.Max(e => e.Count)) : 1;
+                                }
+                                @foreach (var ev in t2EventNames)
+                                {
+                                    var pct = (int)(ev.Count * 100.0 / maxEn);
+                                    var pctTotal = t2TotalEvents > 0 ? (ev.Count * 100.0 / t2TotalEvents) : 0;
+                                    <tr>
+                                        <td class="fw-bold">@ev.EventName</td>
+                                        <td class="text-end">@ev.Count</td>
+                                        <td class="text-end text-muted">@pctTotal.ToString("F1")%</td>
+                                        <td>
+                                            <div class="bar-container rounded" style="height:14px;">
+                                                <div class="bar-fill bg-primary rounded h-100" style="width:@pct%;"></div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <h6 class="fw-bold mb-3">JSON Key Explorer <span class="badge bg-secondary ms-2" style="font-size:.7rem;">@t2JsonKeys.Count clés</span></h6>
+                    @if (t2JsonKeys.Count > 0)
+                    {
+                        <div class="table-responsive mb-4">
+                            <table class="table table-sm table-hover align-middle" style="font-size:.85rem;">
+                                <thead>
+                                    <tr>
+                                        <th>Clé JSON</th>
+                                        <th class="text-end">Apparitions</th>
+                                        <th class="text-end">% events</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (var kv in t2JsonKeys)
+                                    {
+                                        var pctEv = t2TotalEvents > 0 ? (kv.Appearances * 100.0 / t2TotalEvents) : 0;
+                                        <tr style="cursor:pointer;" @onclick="() => ToggleJsonKey(kv.Key)">
+                                            <td><code class="text-info">@kv.Key</code></td>
+                                            <td class="text-end">@kv.Appearances</td>
+                                            <td class="text-end text-muted">@pctEv.ToString("F1")%</td>
+                                            <td class="text-end"><span class="text-muted small">@(t2ExpandedKey == kv.Key ? "▲" : "▼")</span></td>
+                                        </tr>
+                                        @if (t2ExpandedKey == kv.Key)
+                                        {
+                                            <tr>
+                                                <td colspan="4" class="p-3 bg-black">
+                                                    <div class="small text-muted mb-2">Top 20 valeurs pour <code class="text-info">@kv.Key</code></div>
+                                                    @{
+                                                        var topVals = kv.Values
+                                                            .GroupBy(v => v)
+                                                            .Select(g => (Val: g.Key, Cnt: g.Count()))
+                                                            .OrderByDescending(x => x.Cnt)
+                                                            .Take(20)
+                                                            .ToList();
+                                                        var maxVal = topVals.Count > 0 ? Math.Max(1, topVals.Max(v => v.Cnt)) : 1;
+                                                    }
+                                                    @foreach (var tv in topVals)
+                                                    {
+                                                        var p = (int)(tv.Cnt * 100.0 / maxVal);
+                                                        <div class="d-flex align-items-center mb-1">
+                                                            <span class="text-muted me-2" style="min-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.8rem;">@tv.Val</span>
+                                                            <div class="flex-fill bar-container rounded" style="height:14px;">
+                                                                <div class="bar-fill bg-info rounded h-100" style="width:@p%;"></div>
+                                                            </div>
+                                                            <span class="text-muted small ms-2">@tv.Cnt</span>
+                                                        </div>
+                                                    }
+                                                </td>
+                                            </tr>
+                                        }
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+                    else
+                    {
+                        <p class="text-muted small">Aucune propriété JSON trouvée dans les événements de la période.</p>
+                    }
+
+                    @if (t2OsDistrib.Count > 0)
+                    {
+                        <h6 class="fw-bold mb-3">Distribution OS</h6>
+                        <div class="mb-4">
+                            @{
+                                var maxOs = Math.Max(1, t2OsDistrib.Values.Max());
+                            }
+                            @foreach (var kv in t2OsDistrib.OrderByDescending(x => x.Value))
+                            {
+                                var p = (int)(kv.Value * 100.0 / maxOs);
+                                <div class="d-flex align-items-center mb-2">
+                                    <span class="text-muted small me-2" style="min-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">@kv.Key</span>
+                                    <div class="flex-fill bar-container rounded" style="height:18px;">
+                                        <div class="bar-fill bg-warning rounded h-100" style="width:@p%;"></div>
+                                    </div>
+                                    <span class="text-muted small ms-2">@kv.Value</span>
+                                </div>
+                            }
+                        </div>
+                    }
+
+                    @if (t2CultureDistrib.Count > 0)
+                    {
+                        <h6 class="fw-bold mb-3">Distribution Culture</h6>
+                        <div class="mb-4">
+                            @{
+                                var maxCul = Math.Max(1, t2CultureDistrib.Values.Max());
+                            }
+                            @foreach (var kv in t2CultureDistrib.OrderByDescending(x => x.Value))
+                            {
+                                var p = (int)(kv.Value * 100.0 / maxCul);
+                                <div class="d-flex align-items-center mb-2">
+                                    <span class="text-muted small me-2" style="min-width:100px;">@kv.Key</span>
+                                    <div class="flex-fill bar-container rounded" style="height:18px;">
+                                        <div class="bar-fill bg-success rounded h-100" style="width:@p%;"></div>
+                                    </div>
+                                    <span class="text-muted small ms-2">@kv.Value</span>
+                                </div>
+                            }
+                        </div>
+                    }
+
+                    @if (t2FpKeys.Count > 0)
+                    {
+                        <h6 class="fw-bold mb-3">Clés Fingerprint (FP_*)</h6>
+                        <div class="table-responsive mb-4">
+                            <table class="table table-sm align-middle" style="font-size:.85rem;">
+                                <thead><tr><th>Clé</th><th class="text-end">Fréquence</th></tr></thead>
+                                <tbody>
+                                    @foreach (var kv in t2FpKeys.OrderByDescending(x => x.Value))
+                                    {
+                                        <tr><td><code class="text-warning">@kv.Key</code></td><td class="text-end">@kv.Value</td></tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+
+                    @if (t2QuotaKeys.Count > 0)
+                    {
+                        <h6 class="fw-bold mb-3">Clés Quota (Quota_*)</h6>
+                        <div class="table-responsive mb-4">
+                            <table class="table table-sm align-middle" style="font-size:.85rem;">
+                                <thead><tr><th>Clé</th><th>Exemple</th><th class="text-end">Taux saturation moy.</th></tr></thead>
+                                <tbody>
+                                    @foreach (var q in t2QuotaKeys)
+                                    {
+                                        <tr>
+                                            <td><code class="text-danger">@q.Key</code></td>
+                                            <td><span class="text-muted small">@q.Sample</span></td>
+                                            <td class="text-end"><span class="fw-bold @(q.AvgRate > 90 ? "text-danger" : q.AvgRate > 70 ? "text-warning" : "text-success")">@q.AvgRate.ToString("F0")%</span></td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+                }
+            }
+
+            @* ──────────────── TAB 3 : Diagnostics ──────────────── *@
+            @if (activeTab == "diagnostics")
+            {
+                @if (tab3Loading)
+                {
+                    <div class="text-center py-5"><div class="spinner-border text-primary" role="status"></div><p class="mt-2 text-muted">Chargement...</p></div>
+                }
+                else
+                {
+                    <h6 class="fw-bold mb-3">Santé des modules</h6>
+                    @if (t3Modules.Count > 0)
+                    {
+                        <div class="table-responsive mb-4">
+                            <table class="table table-sm table-hover align-middle" style="font-size:.85rem;">
+                                <thead>
+                                    <tr>
+                                        <th>Module</th>
+                                        <th class="text-center">OK</th>
+                                        <th class="text-center">KO</th>
+                                        <th>Taux succès</th>
+                                        <th style="min-width:120px;">Barre</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (var m in t3Modules)
+                                    {
+                                        var rate = m.Total > 0 ? (m.Success * 100.0 / m.Total) : 0;
+                                        var barColor = rate >= 80 ? "bg-success" : rate >= 50 ? "bg-warning" : "bg-danger";
+                                        <tr>
+                                            <td class="fw-bold">@m.Module</td>
+                                            <td class="text-center text-success fw-bold">@m.Success</td>
+                                            <td class="text-center text-danger fw-bold">@(m.Total - m.Success)</td>
+                                            <td><span class="fw-bold @(rate >= 80 ? "text-success" : rate >= 50 ? "text-warning" : "text-danger")">@rate.ToString("F0")%</span></td>
+                                            <td>
+                                                <div class="bar-container rounded" style="height:14px;">
+                                                    <div class="bar-fill @barColor rounded h-100" style="width:@((int)rate)%;"></div>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+                    else
+                    {
+                        <p class="text-muted small mb-4">Aucun résultat de module dans la période.</p>
+                    }
+
+                    <h6 class="fw-bold mb-3">Distribution des scores (10 intervalles)</h6>
+                    <div class="card p-4 mb-4">
+                        <div class="chart-container d-flex align-items-end justify-content-around" style="height:160px;">
+                            @{
+                                var maxBucket = t3ScoreBuckets.Length > 0 ? Math.Max(1, t3ScoreBuckets.Max()) : 1;
+                                var bucketLabels = new[] { "0-10","11-20","21-30","31-40","41-50","51-60","61-70","71-80","81-90","91-100" };
+                            }
+                            @for (int i = 0; i < 10; i++)
+                            {
+                                var cnt = t3ScoreBuckets[i];
+                                var pct = (int)(cnt * 100.0 / maxBucket);
+                                <div class="d-flex flex-column align-items-center" style="width:60px;">
+                                    @if (cnt > 0) { <div class="small text-muted mb-1">@cnt</div> }
+                                    <div class="bar-container position-relative rounded" style="height:120px;width:36px;">
+                                        @if (pct > 0) { <div class="bar-fill bg-warning position-absolute bottom-0 w-100 rounded" style="height:@pct%;"></div> }
+                                    </div>
+                                    <span class="mt-2 text-muted" style="font-size:.6rem;">@bucketLabels[i]</span>
+                                </div>
+                            }
+                        </div>
+                    </div>
+
+                    <h6 class="fw-bold mb-3">Analyse des ports (Top 20)</h6>
+                    @if (t3Ports.Count > 0)
+                    {
+                        <div class="mb-2 small text-muted">TCP : <span class="fw-bold text-info">@t3TcpCount</span> &nbsp;|&nbsp; UDP : <span class="fw-bold text-warning">@t3UdpCount</span></div>
+                        <div class="table-responsive mb-4">
+                            <table class="table table-sm table-hover align-middle" style="font-size:.85rem;">
+                                <thead>
+                                    <tr>
+                                        <th>Port</th>
+                                        <th>Nom</th>
+                                        <th>Proto</th>
+                                        <th class="text-end">Occurrences</th>
+                                        <th style="min-width:120px;">Barre</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @{
+                                        var maxPort = t3Ports.Count > 0 ? Math.Max(1, t3Ports.Max(x => x.Count)) : 1;
+                                    }
+                                    @foreach (var pt in t3Ports)
+                                    {
+                                        var pct = (int)(pt.Count * 100.0 / maxPort);
+                                        <tr>
+                                            <td><code>@pt.Port</code></td>
+                                            <td>@(pt.Name ?? "-")</td>
+                                            <td><span class="badge @(pt.Protocol?.ToUpper() == "TCP" ? "bg-info" : "bg-warning")">@(pt.Protocol ?? "?")</span></td>
+                                            <td class="text-end fw-bold">@pt.Count</td>
+                                            <td>
+                                                <div class="bar-container rounded" style="height:14px;">
+                                                    <div class="bar-fill bg-primary rounded h-100" style="width:@pct%;"></div>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+                    else
+                    {
+                        <p class="text-muted small">Aucun port diagnostiqué dans la période.</p>
+                    }
+                }
+            }
+
+            @* ──────────────── TAB 4 : Erreurs ──────────────── *@
+            @if (activeTab == "errors")
+            {
+                @if (tab4Loading)
+                {
+                    <div class="text-center py-5"><div class="spinner-border text-primary" role="status"></div><p class="mt-2 text-muted">Chargement...</p></div>
+                }
+                else
+                {
+                    <div class="row g-3 mb-4">
+                        <div class="col-md-8">
+                            <h6 class="fw-bold mb-3">Résumé des erreurs</h6>
+                            <div class="mb-3">
+                                <input class="form-control form-control-sm" style="max-width:300px;" placeholder="Filtrer type / message..."
+                                       @bind="t4Filter" @bind:event="oninput" />
+                            </div>
+                            <div class="table-responsive">
+                                <table class="table table-sm table-hover align-middle" style="font-size:.85rem;">
+                                    <thead>
+                                        <tr>
+                                            <th>ErrorType</th>
+                                            <th>Message</th>
+                                            <th class="text-end">Count</th>
+                                            <th class="text-nowrap">Dernière vue</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach (var e in T4FilteredSummary)
+                                        {
+                                            <tr>
+                                                <td><code class="text-danger small">@(e.ErrorType ?? "?")</code></td>
+                                                <td class="text-muted" style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">@(e.Message ?? "-")</td>
+                                                <td class="text-end fw-bold">@e.Count</td>
+                                                <td class="text-nowrap text-muted small">@TZ.ToLocal(e.LastSeen).ToString("dd/MM HH:mm")</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <h6 class="fw-bold mb-3">Erreurs par jour</h6>
+                            <div class="chart-container d-flex align-items-end justify-content-around" style="height:180px;">
+                                @{
+                                    var maxErrDay = t4DailyErrors.Count > 0 ? Math.Max(1, t4DailyErrors.Max(d => d.Count)) : 1;
+                                }
+                                @foreach (var day in t4DailyErrors)
+                                {
+                                    var p = (int)(day.Count * 100.0 / maxErrDay);
+                                    <div class="d-flex flex-column align-items-center flex-fill" style="min-width:0;">
+                                        @if (day.Count > 0) { <div class="small text-muted mb-1" style="font-size:.65rem;">@day.Count</div> }
+                                        <div class="bar-container position-relative rounded" style="height:140px;width:20px;">
+                                            @if (p > 0) { <div class="bar-fill bg-danger position-absolute bottom-0 w-100 rounded" style="height:@p%;"></div> }
+                                        </div>
+                                        <span class="mt-1 text-muted" style="font-size:.6rem;">@TZ.ToLocal(day.Date).ToString("dd/MM")</span>
+                                    </div>
+                                }
+                            </div>
+                        </div>
+                    </div>
+
+                    <h6 class="fw-bold mb-3">Explorateur d'erreurs <span class="badge bg-secondary ms-2">@t4ErrorTotal enregistrements</span></h6>
+                    <div class="table-responsive mb-3">
+                        <table class="table table-sm table-hover align-middle" style="font-size:.85rem;">
+                            <thead>
+                                <tr>
+                                    <th>Date</th>
+                                    <th>HWID</th>
+                                    <th>Version</th>
+                                    <th>ErrorType</th>
+                                    <th>Message</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var rec in t4Errors)
+                                {
+                                    <tr>
+                                        <td class="text-nowrap text-muted">@TZ.ToLocal(rec.Timestamp).ToString("dd/MM HH:mm")</td>
+                                        <td><code class="small">@rec.HardwareId</code></td>
+                                        <td><small class="text-muted">@rec.Version</small></td>
+                                        <td><code class="text-danger small">@(rec.ErrorData?.ErrorType ?? "?")</code></td>
+                                        <td class="text-muted" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">@(rec.ErrorData?.Message ?? "-")</td>
+                                        <td><button class="btn btn-outline-info btn-sm" @onclick="() => ShowRecord(rec)">Voir</button></td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                    @if (t4ErrorTotal > 0)
+                    {
+                        <div class="d-flex justify-content-between align-items-center">
+                            <small class="text-muted">@t4ErrorTotal erreur(s) — page @t4ErrorPage / @T4TotalPages</small>
+                            <nav><ul class="pagination pagination-sm mb-0">
+                                <li class="page-item @(t4ErrorPage == 1 ? "disabled" : "")">
+                                    <button class="page-link" @onclick="() => GoToErrorPage(t4ErrorPage - 1)">Préc.</button>
+                                </li>
+                                <li class="page-item @(t4ErrorPage >= T4TotalPages ? "disabled" : "")">
+                                    <button class="page-link" @onclick="() => GoToErrorPage(t4ErrorPage + 1)">Suiv.</button>
+                                </li>
+                            </ul></nav>
+                        </div>
+                    }
+                }
+            }
+
+            @* ──────────────── TAB 5 : Machines ──────────────── *@
+            @if (activeTab == "machines")
+            {
+                @if (tab5Loading)
+                {
+                    <div class="text-center py-5"><div class="spinner-border text-primary" role="status"></div><p class="mt-2 text-muted">Chargement...</p></div>
+                }
+                else
+                {
+                    <div class="d-flex gap-2 mb-3">
+                        <input class="form-control form-control-sm" style="max-width:300px;" placeholder="Rechercher un HWID..."
+                               @bind="t5Search" @bind:event="oninput" @bind:after="ResetMachinePage" />
+                        <small class="text-muted align-self-center">@T5FilteredMachines.Count() machines</small>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-hover align-middle" style="font-size:.82rem;">
+                            <thead>
+                                <tr>
+                                    <th>HardwareId</th>
+                                    <th class="text-center">Events</th>
+                                    <th class="text-center">Diag</th>
+                                    <th class="text-center">Err</th>
+                                    <th class="text-nowrap">Première activité</th>
+                                    <th class="text-nowrap">Dernière activité</th>
+                                    <th class="text-center">Versions</th>
+                                    <th class="text-center">IPs</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var m in T5PagedMachines)
+                                {
+                                    <tr>
+                                        <td><code class="small">@m.HardwareId</code></td>
+                                        <td class="text-center text-primary fw-bold">@m.Events</td>
+                                        <td class="text-center text-success fw-bold">@m.Diagnostics</td>
+                                        <td class="text-center @(m.Errors > 0 ? "text-danger fw-bold" : "text-muted")">@m.Errors</td>
+                                        <td class="text-muted small text-nowrap">@TZ.ToLocal(m.FirstSeen).ToString("dd/MM/yy HH:mm")</td>
+                                        <td class="text-muted small text-nowrap">@TZ.ToLocal(m.LastSeen).ToString("dd/MM/yy HH:mm")</td>
+                                        <td class="text-center text-muted">@m.VersionCount</td>
+                                        <td class="text-center text-muted">@m.IpCount</td>
+                                        <td>
+                                            @if (t5LicenseMap.TryGetValue(m.HardwareId, out var licId))
+                                            {
+                                                <a href="user-telemetry/@licId" class="btn btn-outline-info btn-sm">Licence</a>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                    @if (T5FilteredMachines.Count() > t5PageSize)
+                    {
+                        <div class="d-flex justify-content-between align-items-center mt-2">
+                            <small class="text-muted">Page @t5Page / @T5TotalPages</small>
+                            <nav><ul class="pagination pagination-sm mb-0">
+                                <li class="page-item @(t5Page == 1 ? "disabled" : "")">
+                                    <button class="page-link" @onclick="() => t5Page--">Préc.</button>
+                                </li>
+                                <li class="page-item @(t5Page >= T5TotalPages ? "disabled" : "")">
+                                    <button class="page-link" @onclick="() => t5Page++">Suiv.</button>
+                                </li>
+                            </ul></nav>
+                        </div>
+                    }
+                }
+            }
+
+            @* ──────────────── TAB 6 : Réseau & ISP ──────────────── *@
+            @if (activeTab == "network")
+            {
+                @if (tab6Loading)
+                {
+                    <div class="text-center py-5"><div class="spinner-border text-primary" role="status"></div><p class="mt-2 text-muted">Chargement...</p></div>
+                }
+                else
+                {
+                    <div class="row g-4">
+                        <div class="col-md-7">
+                            <h6 class="fw-bold mb-3">Distribution ISP</h6>
+                            @if (t6IspStats.Count > 0)
+                            {
+                                <div>
+                                    @{
+                                        var maxIsp = Math.Max(1, t6IspStats.Max(x => x.Events));
+                                        var totalIspEvents = t6IspStats.Sum(x => x.Events);
+                                    }
+                                    @foreach (var isp in t6IspStats)
+                                    {
+                                        var p = (int)(isp.Events * 100.0 / maxIsp);
+                                        var pct = totalIspEvents > 0 ? (isp.Events * 100.0 / totalIspEvents) : 0;
+                                        <div class="d-flex align-items-center mb-2">
+                                            <span class="text-muted small me-2" style="min-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="@isp.Isp">@isp.Isp</span>
+                                            <div class="flex-fill bar-container rounded" style="height:18px;">
+                                                <div class="bar-fill bg-info rounded h-100" style="width:@p%;"></div>
+                                            </div>
+                                            <span class="text-muted small ms-2 text-nowrap">@isp.Events ev. / @isp.Machines mac. / @pct.ToString("F1")%</span>
+                                        </div>
+                                    }
+                                </div>
+                            }
+                            else
+                            {
+                                <p class="text-muted small">Aucune donnée ISP disponible.</p>
+                            }
+                        </div>
+                        <div class="col-md-5">
+                            <h6 class="fw-bold mb-3">Top 50 IPs</h6>
+                            <div class="table-responsive">
+                                <table class="table table-sm table-hover align-middle" style="font-size:.82rem;">
+                                    <thead>
+                                        <tr>
+                                            <th>IP</th>
+                                            <th>ISP</th>
+                                            <th class="text-end">Events</th>
+                                            <th class="text-end">Machines</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach (var ip in t6TopIps)
+                                        {
+                                            <tr>
+                                                <td><code class="small">@ip.Ip</code></td>
+                                                <td class="text-muted small" style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">@(ip.Isp ?? "-")</td>
+                                                <td class="text-end fw-bold">@ip.Count</td>
+                                                <td class="text-end text-muted">@ip.MachineCount</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                }
+            }
+
+            @* ──────────────── TAB 7 : Explorateur brut ──────────────── *@
+            @if (activeTab == "explorer")
+            {
+                <div class="d-flex flex-wrap gap-2 mb-3 align-items-end">
+                    <div>
+                        <label class="form-label small text-muted mb-1">Recherche libre</label>
+                        <input class="form-control form-control-sm" style="width:220px;" placeholder="EventName, HWID, IP, ISP..."
+                               @bind="t7Search" @bind:event="oninput" />
+                    </div>
+                    <div>
+                        <label class="form-label small text-muted mb-1">Type</label>
+                        <select class="form-select form-select-sm" style="width:140px;" @bind="t7TypeFilter">
+                            <option value="">Tous</option>
+                            <option value="Event">Event</option>
+                            <option value="Diagnostic">Diagnostic</option>
+                            <option value="Error">Error</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="form-label small text-muted mb-1">Produit</label>
+                        <select class="form-select form-select-sm" style="width:160px;" @bind="t7ProductFilter">
+                            <option value="">Tous</option>
+                            @foreach (var p in products)
+                            {
+                                <option value="@p.Id.ToString()">@p.Name</option>
+                            }
+                        </select>
+                    </div>
+                    <div>
+                        <label class="form-label small text-muted mb-1">Début</label>
+                        <input type="date" class="form-control form-control-sm"
+                               value="@(t7StartDate?.ToString("yyyy-MM-dd"))"
+                               @onchange="e => SetT7StartDate(e.Value?.ToString())" />
+                    </div>
+                    <div>
+                        <label class="form-label small text-muted mb-1">Fin</label>
+                        <input type="date" class="form-control form-control-sm"
+                               value="@(t7EndDate?.ToString("yyyy-MM-dd"))"
+                               @onchange="e => SetT7EndDate(e.Value?.ToString())" />
+                    </div>
+                    <div>
+                        <label class="form-label small text-muted mb-1">Par page</label>
+                        <select class="form-select form-select-sm" style="width:90px;" @bind="t7PageSize">
+                            <option value="25">25</option>
+                            <option value="50">50</option>
+                            <option value="100">100</option>
+                        </select>
+                    </div>
+                    <button class="btn btn-primary btn-sm" @onclick="() => { t7Page = 1; _ = LoadTab7Page(); }">Rechercher</button>
+                    <button class="btn btn-outline-secondary btn-sm" @onclick="ResetExplorer">Réinitialiser</button>
+                </div>
+
+                @if (tab7Loading)
+                {
+                    <div class="text-center py-5"><div class="spinner-border text-primary" role="status"></div><p class="mt-2 text-muted">Chargement...</p></div>
+                }
+                else
+                {
+                    <div class="table-responsive mb-3">
+                        <table class="table table-sm table-hover align-middle" style="font-size:.82rem;">
+                            <thead>
+                                <tr>
+                                    <th class="text-nowrap">Date</th>
+                                    <th>Produit</th>
+                                    <th>Type</th>
+                                    <th>EventName</th>
+                                    <th>Version</th>
+                                    <th>HardwareId</th>
+                                    <th>IP</th>
+                                    <th>ISP</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var rec in t7Records)
+                                {
+                                    <tr>
+                                        <td class="text-nowrap text-muted">@TZ.ToLocal(rec.Timestamp).ToString("dd/MM HH:mm:ss")</td>
+                                        <td class="fw-bold">@(rec.Product?.Name ?? rec.AppName)</td>
+                                        <td><span class="badge @GetTypeBadgeClass(rec.Type)">@rec.Type</span></td>
+                                        <td>@rec.EventName</td>
+                                        <td><small class="text-muted">@rec.Version</small></td>
+                                        <td><code class="small">@rec.HardwareId</code></td>
+                                        <td><code class="small">@(rec.ClientIp ?? "-")</code></td>
+                                        <td class="text-muted" style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="@rec.Isp">@(rec.Isp ?? "-")</td>
+                                        <td><button class="btn btn-outline-info btn-sm" @onclick="() => ShowRecord(rec)">Voir</button></td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                    @if (t7Total > 0)
+                    {
+                        <div class="d-flex justify-content-between align-items-center">
+                            <small class="text-muted">@t7Total enregistrement(s) — page @t7Page / @T7TotalPages</small>
+                            <nav><ul class="pagination pagination-sm mb-0">
+                                <li class="page-item @(t7Page == 1 ? "disabled" : "")">
+                                    <button class="page-link" @onclick="() => { t7Page--; _ = LoadTab7Page(); }">Préc.</button>
+                                </li>
+                                <li class="page-item @(t7Page >= T7TotalPages ? "disabled" : "")">
+                                    <button class="page-link" @onclick="() => { t7Page++; _ = LoadTab7Page(); }">Suiv.</button>
+                                </li>
+                            </ul></nav>
+                        </div>
+                    }
+                }
+            }
+
+        </div>
+    </div>
+
+    @* ──────────────── Modal détail enregistrement ──────────────── *@
+    @if (selectedRecord != null)
+    {
+        <div class="modal fade show d-block" style="background:rgba(0,0,0,0.75);" tabindex="-1">
+            <div class="modal-dialog modal-lg modal-dialog-centered">
+                <div class="modal-content bg-dark border-secondary">
+                    <div class="modal-header border-secondary">
+                        <h5 class="modal-title">Détails — @selectedRecord.EventName</h5>
+                        <button type="button" class="btn-close btn-close-white" @onclick="() => selectedRecord = null"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <small class="text-muted d-block">App / Version</small>
+                                <span>@selectedRecord.AppName / @selectedRecord.Version</span>
+                            </div>
+                            <div class="col-md-6">
+                                <small class="text-muted d-block">HardwareId</small>
+                                <code>@selectedRecord.HardwareId</code>
+                            </div>
+                        </div>
+                        <div class="row mb-3">
+                            <div class="col-md-6">
+                                <small class="text-muted d-block">IP Address</small>
+                                <code>@(selectedRecord.ClientIp ?? "-")</code>
+                            </div>
+                            <div class="col-md-6">
+                                <small class="text-muted d-block">ISP / Provider</small>
+                                <span class="small text-info">@(selectedRecord.Isp ?? "-")</span>
+                            </div>
+                        </div>
+                        <h6 class="mt-4 mb-2">Données (@selectedRecord.Type)</h6>
+                        <div class="p-3 bg-black text-info rounded border border-secondary" style="font-size:.85rem;max-height:420px;overflow-y:auto;">
+                            @if (selectedRecord.Type == TelemetryType.Event && selectedRecord.EventData != null)
+                            {
+                                <pre>@FormatJson(selectedRecord.EventData.PropertiesJson)</pre>
+                            }
+                            else if (selectedRecord.Type == TelemetryType.Error && selectedRecord.ErrorData != null)
+                            {
+                                <div class="text-danger fw-bold">@selectedRecord.ErrorData.ErrorType</div>
+                                <div class="mb-2">@selectedRecord.ErrorData.Message</div>
+                                <hr class="border-secondary" />
+                                <pre class="small text-muted">@selectedRecord.ErrorData.StackTrace</pre>
+                            }
+                            else if (selectedRecord.Type == TelemetryType.Diagnostic && selectedRecord.DiagnosticData != null)
+                            {
+                                <div class="mb-3">Score global : <span class="badge bg-info">@selectedRecord.DiagnosticData.Score / 100</span></div>
+                                <h6>Résultats modules</h6>
+                                <ul class="list-unstyled">
+                                    @foreach (var r in selectedRecord.DiagnosticData.Results)
+                                    {
+                                        <li class="mb-2">
+                                            <span class="badge @(r.Success ? "bg-success" : "bg-danger") me-2">@(r.Success ? "OK" : "KO")</span>
+                                            <strong>@r.ModuleName</strong> : @r.Message
+                                        </li>
+                                    }
+                                </ul>
+                                @if (selectedRecord.DiagnosticData.Ports.Any())
+                                {
+                                    <h6 class="mt-3">Ports</h6>
+                                    <table class="table table-sm table-dark">
+                                        <thead><tr><th>Nom</th><th>Port</th><th>Proto</th></tr></thead>
+                                        <tbody>
+                                            @foreach (var pt in selectedRecord.DiagnosticData.Ports)
+                                            {
+                                                <tr><td>@pt.Name</td><td>@pt.ExternalPort</td><td>@pt.Protocol</td></tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                            }
+                            else
+                            {
+                                <span class="text-muted">Aucune donnée supplémentaire.</span>
+                            }
+                        </div>
+                    </div>
+                    <div class="modal-footer border-secondary">
+                        <button type="button" class="btn btn-secondary" @onclick="() => selectedRecord = null">Fermer</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+<style>
+    .bg-primary-soft   { background-color: rgba(13,110,253,.15); }
+    .bg-success-soft   { background-color: rgba(25,135,84,.15); }
+    .bg-warning-soft   { background-color: rgba(255,193,7,.15); }
+    .bg-danger-soft    { background-color: rgba(220,53,69,.15); }
+    .bg-info-soft      { background-color: rgba(13,202,240,.15); }
+    .bg-secondary-soft { background-color: rgba(108,117,125,.15); }
+    .bg-black          { background-color: #000 !important; }
+    .bar-container     { background-color: rgba(255,255,255,.05) !important; overflow: hidden; }
+    .bar-fill          { transition: height .4s ease, width .4s ease; }
+    .legend-dot        { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+</style>
+
+@code {
+
+    // ── Common state ──────────────────────────────────────────────
+    bool isAuthorized;
+    List<Product> products = new();
+    string selectedProductId = "";
+    int selectedDays = 30;
+    string activeTab = "overview";
+    TelemetryRecord? selectedRecord;
+
+    // ── Tab 1 ── Vue d'ensemble ───────────────────────────────────
+    bool tab1Loaded, tab1Loading;
+    int t1TotalRecords, t1EventCount, t1DiagCount, t1ErrorCount;
+    int t1UniqueHwids, t1UniqueIps, t1UniqueIsps, t1UniqueVersions;
+    record DayVolume(DateTime Date, int Events, int Diagnostics, int Errors);
+    record DayCount(DateTime Date, int DevCount);
+    List<DayVolume> t1DailyVolume = new();
+    List<DayCount> t1DailyDevices = new();
+
+    // ── Tab 2 ── Événements & JSON ────────────────────────────────
+    bool tab2Loaded, tab2Loading;
+    record EventNameRow(string EventName, int Count);
+    record JsonKeyRow(string Key, int Appearances, List<string> Values);
+    record QuotaKeyRow(string Key, string Sample, double AvgRate);
+    List<EventNameRow> t2EventNames = new();
+    int t2TotalEvents;
+    List<JsonKeyRow> t2JsonKeys = new();
+    string? t2ExpandedKey;
+    Dictionary<string, int> t2OsDistrib = new();
+    Dictionary<string, int> t2CultureDistrib = new();
+    Dictionary<string, int> t2FpKeys = new();
+    List<QuotaKeyRow> t2QuotaKeys = new();
+
+    // ── Tab 3 ── Diagnostics ──────────────────────────────────────
+    bool tab3Loaded, tab3Loading;
+    record ModuleRow(string Module, int Total, int Success);
+    record PortRow(int Port, string? Name, string? Protocol, int Count);
+    List<ModuleRow> t3Modules = new();
+    int[] t3ScoreBuckets = new int[10];
+    List<PortRow> t3Ports = new();
+    int t3TcpCount, t3UdpCount;
+
+    // ── Tab 4 ── Erreurs ──────────────────────────────────────────
+    bool tab4Loaded, tab4Loading;
+    record ErrorSummaryRow(string? ErrorType, string? Message, int Count, DateTime LastSeen);
+    List<ErrorSummaryRow> t4ErrorSummary = new();
+    string t4Filter = "";
+    List<TelemetryRecord> t4Errors = new();
+    int t4ErrorPage = 1, t4ErrorTotal;
+    const int t4PageSize = 25;
+    record ErrDayCount(DateTime Date, int Count);
+    List<ErrDayCount> t4DailyErrors = new();
+
+    // ── Tab 5 ── Machines ─────────────────────────────────────────
+    bool tab5Loaded, tab5Loading;
+    record MachineRow(string HardwareId, int Events, int Diagnostics, int Errors,
+                      DateTime FirstSeen, DateTime LastSeen, int VersionCount, int IpCount);
+    List<MachineRow> t5Machines = new();
+    Dictionary<string, Guid> t5LicenseMap = new();
+    string t5Search = "";
+    int t5Page = 1;
+    const int t5PageSize = 50;
+
+    // ── Tab 6 ── Réseau & ISP ─────────────────────────────────────
+    bool tab6Loaded, tab6Loading;
+    record IspRow(string Isp, int Events, int Machines);
+    record IpRow(string Ip, string? Isp, int Count, int MachineCount);
+    List<IspRow> t6IspStats = new();
+    List<IpRow> t6TopIps = new();
+
+    // ── Tab 7 ── Explorateur brut ─────────────────────────────────
+    bool tab7Loaded, tab7Loading;
+    string t7Search = "", t7TypeFilter = "", t7ProductFilter = "";
+    DateTime? t7StartDate, t7EndDate;
+    int t7Page = 1, t7PageSize = 25, t7Total;
+    List<TelemetryRecord> t7Records = new();
+
+    // ── Computed properties ───────────────────────────────────────
+    IEnumerable<ErrorSummaryRow> T4FilteredSummary => string.IsNullOrWhiteSpace(t4Filter)
+        ? t4ErrorSummary
+        : t4ErrorSummary.Where(e =>
+            (e.ErrorType?.Contains(t4Filter, StringComparison.OrdinalIgnoreCase) ?? false) ||
+            (e.Message?.Contains(t4Filter, StringComparison.OrdinalIgnoreCase) ?? false));
+
+    int T4TotalPages => (int)Math.Ceiling((double)t4ErrorTotal / t4PageSize);
+
+    IEnumerable<MachineRow> T5FilteredMachines => string.IsNullOrWhiteSpace(t5Search)
+        ? t5Machines
+        : t5Machines.Where(m => m.HardwareId.Contains(t5Search, StringComparison.OrdinalIgnoreCase));
+
+    IEnumerable<MachineRow> T5PagedMachines => T5FilteredMachines.Skip((t5Page - 1) * t5PageSize).Take(t5PageSize);
+    int T5TotalPages => (int)Math.Ceiling((double)T5FilteredMachines.Count() / t5PageSize);
+
+    int T7TotalPages => (int)Math.Ceiling((double)t7Total / t7PageSize);
+
+    // ── Lifecycle ────────────────────────────────────────────────
+    protected override async Task OnInitializedAsync()
+    {
+        isAuthorized = await Auth.HasPermissionAsync("telemetry.view");
+        if (!isAuthorized) return;
+
+        using var db = await DbFactory.CreateDbContextAsync();
+        products = await db.Products.AsNoTracking().OrderBy(p => p.Name).ToListAsync();
+
+        await LoadTab1();
+    }
+
+    // ── Navigation ───────────────────────────────────────────────
+    private async Task SwitchTab(string tab)
+    {
+        activeTab = tab;
+        switch (tab)
+        {
+            case "overview":     if (!tab1Loaded) await LoadTab1();     break;
+            case "events":       if (!tab2Loaded) await LoadTab2();     break;
+            case "diagnostics":  if (!tab3Loaded) await LoadTab3();     break;
+            case "errors":       if (!tab4Loaded) await LoadTab4();     break;
+            case "machines":     if (!tab5Loaded) await LoadTab5();     break;
+            case "network":      if (!tab6Loaded) await LoadTab6();     break;
+            case "explorer":     if (!tab7Loaded) await LoadTab7Page(); break;
+        }
+    }
+
+    private async Task RefreshCurrentTab()
+    {
+        tab1Loaded = tab2Loaded = tab3Loaded = tab4Loaded = tab5Loaded = tab6Loaded = tab7Loaded = false;
+        await SwitchTab(activeTab);
+    }
+
+    private async Task OnProductChanged(string value)
+    {
+        selectedProductId = value;
+        tab1Loaded = tab2Loaded = tab3Loaded = tab4Loaded = tab5Loaded = tab6Loaded = tab7Loaded = false;
+        await SwitchTab(activeTab);
+    }
+
+    private async Task SetDays(int days)
+    {
+        selectedDays = days;
+        tab1Loaded = tab2Loaded = tab3Loaded = tab4Loaded = tab5Loaded = tab6Loaded = tab7Loaded = false;
+        await SwitchTab(activeTab);
+    }
+
+    // ── Helpers ─────────────────────────────────────────────────
+    private Guid? ParseProductId(string? id = null)
+    {
+        var src = id ?? selectedProductId;
+        return !string.IsNullOrEmpty(src) && Guid.TryParse(src, out var pid) ? pid : null;
+    }
+
+    private void ShowRecord(TelemetryRecord rec) => selectedRecord = rec;
+
+    private void ToggleJsonKey(string key) => t2ExpandedKey = t2ExpandedKey == key ? null : key;
+
+    private void ResetMachinePage() => t5Page = 1;
+
+    private void SetT7StartDate(string? val)
+    {
+        t7StartDate = DateTime.TryParse(val, out var d) ? DateTime.SpecifyKind(d, DateTimeKind.Utc) : null;
+    }
+
+    private void SetT7EndDate(string? val)
+    {
+        t7EndDate = DateTime.TryParse(val, out var d) ? DateTime.SpecifyKind(d, DateTimeKind.Utc) : null;
+    }
+
+    private void ResetExplorer()
+    {
+        t7Search = t7TypeFilter = t7ProductFilter = "";
+        t7StartDate = t7EndDate = null;
+        t7Page = 1;
+        tab7Loaded = false;
+        _ = LoadTab7Page();
+    }
+
+    private string GetTypeBadgeClass(TelemetryType type) => type switch
+    {
+        TelemetryType.Event => "bg-primary",
+        TelemetryType.Diagnostic => "bg-success",
+        TelemetryType.Error => "bg-danger",
+        _ => "bg-secondary"
+    };
+
+    private string FormatJson(string? json)
+    {
+        if (string.IsNullOrEmpty(json)) return "{}";
+        try
+        {
+            var opts = new JsonSerializerOptions { WriteIndented = true };
+            var el = JsonSerializer.Deserialize<JsonElement>(json);
+            return JsonSerializer.Serialize(el, opts);
+        }
+        catch { return json; }
+    }
+
+    // ── Tab 1 — Vue d'ensemble ────────────────────────────────────
+    private async Task LoadTab1()
+    {
+        tab1Loading = true;
+        StateHasChanged();
+        try
+        {
+            using var db = await DbFactory.CreateDbContextAsync();
+            var since = DateTime.UtcNow.AddDays(-selectedDays);
+            var pid = ParseProductId();
+
+            var raw = await db.TelemetryRecords.AsNoTracking()
+                .Where(r => r.Timestamp >= since && (pid == null || r.ProductId == pid))
+                .Select(r => new { r.Timestamp, r.Type, r.HardwareId, r.ClientIp, r.Isp, r.Version })
+                .ToListAsync();
+
+            t1EventCount = raw.Count(r => r.Type == TelemetryType.Event);
+            t1DiagCount  = raw.Count(r => r.Type == TelemetryType.Diagnostic);
+            t1ErrorCount = raw.Count(r => r.Type == TelemetryType.Error);
+            t1TotalRecords = raw.Count;
+
+            t1UniqueHwids    = raw.Select(r => r.HardwareId).Distinct().Count();
+            t1UniqueIps      = raw.Where(r => r.ClientIp != null).Select(r => r.ClientIp).Distinct().Count();
+            t1UniqueIsps     = raw.Where(r => r.Isp != null).Select(r => r.Isp).Distinct().Count();
+            t1UniqueVersions = raw.Where(r => r.Version != null).Select(r => r.Version).Distinct().Count();
+
+            t1DailyVolume = raw
+                .GroupBy(r => r.Timestamp.Date)
+                .OrderBy(g => g.Key)
+                .Select(g => new DayVolume(
+                    g.Key,
+                    g.Count(r => r.Type == TelemetryType.Event),
+                    g.Count(r => r.Type == TelemetryType.Diagnostic),
+                    g.Count(r => r.Type == TelemetryType.Error)))
+                .ToList();
+
+            t1DailyDevices = raw
+                .GroupBy(r => r.Timestamp.Date)
+                .OrderBy(g => g.Key)
+                .Select(g => new DayCount(g.Key, g.Select(r => r.HardwareId).Distinct().Count()))
+                .ToList();
+        }
+        finally
+        {
+            tab1Loading = false;
+            tab1Loaded  = true;
+        }
+    }
+
+    // ── Tab 2 — Événements & JSON ─────────────────────────────────
+    private async Task LoadTab2()
+    {
+        tab2Loading = true;
+        StateHasChanged();
+        try
+        {
+            using var db = await DbFactory.CreateDbContextAsync();
+            var since = DateTime.UtcNow.AddDays(-selectedDays);
+            var pid = ParseProductId();
+
+            var events = await db.TelemetryRecords.AsNoTracking()
+                .Where(r => r.Timestamp >= since &&
+                            r.Type == TelemetryType.Event &&
+                            (pid == null || r.ProductId == pid))
+                .Include(r => r.EventData)
+                .Select(r => new { r.EventName, Json = r.EventData != null ? r.EventData.PropertiesJson : null })
+                .ToListAsync();
+
+            t2TotalEvents = events.Count;
+
+            t2EventNames = events
+                .GroupBy(e => e.EventName ?? "")
+                .Select(g => new EventNameRow(g.Key, g.Count()))
+                .OrderByDescending(e => e.Count)
+                .ToList();
+
+            // JSON Key Explorer
+            var allProps = new Dictionary<string, List<string>>();
+            foreach (var ev in events.Where(e => e.Json != null))
+            {
+                try
+                {
+                    var dict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(ev.Json!);
+                    if (dict == null) continue;
+                    foreach (var (k, v) in dict)
+                    {
+                        if (!allProps.ContainsKey(k)) allProps[k] = new();
+                        allProps[k].Add(v.ToString());
+                    }
+                }
+                catch { }
+            }
+
+            t2JsonKeys = allProps
+                .Select(kv => new JsonKeyRow(kv.Key, kv.Value.Count, kv.Value))
+                .OrderByDescending(x => x.Appearances)
+                .ToList();
+
+            // Auto-detect OS
+            if (allProps.TryGetValue("OS", out var osVals))
+                t2OsDistrib = osVals.GroupBy(v => v).ToDictionary(g => g.Key, g => g.Count());
+
+            // Auto-detect Culture
+            if (allProps.TryGetValue("Culture", out var culVals))
+                t2CultureDistrib = culVals.GroupBy(v => v).ToDictionary(g => g.Key, g => g.Count());
+
+            // FP_* keys
+            t2FpKeys = allProps
+                .Where(kv => kv.Key.StartsWith("FP_", StringComparison.OrdinalIgnoreCase))
+                .ToDictionary(kv => kv.Key, kv => kv.Value.Count);
+
+            // Quota_* keys
+            t2QuotaKeys = allProps
+                .Where(kv => kv.Key.StartsWith("Quota_", StringComparison.OrdinalIgnoreCase))
+                .Select(kv =>
+                {
+                    var rates = new List<double>();
+                    string sample = kv.Value.FirstOrDefault() ?? "";
+                    foreach (var val in kv.Value)
+                    {
+                        var parts = val.Split('/');
+                        if (parts.Length == 2 &&
+                            double.TryParse(parts[0], out var used) &&
+                            double.TryParse(parts[1], out var limit) &&
+                            limit > 0)
+                        {
+                            rates.Add(used / limit * 100.0);
+                        }
+                    }
+                    var avg = rates.Count > 0 ? rates.Average() : 0;
+                    return new QuotaKeyRow(kv.Key, sample, avg);
+                })
+                .OrderByDescending(q => q.AvgRate)
+                .ToList();
+        }
+        finally
+        {
+            tab2Loading = false;
+            tab2Loaded  = true;
+        }
+    }
+
+    // ── Tab 3 — Diagnostics ───────────────────────────────────────
+    private async Task LoadTab3()
+    {
+        tab3Loading = true;
+        StateHasChanged();
+        try
+        {
+            using var db = await DbFactory.CreateDbContextAsync();
+            var since = DateTime.UtcNow.AddDays(-selectedDays);
+            var pid = ParseProductId();
+
+            var moduleRaw = await db.TelemetryDiagnosticResults.AsNoTracking()
+                .Where(r => r.Diagnostic!.Record!.Timestamp >= since &&
+                            (pid == null || r.Diagnostic!.Record!.ProductId == pid))
+                .Select(r => new { r.ModuleName, r.Success })
+                .ToListAsync();
+
+            t3Modules = moduleRaw
+                .GroupBy(r => r.ModuleName ?? "Unknown")
+                .Select(g => new ModuleRow(g.Key, g.Count(), g.Count(r => r.Success)))
+                .OrderByDescending(m => m.Total)
+                .ToList();
+
+            var scores = await db.TelemetryDiagnostics.AsNoTracking()
+                .Where(d => d.Record!.Timestamp >= since &&
+                            (pid == null || d.Record!.ProductId == pid))
+                .Select(d => d.Score)
+                .ToListAsync();
+
+            t3ScoreBuckets = new int[10];
+            foreach (var s in scores)
+                t3ScoreBuckets[Math.Min(9, s / 10)]++;
+
+            var portRaw = await db.TelemetryDiagnosticPorts.AsNoTracking()
+                .Where(p => p.Diagnostic!.Record!.Timestamp >= since &&
+                            (pid == null || p.Diagnostic!.Record!.ProductId == pid))
+                .Select(p => new { p.ExternalPort, p.Name, p.Protocol })
+                .ToListAsync();
+
+            t3Ports = portRaw
+                .GroupBy(p => new { p.ExternalPort, p.Name, p.Protocol })
+                .Select(g => new PortRow(g.Key.ExternalPort, g.Key.Name, g.Key.Protocol, g.Count()))
+                .OrderByDescending(p => p.Count)
+                .Take(20)
+                .ToList();
+
+            t3TcpCount = portRaw.Count(p => "TCP".Equals(p.Protocol, StringComparison.OrdinalIgnoreCase));
+            t3UdpCount = portRaw.Count(p => "UDP".Equals(p.Protocol, StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            tab3Loading = false;
+            tab3Loaded  = true;
+        }
+    }
+
+    // ── Tab 4 — Erreurs ───────────────────────────────────────────
+    private async Task LoadTab4()
+    {
+        tab4Loading = true;
+        StateHasChanged();
+        try
+        {
+            using var db = await DbFactory.CreateDbContextAsync();
+            var since = DateTime.UtcNow.AddDays(-selectedDays);
+            var pid = ParseProductId();
+
+            var errorRaw = await db.TelemetryErrors.AsNoTracking()
+                .Where(e => e.Record!.Timestamp >= since &&
+                            (pid == null || e.Record!.ProductId == pid))
+                .Select(e => new { e.ErrorType, e.Message, Ts = e.Record!.Timestamp })
+                .ToListAsync();
+
+            t4ErrorSummary = errorRaw
+                .GroupBy(e => new { e.ErrorType, e.Message })
+                .Select(g => new ErrorSummaryRow(g.Key.ErrorType, g.Key.Message, g.Count(), g.Max(e => e.Ts)))
+                .OrderByDescending(e => e.Count)
+                .ToList();
+
+            t4DailyErrors = errorRaw
+                .GroupBy(e => e.Ts.Date)
+                .OrderBy(g => g.Key)
+                .Select(g => new ErrDayCount(g.Key, g.Count()))
+                .ToList();
+
+            t4ErrorTotal = errorRaw.Count;
+            t4ErrorPage  = 1;
+
+            await LoadErrorBrowserPage(db, since, pid);
+        }
+        finally
+        {
+            tab4Loading = false;
+            tab4Loaded  = true;
+        }
+    }
+
+    private async Task GoToErrorPage(int page)
+    {
+        if (page < 1 || page > T4TotalPages) return;
+        t4ErrorPage = page;
+        using var db = await DbFactory.CreateDbContextAsync();
+        var since = DateTime.UtcNow.AddDays(-selectedDays);
+        await LoadErrorBrowserPage(db, since, ParseProductId());
+    }
+
+    private async Task LoadErrorBrowserPage(LicenseDbContext db, DateTime since, Guid? pid)
+    {
+        t4Errors = await db.TelemetryRecords.AsNoTracking().AsSplitQuery()
+            .Include(r => r.ErrorData)
+            .Include(r => r.Product)
+            .Where(r => r.Type == TelemetryType.Error &&
+                        r.Timestamp >= since &&
+                        (pid == null || r.ProductId == pid))
+            .OrderByDescending(r => r.Timestamp)
+            .Skip((t4ErrorPage - 1) * t4PageSize)
+            .Take(t4PageSize)
+            .ToListAsync();
+    }
+
+    // ── Tab 5 — Machines ──────────────────────────────────────────
+    private async Task LoadTab5()
+    {
+        tab5Loading = true;
+        StateHasChanged();
+        try
+        {
+            using var db = await DbFactory.CreateDbContextAsync();
+            var since = DateTime.UtcNow.AddDays(-selectedDays);
+            var pid = ParseProductId();
+
+            var raw = await db.TelemetryRecords.AsNoTracking()
+                .Where(r => r.Timestamp >= since && (pid == null || r.ProductId == pid))
+                .Select(r => new { r.HardwareId, r.Type, r.Timestamp, r.Version, r.ClientIp })
+                .ToListAsync();
+
+            t5Machines = raw
+                .GroupBy(r => r.HardwareId ?? "")
+                .Select(g => new MachineRow(
+                    g.Key,
+                    g.Count(r => r.Type == TelemetryType.Event),
+                    g.Count(r => r.Type == TelemetryType.Diagnostic),
+                    g.Count(r => r.Type == TelemetryType.Error),
+                    g.Min(r => r.Timestamp),
+                    g.Max(r => r.Timestamp),
+                    g.Select(r => r.Version).Distinct().Count(),
+                    g.Select(r => r.ClientIp).Distinct().Count()))
+                .OrderByDescending(m => m.Events + m.Diagnostics + m.Errors)
+                .ToList();
+
+            // Build license map
+            var hwids = t5Machines.Select(m => m.HardwareId).ToList();
+            var licenseLinks = await db.Licenses.AsNoTracking()
+                .Where(l => l.HardwareId != null && hwids.Contains(l.HardwareId))
+                .Select(l => new { l.HardwareId, l.Id })
+                .ToListAsync();
+
+            t5LicenseMap = licenseLinks
+                .GroupBy(l => l.HardwareId!)
+                .ToDictionary(g => g.Key, g => g.First().Id);
+
+            t5Page = 1;
+        }
+        finally
+        {
+            tab5Loading = false;
+            tab5Loaded  = true;
+        }
+    }
+
+    // ── Tab 6 — Réseau & ISP ──────────────────────────────────────
+    private async Task LoadTab6()
+    {
+        tab6Loading = true;
+        StateHasChanged();
+        try
+        {
+            using var db = await DbFactory.CreateDbContextAsync();
+            var since = DateTime.UtcNow.AddDays(-selectedDays);
+            var pid = ParseProductId();
+
+            var raw = await db.TelemetryRecords.AsNoTracking()
+                .Where(r => r.Timestamp >= since &&
+                            (pid == null || r.ProductId == pid) &&
+                            r.ClientIp != null)
+                .Select(r => new { r.ClientIp, r.Isp, r.HardwareId })
+                .ToListAsync();
+
+            // ISP stats (aggregated in-memory)
+            t6IspStats = raw
+                .GroupBy(r => r.Isp ?? "Unknown")
+                .Select(g => new IspRow(
+                    g.Key,
+                    g.Count(),
+                    g.Select(r => r.HardwareId).Distinct().Count()))
+                .OrderByDescending(x => x.Events)
+                .ToList();
+
+            // Top 50 IPs
+            t6TopIps = raw
+                .GroupBy(r => r.ClientIp!)
+                .Select(g => new IpRow(
+                    g.Key,
+                    g.FirstOrDefault()?.Isp,
+                    g.Count(),
+                    g.Select(r => r.HardwareId).Distinct().Count()))
+                .OrderByDescending(x => x.Count)
+                .Take(50)
+                .ToList();
+        }
+        finally
+        {
+            tab6Loading = false;
+            tab6Loaded  = true;
+        }
+    }
+
+    // ── Tab 7 — Explorateur brut ──────────────────────────────────
+    private async Task LoadTab7Page()
+    {
+        tab7Loading = true;
+        StateHasChanged();
+        try
+        {
+            using var db = await DbFactory.CreateDbContextAsync();
+
+            var startDate = t7StartDate ?? DateTime.UtcNow.AddDays(-selectedDays);
+            var endDate   = t7EndDate.HasValue
+                ? DateTime.SpecifyKind(t7EndDate.Value.AddDays(1), DateTimeKind.Utc)
+                : DateTime.UtcNow;
+
+            var query = db.TelemetryRecords.AsNoTracking().AsSplitQuery()
+                .Include(r => r.Product)
+                .Include(r => r.EventData)
+                .Include(r => r.DiagnosticData).ThenInclude(d => d!.Results)
+                .Include(r => r.DiagnosticData).ThenInclude(d => d!.Ports)
+                .Include(r => r.ErrorData)
+                .Where(r => r.Timestamp >= startDate && r.Timestamp <= endDate)
+                .AsQueryable();
+
+            if (!string.IsNullOrEmpty(t7TypeFilter) && Enum.TryParse<TelemetryType>(t7TypeFilter, out var ttype))
+                query = query.Where(r => r.Type == ttype);
+
+            var pid7 = ParseProductId(t7ProductFilter);
+            if (pid7 != null) query = query.Where(r => r.ProductId == pid7);
+
+            if (!string.IsNullOrWhiteSpace(t7Search))
+            {
+                var s = t7Search.Trim();
+                query = query.Where(r =>
+                    r.EventName.Contains(s) ||
+                    r.HardwareId.Contains(s) ||
+                    (r.Version != null && r.Version.Contains(s)) ||
+                    (r.ClientIp != null && r.ClientIp.Contains(s)) ||
+                    (r.Isp != null && r.Isp.Contains(s)));
+            }
+
+            t7Total   = await query.CountAsync();
+            t7Records = await query
+                .OrderByDescending(r => r.Timestamp)
+                .Skip((t7Page - 1) * t7PageSize)
+                .Take(t7PageSize)
+                .ToListAsync();
+
+            tab7Loaded = true;
+        }
+        finally
+        {
+            tab7Loading = false;
+        }
+    }
+}

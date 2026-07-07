@@ -1,0 +1,377 @@
+@page "/piracy"
+@inject IDbContextFactory<LicenseDbContext> DbFactory
+@inject SoftLicence.Server.Services.PiracyDetectionService PiracyService
+@inject SoftLicence.Server.Services.ToastService Toast
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@using SoftLicence.Server.Data
+@using SoftLicence.Server.Services
+@using Microsoft.EntityFrameworkCore
+@using System.Text.Json
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h3 class="mb-0">
+        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" x2="4" y1="22" y2="15"/></svg>
+        Piracy Detection
+    </h3>
+    <div class="d-flex gap-2 align-items-center">
+        <select class="form-select form-select-sm" style="width: 200px" @bind="selectedProductId">
+            <option value="">All Products</option>
+            @foreach (var p in products)
+            {
+                <option value="@p.Id">@p.Name</option>
+            }
+        </select>
+        <select class="form-select form-select-sm" style="width: 150px" @bind="statusFilter">
+            <option value="">All Status</option>
+            <option value="New">New</option>
+            <option value="Confirmed">Confirmed</option>
+            <option value="Monitoring">Monitoring</option>
+            <option value="Blocked">Blocked</option>
+            <option value="Dismissed">Dismissed</option>
+        </select>
+        <button class="btn btn-warning btn-sm" @onclick="RunScan" disabled="@scanning">
+            @if (scanning)
+            {
+                <span class="spinner-border spinner-border-sm me-1"></span>
+            }
+            Scan Now
+        </button>
+    </div>
+</div>
+
+@* KPI Cards *@
+<div class="row g-3 mb-4">
+    <div class="col-md-3">
+        <div class="card shadow-sm border-danger">
+            <div class="card-body text-center">
+                <div class="text-danger fw-bold fs-3">@stats.TotalSuspects</div>
+                <small class="text-muted">Total Suspects</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card shadow-sm border-warning">
+            <div class="card-body text-center">
+                <div class="text-warning fw-bold fs-3">@stats.NewThisWeek</div>
+                <small class="text-muted">New This Week</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card shadow-sm border-info">
+            <div class="card-body text-center">
+                <div class="text-info fw-bold fs-3">@stats.TotalFeatureEvents.ToString("N0")</div>
+                <small class="text-muted">Pirated Feature Events</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card shadow-sm">
+            <div class="card-body text-center">
+                <div class="fw-bold fs-6">
+                    @foreach (var c in stats.TopCultures.Take(3))
+                    {
+                        <span class="badge bg-secondary me-1">@c.Key (@c.Value)</span>
+                    }
+                </div>
+                <small class="text-muted">Top Cultures</small>
+            </div>
+        </div>
+    </div>
+</div>
+
+@if (lastScanResult != null)
+{
+    <div class="alert alert-info alert-dismissible fade show py-2" role="alert">
+        <strong>Scan complete:</strong> @lastScanResult
+        <button type="button" class="btn-close btn-sm" @onclick="() => lastScanResult = null"></button>
+    </div>
+}
+
+@* Main Table *@
+<div class="table-responsive">
+    <table class="table table-hover table-sm align-middle" style="font-size: 0.85rem">
+        <thead class="table-dark">
+            <tr>
+                <th></th>
+                <th>HardwareId</th>
+                <th>Status</th>
+                <th>Product</th>
+                <th class="text-end">Features</th>
+                <th class="text-end">Total</th>
+                <th>Culture</th>
+                <th>IPs</th>
+                <th>First Seen</th>
+                <th>Last Seen</th>
+                <th>Versions</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var s in filteredSuspects)
+            {
+                <tr class="@GetRowClass(s)">
+                    <td>
+                        <button class="btn btn-sm btn-link p-0" @onclick="() => ToggleDetail(s.Id)">
+                            @if (expandedId == s.Id) { <span>&#9660;</span> } else { <span>&#9654;</span> }
+                        </button>
+                    </td>
+                    <td><code class="small">@s.HardwareId</code></td>
+                    <td><span class="badge @GetStatusBadge(s.Status)">@s.Status</span></td>
+                    <td>@(s.Product?.Name ?? "—")</td>
+                    <td class="text-end fw-bold text-danger">@s.FeatureEvents.ToString("N0")</td>
+                    <td class="text-end">@s.TotalEvents.ToString("N0")</td>
+                    <td>
+                        @if (!string.IsNullOrEmpty(s.Culture))
+                        {
+                            <span class="badge bg-secondary">@s.Culture</span>
+                        }
+                    </td>
+                    <td>
+                        <span class="badge bg-info">@s.DistinctIpCount IPs</span>
+                    </td>
+                    <td>@TZ.ToLocal(s.FirstSeenAt).ToString("dd/MM/yy")</td>
+                    <td>@TZ.ToLocal(s.LastSeenAt).ToString("dd/MM/yy HH:mm")</td>
+                    <td><small class="text-muted" title="@s.Versions">@TruncateVersions(s.Versions)</small></td>
+                    <td>
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn btn-outline-success" title="Confirm" @onclick="() => SetStatus(s, PiracyStatus.Confirmed)">&#10003;</button>
+                            <button class="btn btn-outline-warning" title="Monitor" @onclick="() => SetStatus(s, PiracyStatus.Monitoring)">&#128065;</button>
+                            <button class="btn btn-outline-danger" title="Block" @onclick="() => SetStatus(s, PiracyStatus.Blocked)">&#9940;</button>
+                            <button class="btn btn-outline-secondary" title="Dismiss" @onclick="() => SetStatus(s, PiracyStatus.Dismissed)">&#10005;</button>
+                        </div>
+                    </td>
+                </tr>
+
+                @if (expandedId == s.Id && currentDetail != null)
+                {
+                    <tr>
+                        <td colspan="12" class="bg-dark bg-opacity-10 p-3">
+                            <div class="row">
+                                @* Event Breakdown *@
+                                <div class="col-md-5">
+                                    <h6 class="text-info">Event Breakdown</h6>
+                                    <table class="table table-sm table-borderless mb-0" style="font-size: 0.8rem">
+                                        @foreach (var ev in currentDetail.EventBreakdown.Take(20))
+                                        {
+                                            <tr>
+                                                <td>
+                                                    @if (ev.IsFeature)
+                                                    {
+                                                        <span class="badge bg-danger me-1" style="width: 8px; height: 8px; padding: 0; display: inline-block; border-radius: 50%;"></span>
+                                                    }
+                                                    else
+                                                    {
+                                                        <span class="badge bg-secondary me-1" style="width: 8px; height: 8px; padding: 0; display: inline-block; border-radius: 50%;"></span>
+                                                    }
+                                                    <code>@ev.Name</code>
+                                                </td>
+                                                <td class="text-end fw-bold">@ev.Count</td>
+                                            </tr>
+                                        }
+                                    </table>
+                                </div>
+
+                                @* Startup Properties & IPs *@
+                                <div class="col-md-4">
+                                    <h6 class="text-info">System Info</h6>
+                                    @if (currentDetail.StartupProperties != null)
+                                    {
+                                        <table class="table table-sm table-borderless mb-2" style="font-size: 0.8rem">
+                                            @foreach (var prop in currentDetail.StartupProperties.Where(p =>
+                                                new[] { "OS", "Culture", "IsInteractive", "IsVM", "SelectedVersion",
+                                                        "TiaVersionsInstalled", "OverallStatus", "AppVersion" }.Contains(p.Key)))
+                                            {
+                                                <tr>
+                                                    <td class="text-muted">@prop.Key</td>
+                                                    <td><code>@prop.Value</code></td>
+                                                </tr>
+                                            }
+                                        </table>
+                                    }
+
+                                    <h6 class="text-info mt-3">IPs (@currentDetail.AllIps.Count)</h6>
+                                    <div style="max-height: 120px; overflow-y: auto; font-size: 0.75rem">
+                                        @foreach (var ip in currentDetail.AllIps.Take(30))
+                                        {
+                                            <code class="d-block">@ip</code>
+                                        }
+                                        @if (currentDetail.AllIps.Count > 30)
+                                        {
+                                            <em class="text-muted">+@(currentDetail.AllIps.Count - 30) more...</em>
+                                        }
+                                    </div>
+                                </div>
+
+                                @* Daily Activity & Notes *@
+                                <div class="col-md-3">
+                                    <h6 class="text-info">Daily Activity</h6>
+                                    <div style="max-height: 150px; overflow-y: auto; font-size: 0.75rem">
+                                        <table class="table table-sm table-borderless mb-0">
+                                            @foreach (var day in currentDetail.PiracyDailyActivity.TakeLast(15))
+                                            {
+                                                <tr>
+                                                    <td>@TZ.ToLocal(day.Date).ToString("dd/MM")</td>
+                                                    <td class="text-end text-danger fw-bold">@day.Features</td>
+                                                    <td class="text-end text-muted">/@day.Total</td>
+                                                </tr>
+                                            }
+                                        </table>
+                                    </div>
+
+                                    <h6 class="text-info mt-3">Versions</h6>
+                                    <div style="font-size: 0.75rem">
+                                        @foreach (var v in currentDetail.AllVersions)
+                                        {
+                                            <span class="badge bg-secondary me-1 mb-1">@v</span>
+                                        }
+                                    </div>
+
+                                    <h6 class="text-info mt-3">Notes</h6>
+                                    <div class="input-group input-group-sm">
+                                        <input class="form-control form-control-sm" placeholder="Admin notes..."
+                                               @bind="noteInput" @bind:event="oninput" />
+                                        <button class="btn btn-outline-info btn-sm" @onclick="() => SaveNote(s)">Save</button>
+                                    </div>
+                                    @if (!string.IsNullOrEmpty(s.AdminNotes))
+                                    {
+                                        <small class="text-muted mt-1 d-block">@s.AdminNotes</small>
+                                    }
+                                </div>
+                            </div>
+                        </td>
+                    </tr>
+                }
+            }
+        </tbody>
+    </table>
+</div>
+
+@if (!filteredSuspects.Any() && !loading)
+{
+    <div class="text-center text-muted py-5">
+        <p>No suspects found. Run a scan to detect pirated installations.</p>
+    </div>
+}
+
+@code {
+    private List<Product> products = [];
+    private List<PiracySuspect> suspects = [];
+    private PiracyStats stats = new();
+    private string selectedProductId = "";
+    private string statusFilter = "";
+    private bool scanning;
+    private bool loading = true;
+    private string? lastScanResult;
+    private Guid? expandedId;
+    private SuspectDetail? currentDetail;
+    private string noteInput = "";
+
+    private IEnumerable<PiracySuspect> filteredSuspects => suspects
+        .Where(s => string.IsNullOrEmpty(statusFilter) || s.Status == statusFilter);
+
+    protected override async Task OnInitializedAsync()
+    {
+        using var db = await DbFactory.CreateDbContextAsync();
+        products = await db.Products.OrderBy(p => p.Name).ToListAsync();
+        await LoadData();
+        loading = false;
+    }
+
+    private async Task LoadData()
+    {
+        if (Guid.TryParse(selectedProductId, out var pid))
+            suspects = await PiracyService.GetSuspectsAsync(pid);
+        else
+            suspects = await PiracyService.GetAllSuspectsAsync();
+
+        stats = await PiracyService.GetStatsAsync();
+    }
+
+    private async Task RunScan()
+    {
+        scanning = true;
+        StateHasChanged();
+
+        try
+        {
+            if (Guid.TryParse(selectedProductId, out var pid))
+            {
+                var newCount = await PiracyService.RunScanAsync(pid);
+                var product = products.FirstOrDefault(p => p.Id == pid);
+                lastScanResult = $"{newCount} new suspects for {product?.Name ?? "unknown"}";
+            }
+            else
+            {
+                var results = await PiracyService.RunFullScanAsync();
+                var total = results.Values.Sum();
+                var details = string.Join(", ", results.Where(r => r.Value > 0).Select(r => $"{r.Key}: {r.Value}"));
+                lastScanResult = $"{total} new suspects total. {(string.IsNullOrEmpty(details) ? "No new detections." : details)}";
+            }
+
+            await LoadData();
+            Toast.ShowSuccess("Scan complete");
+        }
+        catch (Exception ex)
+        {
+            Toast.ShowError($"Scan failed: {ex.Message}");
+        }
+        finally
+        {
+            scanning = false;
+        }
+    }
+
+    private async Task SetStatus(PiracySuspect suspect, string newStatus)
+    {
+        await PiracyService.UpdateStatusAsync(suspect.Id, newStatus);
+        suspect.Status = newStatus;
+        Toast.ShowSuccess($"{suspect.HardwareId[..8]}... → {newStatus}");
+    }
+
+    private async Task ToggleDetail(Guid id)
+    {
+        if (expandedId == id)
+        {
+            expandedId = null;
+            currentDetail = null;
+            return;
+        }
+
+        expandedId = id;
+        currentDetail = await PiracyService.GetSuspectDetailAsync(id);
+        var suspect = suspects.FirstOrDefault(s => s.Id == id);
+        noteInput = suspect?.AdminNotes ?? "";
+    }
+
+    private async Task SaveNote(PiracySuspect suspect)
+    {
+        await PiracyService.UpdateStatusAsync(suspect.Id, suspect.Status, noteInput);
+        suspect.AdminNotes = noteInput;
+        Toast.ShowSuccess("Note saved");
+    }
+
+    private static string GetStatusBadge(string status) => status switch
+    {
+        PiracyStatus.New => "bg-warning text-dark",
+        PiracyStatus.Confirmed => "bg-danger",
+        PiracyStatus.Monitoring => "bg-info",
+        PiracyStatus.Blocked => "bg-dark",
+        PiracyStatus.Dismissed => "bg-secondary",
+        _ => "bg-light text-dark"
+    };
+
+    private static string GetRowClass(PiracySuspect s) => s.Status switch
+    {
+        PiracyStatus.Blocked => "table-dark",
+        PiracyStatus.Dismissed => "opacity-50",
+        _ => ""
+    };
+
+    private static string TruncateVersions(string? versions)
+    {
+        if (string.IsNullOrEmpty(versions)) return "—";
+        if (versions.Length <= 30) return versions;
+        return versions[..30] + "...";
+    }
+}

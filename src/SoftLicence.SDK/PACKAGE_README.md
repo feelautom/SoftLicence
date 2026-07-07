@@ -12,6 +12,7 @@ SoftLicence provides an industrial-grade licensing solution using RSA-4096 crypt
 - **Online & Offline Validation**: Robust verification logic even without an active internet connection.
 - **Typed Results**: Modern API with clear success/error states.
 - **Custom Parameters**: Inject typed per-license-type parameters (features, limits) signed into the license file.
+- **Plugin/Sub-product Licenses**: Signed plugin metadata for applications that license optional modules.
 - **Device Transfer**: Built-in deactivation and email-reset flows for license transfers between machines.
 
 ## 🛠️ Quick Start
@@ -50,7 +51,10 @@ if (result.IsSuccess)
 ### 4. Check License Status
 
 ```csharp
-var status = await client.CheckStatusAsync("YOUR_LICENSE_KEY", "YourAppName");
+var status = await client.CheckStatusAsync(
+    "YOUR_LICENSE_KEY",
+    "YourAppName",
+    appVersion: "1.1.9"); // optional, enables server-side minimum-version checks
 if (status.IsValid)
 {
     Console.WriteLine("License is valid!");
@@ -87,6 +91,24 @@ if (validation.IsValid)
 ```
 
 Supported types: `string`, `int`, `long`, `double`, `bool`, `Guid`.
+
+### 6. Read Plugin / Sub-product Metadata
+
+SDK `1.1.9` adds optional signed metadata for plugin or sub-product licenses:
+
+```csharp
+var validation = client.ValidateLocal(licenseFile, hardwareId);
+if (validation.IsValid)
+{
+    string? pluginId = validation.License!.PluginId;
+    string? pluginVersion = validation.License.PluginVersion;
+    string? minAppVersion = validation.License.MinAppVersion;
+    string[]? allowedFeatures = validation.License.AllowedFeatures;
+}
+```
+
+Compatibility rule: standard product licenses omit these fields when they are `null`.
+Applications that do not use plugin/sub-product licenses can ignore them safely.
 
 ## 📚 Documentation
 

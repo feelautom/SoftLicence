@@ -1,0 +1,539 @@
+@page "/fingerprints"
+@using Microsoft.EntityFrameworkCore
+@using SoftLicence.Server.Data
+@using SoftLicence.Server.Services
+@inject IDbContextFactory<LicenseDbContext> DbFactory
+@inject FingerprintService FingerprintSvc
+@inject SecurityService SecuritySvc
+@inject AuthService Auth
+@inject NavigationManager Nav
+
+<h3 class="mb-3">Machine Fingerprints</h3>
+
+@if (!isAuthorized)
+{
+    <p class="text-danger">Access denied.</p>
+    return;
+}
+
+@* Stats bar *@
+@if (stats != null)
+{
+    <div class="row g-2 mb-3">
+        <div class="col"><div class="card bg-dark border-secondary text-center p-2"><div class="fs-4 text-info">@stats.Total</div><small class="text-muted">Total</small></div></div>
+        <div class="col"><div class="card bg-dark border-secondary text-center p-2"><div class="fs-4 text-warning">@stats.ClusterCount</div><small class="text-muted">Clusters</small></div></div>
+        <div class="col"><div class="card bg-dark border-secondary text-center p-2"><div class="fs-4 text-success">@stats.NewToday</div><small class="text-muted">New today</small></div></div>
+        <div class="col"><div class="card bg-dark border-secondary text-center p-2"><div class="fs-4 text-primary">@stats.Whitelisted</div><small class="text-muted">Whitelist</small></div></div>
+        <div class="col"><div class="card bg-dark border-secondary text-center p-2"><div class="fs-4 text-secondary">@stats.Greylisted</div><small class="text-muted">Greylist</small></div></div>
+    </div>
+}
+
+@* Toolbar *@
+<div class="mb-3 d-flex gap-2 align-items-center">
+    <input type="text" class="form-control form-control-sm" style="max-width:250px"
+           placeholder="Search HWID / note..." @bind="searchQuery" @bind:event="oninput"
+           @onkeydown="SearchKeyDown" />
+    <button class="btn btn-sm btn-outline-info" @onclick="Search">Search</button>
+    <button class="btn btn-sm btn-outline-primary" @onclick="RunClustering" disabled="@clustering">
+        @(clustering ? "Scanning..." : "Run Cluster Scan")
+    </button>
+    <button class="btn btn-sm @(showBanned ? "btn-warning" : "btn-outline-warning")" @onclick="() => showBanned = !showBanned">
+        Banned Components (@bannedComponents.Count)
+    </button>
+</div>
+
+@if (showBanned)
+{
+    <div class="card mb-4">
+        <div class="card-header bg-warning text-dark fw-bold">Banned Components</div>
+        <div class="card-body p-0">
+            @if (bannedComponents.Count == 0)
+            {
+                <p class="p-3 mb-0 text-muted">No banned components.</p>
+            }
+            else
+            {
+                <table class="table table-sm table-striped mb-0">
+                    <thead><tr><th>Type</th><th>Hash</th><th>Product</th><th>Reason</th><th>Banned</th><th></th></tr></thead>
+                    <tbody>
+                        @foreach (var b in bannedComponents)
+                        {
+                            <tr>
+                                <td><span class="badge bg-secondary">@b.ComponentType</span></td>
+                                <td class="font-monospace small">@b.ComponentHash[..16]...</td>
+                                <td>@(b.Product?.Name ?? "Global")</td>
+                                <td>@b.Reason</td>
+                                <td>@b.BannedAt.ToString("yyyy-MM-dd")</td>
+                                <td><button class="btn btn-sm btn-outline-danger" @onclick="() => UnbanComponent(b.Id)">Unban</button></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        </div>
+    </div>
+}
+
+@* Tabs *@
+<ul class="nav nav-tabs mb-3">
+    <li class="nav-item">
+        <a class="nav-link @(activeTab == "fingerprints" ? "active" : "")" href="javascript:void(0)" @onclick='() => activeTab = "fingerprints"'>
+            Fingerprints (@enriched.Count)
+        </a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link @(activeTab == "clusters" ? "active" : "")" href="javascript:void(0)" @onclick='() => activeTab = "clusters"'>
+            Clusters (@clusters.Count)
+        </a>
+    </li>
+</ul>
+
+@if (activeTab == "clusters")
+{
+    @if (clusters.Count > 0)
+    {
+        @foreach (var cluster in clusters)
+        {
+            var bd = cluster.Breakdown;
+            var scoreColor = cluster.CommonComponents >= 5 ? "danger"
+                           : cluster.CommonComponents >= 4 ? "warning"
+                           : cluster.CommonComponents >= 3 ? "info" : "secondary";
+            <div class="card mb-3 border-@scoreColor" style="border-width:2px!important">
+                <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <div>
+                        @* Score *@
+                        <span class="badge bg-@scoreColor me-1" style="font-size:0.85rem">@cluster.CommonComponents/5 shared</span>
+
+                        @* Label / noms clients *@
+                        @if (editingLabelClusterId == cluster.ClusterId)
+                        {
+                            <input class="form-control form-control-sm d-inline-block ms-2" style="width:200px"
+                                   @bind="editingLabelValue" @bind:event="oninput"
+                                   @onkeydown="(e) => LabelKeyDown(e, cluster)" @onblur="() => SaveLabel(cluster)" />
+                        }
+                        else if (!string.IsNullOrEmpty(cluster.Label))
+                        {
+                            <strong class="ms-2" style="cursor:pointer" @onclick="() => StartEditLabel(cluster)">@cluster.Label</strong>
+                            <small class="text-muted ms-1">— @cluster.Members.Count HWIDs</small>
+                        }
+                        else
+                        {
+                            var clusterNames = cluster.Members
+                                .SelectMany(m => m.Licenses)
+                                .Select(l => l.CustomerName)
+                                .Where(n => !string.IsNullOrEmpty(n))
+                                .Distinct()
+                                .ToList();
+                            if (clusterNames.Any())
+                            {
+                                <span class="ms-2 fw-bold">@string.Join(" | ", clusterNames)</span>
+                                <small class="text-muted ms-1">— @cluster.Members.Count HWIDs</small>
+                            }
+                            else
+                            {
+                                <span class="ms-2 text-muted">Cluster — @cluster.Members.Count HWIDs</span>
+                            }
+                            <small class="text-muted ms-2" style="cursor:pointer;text-decoration:underline dotted" @onclick="() => StartEditLabel(cluster)">(add label)</small>
+                        }
+
+                        @* Breakdown badges : quels composants sont réellement partagés par tous les membres *@
+                        <div class="mt-1 d-flex gap-1 flex-wrap">
+                            <span class="badge @(bd.CpuShared  ? "bg-success" : "bg-secondary opacity-50")"
+                                  title="@(bd.CpuShared  ? ("Shared: " + Short64(bd.CpuHash))  : "Not shared or generic WMI value")">
+                                CPU @(bd.CpuShared  ? "✓" : "✗")
+                            </span>
+                            <span class="badge @(bd.MbShared   ? "bg-success" : "bg-secondary opacity-50")"
+                                  title="@(bd.MbShared   ? ("Shared: " + Short64(bd.MbHash))   : "Not shared or generic WMI value")">
+                                MB @(bd.MbShared    ? "✓" : "✗")
+                            </span>
+                            <span class="badge @(bd.BiosShared ? "bg-success" : "bg-secondary opacity-50")"
+                                  title="@(bd.BiosShared ? ("Shared: " + Short64(bd.BiosHash)) : "Not shared or generic WMI value")">
+                                BIOS @(bd.BiosShared ? "✓" : "✗")
+                            </span>
+                            <span class="badge @(bd.DiskShared ? "bg-success" : "bg-secondary opacity-50")"
+                                  title="@(bd.DiskShared ? ("Shared: " + Short64(bd.DiskHash)) : "Not shared or generic WMI value")">
+                                DISK @(bd.DiskShared ? "✓" : "✗")
+                            </span>
+                            <span class="badge @(bd.HostShared ? "bg-warning text-dark" : "bg-secondary opacity-50")"
+                                  title="@(bd.HostShared ? ("Shared hostname hash: " + Short64(bd.HostHash)) : "Different hostnames (normal)")">
+                                HOST @(bd.HostShared ? "✓" : "✗")
+                            </span>
+                        </div>
+                    </div>
+                    <small class="text-muted font-monospace">@cluster.ClusterId.ToString()[..8]</small>
+                </div>
+                <div class="card-body p-0">
+                    <table class="table table-sm table-dark mb-0">
+                        <thead>
+                            <tr class="text-muted small">
+                                <th>HWID</th>
+                                <th>License(s)</th>
+                                <th style="min-width:70px" title="CPU hash — vert = partagé avec le cluster">CPU</th>
+                                <th style="min-width:70px" title="Motherboard hash">MB</th>
+                                <th style="min-width:70px" title="BIOS hash">BIOS</th>
+                                <th style="min-width:70px" title="Disk hash">DISK</th>
+                                <th style="min-width:70px" title="Hostname hash">HOST</th>
+                                <th>First</th>
+                                <th>Last</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var m in cluster.Members)
+                            {
+                                var memberData = enriched.FirstOrDefault(e => e.Fingerprint.HardwareId == m.HardwareId);
+                                <tr class="@(memberData?.IsBanned == true ? "table-danger" : "")">
+                                    <td class="font-monospace small">
+                                        @{
+                                            var firstLicId = m.Licenses.FirstOrDefault(l => l.LicenseId != Guid.Empty)?.LicenseId;
+                                        }
+                                        @if (firstLicId != null)
+                                        {
+                                            <a href="/user-telemetry/@firstLicId" class="text-info text-decoration-none">@m.HardwareId</a>
+                                        }
+                                        else
+                                        {
+                                            @m.HardwareId
+                                        }
+                                        @if (memberData?.IsBanned == true)
+                                        {
+                                            <span class="badge bg-danger ms-1" style="font-size:0.55rem">BANNED</span>
+                                        }
+                                    </td>
+                                    <td>
+                                        @if (m.Licenses.Any())
+                                        {
+                                            @foreach (var lic in m.Licenses)
+                                            {
+                                                <a href="/user-telemetry/@lic.LicenseId" class="text-decoration-none">
+                                                    <span class="badge bg-@(lic.IsActive ? "success" : "secondary") me-1" title="@lic.CustomerEmail">@lic.TypeName</span>
+                                                </a>
+                                                <small class="text-muted me-1">@lic.CustomerName</small>
+                                            }
+                                        }
+                                        else if (memberData?.Licenses.Count > 0)
+                                        {
+                                            @foreach (var lic in memberData.Licenses)
+                                            {
+                                                <a href="/user-telemetry/@lic.LicenseId" class="text-decoration-none">
+                                                    <span class="badge bg-@(lic.IsActive ? "success" : "secondary") me-1" title="@lic.ProductName - @lic.CustomerEmail">@lic.TypeName</span>
+                                                </a>
+                                                <small class="text-muted me-1">@lic.CustomerName</small>
+                                            }
+                                        }
+                                        else { <small class="text-muted">-</small> }
+                                    </td>
+                                    @* Hashes individuels colorés : vert=partagé, orange=générique, gris=unique *@
+                                    <td>@ComponentCell(m.CpuHash,         bd.CpuHash,  bd.CpuShared)</td>
+                                    <td>@ComponentCell(m.MotherboardHash, bd.MbHash,   bd.MbShared)</td>
+                                    <td>@ComponentCell(m.BiosHash,        bd.BiosHash, bd.BiosShared)</td>
+                                    <td>@ComponentCell(m.DiskHash,        bd.DiskHash, bd.DiskShared)</td>
+                                    <td>@ComponentCell(m.HostHash,        bd.HostHash, bd.HostShared)</td>
+                                    <td class="small text-muted">@m.FirstSeenAt.ToString("MM-dd")</td>
+                                    <td class="small text-muted">@m.LastSeenAt.ToString("MM-dd HH:mm")</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        }
+    }
+    else
+    {
+        <p class="text-muted">No clusters detected. Run a cluster scan first.</p>
+    }
+}
+
+@if (activeTab == "fingerprints")
+{
+<div class="table-responsive">
+<table class="table table-dark table-hover table-sm align-middle">
+    <thead>
+        <tr class="text-muted small">
+            <th>List</th>
+            <th>HWID</th>
+            <th>License</th>
+            <th>Version</th>
+            <th>CPU</th>
+            <th>MB</th>
+            <th>BIOS</th>
+            <th>DISK</th>
+            <th>HOST</th>
+            <th>Last Seen</th>
+            <th>Cluster</th>
+            <th>Note</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach (var item in enriched)
+        {
+            var fp = item.Fingerprint;
+            var rowStyle = fp.ListType == "white" ? "background-color: rgba(13,110,253,0.15) !important"
+                : fp.ListType == "grey" ? "background-color: rgba(108,117,125,0.25) !important"
+                : item.IsBanned ? "background-color: rgba(220,53,69,0.15) !important" : "";
+            <tr style="@rowStyle">
+                <td>
+                    <select class="form-select form-select-sm" style="width:80px;font-size:0.7rem"
+                            value="@(fp.ListType ?? "")"
+                            @onchange="(e) => SetListType(fp, e.Value?.ToString())">
+                        <option value="">-</option>
+                        <option value="white">White</option>
+                        <option value="grey">Grey</option>
+                    </select>
+                </td>
+                <td>
+                    <code class="text-info">@fp.HardwareId</code>
+                    @if (item.IsBanned)
+                    {
+                        <span class="badge bg-danger ms-1" style="font-size:0.6rem">BANNED</span>
+                    }
+                </td>
+                <td>
+                    @if (item.Licenses.Count > 0)
+                    {
+                        <div style="line-height:1.4">
+                            @foreach (var lic in item.Licenses)
+                            {
+                                <div style="white-space:nowrap" title="@lic.ProductName - @lic.CustomerEmail">
+                                    <span class="badge bg-@(lic.IsActive ? "success" : "secondary")" style="font-size:0.65rem">@lic.TypeName</span>
+                                    <small class="text-muted">@Truncate(lic.CustomerName, 16)</small>
+                                    @if (!string.IsNullOrEmpty(lic.MachineName))
+                                    {
+                                        <small class="text-warning" style="font-size:0.6rem"> @lic.MachineName</small>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    }
+                    else
+                    {
+                        <small class="text-muted">No license</small>
+                    }
+                </td>
+                <td><small>@(item.Licenses.FirstOrDefault()?.AppVersion ?? "-")</small></td>
+                <td class="font-monospace small text-light" title="@fp.CpuHash">@Short(fp.CpuHash)</td>
+                <td class="font-monospace small text-light" title="@fp.MotherboardHash">@Short(fp.MotherboardHash)</td>
+                <td class="font-monospace small text-light" title="@fp.BiosHash">@Short(fp.BiosHash)</td>
+                <td class="font-monospace small text-light" title="@fp.DiskHash">@Short(fp.DiskHash)</td>
+                <td class="font-monospace small text-light" title="@fp.HostHash">@Short(fp.HostHash)</td>
+                <td><small>@fp.LastSeenAt.ToString("MM-dd HH:mm")</small></td>
+                <td>
+                    @if (fp.ClusterId != null)
+                    {
+                        var clusterLabel = clusters.FirstOrDefault(c => c.ClusterId == fp.ClusterId)?.Label;
+                        <span class="badge bg-info" style="font-size:0.6rem" title="@fp.ClusterId.Value.ToString()[..8]">@(clusterLabel ?? fp.ClusterId.Value.ToString()[..6])</span>
+                    }
+                    else
+                    {
+                        <small class="text-muted">-</small>
+                    }
+                </td>
+                <td>
+                    @if (editingNoteId == fp.Id)
+                    {
+                        <input class="form-control form-control-sm" style="min-width:120px" @bind="editingNoteValue" @bind:event="oninput"
+                               @onkeydown="(e) => NoteKeyDown(e, fp)" @onblur="() => SaveNote(fp)" />
+                    }
+                    else
+                    {
+                        <span class="small text-muted" style="cursor:pointer" @onclick="() => StartEditNote(fp)">
+                            @(string.IsNullOrEmpty(fp.Note) ? "(click)" : fp.Note)
+                        </span>
+                    }
+                </td>
+                <td>
+                    @if (banTarget == fp.Id)
+                    {
+                        <select class="form-select form-select-sm d-inline-block" style="width:auto" @bind="banComponentType">
+                            <option value="">--</option>
+                            <option value="CPU">CPU</option>
+                            <option value="MB">MB</option>
+                            <option value="BIOS">BIOS</option>
+                            <option value="DISK">DISK</option>
+                            <option value="HOST">HOST</option>
+                        </select>
+                        <button class="btn btn-sm btn-danger" @onclick="() => BanFromFingerprint(fp)" disabled="@(string.IsNullOrEmpty(banComponentType))">Ban</button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => banTarget = null">X</button>
+                    }
+                    else
+                    {
+                        <button class="btn btn-sm btn-outline-danger" @onclick="() => banTarget = fp.Id">Ban</button>
+                    }
+                </td>
+            </tr>
+        }
+    </tbody>
+</table>
+</div>
+}
+
+@code {
+    private bool isAuthorized;
+    private bool clustering;
+    private bool showBanned;
+    private string activeTab = "fingerprints";
+    private string searchQuery = "";
+    private List<EnrichedFingerprint> enriched = new();
+    private List<ClusterInfo> clusters = new();
+    private List<BannedComponent> bannedComponents = new();
+    private FingerprintStats? stats;
+    private Guid? banTarget;
+    private string banComponentType = "";
+    private Guid? editingNoteId;
+    private string editingNoteValue = "";
+    private Guid? editingLabelClusterId;
+    private string editingLabelValue = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        isAuthorized = await Auth.IsRootAsync();
+        if (!isAuthorized) return;
+        await LoadData();
+    }
+
+    private async Task LoadData()
+    {
+        enriched = await FingerprintSvc.GetEnrichedFingerprintsAsync(
+            string.IsNullOrWhiteSpace(searchQuery) ? null : searchQuery);
+        clusters = await FingerprintSvc.GetClustersAsync();
+        bannedComponents = await SecuritySvc.GetBannedComponentsAsync();
+        stats = await FingerprintSvc.GetStatsAsync();
+    }
+
+    private async Task Search()
+    {
+        await LoadData();
+    }
+
+    private async Task SearchKeyDown(Microsoft.AspNetCore.Components.Web.KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await LoadData();
+    }
+
+    private async Task RunClustering()
+    {
+        clustering = true;
+        await FingerprintSvc.RunClusteringAsync();
+        await LoadData();
+        clustering = false;
+    }
+
+    private async Task UnbanComponent(Guid id)
+    {
+        await SecuritySvc.UnbanComponentAsync(id);
+        bannedComponents = await SecuritySvc.GetBannedComponentsAsync();
+    }
+
+    private async Task BanFromFingerprint(HardwareFingerprint fp)
+    {
+        var hash = banComponentType switch
+        {
+            "CPU" => fp.CpuHash,
+            "MB" => fp.MotherboardHash,
+            "BIOS" => fp.BiosHash,
+            "DISK" => fp.DiskHash,
+            "HOST" => fp.HostHash,
+            _ => null
+        };
+
+        if (!string.IsNullOrEmpty(hash))
+        {
+            await SecuritySvc.BanComponentAsync(banComponentType, hash, $"Banned from fingerprint UI (HWID: {fp.HardwareId})");
+            bannedComponents = await SecuritySvc.GetBannedComponentsAsync();
+        }
+
+        banTarget = null;
+        banComponentType = "";
+    }
+
+    private void StartEditNote(HardwareFingerprint fp)
+    {
+        editingNoteId = fp.Id;
+        editingNoteValue = fp.Note ?? "";
+    }
+
+    private async Task NoteKeyDown(Microsoft.AspNetCore.Components.Web.KeyboardEventArgs e, HardwareFingerprint fp)
+    {
+        if (e.Key == "Enter") await SaveNote(fp);
+        else if (e.Key == "Escape") editingNoteId = null;
+    }
+
+    private async Task SaveNote(HardwareFingerprint fp)
+    {
+        if (editingNoteId != fp.Id) return;
+        await FingerprintSvc.UpdateNoteAndListAsync(fp.Id, editingNoteValue, fp.ListType);
+        fp.Note = string.IsNullOrWhiteSpace(editingNoteValue) ? null : editingNoteValue.Trim();
+        editingNoteId = null;
+    }
+
+    private async Task SetListType(HardwareFingerprint fp, string? value)
+    {
+        var listType = string.IsNullOrEmpty(value) ? null : value;
+        await FingerprintSvc.UpdateNoteAndListAsync(fp.Id, fp.Note, listType);
+        fp.ListType = listType;
+    }
+
+    private void StartEditLabel(ClusterInfo cluster)
+    {
+        editingLabelClusterId = cluster.ClusterId;
+        editingLabelValue = cluster.Label ?? "";
+    }
+
+    private async Task LabelKeyDown(Microsoft.AspNetCore.Components.Web.KeyboardEventArgs e, ClusterInfo cluster)
+    {
+        if (e.Key == "Enter") await SaveLabel(cluster);
+        else if (e.Key == "Escape") editingLabelClusterId = null;
+    }
+
+    private async Task SaveLabel(ClusterInfo cluster)
+    {
+        if (editingLabelClusterId != cluster.ClusterId) return;
+        await FingerprintSvc.SetClusterLabelAsync(cluster.ClusterId, editingLabelValue);
+        cluster.Label = string.IsNullOrWhiteSpace(editingLabelValue) ? null : editingLabelValue.Trim();
+        editingLabelClusterId = null;
+    }
+
+    private static string Short(string? hash) => hash != null && hash.Length >= 8 ? hash[..8] : hash ?? "-";
+    private static string Short64(string? hash) => hash != null && hash.Length >= 16 ? hash[..16] : hash ?? "-";
+    private static string Truncate(string? s, int max) => s != null && s.Length > max ? s[..max] + "..." : s ?? "";
+
+    /// <summary>
+    /// Rendu d'une cellule de composant dans la table des membres de cluster.
+    /// Vert = partagé avec le cluster, orange = valeur WMI générique, gris = valeur unique à ce membre.
+    /// </summary>
+    private RenderFragment ComponentCell(string? memberHash, string? sharedHash, bool isShared) => builder =>
+    {
+        var display = memberHash != null && memberHash.Length >= 8 ? memberHash[..8] : memberHash ?? "-";
+        string cssColor;
+        string title;
+
+        if (string.IsNullOrEmpty(memberHash) || memberHash == "-")
+        {
+            cssColor = "color:#6c757d";
+            title = "No data";
+        }
+        else if (FingerprintService.IsGenericHash(memberHash))
+        {
+            cssColor = "color:#fd7e14";  // orange = valeur WMI générique (non fiable)
+            title = "Generic WMI value — not reliable for matching";
+        }
+        else if (isShared && memberHash == sharedHash)
+        {
+            cssColor = "color:#198754";  // vert = partagé
+            title = "Shared with all cluster members: " + memberHash;
+        }
+        else
+        {
+            cssColor = "color:#6c757d";  // gris = unique à ce membre
+            title = memberHash;
+        }
+
+        builder.OpenElement(0, "span");
+        builder.AddAttribute(1, "class", "font-monospace");
+        builder.AddAttribute(2, "style", $"font-size:0.65rem;{cssColor}");
+        builder.AddAttribute(3, "title", title);
+        builder.AddContent(4, display);
+        builder.CloseElement();
+    };
+}

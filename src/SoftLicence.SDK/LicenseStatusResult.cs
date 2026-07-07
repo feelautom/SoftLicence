@@ -26,8 +26,8 @@ namespace SoftLicence.SDK
             LicenseFile = licenseFile;
         }
 
-        public static LicenseStatusResult Ok(string status, string? licenseFile = null) =>
-            new LicenseStatusResult(true, status, StatusErrorCode.None, null, licenseFile);
+        public static LicenseStatusResult Ok(string status, string? licenseFile = null, string? errorMessage = null) =>
+            new LicenseStatusResult(true, status, StatusErrorCode.None, errorMessage, licenseFile);
 
         public static LicenseStatusResult NotFound() =>
             new LicenseStatusResult(true, "NOT_FOUND", StatusErrorCode.None, null);

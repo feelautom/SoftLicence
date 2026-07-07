@@ -15,7 +15,7 @@ namespace SoftLicence.SDK
         /// <summary>
         /// Vérifie le statut d'une licence en ligne.
         /// </summary>
-        Task<LicenseStatusResult> CheckStatusAsync(string licenseKey, string appName, string? appId = null);
+        Task<LicenseStatusResult> CheckStatusAsync(string licenseKey, string appName, string? appId = null, string? appVersion = null);
 
         /// <summary>
         /// Valide une licence pour un matériel spécifique (Signature RSA + Hardware ID + Expiration).

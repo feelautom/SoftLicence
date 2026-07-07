@@ -20,6 +20,9 @@ namespace SoftLicence.Server.Data
         // Secret pour l'Admin API (optionnel si on gère l'auth autrement, mais utile pour simple API Key)
         public string ApiSecret { get; set; } = Guid.NewGuid().ToString("N");
 
+        // Version minimum autorisée (auto-ban HWID si version inférieure via télémétrie)
+        public string? MinimumAllowedVersion { get; set; }
+
         // Hiérarchie produit / plugin
         public Guid? ParentProductId { get; set; }
         public Product? ParentProduct { get; set; }
@@ -30,5 +33,6 @@ namespace SoftLicence.Server.Data
         public ICollection<LicenseType> LicenseTypes { get; set; } = new List<LicenseType>();
         public ICollection<TelemetryRecord> TelemetryRecords { get; set; } = new List<TelemetryRecord>();
         public ICollection<ProductWebhook> Webhooks { get; set; } = new List<ProductWebhook>();
+        public ICollection<AnalyticsApiKey> AnalyticsApiKeys { get; set; } = new List<AnalyticsApiKey>();
     }
 }

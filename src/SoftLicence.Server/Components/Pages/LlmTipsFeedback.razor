@@ -1,0 +1,403 @@
+@page "/llm-tips-feedback"
+@inject SoftLicence.Server.Services.AuthService Auth
+@inject SoftLicence.Server.Services.LlmTipFeedbackService FeedbackService
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@inject IDbContextFactory<LicenseDbContext> DbFactory
+@using System.Text.Json
+@using SoftLicence.Server.Data
+@using SoftLicence.Server.Models
+@using SoftLicence.Server.Services
+@using Microsoft.EntityFrameworkCore
+
+<PageTitle>LLM Tips Feedback</PageTitle>
+
+@if (!isAuthorized)
+{
+    <div class="text-center py-5">
+        <h2 class="text-white">Acces refuse</h2>
+        <p class="text-muted">Vous n'avez pas les permissions necessaires.</p>
+    </div>
+}
+else
+{
+    <div class="d-flex justify-content-between align-items-start mb-4 flex-wrap gap-3">
+        <div>
+            <h3 class="mb-0">LLM Tips Feedback</h3>
+            <p class="text-muted small mb-0">Remontees produit anonymisees, separees de la telemetrie standard.</p>
+        </div>
+        <div class="d-flex gap-2 align-items-center flex-wrap justify-content-end">
+            <select class="form-select form-select-sm" style="width: 180px;" @bind="selectedProductId">
+                <option value="">Tous les produits</option>
+                @foreach (var product in products)
+                {
+                    <option value="@product.Id">@product.Name</option>
+                }
+            </select>
+            <div class="btn-group btn-group-sm">
+                <button class="btn @(selectedDays == 7 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetDays(7)">7j</button>
+                <button class="btn @(selectedDays == 30 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetDays(30)">30j</button>
+                <button class="btn @(selectedDays == 90 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetDays(90)">90j</button>
+                <button class="btn @(selectedDays == 0 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetDays(0)">Tout</button>
+            </div>
+            <button class="btn btn-outline-secondary btn-sm" @onclick="LoadData" disabled="@loading">Actualiser</button>
+        </div>
+    </div>
+
+    <div class="card p-3 mb-4">
+        <div class="row g-2 align-items-end">
+            <div class="col-md-2">
+                <label class="form-label small text-muted">Categorie</label>
+                <select class="form-select form-select-sm" @bind="selectedCategory">
+                    <option value="">Toutes</option>
+                    @foreach (var category in categories)
+                    {
+                        <option value="@category">@category</option>
+                    }
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small text-muted">Version</label>
+                <select class="form-select form-select-sm" @bind="selectedVersion">
+                    <option value="">Toutes</option>
+                    @foreach (var version in versions)
+                    {
+                        <option value="@version">@version</option>
+                    }
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small text-muted">Statut</label>
+                <select class="form-select form-select-sm" @bind="selectedReviewStatus">
+                    <option value="">Tous</option>
+                    @foreach (var status in LlmTipFeedbackService.ReviewStatuses)
+                    {
+                        <option value="@status">@status</option>
+                    }
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small text-muted">Tri</label>
+                <select class="form-select form-select-sm" @bind="selectedSort">
+                    <option value="occurrences">Occurrences</option>
+                    <option value="lastseen">Derniere remontee</option>
+                    <option value="firstseen">Premiere remontee</option>
+                    <option value="upvotes">Upvotes</option>
+                    <option value="title">Titre</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small text-muted">Recherche</label>
+                <input class="form-control form-control-sm" placeholder="Titre, description ou hash" @bind="searchText" @bind:event="oninput" />
+            </div>
+            <div class="col-md-1 d-grid">
+                <button class="btn btn-primary btn-sm" @onclick="LoadData" disabled="@loading">Filtrer</button>
+            </div>
+        </div>
+    </div>
+
+    @if (loading)
+    {
+        <div class="text-center py-5">
+            <div class="spinner-border text-primary" role="status"></div>
+            <p class="mt-2 text-muted">Chargement en cours...</p>
+        </div>
+    }
+    else if (overview != null)
+    {
+        <div class="row g-3 mb-4">
+            <div class="col-md-3">
+                <div class="card stat-card h-100">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small fw-bold">Tips uniques</h6>
+                        <h2 class="mb-0">@overview.TotalTips</h2>
+                        <div class="small text-muted mt-2">@overview.TotalOccurrences occurrences</div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card stat-card h-100" style="border-left-color:#0dcaf0;">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small fw-bold">Evenements usage</h6>
+                        <h2 class="mb-0">@overview.TotalEvents</h2>
+                        <div class="small text-muted mt-2">Table dediee LlmTipFeedbackEvents</div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card stat-card h-100" style="border-left-color:#ffc107;">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small fw-bold">Nouveaux</h6>
+                        <h2 class="mb-0">@overview.NewTips</h2>
+                        <div class="small text-muted mt-2">Statut review = new</div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card stat-card h-100" style="border-left-color:#198754;">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small fw-bold">A traiter</h6>
+                        <h2 class="mb-0">@overview.NeedsReview</h2>
+                        <div class="small text-muted mt-2">Hors ignored/fixed</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row g-3 mb-4">
+            <div class="col-md-4">
+                <div class="card p-3 h-100">
+                    <h6 class="mb-3">Top categories</h6>
+                    @foreach (var item in overview.TopCategories)
+                    {
+                        <div class="d-flex align-items-center mb-2">
+                            <span class="small text-muted me-2" style="min-width: 120px;">@item.Name</span>
+                            <div class="flex-fill bar-container rounded" style="height: 18px;">
+                                <div class="bar-fill bg-primary rounded h-100" style="width:@Percent(item.Count, overview.TopCategories)%"></div>
+                            </div>
+                            <span class="small text-muted ms-2">@item.Count</span>
+                        </div>
+                    }
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card p-3 h-100">
+                    <h6 class="mb-3">Top versions</h6>
+                    @foreach (var item in overview.TopVersions)
+                    {
+                        <div class="d-flex align-items-center mb-2">
+                            <span class="small text-muted me-2" style="min-width: 120px;">@item.Name</span>
+                            <div class="flex-fill bar-container rounded" style="height: 18px;">
+                                <div class="bar-fill bg-info rounded h-100" style="width:@Percent(item.Count, overview.TopVersions)%"></div>
+                            </div>
+                            <span class="small text-muted ms-2">@item.Count</span>
+                        </div>
+                    }
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card p-3 h-100">
+                    <h6 class="mb-3">Evolution recente</h6>
+                    @{
+                        var maxDaily = overview.DailyTips.Count > 0 ? overview.DailyTips.Max(d => Math.Max(d.Tips, d.Events)) : 1;
+                        if (maxDaily == 0) maxDaily = 1;
+                    }
+                    <div class="chart-container d-flex align-items-end justify-content-around" style="height: 130px;">
+                        @foreach (var day in overview.DailyTips.TakeLast(30))
+                        {
+                            var tipPct = (int)(day.Tips * 100.0 / maxDaily);
+                            var eventPct = (int)(day.Events * 100.0 / maxDaily);
+                            <div class="d-flex flex-column align-items-center flex-fill" style="min-width:0;">
+                                <div class="bar-container position-relative rounded" style="height: 105px; width: 14px;">
+                                    <div class="bar-fill bg-info position-absolute bottom-0 w-100 rounded-bottom" style="height:@eventPct%; opacity:.45;"></div>
+                                    <div class="bar-fill bg-primary position-absolute bottom-0 w-100 rounded-bottom" style="height:@tipPct%;"></div>
+                                </div>
+                                <span class="mt-1 text-muted" style="font-size:.55rem;">@TZ.ToLocal(day.Date).ToString("dd/MM")</span>
+                            </div>
+                        }
+                    </div>
+                    <div class="small text-muted mt-2"><span class="legend-dot bg-primary"></span> tips <span class="legend-dot bg-info ms-3"></span> usage</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card p-0">
+            <div class="table-responsive">
+                <table class="table table-sm table-hover align-middle mb-0" style="font-size:.83rem;">
+                    <thead>
+                        <tr>
+                            <th>Titre</th>
+                            <th>Categorie</th>
+                            <th>Severite</th>
+                            <th>Confiance</th>
+                            <th>Version</th>
+                            <th>Contexte</th>
+                            <th class="text-end">Occ.</th>
+                            <th>Derniere vue</th>
+                            <th>Review</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var tip in overview.Tips)
+                        {
+                            var expanded = selectedTip?.Id == tip.Id;
+                            <tr class="@(expanded ? "table-active" : "")" style="cursor:pointer" @onclick="() => SelectTip(tip.Id)">
+                                <td>
+                                    <div class="fw-semibold">@tip.Title</div>
+                                    <code class="small text-muted">@ShortHash(tip.ContentHash)</code>
+                                </td>
+                                <td><span class="badge bg-secondary">@Display(tip.Category)</span></td>
+                                <td><span class="badge @SeverityBadge(tip.Severity)">@Display(tip.Severity)</span></td>
+                                <td><span class="badge bg-info text-dark">@Display(tip.Confidence)</span></td>
+                                <td>@Display(tip.AppVersion)</td>
+                                <td class="text-muted small">@Display(tip.LicenseEdition) · @Display(tip.RequestSource) · @Display(tip.RuntimeMode)/@Display(tip.UiMode)</td>
+                                <td class="text-end fw-bold">@tip.OccurrenceCount</td>
+                                <td>@TZ.ToLocal(tip.LastSeenAtUtc).ToString("dd/MM/yyyy HH:mm")</td>
+                                <td>
+                                    <select class="form-select form-select-sm" value="@tip.ReviewStatus" @onclick:stopPropagation="true" @onchange="e => UpdateReviewStatus(tip.Id, e.Value?.ToString())">
+                                        @foreach (var status in LlmTipFeedbackService.ReviewStatuses)
+                                        {
+                                            <option value="@status">@status</option>
+                                        }
+                                    </select>
+                                </td>
+                            </tr>
+                            @if (expanded && selectedTip != null)
+                            {
+                                <tr>
+                                    <td colspan="9">
+                                        <div class="p-3 border rounded bg-black bg-opacity-25">
+                                            <div class="row g-3">
+                                                <div class="col-md-7">
+                                                    <h6 class="mb-2">Detail anonymise</h6>
+                                                    <p class="mb-2">@Display(selectedTip.Description)</p>
+                                                    <div class="small text-muted">
+                                                        Hash complet: <code>@selectedTip.ContentHash</code><br />
+                                                        Premier signal: @TZ.ToLocal(selectedTip.FirstSeenAtUtc).ToString("dd/MM/yyyy HH:mm") ·
+                                                        Soumis: @(selectedTip.SubmittedAtUtc.HasValue ? TZ.ToLocal(selectedTip.SubmittedAtUtc.Value).ToString("dd/MM/yyyy HH:mm") : "-")<br />
+                                                        App: @Display(selectedTip.AppName) @Display(selectedTip.AppVersion) · Licence: @Display(selectedTip.LicenseEdition)
+                                                    </div>
+                                                </div>
+                                                <div class="col-md-5">
+                                                    <h6 class="mb-2">Payload JSON anonymise</h6>
+                                                    <pre class="small mb-0 p-2 rounded bg-dark text-light llm-json">@FormatJson(selectedTip.PayloadJson)</pre>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    }
+}
+
+<style>
+    .bar-container { background-color: rgba(255,255,255,0.06) !important; overflow: hidden; }
+    .bar-fill { transition: width .25s ease, height .25s ease; }
+    .legend-dot { display:inline-block; width:10px; height:10px; border-radius:50%; vertical-align:middle; }
+    .llm-json { max-height: 280px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+</style>
+
+@code {
+    private bool isAuthorized;
+    private bool loading;
+    private List<Product> products = new();
+    private List<string> categories = new();
+    private List<string> versions = new();
+    private string selectedProductId = "";
+    private string selectedCategory = "";
+    private string selectedVersion = "";
+    private string selectedReviewStatus = "";
+    private string selectedSort = "occurrences";
+    private string searchText = "";
+    private int selectedDays = 30;
+    private LlmTipFeedbackAdminOverview? overview;
+    private LlmTipFeedbackTipDetail? selectedTip;
+
+    protected override async Task OnInitializedAsync()
+    {
+        isAuthorized = await Auth.HasPermissionAsync("telemetry.view");
+        if (!isAuthorized) return;
+
+        await LoadFilterOptions();
+        await LoadData();
+    }
+
+    private async Task LoadFilterOptions()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        products = await db.Products.AsNoTracking().OrderBy(p => p.Name).ToListAsync();
+        categories = await db.LlmTipFeedbackTips.AsNoTracking()
+            .Where(t => t.Category != null && t.Category != "")
+            .Select(t => t.Category!)
+            .Distinct()
+            .OrderBy(c => c)
+            .ToListAsync();
+        versions = await db.LlmTipFeedbackTips.AsNoTracking()
+            .Where(t => t.AppVersion != null && t.AppVersion != "")
+            .Select(t => t.AppVersion!)
+            .Distinct()
+            .OrderByDescending(v => v)
+            .ToListAsync();
+    }
+
+    private async Task LoadData()
+    {
+        loading = true;
+        selectedTip = null;
+
+        overview = await FeedbackService.GetAdminOverviewAsync(new LlmTipFeedbackAdminQuery
+        {
+            ProductId = Guid.TryParse(selectedProductId, out var productId) ? productId : null,
+            Category = EmptyToNull(selectedCategory),
+            AppVersion = EmptyToNull(selectedVersion),
+            ReviewStatus = EmptyToNull(selectedReviewStatus),
+            Search = EmptyToNull(searchText),
+            SortBy = selectedSort,
+            Days = selectedDays,
+            Take = 200
+        });
+
+        loading = false;
+    }
+
+    private async Task SetDays(int days)
+    {
+        selectedDays = days;
+        await LoadData();
+    }
+
+    private async Task SelectTip(Guid id)
+    {
+        selectedTip = selectedTip?.Id == id
+            ? null
+            : await FeedbackService.GetTipDetailAsync(id);
+    }
+
+    private async Task UpdateReviewStatus(Guid id, string? status)
+    {
+        if (string.IsNullOrWhiteSpace(status)) return;
+        await FeedbackService.UpdateReviewStatusAsync(id, status);
+        await LoadData();
+    }
+
+    private static string Display(string? value) => string.IsNullOrWhiteSpace(value) ? "-" : value;
+
+    private static string? EmptyToNull(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private static string ShortHash(string hash) => hash.Length <= 16 ? hash : $"{hash[..8]}...{hash[^8..]}";
+
+    private static string Percent(int count, IReadOnlyList<LlmTipFeedbackGroupedCount> values)
+    {
+        var max = values.Count == 0 ? 1 : values.Max(v => v.Count);
+        if (max == 0) max = 1;
+        return $"{Math.Max(5, (int)(count * 100.0 / max))}%";
+    }
+
+    private static string SeverityBadge(string? severity)
+    {
+        return severity?.ToLowerInvariant() switch
+        {
+            "error" or "critical" => "bg-danger",
+            "warning" => "bg-warning text-dark",
+            "info" => "bg-info text-dark",
+            _ => "bg-secondary"
+        };
+    }
+
+    private static string FormatJson(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return JsonSerializer.Serialize(document.RootElement, new JsonSerializerOptions { WriteIndented = true });
+        }
+        catch
+        {
+            return json;
+        }
+    }
+}

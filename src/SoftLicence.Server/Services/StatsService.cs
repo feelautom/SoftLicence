@@ -1,22 +1,31 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using SoftLicence.Server.Data;
-
+using System.Diagnostics;
 namespace SoftLicence.Server.Services
 {
     public class StatsService
     {
         private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
+        private readonly ILogger<StatsService> _logger;
 
-        public StatsService(IDbContextFactory<LicenseDbContext> dbFactory)
+        public StatsService(IDbContextFactory<LicenseDbContext> dbFactory, ILogger<StatsService>? logger = null)
         {
             _dbFactory = dbFactory;
+            _logger = logger ?? NullLogger<StatsService>.Instance;
         }
 
         public async Task<DashboardStats> GetDashboardStatsAsync()
         {
+            var totalSw = Stopwatch.StartNew();
             using var db = await _dbFactory.CreateDbContextAsync();
+            if (db.Database.IsRelational())
+            {
+                db.Database.SetCommandTimeout(10); // timeout court pour éviter de bloquer le dashboard
+            }
 
             var stats = new DashboardStats();
+            var stepSw = Stopwatch.StartNew();
 
             // KPIs
             stats.TotalProducts = await db.Products.CountAsync();
@@ -24,54 +33,66 @@ namespace SoftLicence.Server.Services
             var now = DateTime.UtcNow;
             stats.ActiveLicenses = await db.Licenses.CountAsync(l => l.IsActive && (!l.ExpirationDate.HasValue || l.ExpirationDate > now));
             stats.RevokedLicenses = await db.Licenses.CountAsync(l => !l.IsActive);
+            LogStep("kpis", stepSw);
 
             // Audit Stats (Derniers 30 jours)
-            var since = DateTime.UtcNow.AddDays(-30);
-            var logs = await db.AccessLogs
-                .Where(l => l.Timestamp >= since)
-                .Select(l => new { l.ResultStatus, l.Timestamp, l.AppName, l.Endpoint, l.IsSuccess })
-                .ToListAsync();
+            stepSw.Restart();
+            var since = now.AddDays(-30);
+            var logsQuery = db.AccessLogs.AsNoTracking().Where(l => l.Timestamp >= since);
 
-            stats.TotalRequests = logs.Count;
-            stats.FailedRequests = logs.Count(l => !l.IsSuccess);
-            
-            stats.ActivationCount = logs.Count(l => l.Endpoint == "ACTIVATE" && l.IsSuccess);
-            stats.CheckInCount = logs.Count(l => l.Endpoint == "CHECK" && l.IsSuccess);
+            stats.TotalRequests = await logsQuery.CountAsync();
+            stats.FailedRequests = await logsQuery.CountAsync(l => !l.IsSuccess);
+            stats.ActivationCount = await logsQuery.CountAsync(l => l.Endpoint == "ACTIVATE" && l.IsSuccess);
+            stats.CheckInCount = await logsQuery.CountAsync(l => l.Endpoint == "CHECK" && l.IsSuccess);
+            LogStep("audit-30d-counts", stepSw);
 
-            // Graphique 7 jours - Activité
+            // Graphique 7 jours - Activité (groupé par jour Europe/Paris)
+            stepSw.Restart();
             for (int i = 6; i >= 0; i--)
             {
-                var date = DateTime.UtcNow.Date.AddDays(-i);
-                var count = logs.Count(l => l.Timestamp.Date == date);
-                var fail = logs.Count(l => l.Timestamp.Date == date && !l.IsSuccess);
+                var parisDate = TimeZoneService.ParisDateDaysAgo(i);
+                var (startUtc, endUtc) = TimeZoneService.ParisDateToUtcRange(parisDate);
+                var dayQuery = db.AccessLogs.AsNoTracking().Where(l => l.Timestamp >= startUtc && l.Timestamp < endUtc);
+                var count = await dayQuery.CountAsync();
+                var fail = await dayQuery.CountAsync(l => !l.IsSuccess);
 
                 stats.ActivityChart.Add(new DailyActivity
                 {
-                    Date = date,
+                    Date = parisDate,
                     Total = count,
                     Errors = fail
                 });
             }
+            LogStep("activity-chart-7d", stepSw);
 
-            // Graphique 7 jours - Licences
-            var sinceLic = DateTime.UtcNow.Date.AddDays(-6);
-            var recentLicenses = await db.Licenses
-                .Where(l => l.CreationDate >= sinceLic)
-                .Select(l => new { l.CreationDate, l.ActivationDate })
-                .ToListAsync();
-
+            // Graphique 7 jours - Licences (groupé par jour Europe/Paris)
+            stepSw.Restart();
             for (int i = 6; i >= 0; i--)
             {
-                var date = DateTime.UtcNow.Date.AddDays(-i);
+                var parisDate = TimeZoneService.ParisDateDaysAgo(i);
+                var (startUtc, endUtc) = TimeZoneService.ParisDateToUtcRange(parisDate);
                 stats.LicenseChart.Add(new DailyLicenseActivity
                 {
-                    Date = date,
-                    Created = recentLicenses.Count(l => l.CreationDate.Date == date),
-                    Activated = recentLicenses.Count(l => l.ActivationDate?.Date == date)
+                    Date = parisDate,
+                    Created = await db.Licenses.AsNoTracking().CountAsync(l => l.CreationDate >= startUtc && l.CreationDate < endUtc),
+                    Activated = await db.Licenses.AsNoTracking().CountAsync(l => l.ActivationDate.HasValue && l.ActivationDate.Value >= startUtc && l.ActivationDate.Value < endUtc)
                 });
             }
+            LogStep("license-chart-7d", stepSw);
+
+            _logger.LogInformation(
+                "Dashboard stats loaded in {ElapsedMs}ms: products={Products}, licenses={Licenses}, requests30d={Requests30d}",
+                totalSw.ElapsedMilliseconds,
+                stats.TotalProducts,
+                stats.TotalLicenses,
+                stats.TotalRequests);
 
             return stats;
+        }
+
+        private void LogStep(string step, Stopwatch sw)
+        {
+            _logger.LogInformation("Dashboard stats step {Step} completed in {ElapsedMs}ms", step, sw.ElapsedMilliseconds);
         }
     }
 

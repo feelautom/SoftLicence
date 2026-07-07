@@ -161,6 +161,47 @@ public class SoftLicenceClientTests
     }
 
     [Fact]
+    public async Task CheckStatusAsync_ShouldSendAppVersion_WhenProvided()
+    {
+        string? capturedPayload = null;
+        var handler = new MockHttpMessageHandler(request =>
+        {
+            capturedPayload = request.Content?.ReadAsStringAsync().Result;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"Status\":\"VALID\"}", Encoding.UTF8, "application/json")
+            };
+        });
+
+        var client = CreateClient(handler);
+        await client.CheckStatusAsync("KEY-123", "TestApp", appId: "APP-GUID-123", appVersion: "1.1.91");
+
+        Assert.NotNull(capturedPayload);
+        Assert.Contains("\"AppId\":\"APP-GUID-123\"", capturedPayload);
+        Assert.Contains("\"AppVersion\":\"1.1.91\"", capturedPayload);
+    }
+
+    [Fact]
+    public async Task CheckStatusAsync_ShouldReturnServerMessage_WhenStatusContainsErrorMessage()
+    {
+        var handler = new MockHttpMessageHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "{\"status\":\"FREEMIUM_HWID_ALREADY_CONSUMED\",\"errorMessage\":\"Freemium access has already been used on this machine.\"}",
+                    Encoding.UTF8,
+                    "application/json")
+            });
+
+        var client = CreateClient(handler);
+        var result = await client.CheckStatusAsync("KEY-123", "TestApp");
+
+        Assert.True(result.Success);
+        Assert.Equal("FREEMIUM_HWID_ALREADY_CONSUMED", result.Status);
+        Assert.Equal("Freemium access has already been used on this machine.", result.ErrorMessage);
+    }
+
+    [Fact]
     public async Task CheckStatusAsync_ShouldReturnNotFound_When404()
     {
         var handler = new MockHttpMessageHandler(_ =>

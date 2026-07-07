@@ -1,5 +1,5 @@
 @page "/telemetry"
-@inject LicenseDbContext Db
+@inject IDbContextFactory<LicenseDbContext> DbFactory
 @inject SoftLicence.Server.Services.TimeZoneService TZ
 @inject IStringLocalizer<SharedResource> L
 @using SoftLicence.Server.Data
@@ -218,7 +218,8 @@
 
     protected override async Task OnInitializedAsync()
     {
-        Products = await Db.Products.OrderBy(p => p.Name).ToListAsync();
+        using var db = await DbFactory.CreateDbContextAsync();
+        Products = await db.Products.AsNoTracking().OrderBy(p => p.Name).ToListAsync();
         
         if (!string.IsNullOrEmpty(ProductId))
         {
@@ -254,7 +255,9 @@
     {
         try
         {
-            var query = Db.TelemetryRecords
+            using var db = await DbFactory.CreateDbContextAsync();
+            var query = db.TelemetryRecords
+                .AsNoTracking()
                 .AsSplitQuery()
                 .Include(t => t.Product)
                 .Include(t => t.EventData)

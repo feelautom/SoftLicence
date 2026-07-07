@@ -16,6 +16,7 @@ public class NotificationService
     {
         public const string SecurityIpBanned = "Security.IpBanned";
         public const string SecurityZombieDetected = "Security.ZombieDetected";
+        public const string SecurityHwidReuseDetected = "Security.HwidReuseDetected";
         public const string SecurityAuthFailure = "Security.AuthFailure";
         public const string LicenseCreated = "License.Created";
         public const string LicenseActivated = "License.Activated";
@@ -27,6 +28,7 @@ public class NotificationService
     {
         { Triggers.SecurityIpBanned, "🚨 IP Bannue (Sécurité)" },
         { Triggers.SecurityZombieDetected, "🧟 Zombie Détecté (Fraude)" },
+        { Triggers.SecurityHwidReuseDetected, "🚨 HWID réutilisé (Multi-compte)" },
         { Triggers.SecurityAuthFailure, "⚠️ Echec Authentification (Admin)" },
         { Triggers.LicenseCreated, "✨ Nouvelle Licence Créée" },
         { Triggers.LicenseActivated, "✅ Licence Activée" },
@@ -51,6 +53,7 @@ public class NotificationService
     {
         Triggers.SecurityIpBanned => "no_entry",
         Triggers.SecurityZombieDetected => "zombie",
+        Triggers.SecurityHwidReuseDetected => "warning",
         Triggers.SecurityAuthFailure => "warning",
         Triggers.LicenseCreated => "sparkles",
         Triggers.LicenseActivated => "white_check_mark",

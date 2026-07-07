@@ -1,7 +1,3 @@
-networks:
-  softlicence:
-    driver: bridge
-
 services:
   licencedb:
     image: postgres:16
@@ -16,9 +12,11 @@ services:
       - POSTGRES_USER=developer
       - POSTGRES_PASSWORD=${DB_PASSWORD:-CHANGE_ME_DB_PASSWORD}
     volumes:
-      - /home/developer/softlicence/pgdata:/var/lib/postgresql/data
+      - softlicence-db-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U developer -d db_softlicence"]
+      test:
+        - CMD-SHELL
+        - pg_isready -U developer -d db_softlicence
       interval: 3s
       timeout: 3s
       retries: 10
@@ -26,36 +24,35 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '0.75'
+          cpus: "0.75"
           memory: 1024M
 
   server:
     image: softlicence-server
-    build:
-      context: ../
-      dockerfile: src/SoftLicence.Server/Dockerfile
     networks:
       - softlicence
+      - Docker-network
     depends_on:
       licencedb:
         condition: service_healthy
     volumes:
-      # Dossiers locaux pour gestion via WinSCP (Chemins absolus Docker)
-      - /home/developer/softlicence/data:/app/data
-      - /home/developer/softlicence:/app/config
+      - softlicence-data:/app/data
+      - softlicence-config:/app/config
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_FORWARDEDHEADERS_ENABLED=true
       - RCLONE_CONFIG=/app/config/rclone.conf
       - DB_TYPE=PostgreSQL
       - ConnectionStrings__DefaultConnection=Host=licencedb;Database=db_softlicence;Username=developer;Password=${DB_PASSWORD:-CHANGE_ME_DB_PASSWORD}
       - RetentionSettings__CleanupEnabled=true
-      # On laisse Docker injecter ces valeurs via les Variables d'Environnement
+      - RetentionSettings__AuditLogsDays=${RetentionSettings__AuditLogsDays:-30}
+      - RetentionSettings__TelemetryDays=${RetentionSettings__TelemetryDays:-90}
+      - RetentionSettings__CleanupIntervalHours=${RetentionSettings__CleanupIntervalHours:-24}
       - AdminSettings__Username=${AdminSettings__Username:-admin}
       - AdminSettings__Password=${AdminSettings__Password:-CHANGE_ME_ADMIN_PASSWORD}
       - AdminSettings__ApiSecret=${AdminSettings__ApiSecret:-CHANGE_ME_RANDOM_SECRET}
       - AdminSettings__LoginPath=${AdminSettings__LoginPath:-CHANGE_ME_LOGIN_PATH}
       - AdminSettings__AllowedIps=${AdminSettings__AllowedIps:-}
-      # SMTP Settings
       - SmtpSettings__Host
       - SmtpSettings__Port
       - SmtpSettings__Username
@@ -63,12 +60,39 @@ services:
       - SmtpSettings__FromEmail
       - SmtpSettings__FromName
       - SmtpSettings__EnableSsl
+      - BackupSettings__Enabled=${BackupSettings__Enabled:-false}
+      - BackupSettings__RcloneRemote=${BackupSettings__RcloneRemote:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - BUGTRACE_BASE_URL=${BUGTRACE_BASE_URL:-}
+      - BUGTRACE_PROJECT_TOKEN=${BUGTRACE_PROJECT_TOKEN:-}
+      - BUGTRACE_PROJECT_ID=${BUGTRACE_PROJECT_ID:-}
       - FORCE_DB_RESET=false
     restart: unless-stopped
     deploy:
       resources:
         limits:
-          cpus: '0.75'
+          cpus: "0.75"
           memory: 1024M
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=Docker-network"
+      - "traefik.http.routers.softlicence-web.rule=Host(`softlicence.EXAMPLE.COM`) || Host(`telemetrie.EXAMPLE.COM`)"
+      - "traefik.http.routers.softlicence-web.entrypoints=websecure"
+      - "traefik.http.routers.softlicence-web.service=softlicence-web"
+      - "traefik.http.routers.softlicence-web.tls.certresolver=letsencrypt"
+      - "traefik.http.services.softlicence-web.loadbalancer.server.port=8080"
+      - "traefik.http.services.softlicence-web.loadbalancer.responseForwarding.flushInterval=-1"
 
-# Les volumes nommés sont remplacés par des bind mounts (dossiers locaux)
+networks:
+  softlicence:
+    driver: bridge
+  Docker-network:
+    external: true
+
+volumes:
+  softlicence-db-data:
+    external: true
+  softlicence-data:
+    external: true
+  softlicence-config:
+    external: true

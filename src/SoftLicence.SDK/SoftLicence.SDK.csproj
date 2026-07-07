@@ -9,7 +9,7 @@
 
     <!-- NuGet Configuration -->
     <PackageId>SoftLicence.SDK</PackageId>
-    <Version>1.1.8</Version>
+    <Version>0.0.0-local</Version>
     <Authors>FeelAutom</Authors>
     <Company>FeelAutom</Company>
     <Description>SDK officiel pour l'intégration de la protection SoftLicence dans les applications .NET.</Description>

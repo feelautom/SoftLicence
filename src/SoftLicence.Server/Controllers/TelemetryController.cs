@@ -9,18 +9,24 @@ namespace SoftLicence.Server.Controllers;
 
 [ApiController]
 [Route("api/telemetry")]
-[Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("PublicAPI")]
+[Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("TelemetryAPI")]
 public class TelemetryController : ControllerBase
 {
     private readonly TelemetryService _telemetryService;
     private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
     private readonly ILogger<TelemetryController> _logger;
+    private readonly SettingsService _settings;
 
-    public TelemetryController(TelemetryService telemetryService, IDbContextFactory<LicenseDbContext> dbFactory, ILogger<TelemetryController> logger)
+    private static HashSet<string> _excludedHwidsCache = new(StringComparer.OrdinalIgnoreCase);
+    private static DateTime _excludedHwidsCacheExpiry = DateTime.MinValue;
+    private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(5);
+
+    public TelemetryController(TelemetryService telemetryService, IDbContextFactory<LicenseDbContext> dbFactory, ILogger<TelemetryController> logger, SettingsService settings)
     {
         _telemetryService = telemetryService;
         _dbFactory = dbFactory;
         _logger = logger;
+        _settings = settings;
     }
 
     private void TagLog(TelemetryBaseRequest req)
@@ -50,6 +56,19 @@ public class TelemetryController : ControllerBase
         return false;
     }
 
+    private async Task<bool> IsExcludedHardwareAsync(string hardwareId)
+    {
+        if (DateTime.UtcNow >= _excludedHwidsCacheExpiry)
+        {
+            var raw = await _settings.GetSettingAsync("TelemetryExcludedHardwareIds", "") ?? "";
+            _excludedHwidsCache = raw
+                .Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            _excludedHwidsCacheExpiry = DateTime.UtcNow.Add(CacheTtl);
+        }
+        return _excludedHwidsCache.Contains(hardwareId);
+    }
+
     private string GetClientIp()
     {
         var forwarded = Request.Headers["X-Forwarded-For"].FirstOrDefault();
@@ -61,6 +80,7 @@ public class TelemetryController : ControllerBase
     public async Task<IActionResult> PostEvent([FromBody] TelemetryEventRequest req)
     {
         if (!await IsValidClientAsync(req)) return Unauthorized();
+        if (await IsExcludedHardwareAsync(req.HardwareId)) return Ok();
         try
         {
             await _telemetryService.SaveEventAsync(req, GetClientIp());
@@ -77,6 +97,7 @@ public class TelemetryController : ControllerBase
     public async Task<IActionResult> PostDiagnostic([FromBody] TelemetryDiagnosticRequest req)
     {
         if (!await IsValidClientAsync(req)) return Unauthorized();
+        if (await IsExcludedHardwareAsync(req.HardwareId)) return Ok();
         try
         {
             await _telemetryService.SaveDiagnosticAsync(req, GetClientIp());
@@ -93,6 +114,7 @@ public class TelemetryController : ControllerBase
     public async Task<IActionResult> PostError([FromBody] TelemetryErrorRequest req)
     {
         if (!await IsValidClientAsync(req)) return Unauthorized();
+        if (await IsExcludedHardwareAsync(req.HardwareId)) return Ok();
         try
         {
             await _telemetryService.SaveErrorAsync(req, GetClientIp());

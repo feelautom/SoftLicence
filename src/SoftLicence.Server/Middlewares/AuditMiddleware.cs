@@ -62,7 +62,15 @@ namespace SoftLicence.Server.Middlewares
             if (clientIp == "Unknown") clientIp = context.Connection.RemoteIpAddress?.ToString() ?? "Unknown";
 
             // 1. VÉRIFICATION BAN (PRIORITÉ ABSOLUE)
-            if (await security.IsBannedAsync(clientIp))
+            // Exceptions : télémétrie et canary ping restent accessibles même pour les IPs bannies
+            // - Télémétrie : on veut continuer à recevoir les données de nos clients légitimes
+            // - Health ping (/api/health/ping) : c'est l'endpoint que T-IA Connect utilise pour envoyer
+            //   ses canary events, même depuis une machine patchée ou bannie. Le bloquer rendrait
+            //   le serveur aveugle sur l'activité de l'attaquant. Le HealthController gère lui-même
+            //   la logique "already banned" (incrément du compteur de répétition, sans re-ban).
+            bool isTelemetryPath = path.StartsWith("/api/telemetry");
+            bool isHealthPingPath = path == "/api/health/ping";
+            if (!isTelemetryPath && !isHealthPingPath && await security.IsBannedAsync(clientIp))
             {
                 context.Response.StatusCode = 403;
                 await context.Response.WriteAsync("Access Denied (Banned)");
@@ -145,20 +153,38 @@ namespace SoftLicence.Server.Middlewares
                     requestBodyContent = await reader.ReadToEndAsync();
                     context.Request.Body.Position = 0; // Remise à zéro pour le contrôleur
                 }
+            }
+            catch (BadHttpRequestException ex) when (IsClientAbort(ex))
+            {
+                _logger.LogDebug(ex, "Request body capture skipped because the client aborted the request");
+                requestBodyContent = "[client aborted while reading request body]";
             } catch { /* Capture failure */ }
 
             var sw = Stopwatch.StartNew();
             var originalBodyStream = context.Response.Body;
             using var responseBody = new MemoryStream();
             context.Response.Body = responseBody;
+            var requestAbortedByClient = false;
             
             try
             {
                 await _next(context);
             }
+            catch (BadHttpRequestException ex) when (IsClientAbort(ex))
+            {
+                _logger.LogDebug(ex, "Request aborted by client while processing {Path}", context.Request.Path);
+                requestAbortedByClient = true;
+            }
             finally
             {
                 sw.Stop();
+
+                if (requestAbortedByClient)
+                {
+                    context.Response.Body = originalBodyStream;
+                }
+                else
+                {
                 
                 // --- CAPTURE DU MESSAGE DE RÉPONSE (RECU/ENVOYÉ) ---
                 string responseContent = "";
@@ -190,6 +216,7 @@ namespace SoftLicence.Server.Middlewares
                 var licenseKey = context.Items[LogKeys.LicenseKey]?.ToString() ?? "";
                 var hardwareId = context.Items[LogKeys.HardwareId]?.ToString() ?? "";
                 var endpoint = context.Items[LogKeys.Endpoint]?.ToString() ?? "HTTP_REQUEST";
+                var resultStatusOverride = context.Items[LogKeys.ResultStatusOverride]?.ToString();
 
                 // Auth check (nécessaire pour le tri PORTAL_ENTRY vs ADMIN_PORTAL)
                 var isAuthenticated = context.User.Identity?.IsAuthenticated == true;
@@ -245,9 +272,17 @@ namespace SoftLicence.Server.Middlewares
 
                                     if (statusCode == 404)
                                     {
-                                        // Si déjà banni ou en quarantaine, base 10, sinon base 2
-                                        int basePts = (banCount > 0 || currentScore >= 100) ? 10 : 2;
-                                        await scopedSecurity.ReportThreatAsync(clientIp, basePts * multiplier, $"404 on {requestPath} (Multiplier: x{multiplier})");
+                                        // Endpoints légitimes d'autres produits feelautom qui n'existent pas
+                                        // sur ce serveur — ne pas pénaliser (vrais clients, pas des bots)
+                                        var knownCrossDomainPaths = new[] { "/api/build-id", "/api/updates/check", "/api/internal/" };
+                                        bool isKnownCrossProduct = knownCrossDomainPaths.Any(p => requestPath.StartsWith(p, StringComparison.OrdinalIgnoreCase));
+
+                                        if (!isKnownCrossProduct)
+                                        {
+                                            // Si déjà banni ou en quarantaine, base 10, sinon base 2
+                                            int basePts = (banCount > 0 || currentScore >= 100) ? 10 : 2;
+                                            await scopedSecurity.ReportThreatAsync(clientIp, basePts * multiplier, $"404 on {requestPath} (Multiplier: x{multiplier})");
+                                        }
                                     }
                                     
                                     if (statusCode == 401 || statusCode == 403) 
@@ -274,7 +309,9 @@ namespace SoftLicence.Server.Middlewares
                                     StatusCode = statusCode,
                                     DurationMs = duration,
                                     IsSuccess = statusCode >= 200 && statusCode < 300,
-                                    ResultStatus = GetStatusLabel(statusCode),
+                                    ResultStatus = string.IsNullOrWhiteSpace(resultStatusOverride)
+                                        ? GetStatusLabel(statusCode)
+                                        : resultStatusOverride,
                                     RequestBody = requestBodyContent,
                                     ErrorDetails = responseContent,
                                     UserAgent = userAgent,
@@ -299,6 +336,7 @@ namespace SoftLicence.Server.Middlewares
                         Console.WriteLine($"[AUDIT ERROR] {ex.Message}");
                     }
                 });
+                }
             }
         }
 
@@ -313,5 +351,10 @@ namespace SoftLicence.Server.Middlewares
             500 => "INTERNAL_ERROR",
             _ => $"HTTP_{code}"
         };
+
+        private static bool IsClientAbort(BadHttpRequestException ex)
+        {
+            return ex.Message.Contains("Unexpected end of request content", StringComparison.OrdinalIgnoreCase);
+        }
     }
 }

@@ -1,12 +1,12 @@
 @page "/licenses"
 @inject SoftLicence.Server.Services.AuthService Auth
-@inject LicenseDbContext Db
 @inject IDbContextFactory<LicenseDbContext> DbFactory
 @inject IJSRuntime JS
 @inject SoftLicence.Server.Services.ToastService Toast
 @inject SoftLicence.Server.Services.EmailService Mailer
 @inject SoftLicence.Server.Services.TimeZoneService TZ
 @inject NavigationManager Nav
+@inject SoftLicence.Server.Services.SecurityService Security
 @using SoftLicence.SDK
 @using Microsoft.EntityFrameworkCore
 @using SoftLicence.Server.Components.Shared
@@ -48,21 +48,28 @@
                     </div>
                     <div class="col-md-2">
                         <label class="small text-muted">@L["Licenses_Client"]</label>
-                        <input class="form-control form-control-sm" list="existingClients" placeholder="@L["Licenses_NamePlaceholder"]" value="@NewClientName" @onchange="OnClientNameChanged" />
-                        <datalist id="existingClients">
-                            @foreach (var c in ExistingClients)
-                            {
-                                <option value="@c.Name" />
-                            }
-                        </datalist>
+                        @if (isSelectedTypeAnonymous)
+                        {
+                            <input class="form-control form-control-sm text-muted" value="Non attribué" disabled />
+                        }
+                        else
+                        {
+                            <input class="form-control form-control-sm" list="existingClients" placeholder="@L["Licenses_NamePlaceholder"]" value="@NewClientName" @onchange="OnClientNameChanged" />
+                            <datalist id="existingClients">
+                                @foreach (var c in ExistingClients)
+                                {
+                                    <option value="@c.Name" />
+                                }
+                            </datalist>
+                        }
                     </div>
                     <div class="col-md-2">
                         <label class="small text-muted">@L["Licenses_Email"]</label>
-                        <input class="form-control form-control-sm" type="email" placeholder="@L["Licenses_EmailPlaceholder"]" @bind="NewClientEmail" />
+                        <input class="form-control form-control-sm" type="email" placeholder="@L["Licenses_EmailPlaceholder"]" @bind="NewClientEmail" disabled="@isSelectedTypeAnonymous" />
                     </div>
                     <div class="col-md-2">
                         <label class="small text-muted">@L["Common_Type"]</label>
-                        <select class="form-select form-select-sm" @bind="SelectedTypeId">
+                        <select class="form-select form-select-sm" value="@SelectedTypeId" @onchange="OnTypeSelected">
                             <option value="">@L["Common_Select"]</option>
                             @foreach (var t in LicenseTypes)
                             {
@@ -95,6 +102,40 @@
                 </div>
             </div>
         }
+
+        <!-- Stats -->
+        <div class="row g-3 mb-4">
+            <div class="col">
+                <div class="card bg-dark border-secondary text-center py-2">
+                    <div class="text-info fw-bold fs-4">@statTotal</div>
+                    <small class="text-muted">Total</small>
+                </div>
+            </div>
+            <div class="col">
+                <div class="card bg-dark border-secondary text-center py-2">
+                    <div class="text-success fw-bold fs-4">@statActive</div>
+                    <small class="text-muted">Actives</small>
+                </div>
+            </div>
+            <div class="col">
+                <div class="card bg-dark border-secondary text-center py-2">
+                    <div class="text-warning fw-bold fs-4">@statExpired</div>
+                    <small class="text-muted">Expirées</small>
+                </div>
+            </div>
+            <div class="col">
+                <div class="card bg-dark border-secondary text-center py-2">
+                    <div class="text-secondary fw-bold fs-4">@statIssued</div>
+                    <small class="text-muted">Délivrées</small>
+                </div>
+            </div>
+            <div class="col">
+                <div class="card bg-dark border-secondary text-center py-2">
+                    <div class="text-danger fw-bold fs-4">@statRevoked</div>
+                    <small class="text-muted">Révoquées</small>
+                </div>
+            </div>
+        </div>
 
         <div class="row g-2 mb-3 align-items-end">
             <div class="col-md-3">
@@ -157,8 +198,11 @@
                 <tbody>
                     @foreach (var l in LicensesList)
                     {
-                        <tr>
-                            <td class="fw-bold">@l.Product?.Name</td>
+                        <tr class="@(l.HasUninstallEvent ? "border-start border-3 border-warning" : "")">
+                            <td>
+                                <div class="fw-bold">@l.Product?.Name</div>
+                                <small class="text-muted" style="font-size: 0.65rem">@TZ.ToLocal(l.CreationDate).ToString("dd/MM/yyyy HH:mm")</small>
+                            </td>
                             <td>
                                 <div class="d-flex flex-column">
                                     <a href="/user-telemetry/@l.Id" class="text-info text-decoration-none" style="cursor:pointer" title="@L["UserTelemetry_ViewTelemetry"]">
@@ -166,10 +210,28 @@
                                         <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" fill="currentColor" class="bi bi-graph-up ms-1 opacity-50" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M0 0h1v15h15v1H0V0Zm14.817 3.113a.5.5 0 0 1 .07.704l-4.5 5.5a.5.5 0 0 1-.74.037L7.06 6.767l-3.656 5.027a.5.5 0 0 1-.808-.588l4-5.5a.5.5 0 0 1 .758-.06l2.609 2.61 4.15-5.073a.5.5 0 0 1 .704-.07Z"/></svg>
                                     </a>
                                     <small class="text-muted">@l.CustomerEmail</small>
+                                    @if (l.HasUninstallEvent)
+                                    {
+                                        <div class="d-flex align-items-center gap-1 mt-1">
+                                            <span class="badge bg-warning text-dark" style="font-size: 0.6rem;" title="Désinstallation détectée@(l.LastUninstallAt.HasValue ? " le " + TZ.ToLocal(l.LastUninstallAt.Value).ToString("dd/MM/yyyy HH:mm") : "")">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
+                                                Désinstallé
+                                            </span>
+                                            <button class="btn btn-link text-muted p-0" style="font-size: 0.55rem; line-height:1" @onclick="() => ClearUninstallFlag(l)" @onclick:stopPropagation="true" title="Effacer le flag désinstallation">✕</button>
+                                        </div>
+                                    }
                                 </div>
                             </td>
                             <td>
-                                <code class="text-muted small" style="cursor:pointer" title="Cliquer pour copier" @onclick="() => CopyToClipboard(l.LicenseKey)">@l.LicenseKey</code>
+                                <div class="d-flex align-items-center gap-1">
+                                    <code class="text-muted small">@MaskedSecret()</code>
+                                    <button class="btn btn-link text-info p-0" style="line-height:1" title="Copier la clé" aria-label="Copier la clé" @onclick="() => CopyToClipboard(l.LicenseKey)">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" fill="currentColor" viewBox="0 0 16 16">
+                                            <path d="M4 2a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V2zm2-1a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H6z"/>
+                                            <path d="M2 6a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1v-1h1v1a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h1v1H2z"/>
+                                        </svg>
+                                    </button>
+                                </div>
                             </td>
                             <td>
                                 @{
@@ -177,14 +239,49 @@
                                 }
                                 @if (!string.IsNullOrEmpty(hwId))
                                 {
-                                    <code class="text-info small" style="cursor:pointer" title="Cliquer pour copier" @onclick="() => CopyToClipboard(hwId)">@hwId</code>
+                                    <div class="d-flex align-items-center gap-1">
+                                        <code class="text-info small" style="cursor:pointer" title="Cliquer pour copier" @onclick="() => CopyToClipboard(hwId)">@hwId</code>
+                                        @if (bannedHwids.Contains(hwId))
+                                        {
+                                            <span class="badge bg-danger" style="font-size: 0.55rem;">BAN</span>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn btn-link text-warning p-0" style="font-size: 0.6rem;" @onclick="() => BanHardwareId(hwId, l.ProductId)" @onclick:stopPropagation="true" title="Ban this Hardware ID">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M11.354 4.646a.5.5 0 0 0-.708 0L4.646 10.646a.5.5 0 0 0 .708.708l6-6a.5.5 0 0 0 0-.708z"/></svg>
+                                            </button>
+                                        }
+                                    </div>
                                 }
                                 else
                                 {
                                     <span class="text-muted small">-</span>
                                 }
                             </td>
-                            <td><span class="badge border border-secondary text-info">@l.Type?.Slug</span></td>
+                            <td>
+                                @if (changingTypeLicenseId == l.Id)
+                                {
+                                    <div class="d-flex flex-column gap-1 animate-fade">
+                                        <select class="form-select form-select-sm py-0" style="font-size: 0.75rem; width: 140px" @bind="changingTypeNewId">
+                                            @foreach (var t in LicenseTypes.Where(t => t.ProductId == l.ProductId))
+                                            {
+                                                <option value="@t.Id">@t.Name</option>
+                                            }
+                                        </select>
+                                        <div class="d-flex gap-1">
+                                            <button class="btn btn-sm btn-outline-success px-1 py-0" style="font-size: 0.7rem" @onclick="() => SaveLicenseType(l)">&#10003;</button>
+                                            <button class="btn btn-sm btn-outline-secondary px-1 py-0" style="font-size: 0.7rem" @onclick="() => changingTypeLicenseId = null">&#10007;</button>
+                                        </div>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="d-flex flex-column align-items-start">
+                                        <span class="badge border border-secondary text-info">@l.Type?.Slug</span>
+                                        <button class="btn btn-sm btn-link text-muted p-0" style="font-size: 0.6rem" @onclick="() => StartChangeType(l)" @onclick:stopPropagation="true">@L["Common_Edit"]</button>
+                                    </div>
+                                }
+                            </td>
                             <td>
                                 @{
                                     var isActivated = !string.IsNullOrEmpty(l.HardwareId) || (l.Seats?.Any(s => s.IsActive) ?? false);
@@ -213,7 +310,29 @@
                                 {
                                     <div class="d-flex flex-column">
                                         <span class="text-warning small">● @L["Common_Expired"]</span>
-                                        <small class="text-muted" style="font-size: 0.65rem">@l.ExpirationDate!.Value.ToLocalTime().ToString("dd/MM/yyyy")</small>
+                                        <small class="text-muted" style="font-size: 0.65rem">@TZ.ToLocal(l.ExpirationDate!.Value).ToString("dd/MM/yyyy")</small>
+                                        @if (l.IsActive)
+                                        {
+                                            @if (extendingLicenseId == l.Id)
+                                            {
+                                                <div class="d-flex flex-column gap-1 mt-1 align-items-center">
+                                                    <div class="btn-group btn-group-sm">
+                                                        <button class="btn btn-outline-success px-1 py-0" style="font-size: 0.65rem" @onclick="() => ExtendLicense(l, 30)">+30j</button>
+                                                        <button class="btn btn-outline-success px-1 py-0" style="font-size: 0.65rem" @onclick="() => ExtendLicense(l, 90)">+90j</button>
+                                                        <button class="btn btn-outline-success px-1 py-0" style="font-size: 0.65rem" @onclick="() => ExtendLicense(l, 365)">+1an</button>
+                                                    </div>
+                                                    <div class="d-flex align-items-center gap-1">
+                                                        <input type="date" class="form-control form-control-sm py-0" style="font-size: 0.65rem; width: 120px" @bind="extendCustomDate" />
+                                                        <button class="btn btn-sm btn-outline-info px-1 py-0" style="font-size: 0.65rem" @onclick="() => ExtendLicenseToDate(l)">OK</button>
+                                                    </div>
+                                                    <button class="btn btn-sm btn-link text-muted p-0" style="font-size: 0.6rem" @onclick="() => extendingLicenseId = null">@L["Common_Cancel"]</button>
+                                                </div>
+                                            }
+                                            else
+                                            {
+                                                <button class="btn btn-sm btn-link text-info p-0 mt-1" style="font-size: 0.6rem" @onclick="() => { extendingLicenseId = l.Id; extendCustomDate = DateTime.UtcNow.AddDays(30); }" @onclick:stopPropagation="true">@L["Licenses_Extend"]</button>
+                                            }
+                                        }
                                     </div>
                                 }
                                 else
@@ -236,6 +355,28 @@
                                         }
                                     }
                                 }
+                                @if (l.ExpirationDate.HasValue && l.IsActive)
+                                {
+                                    @if (extendingLicenseId == l.Id)
+                                    {
+                                        <div class="d-flex flex-column gap-1 mt-1 align-items-center">
+                                            <div class="btn-group btn-group-sm">
+                                                <button class="btn btn-outline-success px-1 py-0" style="font-size: 0.65rem" @onclick="() => ExtendLicense(l, 30)">+30j</button>
+                                                <button class="btn btn-outline-success px-1 py-0" style="font-size: 0.65rem" @onclick="() => ExtendLicense(l, 90)">+90j</button>
+                                                <button class="btn btn-outline-success px-1 py-0" style="font-size: 0.65rem" @onclick="() => ExtendLicense(l, 365)">+1an</button>
+                                            </div>
+                                            <div class="d-flex align-items-center gap-1">
+                                                <input type="date" class="form-control form-control-sm py-0" style="font-size: 0.65rem; width: 120px" @bind="extendCustomDate" />
+                                                <button class="btn btn-sm btn-outline-info px-1 py-0" style="font-size: 0.65rem" @onclick="() => ExtendLicenseToDate(l)">OK</button>
+                                            </div>
+                                            <button class="btn btn-sm btn-link text-muted p-0" style="font-size: 0.6rem" @onclick="() => extendingLicenseId = null">@L["Common_Cancel"]</button>
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <button class="btn btn-sm btn-link text-info p-0" style="font-size: 0.6rem" @onclick="() => { extendingLicenseId = l.Id; extendCustomDate = l.ExpirationDate.Value.AddDays(30); }" @onclick:stopPropagation="true">@L["Licenses_Extend"]</button>
+                                    }
+                                }
                             </td>
                             <td class="text-center">
                                 @if (l.RecoveryCount > 0)
@@ -245,7 +386,13 @@
                                 else { <span class="text-muted small">-</span> }
                             </td>
                             <td>
-                                <span class="text-muted small">@(string.IsNullOrEmpty(l.Reference) ? "-" : l.Reference)</span>
+                                <div class="d-flex flex-column">
+                                    <span class="text-muted small d-inline-block text-truncate" style="max-width: 160px" title="@l.Reference">@(string.IsNullOrEmpty(l.Reference) ? "-" : l.Reference)</span>
+                                    @if (!string.IsNullOrEmpty(l.PartnerCode))
+                                    {
+                                        <span class="badge bg-warning text-dark mt-1" style="font-size: 0.6rem; width: fit-content;">@l.PartnerCode</span>
+                                    }
+                                </div>
                             </td>
                             <td class="text-center">
                                 @{
@@ -256,6 +403,18 @@
                                     <span class="fw-bold @color">@used / @l.MaxSeats</span>
                                     <small class="text-muted" style="font-size: 0.7rem">@L["Licenses_SeatDetails"] ▾</small>
                                 </div>
+                                @if (editingSeatsLicenseId == l.Id)
+                                {
+                                    <div class="d-flex align-items-center gap-1 mt-1">
+                                        <input class="form-control form-control-sm text-center" type="number" min="1" style="width: 55px;" @bind="editingSeatsValue" />
+                                        <button class="btn btn-sm btn-outline-success px-1 py-0" @onclick="() => SaveMaxSeats(l)">✓</button>
+                                        <button class="btn btn-sm btn-outline-secondary px-1 py-0" @onclick="() => editingSeatsLicenseId = null">✗</button>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <button class="btn btn-sm btn-link text-muted p-0" style="font-size: 0.65rem;" @onclick="() => StartEditMaxSeats(l)" @onclick:stopPropagation="true">@L["Common_Edit"]</button>
+                                }
                             </td>
                             <td class="text-end">
                                 <div class="d-flex gap-2 justify-content-end">
@@ -293,6 +452,15 @@
                                                         @L["Licenses_LifeCycleTitle"]
                                                     </button>
                                                 </li>
+                                                @if (l.Type?.CustomParams != null && l.Type.CustomParams.Any())
+                                                {
+                                                    <li class="nav-item">
+                                                        <button class="nav-link py-1 small @(activeDetailTab == "params" ? "active" : "")" @onclick='() => activeDetailTab = "params"'>
+                                                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" class="bi bi-sliders me-1" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M11.5 2a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3M9.05 3a2.5 2.5 0 0 1 4.9 0H16v1h-2.05a2.5 2.5 0 0 1-4.9 0H0V3zM4.5 7a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3M2.05 8a2.5 2.5 0 0 1 4.9 0H16v1H6.95a2.5 2.5 0 0 1-4.9 0H0V8zM9.5 12a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3M7.05 13a2.5 2.5 0 0 1 4.9 0H16v1h-4.05a2.5 2.5 0 0 1-4.9 0H0v-1z"/></svg>
+                                                            @L["Common_Parameters"]
+                                                        </button>
+                                                    </li>
+                                                }
                                             </ul>
                                         </div>
                                         <div class="card-body p-3">
@@ -316,15 +484,28 @@
                                                             <div class="col">
                                                                 <div class="card bg-dark border-secondary p-2 d-flex flex-row justify-content-between align-items-center shadow-sm">
                                                                     <div>
+                                                                        <span class="badge bg-success mb-1">@L["Licenses_SeatStatusActive"]</span>
                                                                         <code class="text-info small">@seat.HardwareId</code>
                                                                         <div class="text-muted" style="font-size: 0.7rem;">
                                                                             @L["Licenses_ActivatedOn"] @TZ.ToLocal(seat.FirstActivatedAt).ToString("dd/MM/yyyy HH:mm") |
                                                                             @L["Licenses_LastSeen"] @(DateTime.UtcNow.Subtract(seat.LastCheckInAt).TotalMinutes < 5 ? L["Licenses_Online"].Value : TZ.ToLocal(seat.LastCheckInAt).ToString("dd/MM/yyyy HH:mm"))
                                                                         </div>
                                                                     </div>
-                                                                    <button class="btn btn-sm btn-link text-danger p-0" @onclick="() => DeleteSeat(seat)" title="@L["Licenses_UnlinkSeat"]">
-                                                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-trash" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
-                                                                    </button>
+                                                                    <div class="d-flex gap-1 align-items-center">
+                                                                        @if (bannedHwids.Contains(seat.HardwareId))
+                                                                        {
+                                                                            <span class="badge bg-danger" style="font-size: 0.6rem;">BANNED</span>
+                                                                        }
+                                                                        else
+                                                                        {
+                                                                            <button class="btn btn-sm btn-link text-warning p-0" @onclick="() => BanHardwareId(seat.HardwareId, l.ProductId)" title="Ban this Hardware ID">
+                                                                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M11.354 4.646a.5.5 0 0 0-.708 0L4.646 10.646a.5.5 0 0 0 .708.708l6-6a.5.5 0 0 0 0-.708z"/></svg>
+                                                                            </button>
+                                                                        }
+                                                                        <button class="btn btn-sm btn-link text-danger p-0" @onclick="() => BeginSeatUnlink(l, seat)" title="@L["Licenses_UnlinkSeat"]">
+                                                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-trash" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
+                                                                        </button>
+                                                                    </div>
                                                                 </div>
                                                             </div>
                                                         }
@@ -340,6 +521,7 @@
                                                             <thead>
                                                                 <tr>
                                                                     <th>Hardware ID</th>
+                                                                    <th>@L["Common_Status"]</th>
                                                                     <th>@L["Licenses_FirstActivation"]</th>
                                                                     <th>@L["Licenses_UnlinkDate"]</th>
                                                                 </tr>
@@ -349,6 +531,7 @@
                                                                 {
                                                                     <tr class="opacity-75">
                                                                         <td><code class="text-secondary">@oldSeat.HardwareId</code></td>
+                                                                        <td><span class="badge bg-secondary">@L["Licenses_SeatStatusUnlinked"]</span></td>
                                                                         <td>@TZ.ToLocal(oldSeat.FirstActivatedAt).ToString("dd/MM/yyyy HH:mm")</td>
                                                                         <td class="text-warning">@TZ.ToLocal(oldSeat.UnlinkedAt ?? DateTime.MinValue).ToString("dd/MM/yyyy HH:mm")</td>
                                                                     </tr>
@@ -377,9 +560,11 @@
                                                                 {
                                                                     <tr>
                                                                         <td class="text-muted">@TZ.ToLocal(entry.Timestamp).ToString("dd/MM/yyyy HH:mm:ss")</td>
-                                                                        <td><span class="badge @GetActionBadgeClass(entry.Action)">@entry.Action</span></td>
-                                                                        <td class="text-info-emphasis">@entry.Details</td>
-                                                                        <td class="small text-secondary">@(entry.PerformedBy == "Admin" ? L["Licenses_PerformedBy_Admin"] : entry.PerformedBy == "System" ? L["Licenses_PerformedBy_System"] : entry.PerformedBy)</td>
+                                                                        <td>
+                                                                            <span class="badge @GetActionBadgeClass(entry.Action)" title="@entry.Action">@GetActionDisplayLabel(entry)</span>
+                                                                        </td>
+                                                                        <td class="text-info-emphasis">@GetHistoryDetailsDisplay(entry)</td>
+                                                                        <td class="small text-secondary">@GetPerformedByDisplay(entry.PerformedBy)</td>
                                                                     </tr>
                                                                 }
                                                                 @if (!l.History.Any())
@@ -388,6 +573,23 @@
                                                                 }
                                                             </tbody>
                                                         </table>
+                                                    </div>
+                                                </div>
+                                            }
+                                            else if (activeDetailTab == "params")
+                                            {
+                                                <div class="animate-fade">
+                                                    <h6 class="mb-3 text-info">@L["Common_Parameters"] — @l.Type?.Name</h6>
+                                                    <div class="row row-cols-2 row-cols-md-4 row-cols-xl-5 g-1">
+                                                        @foreach (var p in l.Type!.CustomParams)
+                                                        {
+                                                            <div class="col">
+                                                                <div class="border border-secondary rounded px-2 py-1" style="font-size: 0.75rem;">
+                                                                    <span class="text-muted">@p.Name</span>
+                                                                    <span class="fw-bold text-info ms-1">@p.Value</span>
+                                                                </div>
+                                                            </div>
+                                                        }
                                                     </div>
                                                 </div>
                                             }
@@ -443,12 +645,22 @@
                     @{
                         var softwareLabel = L["Licenses_Software"].Value.ToLower();
                     }
-                    <p>@L["Common_Delete"] @softwareLabel <code>@licenseToDelete.LicenseKey</code> de <strong>@licenseToDelete.CustomerName</strong> ??</p>
+                    <p>@L["Common_Delete"] @softwareLabel <code>@MaskedSecret()</code> de <strong>@licenseToDelete.CustomerName</strong> ??</p>
                     <p class="text-warning small">@L["Licenses_DeleteWarning"]</p>
+                    @if (ActiveSeatCount(licenseToDelete) > 0)
+                    {
+                        <div class="alert alert-warning small mb-3">
+                            <div class="fw-bold">@L["Licenses_StrongConfirmImpactTitle"]</div>
+                            <div>@L["Licenses_StrongConfirmClientDisconnect"]</div>
+                            <div class="mt-2">@GetLicenseConfirmationSummary(licenseToDelete)</div>
+                        </div>
+                        <label class="form-label small text-muted">@L["Licenses_StrongConfirmLabel"]</label>
+                        <input class="form-control bg-black text-white" @bind="deleteConfirmationText" placeholder="DELIER" autocomplete="off" />
+                    }
                 </div>
                 <div class="modal-footer border-secondary">
                     <button class="btn btn-outline-secondary" @onclick="CancelDelete">@L["Common_Cancel"]</button>
-                    <button class="btn btn-danger" @onclick="DeleteLicense">@L["Common_Delete"]</button>
+                    <button class="btn btn-danger" @onclick="DeleteLicense" disabled="@(!CanDeleteSelectedLicense)">@L["Common_Delete"]</button>
                 </div>
             </div>
         </div>
@@ -491,11 +703,54 @@
                 </div>
                 <div class="modal-body">
                     <p>@string.Format(L["Licenses_GlobalResetConfirmMsg"].Value, licenseToReset.CustomerName)</p>
+                    <div class="alert alert-warning small mb-3">
+                        <div class="fw-bold">@L["Licenses_StrongConfirmImpactTitle"]</div>
+                        <div>@L["Licenses_StrongConfirmClientDisconnect"]</div>
+                        <div class="mt-2">@GetLicenseConfirmationSummary(licenseToReset)</div>
+                    </div>
                     <p class="text-info small">@L["Licenses_GlobalResetNote"]</p>
+                    <label class="form-label small text-muted">@L["Licenses_StrongConfirmLabel"]</label>
+                    <input class="form-control bg-black text-white" @bind="resetConfirmationText" placeholder="DELIER" autocomplete="off" />
                 </div>
                 <div class="modal-footer border-secondary">
-                    <button class="btn btn-outline-secondary" @onclick="() => licenseToReset = null">@L["Common_Cancel"]</button>
-                    <button class="btn btn-primary" @onclick="ResetAllSeats">@L["Licenses_GlobalResetBtn"]</button>
+                    <button class="btn btn-outline-secondary" @onclick="CancelGlobalReset">@L["Common_Cancel"]</button>
+                    <button class="btn btn-primary" @onclick="ResetAllSeats" disabled="@(!IsStrongConfirmationValid(resetConfirmationText))">@L["Licenses_GlobalResetBtn"]</button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@if (seatToUnlink != null && licenseForSeatUnlink != null)
+{
+    <div class="modal d-block" tabindex="-1" style="background: rgba(0,0,0,0.7)">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content bg-dark border-danger shadow-lg">
+                <div class="modal-header border-secondary">
+                    <h5 class="modal-title text-danger">@L["Licenses_UnlinkSeatConfirmTitle"]</h5>
+                    <button type="button" class="btn-close btn-close-white" @onclick="CancelSeatUnlink"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-warning small mb-3">
+                        <div class="fw-bold">@L["Licenses_StrongConfirmImpactTitle"]</div>
+                        <div>@L["Licenses_StrongConfirmClientDisconnect"]</div>
+                    </div>
+                    <dl class="row small mb-3">
+                        <dt class="col-4">@L["Licenses_Client"]</dt>
+                        <dd class="col-8">@licenseForSeatUnlink.CustomerName</dd>
+                        <dt class="col-4">@L["Licenses_Key"]</dt>
+                        <dd class="col-8"><code>@RedactLicenseKey(licenseForSeatUnlink.LicenseKey)</code></dd>
+                        <dt class="col-4">@L["Licenses_HardwareId"]</dt>
+                        <dd class="col-8"><code>@seatToUnlink.HardwareId</code></dd>
+                        <dt class="col-4">@L["Licenses_Seats"]</dt>
+                        <dd class="col-8">@ActiveSeatCount(licenseForSeatUnlink) / @licenseForSeatUnlink.MaxSeats</dd>
+                    </dl>
+                    <label class="form-label small text-muted">@L["Licenses_StrongConfirmLabel"]</label>
+                    <input class="form-control bg-black text-white" @bind="seatUnlinkConfirmationText" placeholder="DELIER" autocomplete="off" />
+                </div>
+                <div class="modal-footer border-secondary">
+                    <button class="btn btn-outline-secondary" @onclick="CancelSeatUnlink">@L["Common_Cancel"]</button>
+                    <button class="btn btn-danger" @onclick="ConfirmSeatUnlink" disabled="@(!IsStrongConfirmationValid(seatUnlinkConfirmationText))">@L["Licenses_UnlinkSeat"]</button>
                 </div>
             </div>
         </div>
@@ -506,21 +761,40 @@
     private List<License> LicensesList = new();
     private List<Product> Products = new();
     private List<LicenseType> LicenseTypes = new();
+
+    // Stats globales
+    private int statTotal, statActive, statExpired, statRevoked, statIssued;
+    private HashSet<string> bannedHwids = new(StringComparer.OrdinalIgnoreCase);
     private List<(string Name, string Email)> ExistingClients = new();
 
     private bool showCreate = false;
     private string SelectedProductId = "";
     private string SelectedTypeId = "";
+    private bool isSelectedTypeAnonymous = false;
     private string NewClientName = "";
     private string NewClientEmail = "";
     private int? newValidityDays = 365;
     private int newMaxSeats = 1;
     private string? GeneratedKey;
 
+    private Guid? editingSeatsLicenseId;
+    private int editingSeatsValue = 1;
+
+    private Guid? extendingLicenseId;
+    private DateTime extendCustomDate = DateTime.UtcNow.AddDays(30);
+
+    private Guid? changingTypeLicenseId;
+    private Guid changingTypeNewId;
+
     private Guid? ExpandedLicenseId;
     private string activeDetailTab = "seats";
 
     private bool isAuthorized = false;
+    private LicenseSeat? seatToUnlink;
+    private License? licenseForSeatUnlink;
+    private string seatUnlinkConfirmationText = "";
+    private string resetConfirmationText = "";
+    private string deleteConfirmationText = "";
 
     // Filtres
     private string searchText = "";
@@ -534,6 +808,154 @@
     private int TotalCount = 0;
     private int TotalPages => (int)Math.Ceiling((double)TotalCount / PageSize);
 
+    private void StartEditMaxSeats(License l)
+    {
+        editingSeatsLicenseId = l.Id;
+        editingSeatsValue = l.MaxSeats;
+    }
+
+    private async Task SaveMaxSeats(License l)
+    {
+        if (editingSeatsValue < 1) editingSeatsValue = 1;
+        using var db = await DbFactory.CreateDbContextAsync();
+        var oldValue = l.MaxSeats;
+
+        await db.Licenses.Where(x => x.Id == l.Id)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.MaxSeats, editingSeatsValue));
+
+        db.Set<LicenseHistory>().Add(new LicenseHistory
+        {
+            LicenseId = l.Id,
+            Action = "MAX_SEATS_CHANGED",
+            Details = $"MaxSeats: {oldValue} → {editingSeatsValue}",
+            PerformedBy = "Admin"
+        });
+        await db.SaveChangesAsync();
+
+        l.MaxSeats = editingSeatsValue;
+        editingSeatsLicenseId = null;
+        Toast.ShowSuccess($"MaxSeats: {oldValue} → {editingSeatsValue}");
+    }
+
+    private void StartChangeType(License l)
+    {
+        changingTypeLicenseId = l.Id;
+        changingTypeNewId = l.LicenseTypeId;
+    }
+
+    private async Task SaveLicenseType(License l)
+    {
+        if (changingTypeNewId == l.LicenseTypeId)
+        {
+            changingTypeLicenseId = null;
+            return;
+        }
+
+        using var db = await DbFactory.CreateDbContextAsync();
+        var newType = await db.LicenseTypes.Include(t => t.CustomParams).FirstOrDefaultAsync(t => t.Id == changingTypeNewId);
+        if (newType == null) { Toast.ShowError("Type introuvable"); return; }
+
+        var oldTypeName = l.Type?.Name ?? l.Type?.Slug ?? "?";
+        await db.Licenses.Where(x => x.Id == l.Id)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.LicenseTypeId, changingTypeNewId));
+
+        db.Set<LicenseHistory>().Add(new LicenseHistory
+        {
+            LicenseId = l.Id,
+            Action = "TYPE_CHANGED",
+            Details = $"Type: {oldTypeName} → {newType.Name}",
+            PerformedBy = "Admin"
+        });
+        await db.SaveChangesAsync();
+
+        l.LicenseTypeId = newType.Id;
+        l.Type = newType;
+        changingTypeLicenseId = null;
+        Toast.ShowSuccess($"Type: {oldTypeName} → {newType.Name}");
+    }
+
+    private async Task ExtendLicense(License l, int days)
+    {
+        using var db = await DbFactory.CreateDbContextAsync();
+        var baseDate = l.ExpirationDate ?? DateTime.UtcNow;
+        if (baseDate < DateTime.UtcNow) baseDate = DateTime.UtcNow;
+        var oldExpiry = l.ExpirationDate?.ToString("dd/MM/yyyy HH:mm") ?? "Lifetime";
+        var newExpiry = baseDate.AddDays(days);
+
+        await db.Licenses.Where(x => x.Id == l.Id)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(x => x.ExpirationDate, newExpiry)
+                .SetProperty(x => x.IsActive, true));
+
+        db.Set<LicenseHistory>().Add(new LicenseHistory
+        {
+            LicenseId = l.Id,
+            Action = "EXTENDED",
+            Details = $"Expiration: {oldExpiry} → {newExpiry:dd/MM/yyyy HH:mm} (+{days}j)",
+            PerformedBy = "Admin"
+        });
+        await db.SaveChangesAsync();
+
+        l.ExpirationDate = newExpiry;
+        l.IsActive = true;
+        extendingLicenseId = null;
+        Toast.ShowSuccess($"+{days}j → {TZ.ToLocal(newExpiry):dd/MM/yyyy HH:mm}");
+    }
+
+    private async Task ExtendLicenseToDate(License l)
+    {
+        if (extendCustomDate <= DateTime.UtcNow)
+        {
+            Toast.ShowError(L["Licenses_ExtendDateInvalid"].Value);
+            return;
+        }
+
+        using var db = await DbFactory.CreateDbContextAsync();
+        var oldExpiry = l.ExpirationDate?.ToString("dd/MM/yyyy HH:mm") ?? "Lifetime";
+        var newExpiry = DateTime.SpecifyKind(extendCustomDate, DateTimeKind.Utc);
+
+        await db.Licenses.Where(x => x.Id == l.Id)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(x => x.ExpirationDate, newExpiry)
+                .SetProperty(x => x.IsActive, true));
+
+        db.Set<LicenseHistory>().Add(new LicenseHistory
+        {
+            LicenseId = l.Id,
+            Action = "EXTENDED",
+            Details = $"Expiration: {oldExpiry} → {newExpiry:dd/MM/yyyy HH:mm} (date personnalisée)",
+            PerformedBy = "Admin"
+        });
+        await db.SaveChangesAsync();
+
+        l.ExpirationDate = newExpiry;
+        l.IsActive = true;
+        extendingLicenseId = null;
+        Toast.ShowSuccess($"→ {TZ.ToLocal(newExpiry):dd/MM/yyyy HH:mm}");
+    }
+
+    private void OnTypeSelected(ChangeEventArgs e)
+    {
+        SelectedTypeId = e.Value?.ToString() ?? "";
+        isSelectedTypeAnonymous = false;
+        if (Guid.TryParse(SelectedTypeId, out var typeId))
+        {
+            var lt = LicenseTypes.FirstOrDefault(t => t.Id == typeId);
+            if (lt != null)
+            {
+                newMaxSeats = lt.DefaultMaxSeats;
+                newValidityDays = lt.DefaultDurationDays;
+                SelectedProductId = lt.ProductId.ToString();
+                isSelectedTypeAnonymous = lt.AllowAnonymous;
+                if (isSelectedTypeAnonymous)
+                {
+                    NewClientName = "";
+                    NewClientEmail = "";
+                }
+            }
+        }
+    }
+
     private void OnClientNameChanged(ChangeEventArgs e)
     {
         NewClientName = e.Value?.ToString() ?? "";
@@ -542,6 +964,24 @@
         {
             NewClientEmail = match.Email;
         }
+    }
+
+    private bool CanDeleteSelectedLicense =>
+        licenseToDelete == null || ActiveSeatCount(licenseToDelete) == 0 || IsStrongConfirmationValid(deleteConfirmationText);
+
+    private static bool IsStrongConfirmationValid(string value) =>
+        string.Equals(value.Trim(), "DELIER", StringComparison.Ordinal);
+
+    private static int ActiveSeatCount(License license) =>
+        license.Seats?.Count(s => s.IsActive) ?? 0;
+
+    private string GetLicenseConfirmationSummary(License license) =>
+        $"{L["Licenses_Key"]}: {RedactLicenseKey(license.LicenseKey)} | {L["Licenses_Client"]}: {license.CustomerName} | {L["Licenses_Seats"]}: {ActiveSeatCount(license)} / {license.MaxSeats}";
+
+    private static string RedactLicenseKey(string licenseKey)
+    {
+        if (string.IsNullOrWhiteSpace(licenseKey)) return "";
+        return MaskedSecret();
     }
 
     protected override async Task OnInitializedAsync()
@@ -590,9 +1030,59 @@
         HistoryActions.UnlinkedApi => "bg-info",
         HistoryActions.UnlinkedManual => "bg-warning text-dark",
         HistoryActions.UnlinkedAdminTool => "bg-danger",
+        HistoryActions.AutoUnlinkedProductScope => "bg-info text-dark",
         HistoryActions.Renewed => "bg-success",
         _ => "bg-secondary"
     };
+
+    private string GetActionDisplayLabel(LicenseHistory entry) => entry.Action switch
+    {
+        HistoryActions.Created => L["Licenses_ActionLabel_Created"].Value,
+        HistoryActions.Activated => L["Licenses_ActionLabel_Activated"].Value,
+        HistoryActions.Recovery => L["Licenses_ActionLabel_Recovery"].Value,
+        HistoryActions.Revoked => L["Licenses_ActionLabel_Revoked"].Value,
+        HistoryActions.Reactivated => L["Licenses_ActionLabel_Reactivated"].Value,
+        HistoryActions.GlobalReset => L["Licenses_ActionLabel_GlobalReset"].Value,
+        HistoryActions.UnlinkedApi when IsAdminApi(entry.PerformedBy) => L["Licenses_ActionLabel_UnlinkedAdminApi"].Value,
+        HistoryActions.UnlinkedApi => L["Licenses_ActionLabel_UnlinkedClientApi"].Value,
+        HistoryActions.UnlinkedManual => L["Licenses_ActionLabel_UnlinkedManual"].Value,
+        HistoryActions.UnlinkedAdminTool => L["Licenses_ActionLabel_UnlinkedAdminTool"].Value,
+        HistoryActions.AutoUnlinkedProductScope => L["Licenses_ActionLabel_AutoUnlinkedProductScope"].Value,
+        HistoryActions.Renewed => L["Licenses_ActionLabel_Renewed"].Value,
+        _ => entry.Action
+    };
+
+    private string GetHistoryDetailsDisplay(LicenseHistory entry)
+    {
+        if (string.IsNullOrWhiteSpace(entry.Details))
+            return string.Empty;
+
+        var details = entry.Details;
+        if (entry.Action == HistoryActions.UnlinkedApi && !IsAdminApi(entry.PerformedBy))
+        {
+            var clientUnlinkText = L["Licenses_Detail_UnlinkedClientApiVerb"].Value;
+            details = details
+                .Replace("délié via Code Reset API", clientUnlinkText, StringComparison.OrdinalIgnoreCase)
+                .Replace("unlinked via API Reset Code", clientUnlinkText, StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (entry.Action == HistoryActions.AutoUnlinkedProductScope)
+            return L["Licenses_Detail_AutoUnlinkedProductScope"].Value;
+
+        return details;
+    }
+
+    private string GetPerformedByDisplay(string? performedBy) => performedBy switch
+    {
+        "Admin" => L["Licenses_PerformedBy_Admin"].Value,
+        "System" => L["Licenses_PerformedBy_System"].Value,
+        "Admin (API)" => L["Licenses_PerformedBy_AdminApi"].Value,
+        "Admin (Freemium closure)" => L["Licenses_PerformedBy_AdminFreemium"].Value,
+        _ => performedBy ?? string.Empty
+    };
+
+    private static bool IsAdminApi(string? performedBy) =>
+        string.Equals(performedBy, "Admin (API)", StringComparison.OrdinalIgnoreCase);
 
     private async Task ChangePageSize(int size)
     {
@@ -648,6 +1138,19 @@
             Products = await db.Products.ToListAsync();
             LicenseTypes = await db.LicenseTypes.Include(t => t.Product).OrderBy(t => t.Product!.Name).ThenBy(t => t.Name).ToListAsync();
 
+            // Stats globales (non filtrées)
+            statTotal = await db.Licenses.CountAsync();
+            statRevoked = await db.Licenses.CountAsync(l => !l.IsActive);
+            statExpired = await db.Licenses.CountAsync(l => l.IsActive && l.ExpirationDate.HasValue && l.ExpirationDate <= DateTime.UtcNow);
+            statIssued = await db.Licenses.CountAsync(l => l.IsActive && (l.HardwareId == null || l.HardwareId == "") && !l.Seats.Any(s => s.IsActive));
+            statActive = statTotal - statRevoked - statExpired - statIssued;
+
+            bannedHwids = (await db.BannedHardwareIds
+                .Where(b => b.IsActive && (b.ExpiresAt == null || b.ExpiresAt > DateTime.UtcNow))
+                .Select(b => b.HardwareId)
+                .ToListAsync())
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
             ExistingClients = (await db.Licenses
                 .Where(l => l.CustomerName != "")
                 .Select(l => new { l.CustomerName, l.CustomerEmail })
@@ -661,12 +1164,13 @@
 
             if (!string.IsNullOrWhiteSpace(searchText))
             {
-                var search = searchText.Trim();
-                query = query.Where(l => l.CustomerName.Contains(search)
-                    || l.CustomerEmail.Contains(search)
-                    || l.LicenseKey.Contains(search)
-                    || (l.HardwareId != null && l.HardwareId.Contains(search))
-                    || l.Seats.Any(s => s.HardwareId.Contains(search)));
+                var search = searchText.Trim().ToLower();
+                query = query.Where(l => l.CustomerName.ToLower().Contains(search)
+                    || l.CustomerEmail.ToLower().Contains(search)
+                    || l.LicenseKey.ToLower().Contains(search)
+                    || (l.HardwareId != null && l.HardwareId.ToLower().Contains(search))
+                    || l.Seats.Any(s => s.HardwareId.ToLower().Contains(search))
+                    || l.History.Any(h => h.PerformedBy != null && h.PerformedBy.ToLower().Contains(search)));
             }
 
             if (!string.IsNullOrEmpty(filterProduct))
@@ -691,6 +1195,7 @@
 
             LicensesList = await query.Include(l => l.Product)
                                       .Include(l => l.Type)
+                                          .ThenInclude(t => t!.CustomParams)
                                       .Include(l => l.Seats)
                                       .OrderByDescending(l => l.CreationDate)
                                       .Skip((CurrentPage - 1) * PageSize)
@@ -702,7 +1207,7 @@
 
     private async Task CreateLicense()
     {
-        if (string.IsNullOrEmpty(SelectedProductId) || string.IsNullOrEmpty(SelectedTypeId) || string.IsNullOrEmpty(NewClientName))
+        if (string.IsNullOrEmpty(SelectedProductId) || string.IsNullOrEmpty(SelectedTypeId) || (!isSelectedTypeAnonymous && string.IsNullOrEmpty(NewClientName)))
         {
             Toast.ShowError(L["Licenses_MsgMissingFields"]); return;
         }
@@ -712,8 +1217,8 @@
         {
             ProductId = Guid.Parse(SelectedProductId),
             LicenseTypeId = Guid.Parse(SelectedTypeId),
-            CustomerName = NewClientName,
-            CustomerEmail = NewClientEmail,
+            CustomerName = isSelectedTypeAnonymous ? "Non attribué" : NewClientName,
+            CustomerEmail = isSelectedTypeAnonymous ? "" : NewClientEmail,
             LicenseKey = key,
             IsActive = true,
             MaxSeats = newMaxSeats,
@@ -749,6 +1254,19 @@
         await LoadData();
     }
 
+    private async Task ClearUninstallFlag(License l)
+    {
+        using var db = await DbFactory.CreateDbContextAsync();
+        var dbLic = await db.Licenses.FirstOrDefaultAsync(x => x.Id == l.Id);
+        if (dbLic == null) return;
+        dbLic.HasUninstallEvent = false;
+        dbLic.LastUninstallAt = null;
+        await db.SaveChangesAsync();
+        l.HasUninstallEvent = false;
+        l.LastUninstallAt = null;
+        Toast.ShowSuccess("Flag désinstallation effacé");
+    }
+
     private async Task Reactivate(License l)
     {
         using var db = await DbFactory.CreateDbContextAsync();
@@ -770,11 +1288,41 @@
         await LoadData();
     }
     
+    private async Task BeginSeatUnlink(License license, LicenseSeat seat)
+    {
+        if (!seat.IsActive)
+        {
+            await DeleteSeat(seat);
+            return;
+        }
+
+        licenseForSeatUnlink = license;
+        seatToUnlink = seat;
+        seatUnlinkConfirmationText = "";
+    }
+
+    private void CancelSeatUnlink()
+    {
+        seatToUnlink = null;
+        licenseForSeatUnlink = null;
+        seatUnlinkConfirmationText = "";
+    }
+
+    private async Task ConfirmSeatUnlink()
+    {
+        if (seatToUnlink == null || !IsStrongConfirmationValid(seatUnlinkConfirmationText)) return;
+
+        var seat = seatToUnlink;
+        CancelSeatUnlink();
+        await DeleteSeat(seat);
+    }
+
     private async Task DeleteSeat(LicenseSeat seat)
     {
         using var db = await DbFactory.CreateDbContextAsync();
         var dbSeat = await db.LicenseSeats.FirstOrDefaultAsync(s => s.Id == seat.Id);
         if (dbSeat == null) { Toast.ShowError(L["Resets_MsgNotFound"]); return; }
+        if (!dbSeat.IsActive) { Toast.ShowInfo(L["Licenses_MsgSeatAlreadyUnlinked"]); await LoadData(); return; }
 
         // On ne supprime plus, on délie (historisation)
         dbSeat.IsActive = false;
@@ -794,21 +1342,39 @@
         await LoadData();
     }
 
+    private async Task BanHardwareId(string hardwareId, Guid productId)
+    {
+        await Security.BanHardwareIdAsync(hardwareId, "Manual ban from license admin", productId, banCategory: Data.BannedHardwareId.Categories.Manual);
+        bannedHwids.Add(hardwareId);
+        Toast.ShowSuccess($"Hardware ID {hardwareId} banni");
+        StateHasChanged();
+    }
+
     private async Task CopyToClipboard(string text)
     {
         await JS.InvokeVoidAsync("navigator.clipboard.writeText", text);
         Toast.ShowInfo(L["Common_Copied"]);
     }
 
+    private static string MaskedSecret() => "****-****-****";
+
     private License? licenseToReset;
     private void ConfirmGlobalReset(License l)
     {
         licenseToReset = l;
+        resetConfirmationText = "";
+    }
+
+    private void CancelGlobalReset()
+    {
+        licenseToReset = null;
+        resetConfirmationText = "";
     }
 
     private async Task ResetAllSeats()
     {
         if (licenseToReset == null) return;
+        if (!IsStrongConfirmationValid(resetConfirmationText)) return;
 
         using var db = await DbFactory.CreateDbContextAsync();
         var dbLic = await db.Licenses.Include(l => l.Seats)
@@ -837,23 +1403,26 @@
 
         await db.SaveChangesAsync();
         Toast.ShowSuccess(L["Licenses_MsgAllSeatsUnlinked"]);
-        licenseToReset = null;
+        CancelGlobalReset();
         await LoadData();
     }
 
     private void ConfirmDelete(License l)
     {
         licenseToDelete = l;
+        deleteConfirmationText = "";
     }
 
     private async Task DeleteLicense()
     {
         if (licenseToDelete == null) return;
+        if (!CanDeleteSelectedLicense) return;
 
         using var db = await DbFactory.CreateDbContextAsync();
         var dbLic = await db.Licenses.Include(l => l.Seats)
             .FirstOrDefaultAsync(l => l.Id == licenseToDelete.Id);
         if (dbLic == null) { Toast.ShowError(L["Resets_MsgNotFound"]); licenseToDelete = null; return; }
+        if (dbLic.Seats.Any(s => s.IsActive) && !IsStrongConfirmationValid(deleteConfirmationText)) return;
 
         // On supprime vraiment les seats liés lors de la suppression de la licence parente
         if (dbLic.Seats != null && dbLic.Seats.Any())
@@ -863,13 +1432,14 @@
         db.Licenses.Remove(dbLic);
         await db.SaveChangesAsync();
         Toast.ShowSuccess(L["Licenses_MsgDeleted"]);
-        licenseToDelete = null;
+        CancelDelete();
         await LoadData();
     }
 
     private void CancelDelete()
     {
         licenseToDelete = null;
+        deleteConfirmationText = "";
     }
 
     private License? licenseToDelete;

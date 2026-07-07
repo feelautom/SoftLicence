@@ -5,8 +5,13 @@
 @inject SoftLicence.Server.Services.ToastService Toast
 @inject NavigationManager Nav
 @inject IStringLocalizer<SharedResource> L
+@inject SoftLicence.Server.Services.FingerprintService FingerprintSvc
+@inject SoftLicence.Server.Services.AiAnalysisService AiAnalysis
+@inject IJSRuntime JS
 @using SoftLicence.Server.Data
+@using SoftLicence.Server.Services
 @using Microsoft.EntityFrameworkCore
+@using System.Text
 @using System.Text.Json
 
 <div class="container-fluid animate-fade">
@@ -43,6 +48,17 @@
                     <option value="Error">@L["Telemetry_Errors"]</option>
                 </select>
                 <button class="btn btn-primary btn-sm" @onclick="Refresh">@L["Common_Refresh"]</button>
+                <button class="btn btn-outline-warning btn-sm" @onclick="AnalyzeWithAi" disabled="@aiLoading" title="Analyse comportementale par IA">
+                    @if (aiLoading)
+                    {
+                        <span class="spinner-border spinner-border-sm me-1" role="status"></span>
+                    }
+                    else
+                    {
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" class="me-1" viewBox="0 0 24 24"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/></svg>
+                    }
+                    Analyser avec l'IA
+                </button>
             </div>
         </div>
 
@@ -61,7 +77,15 @@
                     </div>
                     <div class="col-md-3">
                         <small class="text-muted d-block">@L["Licenses_Key"]</small>
-                        <code class="small">@license.LicenseKey</code>
+                        <div class="d-flex align-items-center gap-2">
+                            <code class="small text-muted">@MaskedSecret()</code>
+                            <button class="btn btn-link text-info p-0" style="line-height:1" title="Copier la clé" aria-label="Copier la clé" @onclick="() => CopyToClipboard(license.LicenseKey)">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" fill="currentColor" viewBox="0 0 16 16">
+                                    <path d="M4 2a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V2zm2-1a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H6z"/>
+                                    <path d="M2 6a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1v-1h1v1a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h1v1H2z"/>
+                                </svg>
+                            </button>
+                        </div>
                     </div>
                     <div class="col-md-2">
                         <small class="text-muted d-block">@L["Licenses_Seats"]</small>
@@ -72,39 +96,443 @@
                         <span class="fw-bold text-info">@TotalCount</span>
                     </div>
                 </div>
+                <hr class="my-2 border-secondary" />
+                <div class="row">
+                    @{
+                        var isActivated = !string.IsNullOrEmpty(license.HardwareId) || (license.Seats?.Any(s => s.IsActive) ?? false);
+                        var isExpired = license.ExpirationDate.HasValue && DateTime.UtcNow >= license.ExpirationDate.Value;
+                    }
+                    <div class="col-md-2">
+                        <small class="text-muted d-block">@L["UserTelemetry_Status"]</small>
+                        @if (!license.IsActive)
+                        {
+                            <span class="badge bg-danger">@L["UserTelemetry_Inactive"]</span>
+                        }
+                        else if (!isActivated)
+                        {
+                            <span class="badge bg-secondary">@L["Common_Issued"]</span>
+                        }
+                        else if (isExpired)
+                        {
+                            <span class="badge bg-warning text-dark">@L["UserTelemetry_Expired"]</span>
+                        }
+                        else
+                        {
+                            <span class="badge bg-success">@L["UserTelemetry_Active"]</span>
+                        }
+                    </div>
+                    <div class="col-md-2">
+                        <small class="text-muted d-block">@L["UserTelemetry_LicenseType"]</small>
+                        <span class="badge bg-info text-dark">@(license.Type?.Slug ?? "-")</span>
+                    </div>
+                    <div class="col-md-2">
+                        <small class="text-muted d-block">@L["UserTelemetry_ActivationDate"]</small>
+                        <span>@(license.ActivationDate.HasValue ? TZ.ToLocal(license.ActivationDate.Value).ToString("dd/MM/yyyy") : L["UserTelemetry_NotActivated"])</span>
+                    </div>
+                    <div class="col-md-2">
+                        <small class="text-muted d-block">@L["UserTelemetry_Expiration"]</small>
+                        @if (license.ExpirationDate.HasValue)
+                        {
+                            <span>@TZ.ToLocal(license.ExpirationDate.Value).ToString("dd/MM/yyyy")</span>
+                        }
+                        else
+                        {
+                            <span class="text-success">@L["UserTelemetry_Lifetime"]</span>
+                        }
+                    </div>
+                    <div class="col-md-2">
+                        <small class="text-muted d-block">@L["UserTelemetry_DaysRemaining"]</small>
+                        @if (license.ExpirationDate.HasValue)
+                        {
+                            var remaining = license.ExpirationDate.Value - DateTime.UtcNow;
+                            var daysLeft = (int)remaining.TotalDays;
+                            var hoursLeft = remaining.Hours;
+                            <span class="fw-bold @(daysLeft < 0 ? "text-danger" : daysLeft <= 30 ? "text-warning" : "text-success")">
+                                @if (remaining.TotalSeconds <= 0)
+                                {
+                                    @L["UserTelemetry_Expired"]
+                                }
+                                else
+                                {
+                                    @($"{daysLeft} j. {hoursLeft}h")
+                                }
+                            </span>
+                        }
+                        else
+                        {
+                            <span class="text-success">∞</span>
+                        }
+                    </div>
+                    <div class="col-md-2">
+                        <small class="text-muted d-block">@L["UserTelemetry_MaxSeats"]</small>
+                        <span>@license.MaxSeats</span>
+                    </div>
+                </div>
+                @if (!string.IsNullOrEmpty(license.Reference))
+                {
+                    <div class="row mt-2">
+                        <div class="col-md-2">
+                            <small class="text-muted d-block">@L["UserTelemetry_Reference"]</small>
+                            <span class="small">@license.Reference</span>
+                        </div>
+                        <div class="col-md-2">
+                            <small class="text-muted d-block">@L["UserTelemetry_CreationDate"]</small>
+                            <span>@TZ.ToLocal(license.CreationDate).ToString("dd/MM/yyyy")</span>
+                        </div>
+                    </div>
+                }
             </div>
         </div>
+
+        <!-- Cluster info -->
+        @if (clusterInfo != null)
+        {
+            var otherMembers = clusterInfo.Members
+                .Where(m => !hardwareIds.Contains(m.HardwareId))
+                .ToList();
+            @if (otherMembers.Any())
+            {
+                <div class="card bg-dark border-warning mb-4">
+                    <div class="card-body py-2">
+                        <div class="d-flex align-items-center gap-2 mb-2">
+                            <span class="badge bg-warning text-dark">Cluster</span>
+                            <small class="fw-bold">@(clusterInfo.Label ?? clusterInfo.ClusterId.ToString()[..8])</small>
+                            <small class="text-muted">@clusterInfo.Members.Count HWIDs | @clusterInfo.CommonComponents/5 composants communs</small>
+                            <a href="/fingerprints" class="btn btn-sm btn-outline-secondary ms-auto py-0" style="font-size:0.7rem">Voir le cluster</a>
+                        </div>
+                        <div class="d-flex flex-wrap gap-2">
+                            @foreach (var m in otherMembers)
+                            {
+                                var firstLic = m.Licenses.FirstOrDefault(l => l.LicenseId != Guid.Empty);
+                                <div class="border border-secondary rounded px-2 py-1" style="font-size:0.8rem">
+                                    @if (firstLic != null)
+                                    {
+                                        <a href="/user-telemetry/@firstLic.LicenseId" class="text-info text-decoration-none font-monospace">@m.HardwareId[..Math.Min(12, m.HardwareId.Length)]...</a>
+                                        <span class="text-muted ms-1">@firstLic.CustomerName</span>
+                                        <span class="badge bg-@(firstLic.IsActive ? "success" : "secondary") ms-1" style="font-size:0.6rem">@firstLic.TypeName</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="font-monospace text-muted">@m.HardwareId[..Math.Min(12, m.HardwareId.Length)]...</span>
+                                        <small class="text-muted ms-1">No license</small>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    </div>
+                </div>
+            }
+        }
 
         <!-- KPI cards -->
         @if (TotalCount > 0)
         {
             <div class="row g-3 mb-4">
-                <div class="col-md-3">
+                <div class="col-md-2">
                     <div class="card bg-dark border-primary text-center py-2">
-                        <div class="small text-muted">@L["Telemetry_Events"]</div>
+                        <div class="small text-muted">Activité réelle</div>
                         <div class="fs-4 fw-bold text-primary">@eventCount</div>
                     </div>
                 </div>
-                <div class="col-md-3">
+                <div class="col-md-2">
                     <div class="card bg-dark border-success text-center py-2">
                         <div class="small text-muted">@L["Telemetry_Diagnostics"]</div>
                         <div class="fs-4 fw-bold text-success">@diagnosticCount</div>
                     </div>
                 </div>
-                <div class="col-md-3">
+                <div class="col-md-2">
                     <div class="card bg-dark border-danger text-center py-2">
                         <div class="small text-muted">@L["Telemetry_Errors"]</div>
                         <div class="fs-4 fw-bold text-danger">@errorCount</div>
                     </div>
                 </div>
-                <div class="col-md-3">
+                <div class="col-md-2">
+                    <div class="card bg-dark border-secondary text-center py-2">
+                        <div class="small text-muted">Bruit système</div>
+                        <div class="fs-4 fw-bold text-secondary">@systemNoiseEventCount</div>
+                    </div>
+                </div>
+                <div class="col-md-4">
                     <div class="card bg-dark border-info text-center py-2">
-                        <div class="small text-muted">@L["UserTelemetry_LastActivity"]</div>
-                        <div class="fs-6 fw-bold text-info">@(lastActivity.HasValue ? TZ.ToLocal(lastActivity.Value).ToString("dd/MM/yyyy HH:mm") : "-")</div>
+                        <div class="small text-muted">@L["UserTelemetry_Activity"]</div>
+                        <div class="small"><span class="text-muted">@L["UserTelemetry_FirstActivity"]</span> <span class="fw-bold text-info">@(firstActivity.HasValue ? TZ.ToLocal(firstActivity.Value).ToString("dd/MM/yyyy HH:mm") : "-")</span></div>
+                        <div class="small"><span class="text-muted">@L["UserTelemetry_LastActivity"]</span> <span class="fw-bold text-info">@(lastActivity.HasValue ? TZ.ToLocal(lastActivity.Value).ToString("dd/MM/yyyy HH:mm") : "-")</span></div>
                     </div>
                 </div>
             </div>
         }
+
+        <!-- Quota charts (Freemium / School) -->
+        @if (quotaData.Any())
+        {
+            <div class="card bg-dark border-secondary mb-4">
+                <div class="card-body py-3">
+                    <h6 class="text-info mb-3">Quotas — 7 derniers jours</h6>
+                    <div class="row g-3">
+                        @foreach (var quotaType in quotaData.Keys.OrderBy(k => k))
+                        {
+                            var data = quotaData[quotaType];
+                            var quotaMaxUsed = data.Max(d => d.MaxUsed);
+                            var quotaLimit = data.FirstOrDefault()?.Limit ?? 0;
+                            var quotaHasUsage = quotaMaxUsed > 0;
+                            var quotaPeakPct = quotaLimit > 0 ? quotaMaxUsed * 100.0 / quotaLimit : 0;
+                            var quotaAccent = quotaPeakPct >= 90 ? "#ff4d5e" : quotaPeakPct >= 50 ? "#ffc107" : quotaHasUsage ? "#20c997" : "#6c757d";
+                            <div class="col-md-4">
+                                <div class="border rounded p-2" style="border-color: @quotaAccent !important; box-shadow: @(quotaHasUsage ? $"0 0 0 1px {quotaAccent}33" : "none");">
+                                    <div class="d-flex justify-content-between align-items-center mb-2">
+                                        <span class="fw-bold" style="font-size: 0.95rem;">@quotaType</span>
+                                        <span class="fw-bold" style="font-size: 0.95rem; color: @quotaAccent;">Max: @quotaMaxUsed/@quotaLimit</span>
+                                    </div>
+                                    <div class="chart-container d-flex align-items-end justify-content-around" style="height: 96px;">
+                                        @foreach (var day in data)
+                                        {
+                                            var pct = day.Limit > 0 ? (int)Math.Round(day.MaxUsed * 100.0 / day.Limit) : 0;
+                                            pct = Math.Clamp(pct, 0, 100);
+                                            var hasDayUsage = day.MaxUsed > 0;
+                                            var color = day.MaxUsed >= day.Limit * 0.9 ? "#ff4d5e" : day.MaxUsed >= day.Limit * 0.5 ? "#ffc107" : hasDayUsage ? "#20c997" : "#0dcaf0";
+                                            <div class="d-flex flex-column align-items-center" style="flex: 1; min-width: 0;">
+                                                <small class="fw-bold @(hasDayUsage ? "" : "text-muted")" style="font-size: @(hasDayUsage ? "0.8rem" : "0.6rem"); color: @(hasDayUsage ? color : "");">@day.MaxUsed</small>
+                                                <div class="d-flex align-items-end justify-content-center" style="height: 58px; width: 100%;">
+                                                    <div style="width: 60%; height: @(hasDayUsage ? Math.Max(pct, 8) : 3)%; background: @color; border-radius: 3px 3px 0 0; min-height: 2px;" title="@day.Date.ToString("dd/MM") — @day.MaxUsed/@day.Limit (@pct%)"></div>
+                                                </div>
+                                                <small class="@(hasDayUsage ? "fw-bold" : "text-muted")" style="font-size: @(hasDayUsage ? "0.65rem" : "0.55rem"); color: @(hasDayUsage ? color : "");">@day.Date.ToString("dd/MM")</small>
+                                            </div>
+                                        }
+                                    </div>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+        }
+
+        <!-- Daily usage chart (Paid licenses) -->
+        @if (dailyUsage.Any() && dailyUsage.Any(d => d.Count > 0))
+        {
+            var maxCount = dailyUsage.Max(d => d.Count);
+            if (maxCount == 0) maxCount = 1;
+            var totalEvents = dailyUsage.Sum(d => d.Count);
+            var activeDays = dailyUsage.Count(d => d.Count > 0);
+            var chartH = 150;
+            var barW = 100.0 / dailyUsage.Count;
+            <div class="card bg-dark border-secondary mb-4">
+                <div class="card-body py-3">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h6 class="text-success mb-0">Activité réelle — 30 derniers jours</h6>
+                        <span class="small text-muted">@totalEvents événements utiles · @activeDays jours actifs · moy. @(activeDays > 0 ? totalEvents / activeDays : 0)/jour</span>
+                    </div>
+                    <svg width="100%" height="@(chartH + 20)" viewBox="0 0 1000 @(chartH + 20)" preserveAspectRatio="none">
+                        @for (var i = 0; i < dailyUsage.Count; i++)
+                        {
+                            var day = dailyUsage[i];
+                            var barH = day.Count > 0 ? (int)(day.Count * (chartH - 20.0) / maxCount) + 4 : 0;
+                            var x = (int)(i * 1000.0 / dailyUsage.Count);
+                            var w = (int)(1000.0 / dailyUsage.Count) - 3;
+                            var y = chartH - barH;
+                            var color = day.Count == 0 ? "#2a2a3a" : day.Count >= maxCount * 0.8 ? "#198754" : day.Count >= maxCount * 0.4 ? "#0dcaf0" : "#6c757d";
+                            <rect x="@x" y="@y" width="@w" height="@barH" rx="2" fill="@color">
+                                <title>@day.Date.ToString("dd/MM/yyyy") — @day.Count événements utiles</title>
+                            </rect>
+                            @if (day.Count > 0)
+                            {
+                                @((MarkupString)$"<text x=\"{x + w / 2}\" y=\"{y - 3}\" text-anchor=\"middle\" fill=\"#aaa\" font-size=\"9\">{day.Count}</text>")
+                            }
+                            @((MarkupString)$"<text x=\"{x + w / 2}\" y=\"{chartH + 14}\" text-anchor=\"middle\" fill=\"#666\" font-size=\"8\">{day.Date:dd/MM}</text>")
+                        }
+                    </svg>
+                </div>
+            </div>
+        }
+
+        @* ── Section Sécurité ── *@
+        <div class="card bg-dark border-secondary mt-4">
+            <div class="card-header d-flex justify-content-between align-items-center py-2" style="cursor:pointer" @onclick="ToggleSecuritySection">
+                <span class="fw-semibold d-flex align-items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                    Sécurité
+                    @if (secBanCount > 0)
+                    {
+                        <span class="badge bg-danger ms-1" style="font-size:0.65rem">@secBanCount ban(s)</span>
+                    }
+                    @if (secCanaryCount > 0)
+                    {
+                        <span class="badge bg-warning text-dark ms-1" style="font-size:0.65rem">@secCanaryCount alerte(s)</span>
+                    }
+                </span>
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    @if (showSecuritySection) {
+                        <polyline points="18 15 12 9 6 15"/>
+                    } else {
+                        <polyline points="6 9 12 15 18 9"/>
+                    }
+                </svg>
+            </div>
+
+            @if (showSecuritySection)
+            {
+                @if (!secLoaded)
+                {
+                    <div class="card-body text-center py-3 text-muted">
+                        <div class="spinner-border spinner-border-sm me-2"></div>Chargement...
+                    </div>
+                }
+                else
+                {
+                    <div class="card-body p-3">
+
+                        @* HWIDs liés *@
+                        @if (secRelatedHwids.Count > 0)
+                        {
+                            <div class="mb-3">
+                                <h6 class="text-muted small text-uppercase mb-2">HWIDs liés (cluster)</h6>
+                                <div class="d-flex flex-wrap gap-2">
+                                    @foreach (var rel in secRelatedHwids)
+                                    {
+                                        <div class="card bg-dark border-warning p-2" style="min-width:200px">
+                                            <code class="text-warning small">@(rel.HardwareId.Length > 14 ? rel.HardwareId[..14] + "…" : rel.HardwareId)</code>
+                                            <small class="text-muted">@rel.MatchCount/5 composants communs</small>
+                                            @if (secRelatedLicenses.TryGetValue(rel.HardwareId, out var relLicId))
+                                            {
+                                                <a href="/user-telemetry/@relLicId" class="text-info small">Voir fiche</a>
+                                            }
+                                        </div>
+                                    }
+                                </div>
+                            </div>
+                        }
+
+                        @* Canary Alerts *@
+                        @if (secCanaryAlerts.Count > 0)
+                        {
+                            <div class="mb-3">
+                                <h6 class="text-muted small text-uppercase mb-2">Canary Alerts (@secCanaryAlerts.Count)</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-dark table-sm align-middle mb-0">
+                                        <thead>
+                                            <tr class="text-muted" style="font-size:0.75rem">
+                                                <th>Date</th>
+                                                <th>Trigger</th>
+                                                <th>Sévérité</th>
+                                                <th>IP</th>
+                                                <th>Détails</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var c in secCanaryAlerts)
+                                            {
+                                                <tr>
+                                                    <td class="text-muted small text-nowrap">@TZ.ToLocal(DateTime.SpecifyKind(c.ReceivedAt, DateTimeKind.Utc)).ToString("dd/MM/yyyy HH:mm")</td>
+                                                    <td><code class="text-warning small">@c.Trigger</code></td>
+                                                    <td>
+                                                        @{
+                                                            var sevBadge = c.Severity switch { 3 => ("danger","CRITIQUE"), 2 => ("warning","WARNING"), _ => ("secondary","INFO") };
+                                                        }
+                                                        <span class="badge bg-@sevBadge.Item1" style="font-size:0.6rem">@sevBadge.Item2</span>
+                                                    </td>
+                                                    <td class="small text-muted">@(c.ClientIp ?? "—")</td>
+                                                    <td class="small text-muted" style="max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="@c.Details">@(c.Details ?? "—")</td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        }
+
+                        @* HWID Bans *@
+                        @if (secHwidBans.Count > 0)
+                        {
+                            <div class="mb-3">
+                                <h6 class="text-muted small text-uppercase mb-2">Bans HWID (@secHwidBans.Count)</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-dark table-sm align-middle mb-0">
+                                        <thead>
+                                            <tr class="text-muted" style="font-size:0.75rem">
+                                                <th>Date</th>
+                                                <th>HWID</th>
+                                                <th>Catégorie</th>
+                                                <th>Statut</th>
+                                                <th>Motif</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var b in secHwidBans)
+                                            {
+                                                <tr>
+                                                    <td class="text-muted small text-nowrap">@TZ.ToLocal(DateTime.SpecifyKind(b.BannedAt, DateTimeKind.Utc)).ToString("dd/MM/yyyy HH:mm")</td>
+                                                    <td><code class="text-info small">@(b.HardwareId.Length > 14 ? b.HardwareId[..14] + "…" : b.HardwareId)</code></td>
+                                                    <td><span class="badge bg-danger" style="font-size:0.6rem">@(b.BanCategory ?? "manual")</span></td>
+                                                    <td>@(b.IsActive ? @<span class="badge bg-danger" style="font-size:0.6rem">ACTIF</span> : @<span class="badge bg-secondary" style="font-size:0.6rem">LEVÉ</span>)</td>
+                                                    <td class="small text-muted" style="max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="@b.Reason">@b.Reason</td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        }
+
+                        @* Component Bans *@
+                        @if (secComponentBans.Count > 0)
+                        {
+                            <div class="mb-3">
+                                <h6 class="text-muted small text-uppercase mb-2">Bans Composants / Corrélations (@secComponentBans.Count)</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-dark table-sm align-middle mb-0">
+                                        <thead>
+                                            <tr class="text-muted" style="font-size:0.75rem">
+                                                <th>Date</th>
+                                                <th>Type</th>
+                                                <th>Confiance</th>
+                                                <th>Hash</th>
+                                                <th>Statut</th>
+                                                <th>Motif</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            @foreach (var b in secComponentBans)
+                                            {
+                                                <tr class="@(b.IsWeakCorrelation ? "table-warning" : "")">
+                                                    <td class="text-muted small text-nowrap">@TZ.ToLocal(DateTime.SpecifyKind(b.BannedAt, DateTimeKind.Utc)).ToString("dd/MM/yyyy HH:mm")</td>
+                                                    <td>
+                                                        <span class="badge bg-warning text-dark" style="font-size:0.6rem">@b.ComponentType</span>
+                                                        <div class="text-muted" style="font-size:0.65rem">@b.MatchSummary</div>
+                                                    </td>
+                                                    <td><span class="badge bg-@GetComponentConfidenceBadge(b.MatchStrength)" style="font-size:0.6rem">@GetComponentConfidenceLabel(b.MatchStrength)</span></td>
+                                                    <td><code class="text-muted small">@(b.ComponentHash.Length > 12 ? b.ComponentHash[..12] + "…" : b.ComponentHash)</code></td>
+                                                    <td>
+                                                        @if (b.IsActive && !b.IsWeakCorrelation)
+                                                        {
+                                                            <span class="badge bg-danger" style="font-size:0.6rem">ACTIF</span>
+                                                        }
+                                                        else if (b.IsActive)
+                                                        {
+                                                            <span class="badge bg-warning text-dark" style="font-size:0.6rem">HISTORIQUE FAIBLE</span>
+                                                        }
+                                                        else
+                                                        {
+                                                            <span class="badge bg-secondary" style="font-size:0.6rem">LEVÉ</span>
+                                                        }
+                                                    </td>
+                                                    <td class="small text-muted" style="max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="@b.Reason">@b.Reason</td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        }
+
+                        @if (secCanaryAlerts.Count == 0 && secHwidBans.Count == 0 && secComponentBans.Count == 0 && secRelatedHwids.Count == 0)
+                        {
+                            <p class="text-muted small mb-0 text-center py-2">Aucun événement de sécurité pour cet utilisateur.</p>
+                        }
+                    </div>
+                }
+            }
+        </div>
+
 
         <!-- Hardware IDs list -->
         @if (hardwareIds.Count > 1)
@@ -181,9 +609,27 @@
                                                     <tbody>
                                                         @foreach (var kv in props)
                                                         {
+                                                            var isSensitive = IsSensitiveTelemetryField(kv.Key, kv.Value);
                                                             <tr>
                                                                 <td class="text-info fw-bold">@kv.Key</td>
-                                                                <td class="text-light">@kv.Value</td>
+                                                                <td class="text-light">
+                                                                    @if (isSensitive)
+                                                                    {
+                                                                        <div class="d-flex align-items-center gap-2">
+                                                                            <code class="small text-muted">@MaskedSecret()</code>
+                                                                            <button class="btn btn-link text-info p-0" style="line-height:1" title="Copier la valeur" aria-label="Copier la valeur" @onclick="() => CopyToClipboard(kv.Value)">
+                                                                                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" fill="currentColor" viewBox="0 0 16 16">
+                                                                                    <path d="M4 2a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V2zm2-1a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H6z"/>
+                                                                                    <path d="M2 6a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1v-1h1v1a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h1v1H2z"/>
+                                                                                </svg>
+                                                                            </button>
+                                                                        </div>
+                                                                    }
+                                                                    else
+                                                                    {
+                                                                        @kv.Value
+                                                                    }
+                                                                </td>
                                                             </tr>
                                                         }
                                                     </tbody>
@@ -295,9 +741,51 @@
                 </nav>
             </div>
         }
+
     }
 </div>
 
+@* ── Modal Analyse IA ── *@
+@if (showAiModal && aiReport != null)
+{
+    <div class="modal fade show d-block" style="background:rgba(0,0,0,0.8);" tabindex="-1">
+        <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+            <div class="modal-content bg-dark border-warning">
+                <div class="modal-header border-warning py-2">
+                    <h5 class="modal-title d-flex align-items-center gap-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="none" stroke="#ffc107" stroke-width="2" viewBox="0 0 24 24"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/></svg>
+                        <span>Analyse IA — @license?.CustomerName</span>
+                        <small class="text-muted fw-normal" style="font-size:.75rem;">@(license?.Product?.Name ?? "")</small>
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" @onclick="() => showAiModal = false"></button>
+                </div>
+                <div class="modal-body" style="max-height:70vh;overflow-y:auto;">
+                    <div class="ai-report">
+                        @((MarkupString)FormatAiReport(aiReport))
+                    </div>
+                </div>
+                <div class="modal-footer border-secondary py-2">
+                    <small class="text-muted me-auto">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" class="me-1"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/></svg>
+                        Analysé par DeepSeek
+                    </small>
+                    <button class="btn btn-secondary btn-sm" @onclick="() => showAiModal = false">Fermer</button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+<style>
+    .ai-report { font-size: .9rem; line-height: 1.7; color: #e0e0e0; }
+    .ai-report h2 { font-size: 1.1rem; color: #ffc107; border-bottom: 1px solid #444; padding-bottom: .3rem; margin-top: 1.2rem; margin-bottom: .6rem; }
+    .ai-report h3 { font-size: 1rem; color: #adb5bd; margin-top: .9rem; margin-bottom: .4rem; }
+    .ai-report strong { color: #fff; }
+    .ai-report ul { padding-left: 1.2rem; }
+    .ai-report li { margin-bottom: .2rem; }
+    .ai-report hr { border-color: #444; margin: 1rem 0; }
+    .ai-report code { color: #0dcaf0; background: rgba(13,202,240,.1); padding: .1rem .3rem; border-radius: .2rem; font-size: .85rem; }
+</style>
 
 @code {
     [Parameter] public Guid LicenseId { get; set; }
@@ -312,8 +800,85 @@
     private string? FilterHardwareId;
 
     // KPIs
-    private int eventCount, diagnosticCount, errorCount;
-    private DateTime? lastActivity;
+    private int eventCount, diagnosticCount, errorCount, systemNoiseEventCount;
+    private DateTime? firstActivity, lastActivity;
+
+    // Quotas
+    private Dictionary<string, List<QuotaDayData>> quotaData = new();
+    // Daily usage (paid licenses)
+    private List<DailyUsageData> dailyUsage = new();
+    // Cluster info
+    private ClusterInfo? clusterInfo;
+    private bool isFreemium => license?.Type?.Slug?.Contains("FREEMIUM", StringComparison.OrdinalIgnoreCase) == true;
+    private bool isSchool => license?.Type?.Slug?.Contains("SCHOOL", StringComparison.OrdinalIgnoreCase) == true;
+    private bool hasQuotas => isFreemium || isSchool;
+
+    private static string MaskedSecret() => "****-****-****";
+
+    private async Task CopyToClipboard(string text)
+    {
+        await JS.InvokeVoidAsync("navigator.clipboard.writeText", text);
+        Toast.ShowInfo(L["Common_Copied"]);
+    }
+
+    private bool IsSensitiveTelemetryField(string key, string value)
+    {
+        var normalizedKey = NormalizeSensitiveFieldName(key);
+        var isSensitiveName = normalizedKey is "key" or "licensekey" or "licencekey" or "apikey" or "publickey" or "privatekey"
+            || normalizedKey.EndsWith("licensekey", StringComparison.Ordinal)
+            || normalizedKey.EndsWith("licencekey", StringComparison.Ordinal)
+            || normalizedKey.EndsWith("apikey", StringComparison.Ordinal)
+            || normalizedKey.EndsWith("token", StringComparison.Ordinal)
+            || normalizedKey.EndsWith("secret", StringComparison.Ordinal)
+            || normalizedKey.EndsWith("password", StringComparison.Ordinal);
+
+        return isSensitiveName
+            || (!string.IsNullOrWhiteSpace(license?.LicenseKey)
+                && string.Equals(value, license.LicenseKey, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string NormalizeSensitiveFieldName(string value)
+    {
+        var sb = new StringBuilder(value.Length);
+        foreach (var c in value)
+        {
+            if (char.IsLetterOrDigit(c))
+            {
+                sb.Append(char.ToLowerInvariant(c));
+            }
+        }
+
+        return sb.ToString();
+    }
+
+    private class QuotaDayData
+    {
+        public DateTime Date { get; set; }
+        public int MaxUsed { get; set; }
+        public int Limit { get; set; }
+    }
+
+    private class DailyUsageData
+    {
+        public DateTime Date { get; set; }
+        public int Count { get; set; }
+    }
+
+    // AI Analysis
+    private bool aiLoading;
+    private string? aiReport;
+    private bool showAiModal;
+
+    // Security section state
+    private bool showSecuritySection;
+    private bool secLoaded;
+    private int secBanCount;
+    private int secCanaryCount;
+    private List<CanaryAlert> secCanaryAlerts = new();
+    private List<BannedHardwareId> secHwidBans = new();
+    private List<ComponentBanView> secComponentBans = new();
+    private List<RelatedHwid> secRelatedHwids = new();
+    private Dictionary<string, Guid> secRelatedLicenses = new();
 
     // Pagination
     private int CurrentPage = 1;
@@ -330,6 +895,7 @@
         license = await db.Licenses
             .AsNoTracking()
             .Include(l => l.Product)
+            .Include(l => l.Type)
             .Include(l => l.Seats)
             .FirstOrDefaultAsync(l => l.Id == LicenseId);
 
@@ -345,6 +911,11 @@
             hardwareIds.Add(license.HardwareId);
 
         await LoadKpis();
+        if (hasQuotas)
+            await LoadQuotas();
+        if (!isFreemium)
+            await LoadDailyUsage();
+        clusterInfo = await FingerprintSvc.GetClusterForHardwareIdsAsync(hardwareIds);
         await Refresh();
     }
 
@@ -359,10 +930,121 @@
         if (license!.ProductId != Guid.Empty)
             query = query.Where(t => t.ProductId == license.ProductId);
 
-        eventCount = await query.CountAsync(t => t.Type == TelemetryType.Event);
+        var events = await query
+            .Where(t => t.Type == TelemetryType.Event)
+            .Select(t => new { t.EventName, t.Timestamp })
+            .ToListAsync();
+
+        var realActivityEvents = events
+            .Where(e => TelemetrySchemaRegistry.IsRealUserActivityEvent(e.EventName))
+            .ToList();
+
+        eventCount = realActivityEvents.Count;
+        systemNoiseEventCount = events.Count(e => TelemetrySchemaRegistry.IsSystemNoiseEvent(e.EventName));
         diagnosticCount = await query.CountAsync(t => t.Type == TelemetryType.Diagnostic);
         errorCount = await query.CountAsync(t => t.Type == TelemetryType.Error);
-        lastActivity = await query.OrderByDescending(t => t.Timestamp).Select(t => (DateTime?)t.Timestamp).FirstOrDefaultAsync();
+        firstActivity = realActivityEvents.Count == 0 ? null : realActivityEvents.Min(e => e.Timestamp);
+        lastActivity = realActivityEvents.Count == 0 ? null : realActivityEvents.Max(e => e.Timestamp);
+    }
+
+    private async Task LoadQuotas()
+    {
+        if (!hardwareIds.Any()) return;
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var since = DateTime.UtcNow.AddDays(-7);
+
+        // Récupérer les PropertiesJson des events contenant des quotas
+        var query = db.TelemetryRecords.AsNoTracking()
+            .Where(t => hardwareIds.Contains(t.HardwareId) && t.Type == TelemetryType.Event && t.Timestamp >= since);
+
+        if (license!.ProductId != Guid.Empty)
+            query = query.Where(t => t.ProductId == license.ProductId);
+
+        var events = await query
+            .Where(t => t.EventData != null && t.EventData.PropertiesJson != null && t.EventData.PropertiesJson.Contains("Quota_"))
+            .Select(t => new { t.Timestamp, t.EventData!.PropertiesJson })
+            .ToListAsync();
+
+        if (!events.Any()) return;
+
+        // Parse et agrège par type de quota et par jour
+        var quotaTypes = new[] { "Api_Daily", "Mcp_Daily", "Copilot_Daily" };
+        var result = new Dictionary<string, List<QuotaDayData>>();
+
+        foreach (var quotaType in quotaTypes)
+        {
+            var key = $"Quota_{quotaType}";
+            var dailyMax = new Dictionary<DateTime, (int maxUsed, int limit)>();
+
+            foreach (var ev in events)
+            {
+                try
+                {
+                    var json = JsonSerializer.Deserialize<JsonElement>(ev.PropertiesJson!);
+                    if (json.TryGetProperty(key, out var val))
+                    {
+                        var parts = val.GetString()?.Split('/');
+                        if (parts?.Length == 2 && int.TryParse(parts[0], out var used) && int.TryParse(parts[1], out var limit))
+                        {
+                            var day = SoftLicence.Server.Services.TimeZoneService.ToParisDate(ev.Timestamp);
+                            if (!dailyMax.ContainsKey(day) || used > dailyMax[day].maxUsed)
+                                dailyMax[day] = (used, limit);
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            if (dailyMax.Any())
+            {
+                // Remplir les jours manquants
+                var days = new List<QuotaDayData>();
+                for (var d = SoftLicence.Server.Services.TimeZoneService.ParisDateDaysAgo(7); d <= SoftLicence.Server.Services.TimeZoneService.ParisDateDaysAgo(0); d = d.AddDays(1))
+                {
+                    var limit = dailyMax.Values.FirstOrDefault().limit;
+                    if (dailyMax.TryGetValue(d, out var data))
+                        days.Add(new QuotaDayData { Date = d, MaxUsed = data.maxUsed, Limit = data.limit });
+                    else
+                        days.Add(new QuotaDayData { Date = d, MaxUsed = 0, Limit = limit });
+                }
+                result[quotaType.Replace("_", " ")] = days;
+            }
+        }
+
+        quotaData = result;
+    }
+
+    private async Task LoadDailyUsage()
+    {
+        if (!hardwareIds.Any()) return;
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var since = DateTime.UtcNow.AddDays(-30);
+
+        var query = db.TelemetryRecords.AsNoTracking()
+            .Where(t => hardwareIds.Contains(t.HardwareId) && t.Timestamp >= since)
+            .Where(t => license!.ProductId == Guid.Empty || t.ProductId == license.ProductId);
+
+        if (FilterHardwareId != null)
+            query = query.Where(t => t.HardwareId == FilterHardwareId);
+
+        var events = await query
+            .Where(t => t.Type == TelemetryType.Event)
+            .Select(t => new { t.Timestamp, t.EventName })
+            .ToListAsync();
+
+        var grouped = events
+            .Where(e => TelemetrySchemaRegistry.IsRealUserActivityEvent(e.EventName))
+            .GroupBy(e => SoftLicence.Server.Services.TimeZoneService.ToParisDate(e.Timestamp))
+            .ToDictionary(g => g.Key, g => g.Count());
+
+        var days = new List<DailyUsageData>();
+        for (var d = SoftLicence.Server.Services.TimeZoneService.ParisDateDaysAgo(30); d <= SoftLicence.Server.Services.TimeZoneService.ParisDateDaysAgo(0); d = d.AddDays(1))
+        {
+            days.Add(new DailyUsageData { Date = d, Count = grouped.GetValueOrDefault(d, 0) });
+        }
+        dailyUsage = days;
     }
 
     private async Task Refresh()
@@ -373,6 +1055,8 @@
             TotalCount = 0;
             return;
         }
+
+        await LoadDailyUsage();
 
         try
         {
@@ -471,5 +1155,571 @@
                 JsonSerializer.Serialize(value, new JsonSerializerOptions { WriteIndented = true }),
             _ => value.GetRawText()
         };
+    }
+
+    // ── Analyse IA ────────────────────────────────────────────────
+
+    private async Task AnalyzeWithAi()
+    {
+        aiLoading = true;
+        aiReport = null;
+        StateHasChanged();
+        try
+        {
+            var prompt = await BuildAiPrompt();
+            aiReport = await AiAnalysis.AnalyzeAsync(prompt);
+            showAiModal = true;
+        }
+        catch (Exception ex)
+        {
+            aiReport = $"Erreur lors de l'analyse IA : {ex.Message}";
+            showAiModal = true;
+        }
+        finally
+        {
+            aiLoading = false;
+        }
+    }
+
+    private async Task ToggleSecuritySection()
+    {
+        showSecuritySection = !showSecuritySection;
+        if (showSecuritySection && !secLoaded)
+            await LoadSecuritySection();
+    }
+
+    private async Task LoadSecuritySection()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+
+        // Canary alerts for all HWIDs of this user
+        secCanaryAlerts = await db.CanaryAlerts.AsNoTracking()
+            .Where(c => hardwareIds.Contains(c.HardwareId))
+            .OrderByDescending(c => c.ReceivedAt)
+            .Take(50)
+            .ToListAsync();
+
+        // HWID bans
+        secHwidBans = await db.BannedHardwareIds.AsNoTracking()
+            .Where(b => hardwareIds.Contains(b.HardwareId))
+            .OrderByDescending(b => b.BannedAt)
+            .ToListAsync();
+
+        // Component bans — match via HardwareFingerprint hashes
+        var fp = await db.HardwareFingerprints.AsNoTracking()
+            .Where(f => hardwareIds.Contains(f.HardwareId))
+            .ToListAsync();
+
+        var componentHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var matchedTypesByHash = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var f in fp)
+        {
+            AddComponentHash(componentHashes, matchedTypesByHash, f.CpuHash, "CPU");
+            AddComponentHash(componentHashes, matchedTypesByHash, f.MotherboardHash, "MB");
+            AddComponentHash(componentHashes, matchedTypesByHash, f.BiosHash, "BIOS");
+            AddComponentHash(componentHashes, matchedTypesByHash, f.DiskHash, "DISK");
+            AddComponentHash(componentHashes, matchedTypesByHash, f.HostHash, "HOST");
+        }
+
+        if (componentHashes.Count > 0)
+        {
+            var componentBans = await db.BannedComponents.AsNoTracking()
+                .Where(b => componentHashes.Contains(b.ComponentHash))
+                .OrderByDescending(b => b.BannedAt)
+                .ToListAsync();
+
+            secComponentBans = componentBans
+                .Select(b => ComponentBanView.From(b, matchedTypesByHash.TryGetValue(b.ComponentHash, out var types) ? types : new()))
+                .ToList();
+        }
+        else
+        {
+            secComponentBans = new();
+        }
+
+        // Related HWIDs via clustering
+        secRelatedHwids = new();
+        foreach (var hwid in hardwareIds)
+        {
+            var related = await FingerprintSvc.FindRelatedHwidsAsync(hwid);
+            foreach (var r in related.Where(r => !hardwareIds.Contains(r.HardwareId)))
+            {
+                if (!secRelatedHwids.Any(x => x.HardwareId == r.HardwareId))
+                    secRelatedHwids.Add(r);
+            }
+        }
+
+        // License cross-ref for related HWIDs
+        var relHwids = secRelatedHwids.Select(r => r.HardwareId).ToList();
+        if (relHwids.Count > 0)
+        {
+            var relSeats = await db.LicenseSeats.AsNoTracking()
+                .Where(s => relHwids.Contains(s.HardwareId) && s.IsActive)
+                .Select(s => new { s.HardwareId, s.LicenseId })
+                .ToListAsync();
+            secRelatedLicenses = relSeats.GroupBy(s => s.HardwareId)
+                .ToDictionary(g => g.Key, g => g.First().LicenseId);
+        }
+
+        secBanCount = secHwidBans.Count(b => b.IsActive) + secComponentBans.Count(b => b.IsActive && !b.IsWeakCorrelation);
+        secCanaryCount = secCanaryAlerts.Count;
+        secLoaded = true;
+    }
+
+    private static void AddComponentHash(
+        HashSet<string> hashes,
+        Dictionary<string, HashSet<string>> matchedTypesByHash,
+        string? hash,
+        string componentType)
+    {
+        if (string.IsNullOrWhiteSpace(hash))
+            return;
+
+        hashes.Add(hash);
+        if (!matchedTypesByHash.TryGetValue(hash, out var types))
+        {
+            types = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            matchedTypesByHash[hash] = types;
+        }
+
+        types.Add(componentType);
+    }
+
+    private static string GetComponentConfidenceBadge(string strength) => strength switch
+    {
+        "strong" => "danger",
+        "medium" => "warning text-dark",
+        "weak" => "secondary",
+        _ => "secondary"
+    };
+
+    private static string GetComponentConfidenceLabel(string strength) => strength switch
+    {
+        "strong" => "FORT",
+        "medium" => "MOYEN",
+        "weak" => "FAIBLE",
+        _ => "INCONNU"
+    };
+
+    private sealed class ComponentBanView
+    {
+        public DateTime BannedAt { get; init; }
+        public string ComponentType { get; init; } = "";
+        public string ComponentHash { get; init; } = "";
+        public string Reason { get; init; } = "";
+        public bool IsActive { get; init; }
+        public string MatchStrength { get; init; } = "unknown";
+        public string MatchSummary { get; init; } = "";
+        public bool IsWeakCorrelation => MatchStrength == "weak";
+
+        public static ComponentBanView From(BannedComponent ban, HashSet<string> matchedTypes)
+        {
+            var normalizedType = NormalizeComponentType(ban.ComponentType);
+            var strength = GetComponentMatchStrength(normalizedType, matchedTypes);
+            return new ComponentBanView
+            {
+                BannedAt = ban.BannedAt,
+                ComponentType = ban.ComponentType,
+                ComponentHash = ban.ComponentHash,
+                Reason = ban.Reason,
+                IsActive = ban.IsActive,
+                MatchStrength = strength,
+                MatchSummary = GetComponentMatchSummary(normalizedType, matchedTypes)
+            };
+        }
+    }
+
+    private static string NormalizeComponentType(string componentType) => componentType.Trim().ToUpperInvariant() switch
+    {
+        "FP_CPU" => "CPU",
+        "FP_MB" => "MB",
+        "FP_BIOS" => "BIOS",
+        "FP_DISK" => "DISK",
+        "FP_HOST" => "HOST",
+        var normalized => normalized
+    };
+
+    private static string GetComponentMatchStrength(string componentType, HashSet<string> matchedTypes)
+    {
+        if (componentType is "FP_EXE" or "FP_DLL" or "FP_CORE")
+            return "strong";
+
+        if (componentType == "MB" && matchedTypes.SetEquals(new[] { "MB" }))
+            return "weak";
+
+        return componentType is "DISK" or "BIOS" or "CPU" or "HOST" or "MB"
+            ? "medium"
+            : "unknown";
+    }
+
+    private static string GetComponentMatchSummary(string componentType, HashSet<string> matchedTypes)
+    {
+        if (componentType == "MB" && matchedTypes.SetEquals(new[] { "MB" }))
+            return "MB seul : corrélation faible, surtout en VM";
+
+        return matchedTypes.Count > 0
+            ? $"Match {string.Join("+", matchedTypes.OrderBy(t => t, StringComparer.OrdinalIgnoreCase))}"
+            : $"Match {componentType}";
+    }
+
+    private async Task<string> BuildAiPrompt()
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Tu es un expert en analyse de télémétrie logicielle et gestion de licences SaaS. "
+            + "Analyse les données suivantes sur un utilisateur et fournis un rapport structuré en français. "
+            + "Sois précis, factuel et orienté action pour l'équipe support.");
+        sb.AppendLine();
+
+        // Contexte licence
+        sb.AppendLine("## Contexte licence");
+        sb.AppendLine($"- Client : {license!.CustomerName} ({license.CustomerEmail ?? "email inconnu"})");
+        sb.AppendLine($"- Logiciel : {license.Product?.Name ?? "?"} | Type : {license.Type?.Slug ?? "?"}");
+        sb.AppendLine($"- Statut : {(license.IsActive ? "Active" : "Révoquée/Inactive")}");
+        sb.AppendLine($"- Postes max : {license.MaxSeats} | Postes actifs : {hardwareIds.Count}");
+        if (license.ActivationDate.HasValue)
+            sb.AppendLine($"- Activation : {TZ.ToLocal(license.ActivationDate.Value):dd/MM/yyyy}");
+        if (license.ExpirationDate.HasValue)
+        {
+            var remaining = license.ExpirationDate.Value - DateTime.UtcNow;
+            sb.AppendLine($"- Expiration : {TZ.ToLocal(license.ExpirationDate.Value):dd/MM/yyyy} ({(int)remaining.TotalDays} jours restants)");
+        }
+        else
+        {
+            sb.AppendLine("- Durée : Perpétuelle");
+        }
+        sb.AppendLine();
+
+        // KPIs
+        sb.AppendLine("## Activité globale");
+        sb.AppendLine($"- Activité réelle : {eventCount}");
+        sb.AppendLine($"- Bruit système : {systemNoiseEventCount}");
+        sb.AppendLine($"- Enregistrements bruts : {TotalCount}");
+        sb.AppendLine($"- Diagnostics : {diagnosticCount}");
+        sb.AppendLine($"- Erreurs : {errorCount}");
+        if (firstActivity.HasValue)
+            sb.AppendLine($"- Première activité : {TZ.ToLocal(firstActivity.Value):dd/MM/yyyy HH:mm}");
+        if (lastActivity.HasValue)
+            sb.AppendLine($"- Dernière activité : {TZ.ToLocal(lastActivity.Value):dd/MM/yyyy HH:mm}");
+        sb.AppendLine();
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+
+        // Top EventNames
+        var topEvents = await db.TelemetryRecords.AsNoTracking()
+            .Where(r => hardwareIds.Contains(r.HardwareId) && r.Type == TelemetryType.Event)
+            .GroupBy(r => r.EventName)
+            .Select(g => new { Name = g.Key, Count = g.Count() })
+            .OrderByDescending(x => x.Count)
+            .Take(25)
+            .ToListAsync();
+
+        if (topEvents.Any())
+        {
+            sb.AppendLine("## Événements (Top 25)");
+            foreach (var ev in topEvents)
+                sb.AppendLine($"- {ev.Name} : {ev.Count}x");
+            sb.AppendLine();
+        }
+
+        // Versions utilisées
+        var versions = await db.TelemetryRecords.AsNoTracking()
+            .Where(r => hardwareIds.Contains(r.HardwareId) && r.Version != null)
+            .GroupBy(r => r.Version)
+            .Select(g => new { Version = g.Key, Count = g.Count() })
+            .OrderByDescending(x => x.Count)
+            .Take(5)
+            .ToListAsync();
+
+        if (versions.Any())
+        {
+            sb.AppendLine("## Versions utilisées");
+            foreach (var v in versions)
+                sb.AppendLine($"- v{v.Version} : {v.Count} enregistrements");
+            sb.AppendLine();
+        }
+
+        // Propriétés JSON (clés fréquentes des 100 derniers events)
+        var recentEventsJson = await db.TelemetryRecords.AsNoTracking()
+            .Include(r => r.EventData)
+            .Where(r => hardwareIds.Contains(r.HardwareId) &&
+                        r.Type == TelemetryType.Event &&
+                        r.EventData != null &&
+                        r.EventData.PropertiesJson != null)
+            .OrderByDescending(r => r.Timestamp)
+            .Take(100)
+            .Select(r => r.EventData!.PropertiesJson)
+            .ToListAsync();
+
+        var propSummary = new Dictionary<string, List<string>>();
+        foreach (var jsonStr in recentEventsJson)
+        {
+            try
+            {
+                var dict = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(jsonStr!);
+                if (dict == null) continue;
+                foreach (var (k, v) in dict)
+                {
+                    if (!propSummary.ContainsKey(k)) propSummary[k] = new();
+                    if (propSummary[k].Count < 3)
+                        propSummary[k].Add(v.ToString());
+                }
+            }
+            catch { }
+        }
+
+        if (propSummary.Any())
+        {
+            sb.AppendLine("## Propriétés JSON fréquentes (100 derniers événements)");
+            foreach (var kv in propSummary.OrderByDescending(x => x.Value.Count).Take(30))
+                sb.AppendLine($"- **{kv.Key}** : ex. {string.Join(", ", kv.Value.Distinct().Take(3))}");
+            sb.AppendLine();
+        }
+
+        // Erreurs
+        var errors = await db.TelemetryErrors.AsNoTracking()
+            .Where(e => hardwareIds.Contains(e.Record!.HardwareId!))
+            .Select(e => new { e.ErrorType, e.Message })
+            .ToListAsync();
+
+        if (errors.Any())
+        {
+            sb.AppendLine("## Erreurs (regroupées)");
+            var errGroups = errors
+                .GroupBy(e => new { e.ErrorType, e.Message })
+                .Select(g => new { g.Key.ErrorType, g.Key.Message, Count = g.Count() })
+                .OrderByDescending(x => x.Count)
+                .Take(10);
+            foreach (var err in errGroups)
+                sb.AppendLine($"- [{err.ErrorType ?? "?"}] {err.Message} ({err.Count}x)");
+            sb.AppendLine();
+        }
+
+        // Diagnostics modules
+        var moduleResults = await db.TelemetryDiagnosticResults.AsNoTracking()
+            .Where(r => hardwareIds.Contains(r.Diagnostic!.Record!.HardwareId!))
+            .Select(r => new { r.ModuleName, r.Success })
+            .ToListAsync();
+
+        if (moduleResults.Any())
+        {
+            sb.AppendLine("## Santé des modules diagnostics");
+            foreach (var m in moduleResults
+                .GroupBy(r => r.ModuleName ?? "?")
+                .Select(g => new { Name = g.Key, Total = g.Count(), OK = g.Count(r => r.Success) })
+                .OrderBy(m => m.Name))
+            {
+                var rate = m.Total > 0 ? (m.OK * 100.0 / m.Total) : 0;
+                sb.AppendLine($"- {m.Name} : {m.OK}/{m.Total} ({rate:F0}% succès)");
+            }
+            sb.AppendLine();
+        }
+
+        // Quotas
+        if (quotaData.Any())
+        {
+            sb.AppendLine("## Quotas (7 derniers jours)");
+            foreach (var (quotaType, days) in quotaData)
+            {
+                var maxDay = days.OrderByDescending(d => d.MaxUsed).FirstOrDefault();
+                if (maxDay != null && maxDay.Limit > 0)
+                {
+                    var saturation = (int)(maxDay.MaxUsed * 100.0 / maxDay.Limit);
+                    sb.AppendLine($"- {quotaType} : pic={maxDay.MaxUsed}/{maxDay.Limit} ({saturation}% saturation)");
+                }
+            }
+            sb.AppendLine();
+        }
+
+        // Fréquence d'utilisation
+        if (firstActivity.HasValue && lastActivity.HasValue && eventCount > 0)
+        {
+            var durationDays = Math.Max(1.0, (lastActivity.Value - firstActivity.Value).TotalDays);
+            sb.AppendLine("## Fréquence d'utilisation");
+            sb.AppendLine($"- Durée d'activité : {(int)durationDays} jours");
+            sb.AppendLine($"- Moyenne événements/jour : {(eventCount / durationDays):F1}");
+            sb.AppendLine();
+        }
+
+        // Réseau
+        var uniqueIpCount = await db.TelemetryRecords.AsNoTracking()
+            .Where(r => hardwareIds.Contains(r.HardwareId) && r.ClientIp != null)
+            .Select(r => r.ClientIp).Distinct().CountAsync();
+        var uniqueIspCount = await db.TelemetryRecords.AsNoTracking()
+            .Where(r => hardwareIds.Contains(r.HardwareId) && r.Isp != null)
+            .Select(r => r.Isp).Distinct().CountAsync();
+        sb.AppendLine("## Réseau");
+        sb.AppendLine($"- IPs uniques : {uniqueIpCount}");
+        sb.AppendLine($"- FAI/ISP uniques : {uniqueIspCount}");
+        sb.AppendLine();
+
+        // Signaux d'automatisation (extraits des propriétés JSON déjà collectées)
+        var automationSignals = new List<string>();
+        if (propSummary.TryGetValue("IsInteractive", out var interactiveVals))
+        {
+            var falseCount = interactiveVals.Count(v => v.Equals("False", StringComparison.OrdinalIgnoreCase));
+            if (falseCount > 0) automationSignals.Add($"IsInteractive=False détecté ({falseCount}x sur 100 events récents)");
+        }
+        if (propSummary.TryGetValue("RequestSource", out var requestSources))
+        {
+            var notable = requestSources.Where(v =>
+                v.Contains("MCP", StringComparison.OrdinalIgnoreCase) ||
+                v.Contains("Agent", StringComparison.OrdinalIgnoreCase)).ToList();
+            if (notable.Any()) automationSignals.Add($"RequestSource: {string.Join(", ", notable.Distinct().Take(3))}");
+        }
+        foreach (var fpKey in propSummary.Keys.Where(k => k.StartsWith("FP_")))
+            automationSignals.Add($"Fingerprint technique détecté: {fpKey}");
+        if (automationSignals.Any())
+        {
+            sb.AppendLine("## Signaux d'automatisation / intégration technique");
+            foreach (var sig in automationSignals) sb.AppendLine($"- {sig}");
+            sb.AppendLine();
+        }
+
+        // OS et environnement
+        if (propSummary.TryGetValue("OS", out var osVals) && osVals.Any())
+        {
+            sb.AppendLine("## Environnement OS");
+            sb.AppendLine($"- OS détectés : {string.Join(", ", osVals.Distinct().Take(5))}");
+            sb.AppendLine();
+        }
+
+        // Historique de la licence (actions admin/système)
+        var licenseHistory = await db.LicenseHistories.AsNoTracking()
+            .Where(h => h.LicenseId == LicenseId)
+            .OrderBy(h => h.Timestamp)
+            .ToListAsync();
+
+        if (licenseHistory.Any())
+        {
+            sb.AppendLine("## Historique de la licence");
+            foreach (var h in licenseHistory)
+                sb.AppendLine($"- [{TZ.ToLocal(h.Timestamp):dd/MM/yyyy HH:mm}] {h.Action} — par {h.PerformedBy ?? "?"}{(string.IsNullOrEmpty(h.Details) ? "" : $" — {h.Details}")}");
+            sb.AppendLine();
+        }
+
+        // IPs bannies et threat scores associés à cet utilisateur
+        var userIps = await db.TelemetryRecords.AsNoTracking()
+            .Where(r => hardwareIds.Contains(r.HardwareId) && r.ClientIp != null)
+            .Select(r => r.ClientIp!)
+            .Distinct()
+            .ToListAsync();
+
+        if (userIps.Any())
+        {
+            var bannedUserIps = await db.BannedIps.AsNoTracking()
+                .Where(b => userIps.Contains(b.IpAddress))
+                .ToListAsync();
+
+            var threatScores = await db.IpThreatScores.AsNoTracking()
+                .Where(t => userIps.Contains(t.IpAddress))
+                .ToListAsync();
+
+            if (bannedUserIps.Any())
+            {
+                sb.AppendLine("## ⚠️ IPs bannies associées à cet utilisateur");
+                foreach (var ban in bannedUserIps)
+                    sb.AppendLine($"- {ban.IpAddress} : banni le {TZ.ToLocal(ban.BannedAt):dd/MM/yyyy}, {ban.BanCount}x ban(s), motif: {ban.Reason}, actif: {(ban.IsActive ? "OUI" : "non")}");
+                sb.AppendLine();
+            }
+
+            var highThreat = threatScores.Where(t => t.Score >= 50).ToList();
+            if (highThreat.Any())
+            {
+                sb.AppendLine("## ⚠️ Threat scores élevés (IPs de cet utilisateur)");
+                foreach (var ts in highThreat.OrderByDescending(t => t.Score))
+                    sb.AppendLine($"- {ts.IpAddress} : score {ts.Score} (zone {(ts.Score >= 200 ? "BAN" : ts.Score >= 100 ? "QUARANTAINE" : "ALERTE")})");
+                sb.AppendLine();
+            }
+        }
+
+        // Détection automatique de fraude / contournement
+        var securityFlags = new List<string>();
+        if (!license!.IsActive)
+        {
+            var activationAttemptsAfterRevoke = topEvents.FirstOrDefault(e =>
+                e.Name != null && e.Name.Contains("LicenseActivated"))?.Count ?? 0;
+            if (activationAttemptsAfterRevoke > 0)
+                securityFlags.Add($"CONTOURNEMENT PROBABLE : licence révoquée/inactive avec {activationAttemptsAfterRevoke} tentative(s) d'activation réussie détectée(s)");
+            var revokedHistory = licenseHistory.Where(h => h.Action == "REVOKED" || h.Action == "BANNED").ToList();
+            if (revokedHistory.Any())
+                securityFlags.Add($"Licence révoquée délibérément : {string.Join(" / ", revokedHistory.Select(h => $"{h.Action} le {TZ.ToLocal(h.Timestamp):dd/MM/yyyy} ({h.Details ?? "sans motif"})"))}");
+        }
+        if (propSummary.TryGetValue("IsVM", out var vmVals) && vmVals.Any(v => v.Equals("True", StringComparison.OrdinalIgnoreCase)))
+        {
+            if (propSummary.TryGetValue("VMPlatform", out var vmPlatVals))
+                securityFlags.Add($"Machine virtuelle détectée ({string.Join(", ", vmPlatVals.Distinct().Take(2))}) — contexte compatible reverse engineering");
+            else
+                securityFlags.Add("Machine virtuelle détectée — contexte compatible reverse engineering");
+        }
+        if (license.CustomerEmail != null && (license.CustomerEmail.Contains("privaterelay.appleid.com") || license.CustomerEmail.Contains("relay.firefox.com")))
+            securityFlags.Add($"Email de relais anonymisé ({license.CustomerEmail}) — identité volontairement masquée");
+
+        if (securityFlags.Any())
+        {
+            sb.AppendLine("## 🚨 SIGNAUX DE SÉCURITÉ CRITIQUES");
+            foreach (var flag in securityFlags) sb.AppendLine($"- {flag}");
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("---");
+        sb.AppendLine("RÈGLES D'ANALYSE ABSOLUES — à respecter impérativement :");
+        sb.AppendLine("- Si la licence est marquée RÉVOQUÉE/INACTIVE et que des tentatives d'activation sont présentes dans les événements → c'est une FRAUDE CONFIRMÉE ou une tentative de contournement. NE PAS diagnostiquer comme 'problème technique'. NE PAS recommander d'aide support.");
+        sb.AppendLine("- Si des IPs bannies ou des threat scores élevés sont présents → traiter comme un profil hostile, pas comme un utilisateur légitime en difficulté.");
+        sb.AppendLine("- Si une VM est détectée combinée à une licence révoquée → indiquer explicitement le risque de reverse engineering / piratage.");
+        sb.AppendLine("- Si l'email est un relais anonyme (privaterelay.appleid.com, relay.firefox.com) → signaler comme élément de dissimulation d'identité.");
+        sb.AppendLine();
+        sb.AppendLine("Fournis une analyse structurée avec ces 7 sections :");
+        sb.AppendLine("1. **Évaluation sécurité** : catégorise le profil — Utilisateur légitime / Suspect / Fraudeur confirmé / Attaquant. Justifie avec les signaux de sécurité (historique licence, bans IP, threat scores, VM, email anonyme, tentatives post-révocation).");
+        sb.AppendLine("2. **Classification du profil** (uniquement si utilisateur légitime) : intégrateur technique, développeur API, agent MCP/automatisé, utilisateur final, testeur.");
+        sb.AppendLine("3. **Potentiel commercial** (uniquement si utilisateur légitime) : score Faible/Moyen/Élevé/Très élevé avec signaux positifs et négatifs.");
+        sb.AppendLine("4. **Résumé comportemental** : profil d'utilisation réel — usage normal, exploitation de faille, contournement de licence, reconnaissance du système.");
+        sb.AppendLine("5. **Points d'attention** : erreurs, anomalies, risques de churn (si légitime) ou signaux d'attaque (si fraudeur).");
+        sb.AppendLine("6. **Santé technique** : OS, compatibilité, versions, diagnostics, risques de blocage (si légitime) ou environnement d'attaque (VM, droits, outils).");
+        sb.AppendLine("7. **Actions recommandées** : actions priorisées — si fraudeur : renforcement sécurité, blocage, analyse forensique. Si légitime : support, upsell, renouvellement.");
+
+        return sb.ToString();
+    }
+
+    /// <summary>Convertit le Markdown basique de la réponse Claude en HTML léger.</summary>
+    private static string FormatAiReport(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+
+        var sb = new StringBuilder();
+        foreach (var line in text.Split('\n'))
+        {
+            var l = System.Web.HttpUtility.HtmlEncode(line.TrimEnd());
+
+            if (l.StartsWith("## "))
+                sb.AppendLine($"<h2>{l[3..]}</h2>");
+            else if (l.StartsWith("### "))
+                sb.AppendLine($"<h3>{l[4..]}</h3>");
+            else if (l.StartsWith("- ") || l.StartsWith("* "))
+                sb.AppendLine($"<li>{ApplyInline(l[2..])}</li>");
+            else if (l == "---")
+                sb.AppendLine("<hr/>");
+            else if (string.IsNullOrWhiteSpace(l))
+                sb.AppendLine("<br/>");
+            else
+                sb.AppendLine($"<p>{ApplyInline(l)}</p>");
+        }
+
+        // Wrap consecutive <li> in <ul>
+        var result = System.Text.RegularExpressions.Regex.Replace(
+            sb.ToString(),
+            @"(<li>.*?</li>\s*)+",
+            m => $"<ul>{m.Value}</ul>",
+            System.Text.RegularExpressions.RegexOptions.Singleline);
+
+        return result;
+    }
+
+    private static string ApplyInline(string s)
+    {
+        // **bold**
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"\*\*(.+?)\*\*", "<strong>$1</strong>");
+        // `code`
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"`(.+?)`", "<code>$1</code>");
+        return s;
     }
 }

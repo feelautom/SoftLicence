@@ -4,7 +4,9 @@
 @inject SoftLicence.Server.Services.StatsService StatsService
 @inject SoftLicence.Server.Services.TimeZoneService TZ
 @inject SoftLicence.Server.Services.AuditNotifier AuditNotifier
+@inject ILogger<Dashboard> Logger
 @using SoftLicence.Server.Services
+@using System.Diagnostics
 @inject IStringLocalizer<SharedResource> L
 @implements IDisposable
 
@@ -22,7 +24,7 @@ else
 {
     <div class="d-flex justify-content-between align-items-center mb-4">
         <h1>@L["Dashboard_Title"]</h1>
-        <button class="btn btn-outline-secondary btn-sm" @onclick="LoadStats">@L["Common_Refresh"]</button>
+        <button class="btn btn-outline-secondary btn-sm" @onclick="() => LoadStats(force: true)">@L["Common_Refresh"]</button>
     </div>
 
     @if (Stats == null)
@@ -212,6 +214,9 @@ else
 @code {
     private DashboardStats? Stats;
     private bool isAuthorized = false;
+    private bool isLoadingStats = false;
+    private DateTime lastStatsRefreshUtc = DateTime.MinValue;
+    private static readonly TimeSpan AutoRefreshThrottle = TimeSpan.FromSeconds(15);
 
     protected override async Task OnInitializedAsync()
     {
@@ -219,22 +224,44 @@ else
         if (isAuthorized)
         {
             AuditNotifier.OnNewLog += OnNewLogReceived;
-            await LoadStats();
+            await LoadStats(force: true);
         }
     }
 
     private async void OnNewLogReceived()
     {
-        await InvokeAsync(async () =>
+        try
         {
-            await LoadStats();
-            StateHasChanged();
-        });
+            await InvokeAsync(async () =>
+            {
+                await LoadStats();
+                StateHasChanged();
+            });
+        }
+        catch { /* timeout PostgreSQL ou composant disposé — on ignore silencieusement */ }
     }
 
-    private async Task LoadStats()
+    private async Task LoadStats(bool force = false)
     {
-        Stats = await StatsService.GetDashboardStatsAsync();
+        if (isLoadingStats)
+            return;
+
+        var now = DateTime.UtcNow;
+        if (!force && now - lastStatsRefreshUtc < AutoRefreshThrottle)
+            return;
+
+        isLoadingStats = true;
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            Stats = await StatsService.GetDashboardStatsAsync();
+            lastStatsRefreshUtc = DateTime.UtcNow;
+            Logger.LogInformation("Dashboard LoadStats completed in {ElapsedMs}ms force={Force}", sw.ElapsedMilliseconds, force);
+        }
+        finally
+        {
+            isLoadingStats = false;
+        }
     }
 
     public void Dispose()

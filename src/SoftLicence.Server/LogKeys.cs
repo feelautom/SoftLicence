@@ -8,5 +8,6 @@ namespace SoftLicence.Server
         public const string HardwareId = "Audit_HardwareId";
         public const string Endpoint = "Audit_Endpoint";
         public const string Version = "Audit_Version";
+        public const string ResultStatusOverride = "Audit_ResultStatusOverride";
     }
 }

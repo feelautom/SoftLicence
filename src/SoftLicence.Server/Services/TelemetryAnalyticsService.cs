@@ -51,26 +51,26 @@ public class TelemetryAnalyticsService
         var diagScores = records.Where(r => r.DiagnosticScore.HasValue).Select(r => r.DiagnosticScore!.Value).ToList();
         data.AvgDiagnosticScore = diagScores.Count > 0 ? (int)Math.Round(diagScores.Average()) : 0;
 
-        // Volume quotidien (stacked)
+        // Volume quotidien (stacked) — groupé par jour Europe/Paris
         for (int i = days - 1; i >= 0; i--)
         {
-            var date = DateTime.UtcNow.Date.AddDays(-i);
-            var dayRecords = records.Where(r => r.Timestamp.Date == date).ToList();
+            var parisDate = TimeZoneService.ParisDateDaysAgo(i);
+            var dayRecords = records.Where(r => TimeZoneService.ToParisDate(r.Timestamp) == parisDate).ToList();
             data.DailyVolume.Add(new DailyVolume
             {
-                Date = date,
+                Date = parisDate,
                 Events = dayRecords.Count(r => r.Type == TelemetryType.Event),
                 Diagnostics = dayRecords.Count(r => r.Type == TelemetryType.Diagnostic),
                 Errors = dayRecords.Count(r => r.Type == TelemetryType.Error)
             });
         }
 
-        // Appareils uniques par jour
+        // Appareils uniques par jour — groupé par jour Europe/Paris
         for (int i = days - 1; i >= 0; i--)
         {
-            var date = DateTime.UtcNow.Date.AddDays(-i);
-            var count = records.Where(r => r.Timestamp.Date == date).Select(r => r.HardwareId).Distinct().Count();
-            data.DailyDevices.Add(new DailyDevices { Date = date, Count = count });
+            var parisDate = TimeZoneService.ParisDateDaysAgo(i);
+            var count = records.Where(r => TimeZoneService.ToParisDate(r.Timestamp) == parisDate).Select(r => r.HardwareId).Distinct().Count();
+            data.DailyDevices.Add(new DailyDevices { Date = parisDate, Count = count });
         }
 
         // Distribution versions (top 8)

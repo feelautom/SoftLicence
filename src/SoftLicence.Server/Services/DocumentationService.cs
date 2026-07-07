@@ -1608,6 +1608,7 @@ public class DocumentationService
         |---------|-------------|
         | `Security.IpBanned` | An IP address has been banned |
         | `Security.ZombieDetected` | Zombie license detected (>5 IPs/24h) |
+        | `Security.HwidReuseDetected` | Same hardware ID reused across multiple accounts/licenses |
         | `Security.AuthFailure` | Authentication failure on admin endpoints |
         | `License.Created` | A new license has been created |
         | `License.Activated` | A license has been activated on a device |

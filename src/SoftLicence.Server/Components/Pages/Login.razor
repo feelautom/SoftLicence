@@ -3,7 +3,7 @@
 @layout SoftLicence.Server.Components.Layout.EmptyLayout
 @inject IConfiguration Config
 @inject IStringLocalizer<SharedResource> L
-@inject SoftLicence.Server.Data.LicenseDbContext Db
+@inject IDbContextFactory<SoftLicence.Server.Data.LicenseDbContext> DbFactory
 @using Microsoft.EntityFrameworkCore
 
 <PageTitle>@L["Login_Title"]</PageTitle>
@@ -70,6 +70,7 @@ else
         }
 
         // 2. Vérification des secrets PERSONNALISÉS en base
-        isPathValid = await Db.AdminUsers.AnyAsync(u => u.IsEnabled && u.AdminPath != null && u.AdminPath.ToLower() == currentSecret);
+        using var db = await DbFactory.CreateDbContextAsync();
+        isPathValid = await db.AdminUsers.AnyAsync(u => u.IsEnabled && u.AdminPath != null && u.AdminPath.ToLower() == currentSecret);
     }
 }

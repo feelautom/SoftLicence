@@ -1,5 +1,7 @@
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SoftLicence.SDK;
@@ -22,6 +24,10 @@ namespace SoftLicence.Server.Controllers
         private readonly IConfiguration _config;
         private readonly IStringLocalizer<SharedResource> _localizer;
         private readonly Services.NotificationService _notifier;
+        private readonly Services.SecurityService _security;
+        private readonly Services.FingerprintService _fingerprint;
+        private readonly Services.SeatCleanupService _seatCleanup;
+        private readonly Services.HwidReuseAlertService _hwidReuseAlerts;
 
         public ActivationController(
             LicenseDbContext db,
@@ -32,7 +38,11 @@ namespace SoftLicence.Server.Controllers
             Services.GeoIpService geoIp,
             IConfiguration config,
             IStringLocalizer<SharedResource> localizer,
-            Services.NotificationService notifier)
+            Services.NotificationService notifier,
+            Services.SecurityService security,
+            Services.FingerprintService fingerprint,
+            Services.SeatCleanupService seatCleanup,
+            Services.HwidReuseAlertService hwidReuseAlerts)
         {
             _db = db;
             _logger = logger;
@@ -43,6 +53,10 @@ namespace SoftLicence.Server.Controllers
             _config = config;
             _localizer = localizer;
             _notifier = notifier;
+            _security = security;
+            _fingerprint = fingerprint;
+            _seatCleanup = seatCleanup;
+            _hwidReuseAlerts = hwidReuseAlerts;
         }
 
         public class ActivationRequest
@@ -54,6 +68,8 @@ namespace SoftLicence.Server.Controllers
             public string? AppVersion { get; set; } // Nouvelle version client
             public string? CustomerEmail { get; set; }
             public string? CustomerName { get; set; }
+            public Dictionary<string, string>? ExtraParams { get; set; } // Paramètres additionnels mergés dans le payload signé
+            public Dictionary<string, string>? ComponentFingerprints { get; set; }
         }
 
         public class TrialRequest
@@ -65,6 +81,7 @@ namespace SoftLicence.Server.Controllers
             public string? AppVersion { get; set; }
             public string? CustomerEmail { get; set; }
             public string? CustomerName { get; set; }
+            public Dictionary<string, string>? ComponentFingerprints { get; set; }
         }
 
         private async Task<Product?> FindProductAsync(string name, string? id)
@@ -100,10 +117,154 @@ namespace SoftLicence.Server.Controllers
             HttpContext.Items[LogKeys.Version] = req.AppVersion ?? "Unknown";
         }
 
+        private void TagActivationFailure(string resultStatus)
+        {
+            HttpContext.Items[LogKeys.ResultStatusOverride] = resultStatus;
+        }
+
         private static Dictionary<string, string> BuildFeatures(IEnumerable<LicenseTypeCustomParam>? customParams)
         {
             if (customParams == null) return new Dictionary<string, string>();
             return customParams.ToDictionary(p => p.Key, p => p.Value);
+        }
+
+        private static void ApplyPluginMetadataFromReference(LicenseModel model)
+        {
+            if (string.IsNullOrWhiteSpace(model.Reference)) return;
+
+            var parts = model.Reference.Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (parts.Length < 2 || !string.Equals(parts[0], "plugin", StringComparison.OrdinalIgnoreCase)) return;
+
+            model.PluginId = parts[1];
+            model.AllowedFeatures = new[] { "*" };
+
+            if (model.Features.TryGetValue("pluginVersion", out var pluginVersion) && !string.IsNullOrWhiteSpace(pluginVersion))
+                model.PluginVersion = pluginVersion;
+            if (model.Features.TryGetValue("minAppVersion", out var minAppVersion) && !string.IsNullOrWhiteSpace(minAppVersion))
+                model.MinAppVersion = minAppVersion;
+
+            foreach (var part in parts.Skip(2))
+            {
+                var separatorIndex = part.IndexOf('=');
+                if (separatorIndex <= 0 || separatorIndex == part.Length - 1) continue;
+
+                var key = part[..separatorIndex];
+                var value = part[(separatorIndex + 1)..];
+
+                if (string.Equals(key, "pluginVersion", StringComparison.OrdinalIgnoreCase))
+                    model.PluginVersion = value;
+                else if (string.Equals(key, "minAppVersion", StringComparison.OrdinalIgnoreCase))
+                    model.MinAppVersion = value;
+                else if (string.Equals(key, "allowedFeatures", StringComparison.OrdinalIgnoreCase))
+                    model.AllowedFeatures = value
+                        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                        .DefaultIfEmpty("*")
+                        .ToArray();
+            }
+        }
+
+        private static bool IsValidEmailSyntax(string email)
+        {
+            if (string.IsNullOrWhiteSpace(email)) return false;
+            return Regex.IsMatch(email.Trim(), @"^[^@\s]+@[^@\s]+\.[^@\s]+$", RegexOptions.IgnoreCase);
+        }
+
+        private static bool HasValidMxRecord(string email)
+        {
+            try
+            {
+                var domain = email.Trim().Split('@').LastOrDefault();
+                if (string.IsNullOrEmpty(domain)) return false;
+                var hostEntry = Dns.GetHostEntry(domain);
+                return hostEntry.AddressList.Length > 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool IsPaidLicenseEligibleForAutoUnban(License license)
+        {
+            if (!license.IsActive || license.RevokedAt != null)
+                return false;
+
+            if (license.ExpirationDate.HasValue && DateTime.UtcNow > license.ExpirationDate.Value)
+                return false;
+
+            var slug = license.Type?.Slug?.Trim().ToUpperInvariant();
+            if (string.IsNullOrWhiteSpace(slug))
+                return false;
+
+            if (license.Type?.IsFree == true)
+                return false;
+
+            return slug is not ("FREEMIUM" or "TRIAL" or "FREE" or "STUDENT");
+        }
+
+        private static bool EnforcesSingleUsePerHardwareId(LicenseType? type)
+        {
+            return type?.EnforceSingleUsePerHardwareId == true;
+        }
+
+        private static bool DisablesNewActivations(LicenseType? type)
+        {
+            return type?.DisableNewActivations == true;
+        }
+
+        private async Task<bool> HasConsumedLicenseTypeOnHardwareAsync(
+            Guid productId,
+            Guid licenseTypeId,
+            string hardwareId,
+            Guid? currentLicenseId = null)
+        {
+            return await _db.Licenses
+                .AsNoTracking()
+                .Where(l => l.ProductId == productId
+                    && l.LicenseTypeId == licenseTypeId
+                    && (!currentLicenseId.HasValue || l.Id != currentLicenseId.Value)
+                    && (l.HardwareId == hardwareId
+                        || l.Seats.Any(s => s.HardwareId == hardwareId)))
+                .AnyAsync();
+        }
+
+        private async Task<IActionResult?> RejectIfSingleUseHardwareAlreadyConsumedAsync(
+            Guid productId,
+            LicenseType? type,
+            string hardwareId,
+            Guid? currentLicenseId = null)
+        {
+            if (!EnforcesSingleUsePerHardwareId(type))
+                return null;
+
+            if (!await HasConsumedLicenseTypeOnHardwareAsync(productId, type!.Id, hardwareId, currentLicenseId))
+                return null;
+
+            TagActivationFailure("FREEMIUM_HWID_ALREADY_CONSUMED");
+            _logger.LogWarning(
+                "Activation refused: HWID {HardwareId} has already consumed license type {LicenseTypeId} for product {ProductId}. CurrentLicenseId={CurrentLicenseId}",
+                hardwareId,
+                type.Id,
+                productId,
+                currentLicenseId);
+
+            return BadRequest("Freemium access has already been used on this machine.");
+        }
+
+        private IActionResult? RejectIfNewActivationsDisabled(LicenseType? type, string hardwareId, string? licenseKey = null)
+        {
+            if (!DisablesNewActivations(type))
+                return null;
+
+            TagActivationFailure("LICENSE_TYPE_NEW_ACTIVATIONS_DISABLED");
+            _logger.LogWarning(
+                "Activation refused: new activations are disabled for license type {LicenseTypeSlug} ({LicenseTypeId}). HWID={HardwareId}, LicenseKey={LicenseKey}",
+                type?.Slug,
+                type?.Id,
+                hardwareId,
+                licenseKey);
+
+            return BadRequest("New activations are no longer available for this license type.");
         }
 
         /// <summary>
@@ -142,10 +303,36 @@ namespace SoftLicence.Server.Controllers
             return clientVersion == allowedMask;
         }
 
+        private static bool IsVersionBelow(string? current, string? minimum)
+        {
+            if (string.IsNullOrWhiteSpace(current) || string.IsNullOrWhiteSpace(minimum))
+                return false;
+
+            if (Version.TryParse(current, out var cur) && Version.TryParse(minimum, out var min))
+                return cur < min;
+
+            return string.Compare(current, minimum, StringComparison.Ordinal) < 0;
+        }
+
         [HttpPost("trial")]
         public async Task<IActionResult> GetTrial([FromBody] TrialRequest req)
         {
             TagLog(req, "TRIAL_AUTO");
+
+            var hwidBanned = await _security.IsHardwareIdBannedAsync(req.HardwareId);
+            var compBanned = false;
+            if (!hwidBanned && req.ComponentFingerprints != null)
+            {
+                var (cb, _, _) = await _security.IsComponentBannedAsync(req.ComponentFingerprints);
+                compBanned = cb;
+            }
+            if (hwidBanned || compBanned)
+                return Ok(new { isSuccess = false, errorMessage = "Access denied by server" });
+
+            if (req.ComponentFingerprints != null)
+            {
+                _ = Task.Run(async () => { try { await _fingerprint.UpsertFingerprintAsync(req.HardwareId, req.ComponentFingerprints); } catch { } });
+            }
 
             var product = await FindProductAsync(req.AppName, req.AppId);
             if (product == null) return BadRequest(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
@@ -163,7 +350,9 @@ namespace SoftLicence.Server.Controllers
             var requestedSlug = req.TypeSlug.Trim().ToUpper();
             var existing = await _db.Licenses
                 .Include(l => l.Type).ThenInclude(t => t!.CustomParams)
-                .Where(l => l.ProductId == product.Id && l.HardwareId == req.HardwareId)
+                .Where(l => l.ProductId == product.Id
+                    && (l.HardwareId == req.HardwareId
+                        || l.Seats.Any(s => s.HardwareId == req.HardwareId)))
                 .OrderByDescending(l => l.Type != null && l.Type.Slug.ToUpper() == requestedSlug ? 1 : 0)
                 .ThenByDescending(l => l.IsActive ? 1 : 0)
                 .ThenByDescending(l => l.ExpirationDate)
@@ -252,6 +441,14 @@ namespace SoftLicence.Server.Controllers
             }
 
             // Sinon, création d'une nouvelle licence Trial
+            var trialNewActivationsDisabled = RejectIfNewActivationsDisabled(type, req.HardwareId);
+            if (trialNewActivationsDisabled != null)
+                return trialNewActivationsDisabled;
+
+            var freemiumAlreadyConsumed = await RejectIfSingleUseHardwareAlreadyConsumedAsync(product.Id, type, req.HardwareId);
+            if (freemiumAlreadyConsumed != null)
+                return freemiumAlreadyConsumed;
+
             using var trialTransaction = _db.Database.ProviderName == "Microsoft.EntityFrameworkCore.InMemory" ? null : await _db.Database.BeginTransactionAsync();
             try
             {
@@ -291,6 +488,10 @@ namespace SoftLicence.Server.Controllers
             });
 
             await _db.SaveChangesAsync();
+
+            // Enforcement : un HWID ne peut être actif que sur une seule licence par produit
+            await _seatCleanup.UnlinkHwidFromOtherProductLicensesAsync(
+                req.HardwareId, license.Id, product.Id);
 
             _logger.LogInformation("Nouveau Trial cree : {TypeSlug} ({Days} jours) pour {HardwareId}", type.Slug, type.DefaultDurationDays, req.HardwareId);
 
@@ -332,12 +533,29 @@ namespace SoftLicence.Server.Controllers
             var cleanKey = req.LicenseKey.Trim().ToUpper();
             TagLog(req, "ACTIVATE");
 
-            var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
-            if (product == null) 
+            if (req.ComponentFingerprints != null)
             {
+                _ = Task.Run(async () => { try { await _fingerprint.UpsertFingerprintAsync(req.HardwareId, req.ComponentFingerprints); } catch { } });
+            }
+
+            var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
+            if (product == null)
+            {
+                TagActivationFailure("APP_UNKNOWN");
                 _logger.LogWarning("Activation echouee : Application '{AppName}' inconnue.", req.AppName);
                 return BadRequest(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
             }
+
+            // Check ban status. HWID auto-unban is deferred until the license is fully validated.
+            var hwidBanned = await _security.IsHardwareIdBannedAsync(req.HardwareId);
+            var compBanned = false;
+            if (!hwidBanned && req.ComponentFingerprints != null)
+            {
+                var (cb, _, _) = await _security.IsComponentBannedAsync(req.ComponentFingerprints);
+                compBanned = cb;
+            }
+            if (compBanned)
+                return Ok(new { isSuccess = false, errorMessage = "Access denied by server" });
 
             // Utiliser le nom canonique pour le log
             HttpContext.Items[LogKeys.AppName] = product.Name;
@@ -345,6 +563,9 @@ namespace SoftLicence.Server.Controllers
             // --- INTERCEPTION AUTO-TRIAL ---
             if (cleanKey.EndsWith("-FREE-TRIAL") || cleanKey == "FREE-TRIAL")
             {
+                if (hwidBanned)
+                    return Ok(new { isSuccess = false, errorMessage = "Access denied by server" });
+
                 _logger.LogInformation("Detection d'une demande AUTO-TRIAL pour {AppName}", product.Name);
                 HttpContext.Items[LogKeys.Endpoint] = "TRIAL_AUTO";
                 
@@ -354,6 +575,7 @@ namespace SoftLicence.Server.Controllers
 
                 if (type == null) 
                 {
+                    TagActivationFailure("TRIAL_NOT_ENABLED");
                     _logger.LogWarning("Demande Trial echouee : Aucun type de licence 'TRIAL' n'est configure.");
                     return BadRequest(_localizer["Api_TrialNotEnabled"].Value);
                 }
@@ -361,7 +583,9 @@ namespace SoftLicence.Server.Controllers
                 // On vérifie si ce PC a déjà une licence pour ce produit
                 var existing = await _db.Licenses
                     .Include(l => l.Type).ThenInclude(t => t!.CustomParams)
-                    .FirstOrDefaultAsync(l => l.ProductId == product.Id && l.HardwareId == req.HardwareId);
+                    .FirstOrDefaultAsync(l => l.ProductId == product.Id
+                        && (l.HardwareId == req.HardwareId
+                            || l.Seats.Any(s => s.HardwareId == req.HardwareId)));
 
                 if (existing != null)
                 {
@@ -434,6 +658,10 @@ namespace SoftLicence.Server.Controllers
                 }
 
                 // Création auto (atomique)
+                var freemiumAlreadyConsumed = await RejectIfSingleUseHardwareAlreadyConsumedAsync(product.Id, type, req.HardwareId);
+                if (freemiumAlreadyConsumed != null)
+                    return freemiumAlreadyConsumed;
+
                 using var autoTrialTx = _db.Database.ProviderName == "Microsoft.EntityFrameworkCore.InMemory" ? null : await _db.Database.BeginTransactionAsync();
                 try
                 {
@@ -465,6 +693,12 @@ namespace SoftLicence.Server.Controllers
                 });
 
                 await _db.SaveChangesAsync();
+
+                // Enforcement : un HWID ne peut être actif que sur une seule licence par produit
+                await _seatCleanup.UnlinkHwidFromOtherProductLicensesAsync(
+                    req.HardwareId, newLic.Id, product.Id);
+
+                await _hwidReuseAlerts.CheckAndNotifyAsync(product.Id, req.HardwareId, newLic.Id);
 
                 // On met à jour le log avec la clé générée
                 HttpContext.Items[LogKeys.LicenseKey] = newKey;
@@ -504,27 +738,129 @@ namespace SoftLicence.Server.Controllers
 
             if (license == null) 
             {
+                TagActivationFailure("INVALID_LICENSE_KEY");
                 _logger.LogWarning("Activation echouee : Cle '{LicenseKey}' non trouvee pour le produit '{ProductName}' (ID: {ProductId}).", cleanKey, product.Name, product.Id);
                 return BadRequest(_localizer["Api_InvalidLicenseKey"].Value);
             }
             
             if (!license.IsActive) 
             {
+                TagActivationFailure("LICENSE_DISABLED");
                 _logger.LogWarning("Activation echouee : Cle '{LicenseKey}' revoquee.", cleanKey);
                 return BadRequest(_localizer["Api_LicenseDisabled"].Value);
             }
             
             if (license.ExpirationDate.HasValue && DateTime.UtcNow > license.ExpirationDate.Value)
             {
-                _logger.LogWarning("Activation echouee : Cle '{LicenseKey}' expiree ({Expiry}).", cleanKey, license.ExpirationDate);
+                TagActivationFailure("LICENSE_EXPIRED");
+                _logger.LogWarning(
+                    "Activation echouee : licence expiree pour HWID {HardwareId}, app {AppName}, type {TypeSlug}, expiry {Expiry}, version {Version}.",
+                    req.HardwareId,
+                    product.Name,
+                    license.Type?.Slug ?? "UNKNOWN",
+                    license.ExpirationDate,
+                    req.AppVersion ?? "Unknown");
                 return BadRequest(_localizer["Api_LicenseExpired"].Value);
             }
 
             // Vérification de version
             if (!IsVersionAllowed(req.AppVersion, license.AllowedVersions))
             {
+                TagActivationFailure("VERSION_NOT_ALLOWED");
                 _logger.LogWarning("Activation echouee : Version '{Version}' non autorisee pour la cle '{LicenseKey}' (Attendu: '{Allowed}')", req.AppVersion, cleanKey, license.AllowedVersions);
                 return BadRequest(string.Format(_localizer["Api_VersionNotAllowed"].Value, req.AppVersion));
+            }
+
+            // --- VÉRIFICATION PARTENAIRE ---
+            bool isResellerLicense = !string.IsNullOrWhiteSpace(license.PartnerCode);
+            if (isResellerLicense)
+            {
+                var partnerExists = await _db.ResellerPartners.AnyAsync(p => p.Code == license.PartnerCode);
+                var partner = partnerExists
+                    ? await _db.ResellerPartners.FirstOrDefaultAsync(p => p.Code == license.PartnerCode && p.IsActive)
+                    : null;
+                if (partner == null)
+                {
+                    if (!partnerExists)
+                        _logger.LogError("Activation BLOQUEE : Partner code '{PartnerCode}' N'EXISTE PAS dans ResellerPartners pour la cle '{LicenseKey}' (HWID: {HardwareId}, Email: {Email}). La licence a ete creee avec un PartnerCode non enregistre.", license.PartnerCode, cleanKey, req.HardwareId, req.CustomerEmail);
+                    else
+                        _logger.LogError("Activation BLOQUEE : Partner code '{PartnerCode}' DESACTIVE pour la cle '{LicenseKey}' (HWID: {HardwareId}, Email: {Email}).", license.PartnerCode, cleanKey, req.HardwareId, req.CustomerEmail);
+                    TagActivationFailure("PARTNER_INVALID");
+                    return BadRequest(_localizer["Api_LicenseDisabled"].Value);
+                }
+            }
+
+            // --- VÉRIFICATION EMAIL ---
+            bool isAnonymousType = license.Type?.AllowAnonymous == true;
+            bool licenseHasEmail = !string.IsNullOrWhiteSpace(license.CustomerEmail);
+            bool requestHasEmail = !string.IsNullOrWhiteSpace(req.CustomerEmail);
+
+            if (isResellerLicense)
+            {
+                // Reseller license: email is optional, just capture it if provided
+                if (requestHasEmail && !licenseHasEmail)
+                {
+                    license.CustomerEmail = req.CustomerEmail!.Trim();
+                    if (!string.IsNullOrWhiteSpace(req.CustomerName))
+                        license.CustomerName = req.CustomerName.Trim();
+                }
+            }
+            else if (licenseHasEmail && requestHasEmail)
+            {
+                // Licence avec email : vérifier la correspondance
+                if (!string.Equals(license.CustomerEmail.Trim(), req.CustomerEmail!.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    TagActivationFailure("EMAIL_MISMATCH");
+                    _logger.LogWarning("Activation echouee : Email '{SentEmail}' ne correspond pas pour la cle '{LicenseKey}'", req.CustomerEmail, cleanKey);
+                    return BadRequest(_localizer["Api_EmailMismatch"].Value);
+                }
+            }
+            else if (!licenseHasEmail && isAnonymousType)
+            {
+                // Licence anonyme sans email : l'email est obligatoire pour la réclamer
+                if (!requestHasEmail)
+                {
+                    TagActivationFailure("EMAIL_REQUIRED");
+                    _logger.LogWarning("Activation echouee : Email requis pour cle anonyme '{LicenseKey}'", cleanKey);
+                    return BadRequest(_localizer["Api_EmailRequiredAnonymous"].Value);
+                }
+
+                // Vérification syntaxe + MX
+                if (!IsValidEmailSyntax(req.CustomerEmail!))
+                {
+                    TagActivationFailure("EMAIL_INVALID");
+                    return BadRequest(_localizer["Api_InvalidEmail"].Value);
+                }
+                if (!HasValidMxRecord(req.CustomerEmail!))
+                {
+                    TagActivationFailure("EMAIL_DOMAIN_INVALID");
+                    _logger.LogWarning("Activation echouee : Domaine email invalide pour '{Email}'", req.CustomerEmail);
+                    return BadRequest(_localizer["Api_InvalidEmailDomain"].Value);
+                }
+
+                // Associer l'email et le nom à la licence
+                license.CustomerEmail = req.CustomerEmail!.Trim();
+                if (!string.IsNullOrWhiteSpace(req.CustomerName))
+                    license.CustomerName = req.CustomerName.Trim();
+
+                _db.LicenseHistories.Add(new LicenseHistory {
+                    LicenseId = license.Id,
+                    Action = "CLAIMED",
+                    Details = $"Clé anonyme réclamée par {req.CustomerEmail}",
+                    PerformedBy = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown"
+                });
+            }
+
+            if (hwidBanned)
+            {
+                if (!IsPaidLicenseEligibleForAutoUnban(license))
+                    return Ok(new { isSuccess = false, errorMessage = "Access denied by server" });
+
+                var (canProceed, permanentBan) = await _security.TryAutoUnbanForPaidLicenseAsync(req.HardwareId, license.ProductId);
+                if (!canProceed)
+                    return Ok(new { isSuccess = false, errorMessage = permanentBan ? "Access permanently denied" : "Access denied by server" });
+
+                hwidBanned = false;
             }
 
             // --- GESTION MULTI-POSTES (SEATS) ---
@@ -549,11 +885,20 @@ namespace SoftLicence.Server.Controllers
             }
             else
             {
+                var newActivationsDisabled = RejectIfNewActivationsDisabled(license.Type, req.HardwareId, cleanKey);
+                if (newActivationsDisabled != null)
+                    return newActivationsDisabled;
+
+                var freemiumAlreadyConsumed = await RejectIfSingleUseHardwareAlreadyConsumedAsync(license.ProductId, license.Type, req.HardwareId, license.Id);
+                if (freemiumAlreadyConsumed != null)
+                    return freemiumAlreadyConsumed;
+
                 // Nouveau poste : On vérifie si on a encore de la place
                 var currentSeatsCount = await _db.LicenseSeats.CountAsync(s => s.LicenseId == license.Id && s.IsActive);
 
                 if (currentSeatsCount >= license.MaxSeats)
                 {
+                    TagActivationFailure("MAX_ACTIVATIONS_REACHED");
                     _logger.LogWarning("Activation echouee : Limite de postes atteinte ({Max}) pour la clé '{LicenseKey}'", license.MaxSeats, cleanKey);
                     return BadRequest(string.Format(_localizer["Api_MaxActivationsReached"].Value, license.MaxSeats));
                 }
@@ -566,6 +911,7 @@ namespace SoftLicence.Server.Controllers
                     var activationsToday = await _db.LicenseSeats.CountAsync(s => s.LicenseId == license.Id && s.FirstActivatedAt >= todayStart);
                     if (activationsToday >= maxPerDay)
                     {
+                        TagActivationFailure("MAX_DAILY_ACTIVATIONS_REACHED");
                         _logger.LogWarning("Activation echouee : Limite quotidienne atteinte ({Max}/jour) pour la clé '{LicenseKey}'", maxPerDay, cleanKey);
                         return BadRequest(string.Format(_localizer["Api_MaxDailyActivationsReached"].Value, maxPerDay));
                     }
@@ -610,15 +956,28 @@ namespace SoftLicence.Server.Controllers
                     $"Produit: {product.Name}\nType: {license.Type?.Name ?? license.Type?.Slug ?? "Standard"}\nClient: {license.CustomerName}\nClé: {cleanKey}\nHWID: {req.HardwareId}\nPoste: {currentSeatsCount + 1}/{license.MaxSeats}");
             }
 
-            // Mise à jour des infos client si fournies par le client WPF
-            if (!string.IsNullOrWhiteSpace(req.CustomerEmail))
-                license.CustomerEmail = req.CustomerEmail;
-            if (!string.IsNullOrWhiteSpace(req.CustomerName))
-                license.CustomerName = req.CustomerName;
+            // Mise à jour du nom client uniquement si la licence n'en avait pas (anonyme réclamée)
+            // L'email est géré dans la section VÉRIFICATION EMAIL ci-dessus — on ne l'écrase jamais
+            if (string.IsNullOrWhiteSpace(license.CustomerName) && !string.IsNullOrWhiteSpace(req.CustomerName))
+                license.CustomerName = req.CustomerName.Trim();
 
             await _db.SaveChangesAsync();
 
+            // Enforcement : un HWID ne peut être actif que sur une seule licence par produit
+            await _seatCleanup.UnlinkHwidFromOtherProductLicensesAsync(
+                req.HardwareId, license.Id, license.ProductId);
+
+            if (existingSeat == null)
+                await _hwidReuseAlerts.CheckAndNotifyAsync(license.ProductId, req.HardwareId, license.Id);
+
             // Génération du fichier signé
+            var features = BuildFeatures(license.Type?.CustomParams);
+            if (req.ExtraParams is { Count: > 0 })
+            {
+                foreach (var kv in req.ExtraParams)
+                    features[kv.Key] = kv.Value;
+            }
+
             var licenseModel = new LicenseModel
             {
                 Id = license.Id,
@@ -630,8 +989,9 @@ namespace SoftLicence.Server.Controllers
                 CreationDate = license.CreationDate,
                 ExpirationDate = license.ExpirationDate,
                 HardwareId = req.HardwareId,
-                Features = BuildFeatures(license.Type?.CustomParams)
+                Features = features
             };
+            ApplyPluginMetadataFromReference(licenseModel);
 
             try
             {
@@ -666,6 +1026,24 @@ namespace SoftLicence.Server.Controllers
             // Utiliser le nom canonique pour le log
             HttpContext.Items[LogKeys.AppName] = product.Name;
 
+            // For CheckStatus, return a logical status instead of 403 so the IP scoring middleware
+            // doesn't penalize heartbeat callers. Version-enforcement bans are not license revocations.
+            var hwidBan = await _security.GetActiveHardwareBanAsync(req.HardwareId, product.Id);
+            if (hwidBan != null)
+            {
+                if (hwidBan.BanCategory == BannedHardwareId.Categories.OutdatedVersion)
+                    return Ok(new { isSuccess = true, status = "UPDATE_REQUIRED", errorMessage = "Update required by server" });
+
+                return Ok(new { isSuccess = true, status = "REVOKED", errorMessage = "Access denied by server" });
+            }
+
+            if (req.ComponentFingerprints != null)
+            {
+                var (compBanned, compType, compReason) = await _security.IsComponentBannedAsync(req.ComponentFingerprints);
+                if (compBanned) return Ok(new { isSuccess = true, status = "REVOKED", errorMessage = "Access denied by server" });
+                _ = Task.Run(async () => { try { await _fingerprint.UpsertFingerprintAsync(req.HardwareId, req.ComponentFingerprints); } catch { } });
+            }
+
             var checkProductIds = await GetProductHierarchyIds(product.Id);
             var license = await _db.Licenses
                 .Include(l => l.Type)
@@ -676,20 +1054,70 @@ namespace SoftLicence.Server.Controllers
             if (license == null) return NotFound(_localizer["Api_LicenseNotFound"].Value);
 
             string status = "VALID";
-            if (!license.IsActive) status = "REVOKED";
+            if (!license.IsActive || license.RevokedAt != null) status = "REVOKED";
             else if (license.ExpirationDate.HasValue && DateTime.UtcNow > license.ExpirationDate.Value) status = "EXPIRED";
             else
             {
-                // Vérifier via les seats (multi-postes) au lieu du champ legacy HardwareId
-                var hasAnySeat = await _db.LicenseSeats.AnyAsync(s => s.LicenseId == license.Id && s.IsActive);
-                if (!hasAnySeat && string.IsNullOrEmpty(license.HardwareId))
-                    status = "REQUIRES_ACTIVATION";
-                else
+                // Vérifier via les seats (multi-postes) au lieu du champ legacy HardwareId.
+                var hasAnySeat = await _db.LicenseSeats.AnyAsync(s => s.LicenseId == license.Id);
+                var hasAnyActiveSeat = await _db.LicenseSeats.AnyAsync(s => s.LicenseId == license.Id && s.IsActive);
+                if (hasAnyActiveSeat)
                 {
                     var hasSeatForHwid = await _db.LicenseSeats.AnyAsync(s => s.LicenseId == license.Id && s.HardwareId == req.HardwareId && s.IsActive);
-                    if (!hasSeatForHwid && license.HardwareId != req.HardwareId)
-                        status = "HARDWARE_MISMATCH";
+                    if (!hasSeatForHwid)
+                    {
+                        var hasInactiveSeatForHwid = await _db.LicenseSeats.AnyAsync(s => s.LicenseId == license.Id && s.HardwareId == req.HardwareId && !s.IsActive);
+                        status = hasInactiveSeatForHwid ? "HARDWARE_NOT_ACTIVATED" : "HARDWARE_MISMATCH";
+                    }
                 }
+                else if (hasAnySeat)
+                    status = "HARDWARE_NOT_ACTIVATED";
+                else if (string.IsNullOrEmpty(license.HardwareId))
+                    status = "REQUIRES_ACTIVATION";
+                else if (license.HardwareId != req.HardwareId)
+                    status = "HARDWARE_MISMATCH";
+            }
+
+            string? errorMessage = null;
+            if (status == "VALID" && IsVersionBelow(req.AppVersion, product.MinimumAllowedVersion))
+            {
+                status = "UPDATE_REQUIRED";
+                errorMessage = "Update required by server";
+                TagActivationFailure("UPDATE_REQUIRED");
+                _logger.LogWarning(
+                    "Check requires update: HWID {HardwareId}, app {AppName}, version {Version}, minimum {MinimumAllowedVersion}, license {LicenseId}.",
+                    req.HardwareId,
+                    product.Name,
+                    req.AppVersion ?? "Unknown",
+                    product.MinimumAllowedVersion,
+                    license.Id);
+            }
+
+            if (status is "VALID" or "REQUIRES_ACTIVATION"
+                && EnforcesSingleUsePerHardwareId(license.Type)
+                && await HasConsumedLicenseTypeOnHardwareAsync(license.ProductId, license.LicenseTypeId, req.HardwareId, license.Id))
+            {
+                status = "FREEMIUM_HWID_ALREADY_CONSUMED";
+                errorMessage = "Freemium access has already been used on this machine.";
+                TagActivationFailure("FREEMIUM_HWID_ALREADY_CONSUMED");
+                _logger.LogWarning(
+                    "Check Freemium refused: HWID {HardwareId} has already consumed a Freemium license for product {ProductId}. LicenseId={LicenseId}",
+                    req.HardwareId,
+                    license.ProductId,
+                    license.Id);
+            }
+
+            if (status == "REQUIRES_ACTIVATION" && DisablesNewActivations(license.Type))
+            {
+                status = "LICENSE_TYPE_NEW_ACTIVATIONS_DISABLED";
+                errorMessage = "New activations are no longer available for this license type.";
+                TagActivationFailure("LICENSE_TYPE_NEW_ACTIVATIONS_DISABLED");
+                _logger.LogWarning(
+                    "Check refused: new activations are disabled for license type {LicenseTypeSlug} ({LicenseTypeId}). HWID={HardwareId}, LicenseId={LicenseId}",
+                    license.Type?.Slug,
+                    license.Type?.Id,
+                    req.HardwareId,
+                    license.Id);
             }
 
             // Générer un fichier de licence frais avec les paramètres actuels du LicenseType
@@ -725,7 +1153,7 @@ namespace SoftLicence.Server.Controllers
                 }
             }
 
-            return Ok(new { Status = status, LicenseFile = licenseFile });
+            return Ok(new { Status = status, LicenseFile = licenseFile, ErrorMessage = errorMessage });
         }
 
         public class ResetRequest
@@ -843,6 +1271,7 @@ namespace SoftLicence.Server.Controllers
             public required string HardwareId { get; set; }
             public required string AppName { get; set; }
             public string? AppId { get; set; }
+            public Dictionary<string, string>? ComponentFingerprints { get; set; }
         }
 
         [HttpPost("deactivate")]
@@ -853,6 +1282,9 @@ namespace SoftLicence.Server.Controllers
             HttpContext.Items[LogKeys.LicenseKey] = cleanKey;
             HttpContext.Items[LogKeys.HardwareId] = req.HardwareId;
             HttpContext.Items[LogKeys.Endpoint] = "DEACTIVATE";
+
+            if (await _security.IsHardwareIdBannedAsync(req.HardwareId))
+                return StatusCode(403, "Access denied");
 
             var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
             if (product == null) return BadRequest(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));

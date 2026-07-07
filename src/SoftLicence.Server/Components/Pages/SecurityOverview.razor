@@ -1,0 +1,465 @@
+@page "/security"
+@inject IDbContextFactory<LicenseDbContext> DbFactory
+@inject SoftLicence.Server.Services.AuthService Auth
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@inject SoftLicence.Server.Services.SecurityService SecuritySvc
+@inject SoftLicence.Server.Services.ToastService Toast
+@inject NavigationManager Nav
+@using SoftLicence.Server.Data
+@using Microsoft.EntityFrameworkCore
+
+<div class="container-fluid animate-fade">
+    @if (!isAuthorized)
+    {
+        <div class="text-center py-5">
+            <h2 class="text-white">Access Denied</h2>
+        </div>
+    }
+    else
+    {
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <div>
+                <h3 class="mb-0">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                    Vue Sécurité
+                </h3>
+                <p class="text-muted small mb-0">Feed unifié : canary alerts, bans HWID, bans composants.</p>
+            </div>
+            <button class="btn btn-sm btn-outline-secondary" @onclick="LoadData">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-1"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+                Rafraîchir
+            </button>
+        </div>
+
+        @* KPI Cards *@
+        <div class="row g-3 mb-4">
+            <div class="col-6 col-md-3">
+                <div class="card bg-dark border-danger h-100">
+                    <div class="card-body text-center py-3">
+                        <div class="fs-2 fw-bold text-danger">@kpiBansToday</div>
+                        <small class="text-muted">Bans aujourd'hui</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-6 col-md-3">
+                <div class="card bg-dark border-warning h-100">
+                    <div class="card-body text-center py-3">
+                        <div class="fs-2 fw-bold text-warning">@kpiBansWeek</div>
+                        <small class="text-muted">Bans cette semaine</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-6 col-md-3">
+                <div class="card bg-dark border-secondary h-100">
+                    <div class="card-body text-center py-3">
+                        <div class="fs-2 fw-bold text-light">@kpiBansTotal</div>
+                        <small class="text-muted">Bans actifs (total)</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-6 col-md-3">
+                <div class="card bg-dark border-danger h-100">
+                    <div class="card-body text-center py-3">
+                        <div class="fs-2 fw-bold text-danger">@kpiCanaryCritical</div>
+                        <small class="text-muted">Canary critiques (7j)</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        @* Filters *@
+        <div class="card bg-dark border-secondary p-3 mb-3">
+            <div class="d-flex flex-wrap gap-2 align-items-center">
+                <select class="form-select form-select-sm" style="width:160px" @bind="filterType" @bind:after="ApplyFilter">
+                    <option value="">Tous les types</option>
+                    <option value="Canary">Canary Alert</option>
+                    <option value="HwidBan">Ban HWID</option>
+                    <option value="ComponentBan">Ban Composant</option>
+                    <option value="BinaryPatch">Binary Patché</option>
+                    <option value="IntegrityFail">Intégrité (Authenticode)</option>
+                </select>
+                <select class="form-select form-select-sm" style="width:130px" @bind="filterPeriod" @bind:after="LoadData">
+                    <option value="7">7 jours</option>
+                    <option value="30">30 jours</option>
+                    <option value="90">90 jours</option>
+                    <option value="0">Tout</option>
+                </select>
+                <select class="form-select form-select-sm" style="width:180px" @bind="filterProduct" @bind:after="ApplyFilter">
+                    <option value="">Tous les produits</option>
+                    @foreach (var p in products)
+                    {
+                        <option value="@p.Id">@p.Name</option>
+                    }
+                </select>
+                <input class="form-control form-control-sm" style="width:220px" placeholder="HWID, IP, détail..." @bind="filterText" @bind:after="ApplyFilter" />
+                <select class="form-select form-select-sm" style="width:140px" @bind="filterStatus" @bind:after="ApplyFilter">
+                    <option value="">Tous les statuts</option>
+                    <option value="active">Actif / Ban en cours</option>
+                    <option value="inactive">Levé / Expiré</option>
+                </select>
+                <span class="text-muted small ms-auto">@filtered.Count événement(s)</span>
+            </div>
+        </div>
+
+        @* Feed *@
+        @if (isLoading)
+        {
+            <div class="text-center py-5 text-muted">
+                <div class="spinner-border spinner-border-sm me-2"></div>Chargement...
+            </div>
+        }
+        else if (filtered.Count == 0)
+        {
+            <div class="text-center py-5 text-muted">
+                <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" class="mb-3 opacity-25"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                <p class="mb-0">Aucun événement pour les critères sélectionnés.</p>
+            </div>
+        }
+        else
+        {
+            <div class="card bg-dark border-secondary">
+                <div class="table-responsive">
+                    <table class="table table-dark table-hover table-sm align-middle mb-0">
+                        <thead>
+                            <tr class="text-muted small border-secondary">
+                                <th>Date</th>
+                                <th>Type</th>
+                                <th>HWID</th>
+                                <th>Produit</th>
+                                <th>Résumé</th>
+                                <th>IP</th>
+                                <th>Statut</th>
+                                <th class="text-center">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var ev in filtered)
+                            {
+                                <tr>
+                                    <td class="small text-muted text-nowrap">@TZ.ToLocal(ev.EventTime).ToString("dd/MM HH:mm")</td>
+                                    <td>@RenderTypeBadge(ev)</td>
+                                    <td>
+                                        @if (!string.IsNullOrEmpty(ev.HardwareId))
+                                        {
+                                            <code class="text-info small" title="@ev.HardwareId" style="cursor:pointer" @onclick="() => SetHwidFilter(ev.HardwareId!)">
+                                                @(ev.HardwareId.Length > 12 ? ev.HardwareId[..12] + "…" : ev.HardwareId)
+                                            </code>
+                                        }
+                                        else { <span class="text-muted">—</span> }
+                                    </td>
+                                    <td>
+                                        @if (!string.IsNullOrEmpty(ev.ProductName))
+                                        {
+                                            <span class="badge border border-secondary text-info" style="font-size:0.6rem">@ev.ProductName</span>
+                                        }
+                                        else { <span class="text-muted small">—</span> }
+                                    </td>
+                                    <td class="small" style="max-width:300px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis" title="@ev.Summary">
+                                        @ev.Summary
+                                        @if (!string.IsNullOrEmpty(ev.Detail))
+                                        {
+                                            <br/><span class="text-muted" style="font-size:0.7rem">@ev.Detail</span>
+                                        }
+                                    </td>
+                                    <td class="small text-muted text-nowrap">@(ev.ClientIp ?? "—")</td>
+                                    <td>@RenderStatusBadge(ev)</td>
+                                    <td class="text-center text-nowrap">
+                                        @if (!string.IsNullOrEmpty(ev.HardwareId) && ev.LicenseId.HasValue)
+                                        {
+                                            <a class="btn btn-sm btn-outline-info px-2 py-0 me-1" href="/user-telemetry/@ev.LicenseId" title="Fiche utilisateur">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                                            </a>
+                                        }
+                                        @if (ev.EventType == "HwidBan" && ev.IsActive)
+                                        {
+                                            <button class="btn btn-sm btn-outline-success px-2 py-0" @onclick="() => UnbanHwid(ev.SourceId)" title="Lever le ban HWID">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                                            </button>
+                                        }
+                                        @if (ev.EventType == "ComponentBan" && ev.IsActive)
+                                        {
+                                            <button class="btn btn-sm btn-outline-success px-2 py-0" @onclick="() => UnbanComponent(ev.SourceId)" title="Lever le ban composant">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                                            </button>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        }
+    }
+</div>
+
+@code {
+    private bool isAuthorized;
+    private bool isLoading;
+
+    private List<Product> products = new();
+    private List<SecurityEvent> allEvents = new();
+    private List<SecurityEvent> filtered = new();
+
+    // KPIs
+    private int kpiBansToday;
+    private int kpiBansWeek;
+    private int kpiBansTotal;
+    private int kpiCanaryCritical;
+
+    // Filters
+    private string filterType = "";
+    private string filterPeriod = "30";
+    private string filterProduct = "";
+    private string filterText = "";
+    private string filterStatus = "";
+
+    private record SecurityEvent(
+        string EventType,
+        DateTime EventTime,
+        string? HardwareId,
+        string? ProductName,
+        Guid? ProductId,
+        string Summary,
+        string? Detail,
+        string? ClientIp,
+        int Severity,
+        bool IsActive,
+        Guid SourceId,
+        Guid? LicenseId
+    );
+
+    protected override async Task OnInitializedAsync()
+    {
+        isAuthorized = await Auth.IsRootAsync();
+        if (!isAuthorized) return;
+        await LoadData();
+    }
+
+    private async Task LoadData()
+    {
+        isLoading = true;
+        StateHasChanged();
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        products = await db.Products.AsNoTracking().OrderBy(p => p.Name).ToListAsync();
+
+        var since = filterPeriod == "0" ? DateTime.MinValue : DateTime.UtcNow.AddDays(-int.Parse(filterPeriod));
+        var todayUtc = DateTime.UtcNow.Date;
+        var weekAgo = DateTime.UtcNow.AddDays(-7);
+
+        // KPIs (raw counts, unfiltered)
+        kpiBansToday = await db.BannedHardwareIds.AsNoTracking()
+            .CountAsync(b => b.BannedAt >= todayUtc && b.IsActive);
+        kpiBansWeek = await db.BannedHardwareIds.AsNoTracking()
+            .CountAsync(b => b.BannedAt >= weekAgo && b.IsActive);
+        kpiBansTotal = await db.BannedHardwareIds.AsNoTracking()
+            .CountAsync(b => b.IsActive);
+        kpiCanaryCritical = await db.CanaryAlerts.AsNoTracking()
+            .CountAsync(c => c.Severity == 3 && c.ReceivedAt >= weekAgo);
+
+        // Build unified event list
+        var events = new List<SecurityEvent>();
+
+        // -- CanaryAlerts
+        var canaries = await db.CanaryAlerts.AsNoTracking()
+            .Include(c => c.Product)
+            .Where(c => c.ReceivedAt >= since)
+            .OrderByDescending(c => c.ReceivedAt)
+            .Take(1000)
+            .ToListAsync();
+
+        // Cross-reference HWID → LicenseId for canary alerts
+        var canaryHwids = canaries.Select(c => c.HardwareId).Distinct().ToList();
+        var seatsByHwid = await GetLicenseIdsByHwidAsync(db, canaryHwids);
+
+        foreach (var c in canaries)
+        {
+            var isBinaryPatch = c.Trigger != null && c.Trigger.Contains("BinaryPatch", StringComparison.OrdinalIgnoreCase);
+            var isIntegrityFail = c.Trigger != null && (
+                c.Trigger.Contains("IntegrityCheck", StringComparison.OrdinalIgnoreCase) ||
+                c.Trigger.Contains("Authenticode", StringComparison.OrdinalIgnoreCase));
+
+            events.Add(new SecurityEvent(
+                EventType: isBinaryPatch ? "BinaryPatch" : isIntegrityFail ? "IntegrityFail" : "Canary",
+                EventTime: DateTime.SpecifyKind(c.ReceivedAt, DateTimeKind.Utc),
+                HardwareId: c.HardwareId,
+                ProductName: c.Product?.Name,
+                ProductId: c.ProductId,
+                Summary: c.Trigger ?? "Canary Alert",
+                Detail: c.Details?.Length > 120 ? c.Details[..120] + "…" : c.Details,
+                ClientIp: c.ClientIp,
+                Severity: c.Severity,
+                IsActive: true,
+                SourceId: c.Id,
+                LicenseId: seatsByHwid.TryGetValue(c.HardwareId, out var lid) ? lid : null
+            ));
+        }
+
+        // -- BannedHardwareIds
+        var hwidBans = await db.BannedHardwareIds.AsNoTracking()
+            .Include(b => b.Product)
+            .Where(b => b.BannedAt >= since)
+            .OrderByDescending(b => b.BannedAt)
+            .Take(500)
+            .ToListAsync();
+
+        var banHwids = hwidBans.Select(b => b.HardwareId).Distinct().ToList();
+        var banSeatsByHwid = await GetLicenseIdsByHwidAsync(db, banHwids);
+
+        foreach (var b in hwidBans)
+        {
+            var isBinaryPatch = b.Reason.StartsWith("BinaryPatched:", StringComparison.OrdinalIgnoreCase);
+            events.Add(new SecurityEvent(
+                EventType: isBinaryPatch ? "BinaryPatch" : "HwidBan",
+                EventTime: DateTime.SpecifyKind(b.BannedAt, DateTimeKind.Utc),
+                HardwareId: b.HardwareId,
+                ProductName: b.Product?.Name,
+                ProductId: b.ProductId,
+                Summary: $"HWID banni — {b.BanCategory ?? "manual"}",
+                Detail: b.Reason,
+                ClientIp: null,
+                Severity: 3,
+                IsActive: b.IsActive,
+                SourceId: b.Id,
+                LicenseId: banSeatsByHwid.TryGetValue(b.HardwareId, out var lid) ? lid : null
+            ));
+        }
+
+        // -- BannedComponents
+        var compBans = await db.BannedComponents.AsNoTracking()
+            .Include(b => b.Product)
+            .Where(b => b.BannedAt >= since)
+            .OrderByDescending(b => b.BannedAt)
+            .Take(500)
+            .ToListAsync();
+
+        foreach (var b in compBans)
+        {
+            events.Add(new SecurityEvent(
+                EventType: "ComponentBan",
+                EventTime: DateTime.SpecifyKind(b.BannedAt, DateTimeKind.Utc),
+                HardwareId: null,
+                ProductName: b.Product?.Name,
+                ProductId: b.ProductId,
+                Summary: $"{b.ComponentType} banni — {b.ComponentHash[..Math.Min(16, b.ComponentHash.Length)]}…",
+                Detail: b.Reason,
+                ClientIp: null,
+                Severity: 2,
+                IsActive: b.IsActive,
+                SourceId: b.Id,
+                LicenseId: null
+            ));
+        }
+
+        allEvents = events.OrderByDescending(e => e.EventTime).ToList();
+        ApplyFilter();
+        isLoading = false;
+    }
+
+    private void ApplyFilter()
+    {
+        var q = allEvents.AsEnumerable();
+
+        if (!string.IsNullOrEmpty(filterType))
+            q = q.Where(e => e.EventType == filterType);
+
+        if (!string.IsNullOrEmpty(filterProduct) && Guid.TryParse(filterProduct, out var pid))
+            q = q.Where(e => e.ProductId == pid);
+
+        if (!string.IsNullOrWhiteSpace(filterText))
+        {
+            var s = filterText.Trim().ToLowerInvariant();
+            q = q.Where(e =>
+                (e.HardwareId != null && e.HardwareId.Contains(s, StringComparison.OrdinalIgnoreCase)) ||
+                (e.ClientIp != null && e.ClientIp.Contains(s, StringComparison.OrdinalIgnoreCase)) ||
+                e.Summary.Contains(s, StringComparison.OrdinalIgnoreCase) ||
+                (e.Detail != null && e.Detail.Contains(s, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        if (filterStatus == "active")
+            q = q.Where(e => e.IsActive);
+        else if (filterStatus == "inactive")
+            q = q.Where(e => !e.IsActive);
+
+        filtered = q.Take(500).ToList();
+    }
+
+    private void SetHwidFilter(string hwid)
+    {
+        filterText = hwid;
+        ApplyFilter();
+    }
+
+    private static async Task<Dictionary<string, Guid>> GetLicenseIdsByHwidAsync(LicenseDbContext db, List<string> hwids)
+    {
+        if (hwids.Count == 0) return new();
+        var seats = await db.LicenseSeats.AsNoTracking()
+            .Where(s => hwids.Contains(s.HardwareId) && s.IsActive)
+            .Select(s => new { s.HardwareId, s.LicenseId })
+            .ToListAsync();
+        return seats.GroupBy(s => s.HardwareId)
+            .ToDictionary(g => g.Key, g => g.First().LicenseId);
+    }
+
+    private async Task UnbanHwid(Guid banId)
+    {
+        await SecuritySvc.UnbanHardwareIdAsync(banId);
+        Toast.ShowSuccess("Ban HWID levé");
+        await LoadData();
+    }
+
+    private async Task UnbanComponent(Guid banId)
+    {
+        await SecuritySvc.UnbanComponentAsync(banId);
+        Toast.ShowSuccess("Ban composant levé");
+        await LoadData();
+    }
+
+    private RenderFragment RenderTypeBadge(SecurityEvent ev) => __builder =>
+    {
+        var (color, label) = ev.EventType switch
+        {
+            "BinaryPatch"   => ("danger",   "BINARY PATCH"),
+            "IntegrityFail" => ("danger",   "INTÉGRITÉ"),
+            "HwidBan"       => ("danger",   "BAN HWID"),
+            "ComponentBan"  => ("warning",  "BAN COMP."),
+            "Canary" when ev.Severity == 3 => ("danger",  "CANARY CRIT."),
+            "Canary" when ev.Severity == 2 => ("warning", "CANARY WARN"),
+            _               => ("secondary","CANARY INFO"),
+        };
+        __builder.OpenElement(0, "span");
+        __builder.AddAttribute(1, "class", $"badge bg-{color}");
+        __builder.AddAttribute(2, "style", "font-size:0.6rem;white-space:nowrap");
+        __builder.AddContent(3, label);
+        __builder.CloseElement();
+    };
+
+    private RenderFragment RenderStatusBadge(SecurityEvent ev) => __builder =>
+    {
+        if (ev.EventType == "Canary")
+        {
+            __builder.OpenElement(0, "span");
+            __builder.AddAttribute(1, "class", "badge bg-secondary");
+            __builder.AddAttribute(2, "style", "font-size:0.6rem");
+            __builder.AddContent(3, "DÉTECTÉ");
+            __builder.CloseElement();
+        }
+        else if (ev.IsActive)
+        {
+            __builder.OpenElement(0, "span");
+            __builder.AddAttribute(1, "class", "badge bg-danger");
+            __builder.AddAttribute(2, "style", "font-size:0.6rem");
+            __builder.AddContent(3, "BANNI");
+            __builder.CloseElement();
+        }
+        else
+        {
+            __builder.OpenElement(0, "span");
+            __builder.AddAttribute(1, "class", "badge bg-success");
+            __builder.AddAttribute(2, "style", "font-size:0.6rem");
+            __builder.AddContent(3, "LEVÉ");
+            __builder.CloseElement();
+        }
+    };
+}

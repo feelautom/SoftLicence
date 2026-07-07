@@ -69,6 +69,7 @@
   <data name="Common_Hide" xml:space="preserve"><value>Masquer</value></data>
   <data name="Common_Never" xml:space="preserve"><value>Jamais</value></data>
   <data name="Common_Type" xml:space="preserve"><value>Type</value></data>
+  <data name="Common_Parameters" xml:space="preserve"><value>Paramètres</value></data>
   <data name="Common_NoPermissionDashboard" xml:space="preserve"><value>Vous n'avez pas les permissions nécessaires pour voir le tableau de bord.</value></data>
   <data name="Common_NoPermissionLicenses" xml:space="preserve"><value>Vous n'avez pas les permissions nécessaires pour gérer les licences.</value></data>
   <data name="Common_NoPermissionProducts" xml:space="preserve"><value>Vous n'avez pas les permissions nécessaires pour gérer les logiciels.</value></data>
@@ -118,9 +119,14 @@
   <data name="Licenses_LastSeen" xml:space="preserve"><value>Dernier vu :</value></data>
   <data name="Licenses_Online" xml:space="preserve"><value>En ligne</value></data>
   <data name="Licenses_UnlinkSeat" xml:space="preserve"><value>Délier ce poste</value></data>
+  <data name="Licenses_UnlinkSeatConfirmTitle" xml:space="preserve"><value>Confirmation forte de déliaison</value></data>
+  <data name="Licenses_StrongConfirmImpactTitle" xml:space="preserve"><value>Impact client immédiat</value></data>
+  <data name="Licenses_StrongConfirmClientDisconnect" xml:space="preserve"><value>Le poste client actif sera déconnecté au prochain check ou refresh de licence.</value></data>
+  <data name="Licenses_StrongConfirmLabel" xml:space="preserve"><value>Saisissez DELIER pour confirmer cette action.</value></data>
   <data name="Licenses_MsgRevoked" xml:space="preserve"><value>Révoquée.</value></data>
   <data name="Licenses_MsgReactivated" xml:space="preserve"><value>Réactivée.</value></data>
   <data name="Licenses_MsgSeatUnlinked" xml:space="preserve"><value>Poste délié.</value></data>
+  <data name="Licenses_MsgSeatAlreadyUnlinked" xml:space="preserve"><value>Ce poste est déjà délié.</value></data>
   <data name="Licenses_MsgAllSeatsUnlinked" xml:space="preserve"><value>Tous les postes ont été déliés.</value></data>
   <data name="Licenses_MsgDeleted" xml:space="preserve"><value>Licence supprimée définitivement.</value></data>
   <data name="Licenses_HistoryTitle" xml:space="preserve"><value>Historique des appareils déliés</value></data>
@@ -136,12 +142,32 @@
   <data name="Licenses_Action_UnlinkedApi" xml:space="preserve"><value>ID Matériel : {0} délié via Code Reset API</value></data>
   <data name="Licenses_Action_UnlinkedAdminTool" xml:space="preserve"><value>ID Matériel : {0} délié via l'outil SOS Admin</value></data>
   <data name="Licenses_Action_GlobalReset" xml:space="preserve"><value>{0} poste(s) délié(s) manuellement par l'Admin</value></data>
+  <data name="Licenses_SeatStatusActive" xml:space="preserve"><value>Poste actif</value></data>
+  <data name="Licenses_SeatStatusUnlinked" xml:space="preserve"><value>Délié / historique</value></data>
+  <data name="Licenses_ActionLabel_Created" xml:space="preserve"><value>Création</value></data>
+  <data name="Licenses_ActionLabel_Activated" xml:space="preserve"><value>Activation</value></data>
+  <data name="Licenses_ActionLabel_Recovery" xml:space="preserve"><value>Récupération</value></data>
+  <data name="Licenses_ActionLabel_Revoked" xml:space="preserve"><value>Révocation</value></data>
+  <data name="Licenses_ActionLabel_Reactivated" xml:space="preserve"><value>Réactivation</value></data>
+  <data name="Licenses_ActionLabel_GlobalReset" xml:space="preserve"><value>Déliement global admin</value></data>
+  <data name="Licenses_ActionLabel_UnlinkedClientApi" xml:space="preserve"><value>Délié depuis l'application</value></data>
+  <data name="Licenses_ActionLabel_UnlinkedAdminApi" xml:space="preserve"><value>Délié via API admin</value></data>
+  <data name="Licenses_ActionLabel_UnlinkedManual" xml:space="preserve"><value>Délié manuellement par admin</value></data>
+  <data name="Licenses_ActionLabel_UnlinkedAdminTool" xml:space="preserve"><value>Délié via outil admin</value></data>
+  <data name="Licenses_ActionLabel_AutoUnlinkedProductScope" xml:space="preserve"><value>Délié automatiquement - changement de licence même produit</value></data>
+  <data name="Licenses_ActionLabel_Renewed" xml:space="preserve"><value>Renouvellement</value></data>
+  <data name="Licenses_Detail_UnlinkedClientApiVerb" xml:space="preserve"><value>délié depuis l'application cliente</value></data>
+  <data name="Licenses_Detail_AutoUnlinkedProductScope" xml:space="preserve"><value>Délié automatiquement après activation sur une autre licence du même produit.</value></data>
   <data name="Licenses_PerformedBy_Admin" xml:space="preserve"><value>Admin</value></data>
   <data name="Licenses_PerformedBy_System" xml:space="preserve"><value>Système</value></data>
+  <data name="Licenses_PerformedBy_AdminApi" xml:space="preserve"><value>Admin via API</value></data>
+  <data name="Licenses_PerformedBy_AdminFreemium" xml:space="preserve"><value>Admin fermeture freemium</value></data>
   <data name="Licenses_GlobalResetConfirmTitle" xml:space="preserve"><value>Confirmation de Reset Global</value></data>
   <data name="Licenses_GlobalResetConfirmMsg" xml:space="preserve"><value>Vous allez délier tous les appareils associés à la licence de {0}.</value></data>
   <data name="Licenses_GlobalResetNote" xml:space="preserve"><value>L'historique des IDs sera conservé, mais les accès actuels seront réinitialisés.</value></data>
   <data name="Licenses_GlobalResetBtn" xml:space="preserve"><value>Confirmer le Reset</value></data>
+  <data name="Licenses_Extend" xml:space="preserve"><value>Prolonger</value></data>
+  <data name="Licenses_ExtendDateInvalid" xml:space="preserve"><value>La date doit être dans le futur.</value></data>
   <data name="Licenses_MsgMissingFields" xml:space="preserve"><value>Champs manquants.</value></data>
   <data name="Licenses_MsgEmailSent" xml:space="preserve"><value>Email envoyé !</value></data>
   <data name="Licenses_SeatDetails" xml:space="preserve"><value>Détails</value></data>
@@ -292,6 +318,9 @@
   <data name="Maintenance_ClearTelemetryMsg" xml:space="preserve"><value>Voulez-vous vraiment supprimer TOUTES les données de télémétrie ? Cette opération ne peut pas être annulée.</value></data>
   <data name="Maintenance_AuditCleared" xml:space="preserve"><value>Le journal d'audit a été vidé.</value></data>
   <data name="Maintenance_TelemetryCleared" xml:space="preserve"><value>La télémétrie a été vidée.</value></data>
+  <data name="Maintenance_TelemetryExclusion" xml:space="preserve"><value>Exclusion télémétrie</value></data>
+  <data name="Maintenance_TelemetryExclusionDesc" xml:space="preserve"><value>Liste de HardwareId à exclure de l'enregistrement télémétrique (séparés par des points-virgules). Les données de ces machines ne seront pas collectées.</value></data>
+  <data name="Maintenance_TelemetryExclusionSaved" xml:space="preserve"><value>Liste d'exclusion enregistrée.</value></data>
   <data name="Maintenance_WebhookNamePlaceholder" xml:space="preserve"><value>Nom (ex: Mon Discord)</value></data>
   <data name="Maintenance_WebhookUrlPlaceholder" xml:space="preserve"><value>URL du Webhook (https://...)</value></data>
   <data name="Maintenance_WebhookCreated" xml:space="preserve"><value>Webhook créé !</value></data>
@@ -440,6 +469,10 @@
   <data name="Api_MaxDailyUnlinksReached" xml:space="preserve"><value>Limite de déliements quotidiens atteinte ({0}/jour). Réessayez demain.</value></data>
   <data name="Api_InternalErrorServerKey" xml:space="preserve"><value>Erreur interne : La clé de signature du serveur est illisible.</value></data>
   <data name="Api_NoEmail" xml:space="preserve"><value>Aucun email n'est associé à cette licence. Contactez le support.</value></data>
+  <data name="Api_EmailMismatch" xml:space="preserve"><value>L'email ne correspond pas à cette licence.</value></data>
+  <data name="Api_EmailRequiredAnonymous" xml:space="preserve"><value>Un email est requis pour activer cette clé.</value></data>
+  <data name="Api_InvalidEmail" xml:space="preserve"><value>Format d'email invalide.</value></data>
+  <data name="Api_InvalidEmailDomain" xml:space="preserve"><value>Le domaine de l'email n'existe pas.</value></data>
   <data name="Api_CodeSent" xml:space="preserve"><value>Code envoyé par email.</value></data>
   <data name="Api_InvalidResetCode" xml:space="preserve"><value>Code de réinitialisation invalide ou expiré.</value></data>
   <data name="Api_UnlinkSuccess" xml:space="preserve"><value>Licence déliée avec succès. Vous pouvez l'utiliser sur un nouveau poste.</value></data>
@@ -511,13 +544,28 @@
   <data name="UserTelemetry_Title" xml:space="preserve"><value>Télémétrie utilisateur</value></data>
   <data name="UserTelemetry_Devices" xml:space="preserve"><value>appareil(s)</value></data>
   <data name="UserTelemetry_TotalRecords" xml:space="preserve"><value>Total enregistrements</value></data>
-  <data name="UserTelemetry_LastActivity" xml:space="preserve"><value>Dernière activité</value></data>
+  <data name="UserTelemetry_Activity" xml:space="preserve"><value>Activité</value></data>
+  <data name="UserTelemetry_FirstActivity" xml:space="preserve"><value>Première :</value></data>
+  <data name="UserTelemetry_LastActivity" xml:space="preserve"><value>Dernière :</value></data>
   <data name="UserTelemetry_FilterDevice" xml:space="preserve"><value>Filtrer par appareil :</value></data>
   <data name="UserTelemetry_NoRecords" xml:space="preserve"><value>Aucune télémétrie trouvée pour cet utilisateur.</value></data>
   <data name="UserTelemetry_ViewTelemetry" xml:space="preserve"><value>Voir la télémétrie</value></data>
   <data name="UserTelemetry_Property" xml:space="preserve"><value>Propriété</value></data>
   <data name="UserTelemetry_Value" xml:space="preserve"><value>Valeur</value></data>
   <data name="UserTelemetry_ErrorType" xml:space="preserve"><value>Type d'erreur</value></data>
+  <data name="UserTelemetry_Status" xml:space="preserve"><value>Statut</value></data>
+  <data name="UserTelemetry_LicenseType" xml:space="preserve"><value>Type</value></data>
+  <data name="UserTelemetry_ActivationDate" xml:space="preserve"><value>Activation</value></data>
+  <data name="UserTelemetry_Expiration" xml:space="preserve"><value>Expiration</value></data>
+  <data name="UserTelemetry_DaysRemaining" xml:space="preserve"><value>J. restants</value></data>
+  <data name="UserTelemetry_Active" xml:space="preserve"><value>Actif</value></data>
+  <data name="UserTelemetry_Inactive" xml:space="preserve"><value>Révoqué</value></data>
+  <data name="UserTelemetry_Expired" xml:space="preserve"><value>Expiré</value></data>
+  <data name="UserTelemetry_Lifetime" xml:space="preserve"><value>Illimitée</value></data>
+  <data name="UserTelemetry_NotActivated" xml:space="preserve"><value>Non activée</value></data>
+  <data name="UserTelemetry_CreationDate" xml:space="preserve"><value>Création</value></data>
+  <data name="UserTelemetry_MaxSeats" xml:space="preserve"><value>Postes max</value></data>
+  <data name="UserTelemetry_Reference" xml:space="preserve"><value>Référence</value></data>
   <data name="Common_Back" xml:space="preserve"><value>Retour</value></data>
 
   <!-- Layout -->

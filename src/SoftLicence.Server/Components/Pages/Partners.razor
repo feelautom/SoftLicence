@@ -1,0 +1,254 @@
+@page "/partners"
+@inject IDbContextFactory<LicenseDbContext> DbFactory
+@inject SoftLicence.Server.Services.AuthService Auth
+@inject SoftLicence.Server.Services.ToastService Toast
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@inject NavigationManager Nav
+@using SoftLicence.Server.Data
+@using Microsoft.EntityFrameworkCore
+
+<div class="container-fluid animate-fade">
+    @if (!isAuthorized)
+    {
+        <div class="text-center py-5">
+            <h2 class="text-white">Access Denied</h2>
+        </div>
+    }
+    else
+    {
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h3 class="mb-0">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                Reseller Partners
+            </h3>
+            <button class="btn btn-primary btn-sm" @onclick="() => showAddForm = !showAddForm">
+                @(showAddForm ? "Cancel" : "+ Add Partner")
+            </button>
+        </div>
+
+        @if (showAddForm)
+        {
+            <div class="card bg-dark border-primary p-3 mb-4 animate-fade">
+                <h5 class="text-primary mb-3">@(editingId.HasValue ? "Edit Partner" : "New Partner")</h5>
+                <div class="row g-3">
+                    <div class="col-md-2">
+                        <label class="small text-muted">Partner Code</label>
+                        <input class="form-control form-control-sm" @bind="formCode" placeholder="AARONLIU-4M0Q" disabled="@editingId.HasValue" />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="small text-muted">Name</label>
+                        <input class="form-control form-control-sm" @bind="formName" placeholder="Company name" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="small text-muted">Contact Email</label>
+                        <input class="form-control form-control-sm" @bind="formEmail" placeholder="contact@company.com" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="small text-muted">Country</label>
+                        <input class="form-control form-control-sm" @bind="formCountry" placeholder="CN, FR..." />
+                    </div>
+                    <div class="col-md-3">
+                        <label class="small text-muted">Notes</label>
+                        <input class="form-control form-control-sm" @bind="formNotes" placeholder="Optional notes" />
+                    </div>
+                </div>
+                <div class="mt-3">
+                    <button class="btn btn-primary btn-sm" @onclick="SavePartner" disabled="@(string.IsNullOrWhiteSpace(formCode) || string.IsNullOrWhiteSpace(formName))">
+                        @(editingId.HasValue ? "Update" : "Create")
+                    </button>
+                </div>
+            </div>
+        }
+
+        @if (partners.Count == 0)
+        {
+            <div class="text-center py-5 text-muted">
+                <p>No reseller partners registered</p>
+            </div>
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table table-dark table-hover table-sm align-middle">
+                    <thead>
+                        <tr class="text-muted small">
+                            <th>Code</th>
+                            <th>Name</th>
+                            <th>Email</th>
+                            <th>Country</th>
+                            <th>Licenses</th>
+                            <th>Activated</th>
+                            <th>Status</th>
+                            <th>Created</th>
+                            <th class="text-center">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var p in partners)
+                        {
+                            var stats = partnerStats.GetValueOrDefault(p.Code);
+                            <tr class="@(p.IsActive ? "" : "opacity-50")">
+                                <td><code class="text-warning fw-bold">@p.Code</code></td>
+                                <td>@p.Name</td>
+                                <td class="small text-muted">@(p.ContactEmail ?? "-")</td>
+                                <td>@(p.Country ?? "-")</td>
+                                <td>
+                                    <span class="badge bg-info">@(stats?.Total ?? 0)</span>
+                                </td>
+                                <td>
+                                    <span class="badge bg-success">@(stats?.Activated ?? 0)</span>
+                                </td>
+                                <td>
+                                    @if (p.IsActive)
+                                    {
+                                        <span class="badge bg-success" style="font-size: 0.65rem;">ACTIVE</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-danger" style="font-size: 0.65rem;">INACTIVE</span>
+                                    }
+                                </td>
+                                <td class="small text-muted">@TZ.ToLocal(p.CreatedAt).ToString("dd/MM/yyyy")</td>
+                                <td class="text-center">
+                                    <div class="d-flex gap-1 justify-content-center">
+                                        <button class="btn btn-sm btn-outline-primary px-2 py-0" @onclick="() => StartEdit(p)" title="Edit">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-info px-2 py-0" @onclick='() => Nav.NavigateTo($"/licenses?search={p.Code}")' title="View licenses">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/></svg>
+                                        </button>
+                                        @if (p.IsActive)
+                                        {
+                                            <button class="btn btn-sm btn-outline-danger px-2 py-0" @onclick="() => Deactivate(p.Id)" title="Deactivate">
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></svg>
+                                            </button>
+                                        }
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    }
+</div>
+
+@code {
+    private bool isAuthorized;
+    private List<ResellerPartner> partners = new();
+    private Dictionary<string, PartnerLicenseStats> partnerStats = new();
+    private bool showAddForm;
+    private Guid? editingId;
+
+    private string formCode = "";
+    private string formName = "";
+    private string? formEmail;
+    private string? formCountry;
+    private string? formNotes;
+
+    protected override async Task OnInitializedAsync()
+    {
+        isAuthorized = await Auth.IsRootAsync();
+        if (!isAuthorized) return;
+        await LoadData();
+    }
+
+    private async Task LoadData()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        partners = await db.ResellerPartners.OrderBy(p => p.Name).ToListAsync();
+
+        var codes = partners.Select(p => p.Code).ToList();
+        var stats = await db.Licenses
+            .Where(l => l.PartnerCode != null && codes.Contains(l.PartnerCode))
+            .GroupBy(l => l.PartnerCode!)
+            .Select(g => new
+            {
+                Code = g.Key,
+                Total = g.Count(),
+                Activated = g.Count(l => l.HardwareId != null)
+            })
+            .ToListAsync();
+
+        partnerStats = stats.ToDictionary(s => s.Code, s => new PartnerLicenseStats { Total = s.Total, Activated = s.Activated });
+    }
+
+    private async Task SavePartner()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+
+        if (editingId.HasValue)
+        {
+            var partner = await db.ResellerPartners.FindAsync(editingId.Value);
+            if (partner == null) return;
+            partner.Name = formName.Trim();
+            partner.ContactEmail = formEmail?.Trim();
+            partner.Country = formCountry?.Trim();
+            partner.Notes = formNotes;
+            await db.SaveChangesAsync();
+            Toast.ShowSuccess($"Partner {partner.Code} updated");
+        }
+        else
+        {
+            var code = formCode.Trim().ToUpper();
+            if (await db.ResellerPartners.AnyAsync(p => p.Code == code))
+            {
+                Toast.ShowError($"Code {code} already exists");
+                return;
+            }
+            db.ResellerPartners.Add(new ResellerPartner
+            {
+                Code = code,
+                Name = formName.Trim(),
+                ContactEmail = formEmail?.Trim(),
+                Country = formCountry?.Trim(),
+                Notes = formNotes
+            });
+            await db.SaveChangesAsync();
+            Toast.ShowSuccess($"Partner {code} created");
+        }
+
+        ResetForm();
+        await LoadData();
+    }
+
+    private void StartEdit(ResellerPartner p)
+    {
+        editingId = p.Id;
+        formCode = p.Code;
+        formName = p.Name;
+        formEmail = p.ContactEmail;
+        formCountry = p.Country;
+        formNotes = p.Notes;
+        showAddForm = true;
+    }
+
+    private async Task Deactivate(Guid id)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var partner = await db.ResellerPartners.FindAsync(id);
+        if (partner == null) return;
+        partner.IsActive = false;
+        await db.SaveChangesAsync();
+        Toast.ShowSuccess($"Partner {partner.Code} deactivated");
+        await LoadData();
+    }
+
+    private void ResetForm()
+    {
+        editingId = null;
+        formCode = "";
+        formName = "";
+        formEmail = null;
+        formCountry = null;
+        formNotes = null;
+        showAddForm = false;
+    }
+
+    private class PartnerLicenseStats
+    {
+        public int Total { get; set; }
+        public int Activated { get; set; }
+    }
+}

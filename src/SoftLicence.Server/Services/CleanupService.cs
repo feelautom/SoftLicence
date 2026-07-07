@@ -5,6 +5,8 @@ namespace SoftLicence.Server.Services;
 
 public class CleanupService : BackgroundService
 {
+    private const int CleanupBatchSize = 1_000;
+
     private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
     private readonly IConfiguration _config;
     private readonly ILogger<CleanupService> _logger;
@@ -64,31 +66,24 @@ public class CleanupService : BackgroundService
         using var db = await _dbFactory.CreateDbContextAsync();
 
         // 1. Purge Audit
-        var oldLogs = await db.AccessLogs
-            .Where(l => l.Timestamp < auditCutoff)
-            .ToListAsync();
+        var deletedLogs = await DeleteOldAccessLogsAsync(db, auditCutoff);
+        if (deletedLogs > 0)
+            _logger.LogInformation("{Count} logs d'audit supprimés.", deletedLogs);
 
-        if (oldLogs.Any())
+        // 2. Purge Télémétrie (0 = rétention illimitée)
+        if (telemetryDays > 0)
         {
-            db.AccessLogs.RemoveRange(oldLogs);
-            await db.SaveChangesAsync();
-            _logger.LogInformation("{Count} logs d'audit supprimés.", oldLogs.Count);
+            var deletedTelemetry = await DeleteOldTelemetryRecordsAsync(db, telemetryCutoff);
+            if (deletedTelemetry > 0)
+                _logger.LogInformation("{Count} enregistrements de télémétrie supprimés.", deletedTelemetry);
         }
-
-        // 2. Purge Télémétrie
-        var oldTelemetry = await db.TelemetryRecords
-            .Where(t => t.Timestamp < telemetryCutoff)
-            .ToListAsync();
-
-        if (oldTelemetry.Any())
+        else
         {
-            db.TelemetryRecords.RemoveRange(oldTelemetry);
-            await db.SaveChangesAsync();
-            _logger.LogInformation("{Count} enregistrements de télémétrie supprimés.", oldTelemetry.Count);
+            _logger.LogInformation("Rétention télémétrie illimitée (TelemetryDays=0). Aucune purge.");
         }
 
         // 3. Optimisation PostgreSQL
-        if (db.Database.ProviderName != "Microsoft.EntityFrameworkCore.InMemory" && (oldLogs.Any() || oldTelemetry.Any()))
+        if (db.Database.IsRelational() && deletedLogs > 0)
         {
             _logger.LogInformation("Optimisation de la base de données PostgreSQL (VACUUM ANALYZE)...");
             await db.Database.ExecuteSqlRawAsync("VACUUM ANALYZE");
@@ -113,6 +108,52 @@ public class CleanupService : BackgroundService
             {
                 _logger.LogInformation("Backup journalier déjà effectué aujourd'hui ({Date}). Skip.", lastBackup.ToShortDateString());
             }
+        }
+    }
+
+    private static async Task<int> DeleteOldAccessLogsAsync(LicenseDbContext db, DateTime cutoff)
+    {
+        var query = db.AccessLogs.Where(l => l.Timestamp < cutoff);
+        if (db.Database.IsRelational())
+            return await query.ExecuteDeleteAsync();
+
+        var deleted = 0;
+        while (true)
+        {
+            var ids = await query
+                .OrderBy(l => l.Timestamp)
+                .Select(l => l.Id)
+                .Take(CleanupBatchSize)
+                .ToListAsync();
+
+            if (ids.Count == 0) return deleted;
+
+            var batch = ids.Select(id => new AccessLog { Id = id }).ToArray();
+            db.AccessLogs.RemoveRange(batch);
+            deleted += await db.SaveChangesAsync();
+        }
+    }
+
+    private static async Task<int> DeleteOldTelemetryRecordsAsync(LicenseDbContext db, DateTime cutoff)
+    {
+        var query = db.TelemetryRecords.Where(t => t.Timestamp < cutoff);
+        if (db.Database.IsRelational())
+            return await query.ExecuteDeleteAsync();
+
+        var deleted = 0;
+        while (true)
+        {
+            var ids = await query
+                .OrderBy(t => t.Timestamp)
+                .Select(t => t.Id)
+                .Take(CleanupBatchSize)
+                .ToListAsync();
+
+            if (ids.Count == 0) return deleted;
+
+            var batch = ids.Select(id => new TelemetryRecord { Id = id }).ToArray();
+            db.TelemetryRecords.RemoveRange(batch);
+            deleted += await db.SaveChangesAsync();
         }
     }
 }

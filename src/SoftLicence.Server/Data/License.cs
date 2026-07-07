@@ -39,9 +39,15 @@ namespace SoftLicence.Server.Data
 
         public string AllowedVersions { get; set; } = "*"; // Masque de version (ex: 1.*, 2.1.0, *)
 
+        public string? PartnerCode { get; set; } // Reseller/wholesale code (ex: AARONLIU-4M0Q)
+
         public int MaxSeats { get; set; } = 1; // Nombre de postes autorisés
         public ICollection<LicenseSeat> Seats { get; set; } = new List<LicenseSeat>();
         public ICollection<LicenseHistory> History { get; set; } = new List<LicenseHistory>();
+
+        // Uninstall detection flag (set when telemetry Uninstall_* event is received)
+        public bool HasUninstallEvent { get; set; } = false;
+        public DateTime? LastUninstallAt { get; set; }
 
         // Relation
         public Guid ProductId { get; set; }

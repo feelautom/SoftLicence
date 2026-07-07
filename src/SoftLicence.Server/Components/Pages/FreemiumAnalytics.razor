@@ -1,0 +1,640 @@
+@page "/licenses/freemium-analytics"
+@inject SoftLicence.Server.Services.AuthService Auth
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@inject IDbContextFactory<LicenseDbContext> DbFactory
+@using SoftLicence.Server.Data
+@using SoftLicence.Server.Services
+@using Microsoft.EntityFrameworkCore
+
+<PageTitle>Analyse Freemium</PageTitle>
+
+@if (!isAuthorized)
+{
+    <div class="text-center py-5">
+        <h2 class="text-white">Accès Refusé</h2>
+        <p class="text-muted">Vous n'avez pas les permissions nécessaires.</p>
+    </div>
+}
+else
+{
+    <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
+        <div>
+            <h3 class="mb-0">Analyse Freemium / Essai</h3>
+            <p class="text-muted small mb-0">Suivi des conversions — expirations et passages à l'achat</p>
+        </div>
+        <div class="d-flex gap-2 align-items-center flex-wrap">
+            <select class="form-select form-select-sm" style="width: 200px;" @bind:get="selectedProductId" @bind:set="OnProductChanged">
+                <option value="">Tous les produits</option>
+                @foreach (var p in products)
+                {
+                    <option value="@p.Id.ToString()">@p.Name</option>
+                }
+            </select>
+            <div class="btn-group btn-group-sm">
+                <button class="btn @(selectedDays == 30 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetDays(30)">30j</button>
+                <button class="btn @(selectedDays == 60 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetDays(60)">60j</button>
+                <button class="btn @(selectedDays == 90 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetDays(90)">90j</button>
+                <button class="btn @(selectedDays == 0 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetDays(0)">Tout</button>
+            </div>
+            <button class="btn btn-outline-secondary btn-sm" @onclick="LoadData" disabled="@loading">Actualiser</button>
+        </div>
+    </div>
+
+    @if (loading)
+    {
+        <div class="text-center py-5">
+            <div class="spinner-border text-primary" role="status"></div>
+            <p class="mt-2 text-muted">Chargement en cours...</p>
+        </div>
+    }
+    else if (noFreemiumType)
+    {
+        <div class="text-center py-5 text-muted">
+            <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="mb-3 opacity-50"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>
+            <p>Aucun type de licence "freemium / trial / essai" détecté pour ce produit.</p>
+        </div>
+    }
+    else if (stats != null)
+    {
+        <!-- KPI Cards -->
+        <div class="row g-3 mb-4">
+            <div class="col-md-3">
+                <div class="card stat-card h-100">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small fw-bold">Créées (période)</h6>
+                        <div class="d-flex align-items-center mt-2">
+                            <h2 class="mb-0">@stats.TotalCreated</h2>
+                            <div class="ms-auto icon-circle bg-primary-soft text-primary">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 5v14m-7-7h14"/></svg>
+                            </div>
+                        </div>
+                        <div class="mt-2 small text-muted">
+                            @stats.TotalActivated activées · @stats.TotalNeverActivated jamais utilisées
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-3">
+                <div class="card stat-card h-100" style="border-left-color: #dc3545;">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small fw-bold">Expirées (période)</h6>
+                        <div class="d-flex align-items-center mt-2">
+                            <h2 class="mb-0">@stats.TotalExpired</h2>
+                            <div class="ms-auto icon-circle bg-danger-soft text-danger">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>
+                            </div>
+                        </div>
+                        <div class="mt-2 small text-muted">Licences arrivées à terme</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-3">
+                <div class="card stat-card h-100" style="border-left-color: #198754;">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small fw-bold">Converties</h6>
+                        <div class="d-flex align-items-center mt-2">
+                            <h2 class="mb-0 text-success">@stats.TotalConverted</h2>
+                            <div class="ms-auto icon-circle bg-success-soft text-success">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="m9 12 2 2 4-4"/><circle cx="12" cy="12" r="10"/></svg>
+                            </div>
+                        </div>
+                        <div class="mt-2 small text-muted">Passées à une licence payante</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-3">
+                <div class="card stat-card h-100" style="border-left-color: #ffc107;">
+                    <div class="card-body">
+                        <h6 class="text-muted text-uppercase small fw-bold">Taux de conversion</h6>
+                        <div class="d-flex align-items-center mt-2">
+                            <h2 class="mb-0">@stats.ConversionRate.ToString("F1")%</h2>
+                            <div class="ms-auto icon-circle bg-warning-soft text-warning">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 20V10m6 10V4M6 20v-4"/></svg>
+                            </div>
+                        </div>
+                        <div class="mt-2 small">
+                            @if (stats.TotalExpired > 0)
+                            {
+                                <span class="text-danger fw-bold">@(stats.TotalExpired - stats.TotalConverted)</span>
+                                <span class="text-muted"> perdues sans achat</span>
+                            }
+                            else
+                            {
+                                <span class="text-muted">Aucune expiration sur la période</span>
+                            }
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        @if (stats.ExpiringNext7Days > 0)
+        {
+            <p class="text-muted small mb-4">⚠ <strong>@stats.ExpiringNext7Days</strong> licences freemium expirent dans les 7 prochains jours — opportunité de relance.</p>
+        }
+
+        <!-- Charts -->
+        <div class="row g-3 mb-4">
+            <!-- Expirations par jour -->
+            <div class="col-md-6">
+                <div class="card p-4 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h6 class="mb-0">Expirations par jour</h6>
+                        <div class="d-flex gap-3 small">
+                            <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-danger"></span> Expirées</span>
+                            <span class="d-flex align-items-center gap-1"><span class="legend-dot bg-success"></span> Converties</span>
+                        </div>
+                    </div>
+                    @{
+                        var barW = stats.DayBuckets.Count > 60 ? "6px" : stats.DayBuckets.Count > 45 ? "8px" : stats.DayBuckets.Count > 20 ? "14px" : "20px";
+                        var maxExp = stats.DayBuckets.Count > 0 ? stats.DayBuckets.Max(d => d.Expired) : 1;
+                        if (maxExp == 0) maxExp = 1;
+                    }
+                    <div class="chart-container d-flex align-items-end justify-content-around" style="height: 180px;">
+                        @foreach (var day in stats.DayBuckets)
+                        {
+                            var pctTotal = (int)((day.Expired * 100.0) / maxExp);
+                            var pctConv  = day.Expired > 0 ? (int)((day.Converted * 100.0) / maxExp) : 0;
+                            <div class="d-flex flex-column align-items-center" style="min-width: @barW; flex: 1;">
+                                @if (day.Expired > 0)
+                                {
+                                    <div class="small text-muted mb-1" style="font-size: 0.6rem;">@day.Expired</div>
+                                }
+                                <div class="bar-container position-relative rounded" style="height: 140px; width: 100%;">
+                                    @if (pctTotal > 0)
+                                    {
+                                        <div class="bar-fill bg-danger position-absolute bottom-0 w-100 rounded-bottom" style="height: @pctTotal%;"></div>
+                                        @if (pctConv > 0)
+                                        {
+                                            <div class="bar-fill bg-success position-absolute bottom-0 w-100 rounded-bottom" style="height: @pctConv%;"></div>
+                                        }
+                                    }
+                                </div>
+                                @if (stats.DayBuckets.Count <= 60)
+                                {
+                                    <span class="mt-1 text-muted text-center" style="font-size: 0.55rem;">@TZ.ToLocal(day.Date).ToString("dd/MM")</span>
+                                }
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+
+            <!-- Créations par jour -->
+            <div class="col-md-6">
+                <div class="card p-4 h-100">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h6 class="mb-0">Créations par jour</h6>
+                        <span class="d-flex align-items-center gap-1 small"><span class="legend-dot bg-primary"></span> Créées</span>
+                    </div>
+                    @{
+                        var maxCr = stats.DayBuckets.Count > 0 ? stats.DayBuckets.Max(d => d.Created) : 1;
+                        if (maxCr == 0) maxCr = 1;
+                    }
+                    <div class="chart-container d-flex align-items-end justify-content-around" style="height: 180px;">
+                        @foreach (var day in stats.DayBuckets)
+                        {
+                            var pctCr = (int)((day.Created * 100.0) / maxCr);
+                            <div class="d-flex flex-column align-items-center" style="min-width: @barW; flex: 1;">
+                                @if (day.Created > 0)
+                                {
+                                    <div class="small text-muted mb-1" style="font-size: 0.6rem;">@day.Created</div>
+                                }
+                                <div class="bar-container position-relative rounded" style="height: 140px; width: 100%;">
+                                    @if (pctCr > 0)
+                                    {
+                                        <div class="bar-fill bg-primary position-absolute bottom-0 w-100 rounded" style="height: @pctCr%;"></div>
+                                    }
+                                </div>
+                                @if (stats.DayBuckets.Count <= 60)
+                                {
+                                    <span class="mt-1 text-muted text-center" style="font-size: 0.55rem;">@TZ.ToLocal(day.Date).ToString("dd/MM")</span>
+                                }
+                            </div>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tableaux détaillés par onglets -->
+        <div class="card p-4 mb-4">
+            <ul class="nav nav-tabs mb-3">
+                <li class="nav-item">
+                    <button class="nav-link @(activeTab == "en-cours" ? "active" : "")" @onclick='() => activeTab = "en-cours"'>
+                        En cours&nbsp;<span class="badge bg-primary">@stats.Detail.Count(r => !r.IsExpired && r.WasActivated && !r.IsConverted)</span>
+                    </button>
+                </li>
+                <li class="nav-item">
+                    <button class="nav-link @(activeTab == "converti" ? "active" : "")" @onclick='() => activeTab = "converti"'>
+                        Converti&nbsp;<span class="badge bg-success">@stats.Detail.Count(r => r.IsConverted && r.WasActivated)</span>
+                    </button>
+                </li>
+                <li class="nav-item">
+                    <button class="nav-link @(activeTab == "perdu" ? "active" : "")" @onclick='() => activeTab = "perdu"'>
+                        Perdu&nbsp;<span class="badge bg-danger">@stats.Detail.Count(r => r.IsExpired && !r.IsConverted && r.WasActivated)</span>
+                    </button>
+                </li>
+                <li class="nav-item">
+                    <button class="nav-link @(activeTab == "jamais" ? "active" : "")" @onclick='() => activeTab = "jamais"'>
+                        Jamais activée&nbsp;<span class="badge bg-secondary">@stats.Detail.Count(r => !r.WasActivated)</span>
+                    </button>
+                </li>
+            </ul>
+
+            @{
+                var tabRows = GetTabRows(stats);
+            }
+            @if (tabRows.Count == 0)
+            {
+                <p class="text-muted text-center py-3 mb-0">Aucune licence dans cette catégorie.</p>
+            }
+            else
+            {
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover align-middle" style="font-size: 0.83rem;">
+                        <thead>
+                            <tr>
+                                <th>Client</th>
+                                <th>Email</th>
+                                <th>Créée le</th>
+                                <th>Fin essai</th>
+                                <th>Durée</th>
+                                <th class="text-center">Événements</th>
+                                @if (activeTab == "converti")
+                                {
+                                    <th class="text-center">Abonnement</th>
+                                }
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var row in tabRows)
+                            {
+                                <tr>
+                                    <td>@(string.IsNullOrEmpty(row.CustomerName) ? "—" : row.CustomerName)</td>
+                                    <td>
+                                        @if (!string.IsNullOrEmpty(row.CustomerEmail))
+                                        {
+                                            <code class="small">@row.CustomerEmail</code>
+                                        }
+                                        else
+                                        {
+                                            <span class="text-muted">anonyme</span>
+                                        }
+                                    </td>
+                                    <td class="text-nowrap text-muted">@TZ.ToLocal(row.CreationDate).ToString("dd/MM/yyyy")</td>
+                                    <td class="text-nowrap @(activeTab == "converti" ? "text-muted" : (row.IsExpired ? "text-danger" : "text-success"))">
+                                        @(row.ExpirationDate.HasValue ? TZ.ToLocal(row.ExpirationDate.Value).ToString("dd/MM/yyyy") : "—")
+                                    </td>
+                                    <td class="text-muted">
+                                        @if (row.ExpirationDate.HasValue && row.ActivationDate.HasValue)
+                                        {
+                                            @((row.ExpirationDate.Value - row.ActivationDate.Value).Days)<text>j</text>
+                                        }
+                                        else { <text>—</text> }
+                                    </td>
+                                    <td class="text-center">
+                                        @if (row.EventCount > 0)
+                                        {
+                                            <span class="fw-bold text-info">@row.EventCount</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="text-muted">—</span>
+                                        }
+                                    </td>
+                                    @if (activeTab == "converti")
+                                    {
+                                        <td class="text-center">
+                                            @if (row.PaidIsActive)
+                                            {
+                                                <span class="badge bg-success">Actif</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="badge bg-secondary">Annulé</span>
+                                            }
+                                        </td>
+                                    }
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </div>
+    }
+}
+
+<style>
+    .bg-primary-soft { background-color: rgba(13, 110, 253, 0.15); }
+    .bg-success-soft { background-color: rgba(25, 135, 84, 0.15); }
+    .bg-warning-soft { background-color: rgba(255, 193, 7, 0.15); }
+    .bg-danger-soft  { background-color: rgba(220, 53, 69, 0.15); }
+
+    .bar-container { background-color: rgba(255,255,255,0.05) !important; overflow: hidden; }
+    .bar-fill { transition: height 0.4s ease; }
+    .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+    .row-never-activated { opacity: 0.4; }
+</style>
+
+@code {
+    private bool isAuthorized;
+    private bool loading      = false;
+    private bool noFreemiumType = false;
+
+    private List<Product> products = new();
+
+    // IDs des types "freemium" détectés automatiquement
+    private List<Guid> freemiumTypeIds = new();
+
+    private string selectedProductId = "";
+    private int    selectedDays      = 60;
+    private string activeTab         = "en-cours";
+
+    private FreemiumStats? stats;
+
+    // -----------------------------------------------------------------------
+    protected override async Task OnInitializedAsync()
+    {
+        isAuthorized = await Auth.HasPermissionAsync("licenses.view");
+        if (!isAuthorized) return;
+
+        using var db = await DbFactory.CreateDbContextAsync();
+        products = await db.Products.OrderBy(p => p.Name).ToListAsync();
+        await DetectFreemiumTypes(db);
+        await LoadData();
+    }
+
+    // IDs de tous les types non-payants (IsFree=true OU mots-clés) — exclus du paidSet
+    private List<Guid> allFreeTypeIds = new();
+
+    private async Task DetectFreemiumTypes(LicenseDbContext db)
+    {
+        var q = db.LicenseTypes.AsQueryable();
+        if (Guid.TryParse(selectedProductId, out var pid))
+            q = q.Where(t => t.ProductId == pid);
+
+        var all = await q.ToListAsync();
+
+        // Types affichés dans l'analyse freemium : marqués IsFree OU mots-clés freemium/trial/essai
+        freemiumTypeIds = all
+            .Where(t => t.IsFree ||
+                t.Slug.Contains("freemium", StringComparison.OrdinalIgnoreCase) ||
+                t.Slug.Contains("trial",    StringComparison.OrdinalIgnoreCase) ||
+                t.Slug.Contains("essai",    StringComparison.OrdinalIgnoreCase) ||
+                t.Name.Contains("freemium", StringComparison.OrdinalIgnoreCase) ||
+                t.Name.Contains("trial",    StringComparison.OrdinalIgnoreCase) ||
+                t.Name.Contains("essai",    StringComparison.OrdinalIgnoreCase))
+            .Select(t => t.Id)
+            .ToList();
+
+        // Tous les types gratuits (IsFree=true) — pour ne pas les compter comme "payants"
+        // Inclut aussi les types student/edu/demo détectés par mots-clés
+        allFreeTypeIds = all
+            .Where(t => t.IsFree ||
+                t.Slug.Contains("freemium", StringComparison.OrdinalIgnoreCase) ||
+                t.Slug.Contains("trial",    StringComparison.OrdinalIgnoreCase) ||
+                t.Slug.Contains("essai",    StringComparison.OrdinalIgnoreCase) ||
+                t.Slug.Contains("student",  StringComparison.OrdinalIgnoreCase) ||
+                t.Slug.Contains("etudiant", StringComparison.OrdinalIgnoreCase) ||
+                t.Slug.Contains("edu",      StringComparison.OrdinalIgnoreCase) ||
+                t.Slug.Contains("demo",     StringComparison.OrdinalIgnoreCase) ||
+                t.Slug.Contains("nfr",      StringComparison.OrdinalIgnoreCase) ||
+                t.Name.Contains("freemium", StringComparison.OrdinalIgnoreCase) ||
+                t.Name.Contains("trial",    StringComparison.OrdinalIgnoreCase) ||
+                t.Name.Contains("essai",    StringComparison.OrdinalIgnoreCase) ||
+                t.Name.Contains("student",  StringComparison.OrdinalIgnoreCase) ||
+                t.Name.Contains("etudiant", StringComparison.OrdinalIgnoreCase) ||
+                t.Name.Contains("étudiant", StringComparison.OrdinalIgnoreCase) ||
+                t.Name.Contains("edu",      StringComparison.OrdinalIgnoreCase) ||
+                t.Name.Contains("demo",     StringComparison.OrdinalIgnoreCase) ||
+                t.Name.Contains("nfr",      StringComparison.OrdinalIgnoreCase))
+            .Select(t => t.Id)
+            .ToList();
+
+        noFreemiumType = freemiumTypeIds.Count == 0;
+    }
+
+    // -----------------------------------------------------------------------
+    private async Task OnProductChanged(string value)
+    {
+        selectedProductId = value;
+        using var db = await DbFactory.CreateDbContextAsync();
+        await DetectFreemiumTypes(db);
+        await LoadData();
+    }
+
+    private async Task SetDays(int days)
+    {
+        selectedDays = days;
+        await LoadData();
+    }
+
+    // -----------------------------------------------------------------------
+    private async Task LoadData()
+    {
+        if (noFreemiumType) { stats = null; StateHasChanged(); return; }
+
+        loading = true;
+        StateHasChanged();
+
+        var now   = DateTime.UtcNow;
+        // selectedDays == 0 → toute la période (depuis le début des temps)
+        var since = selectedDays == 0 ? DateTime.MinValue : now.AddDays(-selectedDays);
+
+        using var db = await DbFactory.CreateDbContextAsync();
+
+        // --- Toutes les licences freemium ---
+        var q = db.Licenses.Where(l => freemiumTypeIds.Contains(l.LicenseTypeId));
+        if (Guid.TryParse(selectedProductId, out var pid))
+            q = q.Where(l => l.ProductId == pid);
+
+        var freemiumAll = await q
+            .Select(l => new {
+                l.CustomerEmail,
+                l.CustomerName,
+                l.CreationDate,
+                l.ExpirationDate,
+                l.ActivationDate,
+                l.HardwareId,
+                l.ProductId
+            })
+            .ToListAsync();
+
+        // --- Set (email, productId) ayant une licence payante active ---
+        var productIds = freemiumAll.Select(l => l.ProductId).Distinct().ToList();
+
+        // Toutes les licences payantes (actives ou non) avec leur statut
+        // Exclut tous les types gratuits (IsFree + mots-clés)
+        var paidLicenses = await db.Licenses
+            .Where(l => !allFreeTypeIds.Contains(l.LicenseTypeId)
+                     && productIds.Contains(l.ProductId)
+                     && l.CustomerEmail != null && l.CustomerEmail != "")
+            .Select(l => new { l.CustomerEmail, l.ProductId, l.IsActive, l.ExpirationDate })
+            .ToListAsync();
+
+        // Pour chaque (email, produit) : isActive = true si AU MOINS une licence payante est active
+        var paidDetails = paidLicenses
+            .GroupBy(l => (l.CustomerEmail!.ToLowerInvariant(), l.ProductId))
+            .ToDictionary(
+                g => g.Key,
+                g => g.Any(l => l.IsActive && (!l.ExpirationDate.HasValue || l.ExpirationDate.Value > now))
+            );
+
+        // Seul trial@auto.local est exclu : email partagé par TOUTES les licences auto-trial
+        var systemEmails = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "trial@auto.local"
+        };
+
+        bool IsConverted(string email, Guid prod) =>
+            !string.IsNullOrEmpty(email)
+            && !systemEmails.Contains(email)
+            && paidDetails.ContainsKey((email.ToLowerInvariant(), prod));
+
+        bool IsPaidActive(string email, Guid prod) =>
+            paidDetails.TryGetValue((email.ToLowerInvariant(), prod), out var active) && active;
+
+        // --- Comptage télémétrie par HardwareId ---
+        var hwIds = freemiumAll
+            .Where(l => !string.IsNullOrEmpty(l.HardwareId))
+            .Select(l => l.HardwareId!)
+            .Distinct()
+            .ToList();
+
+        var telemetryByHwId = hwIds.Count > 0
+            ? (await db.TelemetryRecords
+                .Where(t => hwIds.Contains(t.HardwareId))
+                .GroupBy(t => t.HardwareId)
+                .Select(g => new { HwId = g.Key, Count = g.Count() })
+                .ToListAsync())
+                .ToDictionary(x => x.HwId, x => x.Count)
+            : new Dictionary<string, int>();
+
+        int GetEventCount(string? hwId) =>
+            !string.IsNullOrEmpty(hwId) && telemetryByHwId.TryGetValue(hwId, out var c) ? c : 0;
+
+        // --- Licences créées dans la période ---
+        var createdInPeriod = freemiumAll.Where(l => l.CreationDate >= since).ToList();
+
+        // --- Licences expirées dans la période (peuvent avoir été créées AVANT la période) ---
+        var expiredInPeriod = freemiumAll
+            .Where(l => l.ExpirationDate.HasValue
+                     && l.ExpirationDate.Value < now
+                     && l.ExpirationDate.Value >= since)
+            .ToList();
+
+        var expiringNext7 = freemiumAll.Count(l =>
+            l.ExpirationDate.HasValue &&
+            l.ExpirationDate.Value >= now &&
+            l.ExpirationDate.Value <  now.AddDays(7));
+
+        int totalConverted = expiredInPeriod.Count(l => l.ActivationDate.HasValue && IsConverted(l.CustomerEmail, l.ProductId));
+
+        // --- Graphique par jour (timezone Paris) ---
+        // En mode "Tout", on génère un bucket par mois si > 180j de données, sinon par jour
+        var dayBuckets = new List<FreemiumDayBucket>();
+        int chartDays = selectedDays == 0
+            ? (freemiumAll.Count > 0 ? (int)(now - freemiumAll.Min(l => l.CreationDate)).TotalDays + 1 : 90)
+            : selectedDays;
+        chartDays = Math.Min(chartDays, 365); // cap à 365 barres max
+
+        for (int i = chartDays - 1; i >= 0; i--)
+        {
+            var parisDate = TimeZoneService.ParisDateDaysAgo(i);
+            var created  = createdInPeriod.Count(l => TimeZoneService.ToParisDate(l.CreationDate) == parisDate);
+            var expired  = expiredInPeriod.Count(l => l.ExpirationDate.HasValue && TimeZoneService.ToParisDate(l.ExpirationDate.Value) == parisDate);
+            var conv     = expiredInPeriod.Count(l => l.ExpirationDate.HasValue && TimeZoneService.ToParisDate(l.ExpirationDate.Value) == parisDate && IsConverted(l.CustomerEmail, l.ProductId));
+            dayBuckets.Add(new FreemiumDayBucket(parisDate, created, expired, conv));
+        }
+
+        // --- Détail : union des expirées dans la période + actives créées dans la période ---
+        // On déduplique par (email, productId, creationDate)
+        var expiredSet = expiredInPeriod
+            .Select(l => new FreemiumLicenseRow(
+                l.CustomerName, l.CustomerEmail, l.CreationDate,
+                l.ActivationDate, l.ExpirationDate, true,
+                IsConverted(l.CustomerEmail, l.ProductId),
+                IsPaidActive(l.CustomerEmail, l.ProductId),
+                GetEventCount(l.HardwareId)));
+
+        var activeInPeriod = createdInPeriod
+            .Where(l => !l.ExpirationDate.HasValue || l.ExpirationDate.Value >= now)
+            .Select(l => new FreemiumLicenseRow(
+                l.CustomerName, l.CustomerEmail, l.CreationDate,
+                l.ActivationDate, l.ExpirationDate, false,
+                IsConverted(l.CustomerEmail, l.ProductId),
+                IsPaidActive(l.CustomerEmail, l.ProductId),
+                GetEventCount(l.HardwareId)));
+
+        // Expirées en premier (les plus importantes pour l'analyse), actives ensuite
+        var detail = expiredSet
+            .OrderByDescending(r => r.ExpirationDate)
+            .Concat(activeInPeriod.OrderByDescending(r => r.ExpirationDate ?? r.CreationDate))
+            .DistinctBy(r => (r.CustomerEmail, r.CreationDate))
+            .ToList();
+
+        stats = new FreemiumStats
+        {
+            TotalCreated        = createdInPeriod.Count,
+            TotalActivated      = createdInPeriod.Count(l => l.ActivationDate.HasValue),
+            TotalNeverActivated = createdInPeriod.Count(l => !l.ActivationDate.HasValue),
+            TotalExpired        = expiredInPeriod.Count,
+            TotalConverted      = totalConverted,
+            ConversionRate      = expiredInPeriod.Count > 0 ? totalConverted * 100.0 / expiredInPeriod.Count : 0.0,
+            ExpiringNext7Days   = expiringNext7,
+            DayBuckets          = dayBuckets,
+            Detail              = detail
+        };
+
+        loading = false;
+    }
+
+    // -----------------------------------------------------------------------
+    private class FreemiumStats
+    {
+        public int    TotalCreated        { get; set; }
+        public int    TotalActivated      { get; set; }
+        public int    TotalNeverActivated { get; set; }
+        public int    TotalExpired        { get; set; }
+        public int    TotalConverted      { get; set; }
+        public double ConversionRate      { get; set; }
+        public int    ExpiringNext7Days   { get; set; }
+        public List<FreemiumDayBucket>  DayBuckets { get; set; } = new();
+        public List<FreemiumLicenseRow> Detail     { get; set; } = new();
+    }
+
+    private List<FreemiumLicenseRow> GetTabRows(FreemiumStats s)
+    {
+        if (activeTab == "converti")
+            // Converti = a acheté, qu'il soit encore en essai ou expiré
+            return s.Detail.Where(r => r.IsConverted && r.WasActivated).OrderByDescending(r => r.ExpirationDate ?? r.CreationDate).ToList();
+        if (activeTab == "perdu")
+            // Perdu = expiré, jamais acheté
+            return s.Detail.Where(r => r.IsExpired && !r.IsConverted && r.WasActivated).OrderByDescending(r => r.ExpirationDate).ToList();
+        if (activeTab == "jamais")
+            return s.Detail.Where(r => !r.WasActivated).OrderByDescending(r => r.CreationDate).ToList();
+        // "en-cours" = actif ET pas encore converti
+        return s.Detail.Where(r => !r.IsExpired && r.WasActivated && !r.IsConverted).OrderByDescending(r => r.ExpirationDate ?? r.CreationDate).ToList();
+    }
+
+    private record FreemiumDayBucket(DateTime Date, int Created, int Expired, int Converted);
+
+    private record FreemiumLicenseRow(
+        string    CustomerName,
+        string    CustomerEmail,
+        DateTime  CreationDate,
+        DateTime? ActivationDate,
+        DateTime? ExpirationDate,
+        bool      IsExpired,
+        bool      IsConverted,
+        bool      PaidIsActive,
+        int       EventCount)
+    {
+        public bool WasActivated => ActivationDate.HasValue;
+    }
+}

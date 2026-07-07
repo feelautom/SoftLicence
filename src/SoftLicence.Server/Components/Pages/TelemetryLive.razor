@@ -1,0 +1,464 @@
+@page "/telemetry/live"
+@using Microsoft.EntityFrameworkCore
+@using SoftLicence.Server.Data
+@using SoftLicence.Server.Services
+@using System.Text.Json
+@inject IDbContextFactory<LicenseDbContext> DbFactory
+@inject AuthService Auth
+@inject TimeZoneService TZ
+
+<PageTitle>Live Telemetry (24h)</PageTitle>
+
+@if (!isAuthorized)
+{
+    <p class="text-danger">Access denied.</p>
+    return;
+}
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <h3 class="mb-0">Live Telemetry</h3>
+    <div class="d-flex gap-2 align-items-center">
+        <div class="btn-group btn-group-sm">
+            <button class="btn @(hours == 1 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetHours(1)">1h</button>
+            <button class="btn @(hours == 6 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetHours(6)">6h</button>
+            <button class="btn @(hours == 24 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetHours(24)">24h</button>
+            <button class="btn @(hours == 72 ? "btn-primary" : "btn-outline-secondary")" @onclick="() => SetHours(72)">3d</button>
+        </div>
+        <button class="btn btn-outline-secondary btn-sm" @onclick="LoadData" disabled="@loading">Refresh</button>
+    </div>
+</div>
+
+@if (loading)
+{
+    <div class="text-center py-5">
+        <div class="spinner-border text-primary" role="status"></div>
+    </div>
+}
+else
+{
+    @* Stats bar *@
+    <div class="row g-2 mb-3">
+        <div class="col"><div class="card bg-dark border-secondary text-center p-2"><div class="fs-4 text-info">@machines.Count</div><small class="text-muted">Machines</small></div></div>
+        <div class="col"><div class="card bg-dark border-secondary text-center p-2"><div class="fs-4 text-warning">@totalEvents</div><small class="text-muted">Events</small></div></div>
+        <div class="col"><div class="card bg-dark border-secondary text-center p-2"><div class="fs-4 text-success">@machines.Count(m => !string.IsNullOrEmpty(m.LicenseType))</div><small class="text-muted">Licensed</small></div></div>
+        <div class="col"><div class="card bg-dark border-secondary text-center p-2"><div class="fs-4 text-danger">@canaryCount</div><small class="text-muted">Canary Alerts</small></div></div>
+        <div class="col"><div class="card bg-dark border-secondary text-center p-2"><div class="fs-4 text-primary">@versionDistribution.Count</div><small class="text-muted">Versions</small></div></div>
+    </div>
+
+    @* Tabs *@
+    <ul class="nav nav-tabs mb-3">
+        <li class="nav-item">
+            <a class="nav-link @(activeTab == "machines" ? "active" : "")" href="javascript:void(0)" @onclick='() => activeTab = "machines"'>
+                Machines (@machines.Count)
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link @(activeTab == "events" ? "active" : "")" href="javascript:void(0)" @onclick='() => activeTab = "events"'>
+                Top Events
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link @(activeTab == "versions" ? "active" : "")" href="javascript:void(0)" @onclick='() => activeTab = "versions"'>
+                Versions
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link @(activeTab == "canary" ? "active" : "") @(canaryCount == 0 ? "" : "text-danger")" href="javascript:void(0)" @onclick='() => activeTab = "canary"'>
+                Canary (@canaryCount)
+            </a>
+        </li>
+    </ul>
+
+    @if (activeTab == "machines")
+    {
+        <div class="table-responsive">
+        <table class="table table-dark table-hover table-sm align-middle">
+            <thead>
+                <tr class="text-muted small">
+                    <th>#</th>
+                    <th>HWID</th>
+                    <th>Product</th>
+                    <th>Account</th>
+                    <th>License</th>
+                    <th>Version</th>
+                    <th>Culture</th>
+                    <th>OS</th>
+                    <th>IP</th>
+                    <th class="text-end">Events</th>
+                    <th>First Seen</th>
+                    <th>Last Seen</th>
+                </tr>
+            </thead>
+            <tbody>
+                @{ var idx = 0; }
+                @foreach (var m in machines)
+                {
+                    idx++;
+                    var rowClass = m.IsBanned ? "table-danger" : "";
+                    <tr class="@rowClass">
+                        <td class="text-muted">@idx</td>
+                        <td><code class="text-info" style="font-size:0.75rem">@m.HardwareId</code>
+                            @if (m.IsBanned) { <span class="badge bg-danger ms-1" style="font-size:0.55rem">BANNED</span> }
+                        </td>
+                        <td><span class="badge border border-secondary text-info" style="font-size:0.65rem">@m.AppName</span></td>
+                        <td>
+                            @if (!string.IsNullOrEmpty(m.CustomerName))
+                            {
+                                <div style="line-height:1.2">
+                                    <small class="text-light">@m.CustomerName</small>
+                                    <br/><small class="text-muted" style="font-size:0.65rem">@m.CustomerEmail</small>
+                                </div>
+                            }
+                            else
+                            {
+                                <small class="text-muted">-</small>
+                            }
+                        </td>
+                        <td>
+                            @if (!string.IsNullOrEmpty(m.LicenseType))
+                            {
+                                <span class="badge bg-success" style="font-size:0.65rem">@m.LicenseType</span>
+                            }
+                            else
+                            {
+                                <small class="text-muted">No license</small>
+                            }
+                        </td>
+                        <td><small>@m.Version</small></td>
+                        <td><small>@m.Culture</small></td>
+                        <td><small class="text-muted" style="font-size:0.65rem" title="@m.OS">@Truncate(m.OS, 20)</small></td>
+                        <td>
+                            @foreach (var ip in m.IPs.Take(2))
+                            {
+                                <div><code class="small" style="font-size:0.7rem">@ip</code></div>
+                            }
+                            @if (m.IPs.Count > 2) { <small class="text-muted">+@(m.IPs.Count - 2)</small> }
+                        </td>
+                        <td class="text-end"><span class="badge bg-secondary">@m.EventCount</span></td>
+                        <td><small>@TZ.ToLocal(m.FirstSeen).ToString("MM-dd HH:mm")</small></td>
+                        <td><small>@TZ.ToLocal(m.LastSeen).ToString("MM-dd HH:mm")</small></td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+        </div>
+    }
+
+    @if (activeTab == "events")
+    {
+        <div class="table-responsive">
+        <table class="table table-dark table-sm" style="max-width:600px">
+            <thead><tr class="text-muted small"><th>Event</th><th class="text-end">Count</th><th>Bar</th></tr></thead>
+            <tbody>
+                @foreach (var ev in topEvents)
+                {
+                    var pct = totalEvents > 0 ? (int)(ev.Count * 100.0 / topEvents.First().Count) : 0;
+                    <tr>
+                        <td><small>@ev.Name</small></td>
+                        <td class="text-end"><span class="badge bg-primary">@ev.Count</span></td>
+                        <td style="width:40%">
+                            <div class="progress" style="height:14px">
+                                <div class="progress-bar bg-info" style="width:@(pct)%"></div>
+                            </div>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+        </div>
+    }
+
+    @if (activeTab == "versions")
+    {
+        <div class="table-responsive">
+        <table class="table table-dark table-sm" style="max-width:600px">
+            <thead><tr class="text-muted small"><th>Product</th><th>Version</th><th class="text-end">Events</th><th class="text-end">Machines</th></tr></thead>
+            <tbody>
+                @foreach (var v in versionDistribution)
+                {
+                    <tr>
+                        <td><span class="badge border border-secondary text-info" style="font-size:0.65rem">@v.AppName</span></td>
+                        <td><code>@v.Version</code></td>
+                        <td class="text-end">@v.Events</td>
+                        <td class="text-end">@v.Machines</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+        </div>
+    }
+
+    @if (activeTab == "canary")
+    {
+        @if (canaryAlerts.Count == 0)
+        {
+            <p class="text-muted">No canary alerts in the last @hours hours.</p>
+        }
+        else
+        {
+            <div class="table-responsive">
+            <table class="table table-dark table-hover table-sm">
+                <thead><tr class="text-muted small"><th>Sev</th><th>Time</th><th>HWID</th><th>Machine</th><th>User</th><th>Trigger</th><th>Repeats</th><th>Version</th><th>IP</th><th>Details</th></tr></thead>
+                <tbody>
+                    @foreach (var a in canaryAlerts)
+                    {
+                        var sevColor = a.Severity >= 3 ? "danger" : (a.Severity >= 2 ? "warning" : "secondary");
+                        var sevLabel = a.Severity >= 3 ? "CRIT" : (a.Severity >= 2 ? "WARN" : "INFO");
+                        <tr>
+                            <td><span class="badge bg-@sevColor" style="font-size:0.6rem">@sevLabel</span></td>
+                            <td><small>@TZ.ToLocal(a.Timestamp).ToString("MM-dd HH:mm")</small></td>
+                            <td><code class="text-danger" style="font-size:0.75rem">@a.HardwareId</code></td>
+                            <td><small>@a.MachineName</small></td>
+                            <td><small>@a.UserName</small></td>
+                            <td><span class="badge bg-danger" style="font-size:0.65rem">@a.Trigger</span></td>
+                            <td>
+                                @if (a.RepeatCount > 0)
+                                {
+                                    <span class="badge bg-warning text-dark" style="font-size:0.65rem" title="Last: @(a.LastSeenAt != null ? TZ.ToLocal(a.LastSeenAt.Value).ToString("MM-dd HH:mm") : "-")">x@(a.RepeatCount + 1)</span>
+                                }
+                            </td>
+                            <td><small>@a.AppVersion</small></td>
+                            <td><code class="small" style="font-size:0.7rem">@a.ClientIp</code></td>
+                            <td>
+                                @if (!string.IsNullOrEmpty(a.Details))
+                                {
+                                    <button class="btn btn-link btn-sm text-muted p-0" style="font-size:0.65rem;text-decoration:none;" @onclick="() => ToggleCanaryDetail(a)">
+                                        @Truncate(a.Details, 50)
+                                    </button>
+                                }
+                                else
+                                {
+                                    <small class="text-muted">-</small>
+                                }
+                            </td>
+                        </tr>
+                        @if (a == expandedCanary)
+                        {
+                            <tr>
+                                <td colspan="10">
+                                    <div style="background:#1a1a2e;padding:12px;border-radius:4px;font-family:monospace;font-size:0.75rem;white-space:pre-wrap;word-break:break-all;color:#a0aec0;">@a.Details@(a.OsVersion != null ? $"\nOS: {a.OsVersion}" : "")</div>
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+            </div>
+        }
+    }
+}
+
+@code {
+    private bool isAuthorized;
+    private bool loading = true;
+    private int hours = 24;
+    private string activeTab = "machines";
+    private int totalEvents;
+    private int canaryCount;
+
+    private List<MachineRow> machines = new();
+    private List<EventCount> topEvents = new();
+    private List<VersionRow> versionDistribution = new();
+    private List<CanaryRow> canaryAlerts = new();
+    private CanaryRow? expandedCanary;
+
+    private void ToggleCanaryDetail(CanaryRow row) => expandedCanary = expandedCanary == row ? null : row;
+
+    protected override async Task OnInitializedAsync()
+    {
+        isAuthorized = await Auth.IsRootAsync();
+        if (!isAuthorized) return;
+        await LoadData();
+    }
+
+    private async Task SetHours(int h)
+    {
+        hours = h;
+        await LoadData();
+    }
+
+    private async Task LoadData()
+    {
+        loading = true;
+        StateHasChanged();
+
+        try
+        {
+            using var db = await DbFactory.CreateDbContextAsync();
+            var since = DateTime.UtcNow.AddHours(-hours);
+
+            // All telemetry records in period
+            var records = await db.TelemetryRecords.AsNoTracking()
+                .Include(r => r.EventData)
+                .Where(r => r.Timestamp >= since)
+                .OrderByDescending(r => r.Timestamp)
+                .ToListAsync();
+
+            totalEvents = records.Count;
+
+            // Group by HWID
+            var grouped = records.GroupBy(r => r.HardwareId).ToList();
+            var hwids = grouped.Select(g => g.Key).ToList();
+
+            // Cross-reference licenses
+            var seats = await db.LicenseSeats.AsNoTracking()
+                .Include(s => s.License).ThenInclude(l => l!.Type)
+                .Where(s => hwids.Contains(s.HardwareId) && s.IsActive)
+                .ToListAsync();
+            var seatsByHwid = seats.GroupBy(s => s.HardwareId)
+                .ToDictionary(g => g.Key, g => g.First());
+
+            // Banned HWIDs
+            var bannedHwids = (await db.BannedHardwareIds.AsNoTracking()
+                .Where(b => hwids.Contains(b.HardwareId) && b.IsActive)
+                .Select(b => b.HardwareId)
+                .ToListAsync()).ToHashSet();
+
+            // Build machine rows
+            machines = grouped.Select(g =>
+            {
+                var first = g.Last(); // oldest
+                var last = g.First(); // newest
+
+                // Extract culture/OS from Startup event PropertiesJson
+                var startupEvent = g.FirstOrDefault(r => r.EventName == "Startup_AppStarted" && r.EventData?.PropertiesJson != null);
+                string? culture = null, os = null;
+                if (startupEvent?.EventData?.PropertiesJson != null)
+                {
+                    try
+                    {
+                        var props = JsonSerializer.Deserialize<Dictionary<string, string>>(startupEvent.EventData.PropertiesJson);
+                        if (props != null)
+                        {
+                            props.TryGetValue("Culture", out culture);
+                            props.TryGetValue("OS", out os);
+                        }
+                    }
+                    catch { }
+                }
+
+                seatsByHwid.TryGetValue(g.Key, out var seat);
+
+                return new MachineRow
+                {
+                    HardwareId = g.Key,
+                    AppName = last.AppName,
+                    Version = last.Version ?? "-",
+                    Culture = culture ?? "-",
+                    OS = os ?? "-",
+                    CustomerName = seat?.License?.CustomerName,
+                    CustomerEmail = seat?.License?.CustomerEmail,
+                    LicenseType = seat?.License?.Type?.Name,
+                    EventCount = g.Count(),
+                    IPs = g.Select(r => r.ClientIp).Where(ip => !string.IsNullOrEmpty(ip)).Distinct().ToList()!,
+                    FirstSeen = first.Timestamp,
+                    LastSeen = last.Timestamp,
+                    IsBanned = bannedHwids.Contains(g.Key)
+                };
+            })
+            .OrderByDescending(m => m.EventCount)
+            .ToList();
+
+            // Top events
+            topEvents = records.GroupBy(r => r.EventName)
+                .Select(g => new EventCount { Name = g.Key, Count = g.Count() })
+                .OrderByDescending(e => e.Count)
+                .Take(20)
+                .ToList();
+
+            // Version distribution
+            versionDistribution = records
+                .Where(r => !string.IsNullOrEmpty(r.Version))
+                .GroupBy(r => new { r.AppName, r.Version })
+                .Select(g => new VersionRow
+                {
+                    AppName = g.Key.AppName,
+                    Version = g.Key.Version!,
+                    Events = g.Count(),
+                    Machines = g.Select(r => r.HardwareId).Distinct().Count()
+                })
+                .OrderByDescending(v => v.Events)
+                .ToList();
+
+            // Canary alerts
+            var alerts = await db.CanaryAlerts.AsNoTracking()
+                .Where(a => a.ReceivedAt >= since)
+                .OrderByDescending(a => a.ReceivedAt)
+                .Take(100)
+                .ToListAsync();
+
+            canaryAlerts = alerts.Select(a => new CanaryRow
+            {
+                Timestamp = a.ReceivedAt,
+                HardwareId = a.HardwareId,
+                MachineName = a.MachineName,
+                UserName = a.UserName,
+                Trigger = a.Trigger ?? "-",
+                AppVersion = a.AppVersion,
+                ClientIp = a.ClientIp,
+                Details = a.Details,
+                Severity = a.Severity,
+                OsVersion = a.OsVersion,
+                RepeatCount = a.RepeatCount,
+                LastSeenAt = a.LastSeenAt
+            }).ToList();
+
+            canaryCount = canaryAlerts.Count;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error loading live telemetry: {ex.Message}");
+        }
+
+        loading = false;
+    }
+
+    private static string Truncate(string? s, int max) => s != null && s.Length > max ? s[..max] + "..." : s ?? "-";
+
+    private class MachineRow
+    {
+        public string HardwareId { get; set; } = "";
+        public string AppName { get; set; } = "";
+        public string Version { get; set; } = "";
+        public string Culture { get; set; } = "-";
+        public string OS { get; set; } = "-";
+        public string? CustomerName { get; set; }
+        public string? CustomerEmail { get; set; }
+        public string? LicenseType { get; set; }
+        public int EventCount { get; set; }
+        public List<string> IPs { get; set; } = new();
+        public DateTime FirstSeen { get; set; }
+        public DateTime LastSeen { get; set; }
+        public bool IsBanned { get; set; }
+    }
+
+    private class EventCount
+    {
+        public string Name { get; set; } = "";
+        public int Count { get; set; }
+    }
+
+    private class VersionRow
+    {
+        public string AppName { get; set; } = "";
+        public string Version { get; set; } = "";
+        public int Events { get; set; }
+        public int Machines { get; set; }
+    }
+
+    private class CanaryRow
+    {
+        public DateTime Timestamp { get; set; }
+        public string HardwareId { get; set; } = "";
+        public string? MachineName { get; set; }
+        public string? UserName { get; set; }
+        public string Trigger { get; set; } = "";
+        public string? AppVersion { get; set; }
+        public string? ClientIp { get; set; }
+        public string? Details { get; set; }
+        public int Severity { get; set; } = 1;
+        public string? OsVersion { get; set; }
+        public int RepeatCount { get; set; }
+        public DateTime? LastSeenAt { get; set; }
+    }
+}

@@ -1,5 +1,5 @@
 @page "/settings"
-@inject LicenseDbContext Db
+@inject IDbContextFactory<LicenseDbContext> DbFactory
 @inject SoftLicence.Server.Services.ToastService Toast
 @inject SoftLicence.Server.Services.EmailService Mailer
 @inject SoftLicence.Server.Services.NotificationService Notifier
@@ -76,18 +76,36 @@
                                         <div class="text-truncate small" style="max-width: 150px;" title="@hook.Url">@hook.Url</div>
                                     </td>
                                     <td>
-                                        <div class="d-flex flex-wrap gap-1">
-                                            @foreach(var evt in (hook.EnabledEvents ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries))
-                                            {
-                                                string display = evt;
-                                                if (NotificationService.AvailableTriggers.TryGetValue(evt, out var friendly)) {
-                                                    display = friendly;
-                                                } else {
-                                                    display = evt.Split('.').Last();
+                                        @if (editingHookId == hook.Id)
+                                        {
+                                            <div class="border border-info rounded p-2 bg-black" style="max-height: 160px; overflow-y: auto;">
+                                                @foreach (var kvp in NotificationService.AvailableTriggers)
+                                                {
+                                                    var currentEvents = (hook.EnabledEvents ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries).ToHashSet();
+                                                    <div class="form-check mb-1">
+                                                        <input class="form-check-input" type="checkbox" id="edit_@(hook.Id)_@kvp.Key"
+                                                               checked="@currentEvents.Contains(kvp.Key)"
+                                                               @onchange="@(e => ToggleHookEvent(hook, kvp.Key, e.Value))">
+                                                        <label class="form-check-label text-light small" for="edit_@(hook.Id)_@kvp.Key">@kvp.Value</label>
+                                                    </div>
                                                 }
-                                                <span class="badge bg-secondary" style="font-size: 0.6rem;">@display</span>
-                                            }
-                                        </div>
+                                            </div>
+                                        }
+                                        else
+                                        {
+                                            <div class="d-flex flex-wrap gap-1">
+                                                @foreach(var evt in (hook.EnabledEvents ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries))
+                                                {
+                                                    string display = evt;
+                                                    if (NotificationService.AvailableTriggers.TryGetValue(evt, out var friendly)) {
+                                                        display = friendly;
+                                                    } else {
+                                                        display = evt.Split('.').Last();
+                                                    }
+                                                    <span class="badge bg-secondary" style="font-size: 0.6rem;">@display</span>
+                                                }
+                                            </div>
+                                        }
                                         @if (!string.IsNullOrEmpty(hook.LastError))
                                         {
                                             <div class="text-danger small mt-1" title="@hook.LastError">⚠️ @hook.LastError</div>
@@ -104,7 +122,15 @@
                                         }
                                     </td>
                                     <td class="text-end">
-                                        <button class="btn btn-sm btn-outline-light" title="Tester" @onclick="() => TestWebhook(hook)">⚡</button>
+                                        @if (editingHookId == hook.Id)
+                                        {
+                                            <button class="btn btn-sm btn-outline-success" title="Valider" @onclick="() => SaveEditWebhook(hook)">✔</button>
+                                        }
+                                        else
+                                        {
+                                            <button class="btn btn-sm btn-outline-info" title="Modifier" @onclick="() => editingHookId = hook.Id">✏️</button>
+                                        }
+                                        <button class="btn btn-sm btn-outline-light ms-1" title="Tester" @onclick="() => TestWebhook(hook)">⚡</button>
                                         <button class="btn btn-sm btn-outline-danger ms-1" title="Supprimer" @onclick="() => RequestDeleteWebhook(hook)">🗑️</button>
                                     </td>
                                 </tr>
@@ -182,6 +208,21 @@
                         </div>
                     }
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- EXCLUSION TELEMETRIE -->
+    <div class="col-md-4">
+        <div class="card h-100 shadow-sm">
+            <div class="card-body">
+                <h5 class="text-info">@L["Maintenance_TelemetryExclusion"]</h5>
+                <p class="text-muted small">@L["Maintenance_TelemetryExclusionDesc"]</p>
+                <textarea class="form-control form-control-sm bg-black text-light font-monospace mb-2"
+                          rows="3"
+                          placeholder="HWID1;HWID2;HWID3"
+                          @bind="excludedHwids"></textarea>
+                <button class="btn btn-info btn-sm w-100" @onclick="SaveExcludedHwids">@L["Common_Save"]</button>
             </div>
         </div>
     </div>
@@ -333,6 +374,7 @@
     private List<string> smtpLogs = new();
 
     private bool globalApiSecretEnabled = true;
+    private string excludedHwids = "";
 
     protected override async Task OnInitializedAsync()
     {
@@ -341,8 +383,16 @@
 
     private async Task LoadData()
     {
-        Webhooks = await Db.Webhooks.OrderByDescending(w => w.CreatedAt).ToListAsync();
+        using var db = await DbFactory.CreateDbContextAsync();
+        Webhooks = await db.Webhooks.OrderByDescending(w => w.CreatedAt).ToListAsync();
         globalApiSecretEnabled = await Settings.GetBoolSettingAsync("GlobalApiSecretEnabled", true);
+        excludedHwids = await Settings.GetSettingAsync("TelemetryExcludedHardwareIds", "") ?? "";
+    }
+
+    private async Task SaveExcludedHwids()
+    {
+        await Settings.SetSettingAsync("TelemetryExcludedHardwareIds", excludedHwids.Trim());
+        Toast.ShowSuccess(L["Maintenance_TelemetryExclusionSaved"]);
     }
 
     private async Task ToggleGlobalApiSecret(ChangeEventArgs e)
@@ -353,6 +403,8 @@
     }
 
     // --- WEBHOOKS LOGIC ---
+
+    private Guid? editingHookId = null;
 
     private void ToggleTrigger(string trigger, object? value)
     {
@@ -378,12 +430,33 @@
             EnabledEvents = string.Join(",", selectedTriggers)
         };
 
-        Db.Webhooks.Add(hook);
-        await Db.SaveChangesAsync();
+        using var db = await DbFactory.CreateDbContextAsync();
+        db.Webhooks.Add(hook);
+        await db.SaveChangesAsync();
         Toast.ShowSuccess("Webhook créé !");
         
         newHookName = ""; newHookUrl = ""; selectedTriggers.Clear();
         await LoadData();
+    }
+
+    private void ToggleHookEvent(Webhook hook, string trigger, object? value)
+    {
+        var events = (hook.EnabledEvents ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries).ToHashSet();
+        if (value is bool b && b)
+            events.Add(trigger);
+        else
+            events.Remove(trigger);
+        hook.EnabledEvents = string.Join(",", events);
+    }
+
+    private async Task SaveEditWebhook(Webhook hook)
+    {
+        using var db = await DbFactory.CreateDbContextAsync();
+        db.Attach(hook);
+        db.Entry(hook).State = EntityState.Modified;
+        await db.SaveChangesAsync();
+        editingHookId = null;
+        Toast.ShowSuccess("Webhook mis à jour !");
     }
 
     private async Task ToggleWebhook(Webhook hook, object? value)
@@ -391,14 +464,18 @@
         if (value is bool b)
         {
             hook.IsEnabled = b;
-            await Db.SaveChangesAsync();
+            using var db = await DbFactory.CreateDbContextAsync();
+            db.Attach(hook);
+            db.Entry(hook).Property(h => h.IsEnabled).IsModified = true;
+            await db.SaveChangesAsync();
         }
     }
 
     private async Task RequestDeleteWebhook(Webhook hook)
     {
-        Db.Webhooks.Remove(hook);
-        await Db.SaveChangesAsync();
+        using var db = await DbFactory.CreateDbContextAsync();
+        db.Webhooks.Remove(hook);
+        await db.SaveChangesAsync();
         Toast.ShowSuccess("Webhook supprimé.");
         await LoadData();
     }
@@ -439,7 +516,8 @@
         {
             try 
             {
-                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"AccessLogs\"");
+                using var db = await DbFactory.CreateDbContextAsync();
+                await db.Database.ExecuteSqlRawAsync("DELETE FROM \"AccessLogs\"");
                 Toast.ShowSuccess("Le journal d'audit a été vidé.");
             }
             catch (Exception ex) { Toast.ShowError($"Erreur : {ex.Message}"); }
@@ -453,7 +531,8 @@
             try 
             {
                 // La suppression en cascade s'occupe des tables liees (Events, Diagnostics, Errors)
-                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"TelemetryRecords\"");
+                using var db = await DbFactory.CreateDbContextAsync();
+                await db.Database.ExecuteSqlRawAsync("DELETE FROM \"TelemetryRecords\"");
                 Toast.ShowSuccess("La télémétrie a été vidée.");
             }
             catch (Exception ex) { Toast.ShowError($"Erreur : {ex.Message}"); }
@@ -492,39 +571,41 @@
 
         try
         {
+            using var db = await DbFactory.CreateDbContextAsync();
+
             // Ordre respectant les FK (enfants d'abord)
             if (resetLicenses || resetProducts)
             {
-                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"LicenseHistories\"");
-                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"LicenseSeats\"");
-                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"LicenseRenewals\"");
-                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"Licenses\"");
+                await db.Database.ExecuteSqlRawAsync("DELETE FROM \"LicenseHistories\"");
+                await db.Database.ExecuteSqlRawAsync("DELETE FROM \"LicenseSeats\"");
+                await db.Database.ExecuteSqlRawAsync("DELETE FROM \"LicenseRenewals\"");
+                await db.Database.ExecuteSqlRawAsync("DELETE FROM \"Licenses\"");
             }
 
             if (resetAudit)
             {
-                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"AccessLogs\"");
+                await db.Database.ExecuteSqlRawAsync("DELETE FROM \"AccessLogs\"");
             }
 
             if (resetBans)
             {
-                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"BannedIps\"");
+                await db.Database.ExecuteSqlRawAsync("DELETE FROM \"BannedIps\"");
             }
 
             if (resetTelemetry)
             {
-                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"TelemetryRecords\"");
+                await db.Database.ExecuteSqlRawAsync("DELETE FROM \"TelemetryRecords\"");
             }
 
             if (resetWebhooks)
             {
-                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"Webhooks\"");
+                await db.Database.ExecuteSqlRawAsync("DELETE FROM \"Webhooks\"");
             }
 
             if (resetProducts)
             {
-                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"Products\"");
-                await Db.Database.ExecuteSqlRawAsync("DELETE FROM \"LicenseTypes\"");
+                await db.Database.ExecuteSqlRawAsync("DELETE FROM \"Products\"");
+                await db.Database.ExecuteSqlRawAsync("DELETE FROM \"LicenseTypes\"");
             }
 
             Toast.ShowSuccess(L["Maintenance_ResetDbSuccess"]);

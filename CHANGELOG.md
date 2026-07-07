@@ -1,5 +1,56 @@
 # Changelog
 
+## SDK v1.1.9 — 2026-07-07
+- feat(sdk): add optional signed plugin/sub-product metadata: `PluginId`, `PluginVersion`, `MinAppVersion`, `AllowedFeatures`
+- fix(sdk): keep standard license JSON compatible with legacy clients by omitting null plugin fields
+- fix(sdk): send optional `AppVersion` during `CheckStatusAsync` so minimum-version rules can return `UPDATE_REQUIRED`
+- test(sdk): add signed license contract guards for standard and plugin license files
+- test(sdk): cover `CheckStatusAsync` request payload with `AppVersion`
+
+## 2026-06-08
+- fix(security): validate paid auto-unban and alert HWID reuse
+- fix(analytics): use hardwareId for partial HWID lookup
+
+## 2026-06-04
+- fix(bugtrace): securiser lecture et commentaires via licence
+- chore(docker): expose variables BUGTRACE_* dans docker-compose
+- feat(bugtrace): proxy securise BugTrace via SoftLicence (4 endpoints)
+
+## 2026-06-01
+- fix: add Docker-network to server service for internal communication with website
+- feat(fingerprints): cluster system v2 — Union-Find, generic WMI filter, component breakdown UI
+
+## 2026-05-31
+- fix(dashboard): wrapper OnNewLogReceived dans try/catch + timeout 10s sur StatsService pour éviter crash PostgreSQL
+- docs(security): correction commentaire AuditMiddleware — clarifier le raisonnement de l'exemption /api/health/ping
+
+## 2026-05-30
+- fix(security): exempter /api/health/ping du ban IP — monitoring externe (EXAMPLE.COM) ne doit pas être bloqué
+- feat(security): page Vue Sécurité /security + section sécurité dans fiche utilisateur
+- fix: ne pas notifier la révocation lors d'un upgrade automatique Freemium -> payant
+
+## 2026-05-29
+- feat(security): UI admin Approved Binaries — inspection et gestion des hashes de référence FP_EXE/FP_DLL/FP_CORE
+- feat(security): détection hash mismatch binaires (FP_EXE/FP_DLL/FP_CORE) — baseline auto + ban immédiat sur patch
+- feat(ai): injection contexte sécurité dans le prompt — historique licence, IPs bannies, threat scores, détection fraude
+- feat(ai): amélioration du prompt d'analyse IA avec classification de profil et potentiel commercial
+
+## 2026-05-28
+- chore: remove one-shot backfill from startup
+- feat(licenses): reset uninstall flag on startup event + backfill on startup
+- fix(migrations): regenerate AddLicenseUninstallFlag with correct schema
+- feat(licenses): flag uninstall telemetry events on license rows
+
+## 2026-05-19
+- fix(activation): logging distinct partner inexistant/desactive + auto-creation partner
+
+## 2026-05-17
+- Fingerprints UI: enriched with license cross-ref, stats bar, search, ban indicators
+
+## 2026-04-12
+- security: tighten Zombie threshold to 3 IPs in 24 hours
+- security: implement anti-flood for Zombie notifications (6h cooldown per HWID)
+
 ## SDK v1.1.3 — 2026-02-19
 - feat(sdk): add `GetParam<T>(key, fallback)` on `LicenseModel` — read typed custom parameters signed into the license
 - feat(server): add `LicenseTypeCustomParam` entity — define key/value parameters per license type, injected at activation into `LicenseModel.Features`

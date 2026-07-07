@@ -1,0 +1,311 @@
+@page "/canary"
+@inject IDbContextFactory<LicenseDbContext> DbFactory
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@using SoftLicence.Server.Data
+@using SoftLicence.Server.Services
+@using Microsoft.EntityFrameworkCore
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h3 class="mb-0">
+        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        Canary Alerts <small class="text-muted fs-6">(@totalCount total)</small>
+    </h3>
+    <div class="d-flex gap-2 align-items-center">
+        <input type="text" class="form-control form-control-sm" style="width: 200px" placeholder="Search HWID, user, trigger..."
+               @bind="searchTerm" @bind:event="oninput" @bind:after="ResetAndLoad" />
+        <select class="form-select form-select-sm" style="width: 150px" @bind="severityFilter" @bind:after="ResetAndLoad">
+            <option value="0">All Severities</option>
+            <option value="1">Info</option>
+            <option value="2">Warning</option>
+            <option value="3">Critical</option>
+        </select>
+        <select class="form-select form-select-sm" style="width: 180px" @bind="triggerFilter" @bind:after="ResetAndLoad">
+            <option value="">All Triggers</option>
+            @foreach (var t in allTriggers)
+            {
+                <option value="@t">@t</option>
+            }
+        </select>
+    </div>
+</div>
+
+@* KPI Cards *@
+<div class="row g-3 mb-4">
+    <div class="col-md-3">
+        <div class="card shadow-sm border-danger">
+            <div class="card-body text-center">
+                <div class="text-danger fw-bold fs-3">@totalCount</div>
+                <small class="text-muted">Total Alerts</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card shadow-sm border-warning">
+            <div class="card-body text-center">
+                <div class="text-warning fw-bold fs-3">@totalPings</div>
+                <small class="text-muted">Total Pings (with repeats)</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card shadow-sm border-info">
+            <div class="card-body text-center">
+                <div class="text-info fw-bold fs-3">@distinctHwids</div>
+                <small class="text-muted">Distinct HWIDs</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card shadow-sm">
+            <div class="card-body text-center">
+                <div class="fw-bold fs-6">
+                    @foreach (var t in topTriggers)
+                    {
+                        <span class="badge bg-secondary me-1">@t.Key (@t.Value)</span>
+                    }
+                </div>
+                <small class="text-muted">Top Triggers</small>
+            </div>
+        </div>
+    </div>
+</div>
+
+@* Accordion by day *@
+@foreach (var dayGroup in alertsByDay)
+{
+    var dateKey = dayGroup.Key;
+    var dayAlerts = dayGroup.Value;
+    var isToday = dateKey == todayKey;
+    var isExpanded = expandedDays.Contains(dateKey);
+    var critCount = dayAlerts.Count(a => a.Severity >= 3);
+    var warnCount = dayAlerts.Count(a => a.Severity == 2);
+    var infoCount = dayAlerts.Count(a => a.Severity <= 1);
+    var totalRepeats = dayAlerts.Sum(a => a.RepeatCount + 1);
+
+    <div class="card mb-2 shadow-sm @(isToday ? "border-primary" : "")">
+        <div class="card-header py-2 d-flex justify-content-between align-items-center"
+             style="cursor: pointer; user-select: none;"
+             @onclick="() => ToggleDay(dateKey)">
+            <div class="d-flex align-items-center gap-2">
+                <span style="font-size: 0.75rem; width: 16px; text-align: center; color: white;">@(isExpanded ? "▼" : "▶")</span>
+                <strong style="color: white;">@dateKey</strong>
+                @if (isToday)
+                {
+                    <span class="badge bg-primary">Today</span>
+                }
+                <span class="text-muted small">— @dayAlerts.Count alert@(dayAlerts.Count > 1 ? "s" : "") (@totalRepeats pings)</span>
+            </div>
+            <div class="d-flex gap-1">
+                @if (critCount > 0)
+                {
+                    <span class="badge bg-danger">@critCount critical</span>
+                }
+                @if (warnCount > 0)
+                {
+                    <span class="badge bg-warning text-dark">@warnCount warning</span>
+                }
+                @if (infoCount > 0)
+                {
+                    <span class="badge bg-info">@infoCount info</span>
+                }
+            </div>
+        </div>
+
+        @if (isExpanded)
+        {
+            <div class="table-responsive">
+                <table class="table table-hover table-sm align-middle mb-0" style="font-size: 0.85rem">
+                    <thead class="table-dark">
+                        <tr>
+                            <th>Sev</th>
+                            <th>HWID</th>
+                            <th>Machine</th>
+                            <th>User</th>
+                            <th>Trigger</th>
+                            <th>Details</th>
+                            <th>Version</th>
+                            <th>OS</th>
+                            <th>IP</th>
+                            <th class="text-end">Repeats</th>
+                            <th>First Seen</th>
+                            <th>Last Seen</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var a in dayAlerts)
+                        {
+                            <tr class="@GetRowClass(a.Severity)">
+                                <td>
+                                    <span class="badge @GetSeverityBadge(a.Severity)" title="@GetSeverityLabel(a.Severity)">@GetSeverityLabel(a.Severity)</span>
+                                </td>
+                                <td><code class="small">@a.HardwareId</code></td>
+                                <td><small>@(a.MachineName ?? "--")</small></td>
+                                <td><small>@(a.UserName ?? "--")</small></td>
+                                <td><span class="badge bg-danger bg-opacity-75">@a.Trigger</span></td>
+                                <td>
+                                    <small class="text-muted" title="@a.Details">
+                                        @(Truncate(a.Details, 50))
+                                    </small>
+                                </td>
+                                <td><small>@(a.AppVersion ?? "--")</small></td>
+                                <td><small class="text-muted" title="@a.OsVersion">@(Truncate(a.OsVersion, 20))</small></td>
+                                <td><code class="small">@(a.ClientIp ?? "--")</code></td>
+                                <td class="text-end">
+                                    @if (a.RepeatCount > 0)
+                                    {
+                                        <span class="badge bg-warning text-dark">@a.RepeatCount</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-muted">0</span>
+                                    }
+                                </td>
+                                <td><small>@TZ.ToLocal(a.ReceivedAt).ToString("dd/MM/yy HH:mm")</small></td>
+                                <td><small>@(a.LastSeenAt.HasValue ? TZ.ToLocal(a.LastSeenAt.Value).ToString("dd/MM/yy HH:mm") : "--")</small></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>
+}
+
+@if (!alertsByDay.Any() && !loading)
+{
+    <div class="text-center text-muted py-5">
+        <p>No canary alerts found.</p>
+    </div>
+}
+
+
+@code {
+    private List<CanaryAlert> alerts = [];
+    private List<string> allTriggers = [];
+    private List<KeyValuePair<string, List<CanaryAlert>>> alertsByDay = [];
+    private HashSet<string> expandedDays = [];
+    private string todayKey = "";
+    private int severityFilter;
+    private string triggerFilter = "";
+    private string searchTerm = "";
+    private bool loading = true;
+    private int totalCount;
+    private int totalPings;
+    private int distinctHwids;
+    private List<KeyValuePair<string, int>> topTriggers = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        todayKey = TZ.ToLocal(DateTime.UtcNow).ToString("dd/MM/yyyy");
+        expandedDays.Add(todayKey);
+        await LoadTriggers();
+        await LoadStats();
+        await LoadData();
+        loading = false;
+    }
+
+    private async Task LoadTriggers()
+    {
+        using var db = await DbFactory.CreateDbContextAsync();
+        allTriggers = await db.CanaryAlerts
+            .Select(a => a.Trigger)
+            .Distinct()
+            .OrderBy(t => t)
+            .ToListAsync();
+    }
+
+    private async Task LoadStats()
+    {
+        using var db = await DbFactory.CreateDbContextAsync();
+        var query = ApplyFilters(db.CanaryAlerts.AsQueryable());
+
+        totalCount = await query.CountAsync();
+        totalPings = totalCount > 0 ? await query.SumAsync(a => a.RepeatCount + 1) : 0;
+        distinctHwids = totalCount > 0 ? await query.Select(a => a.HardwareId).Distinct().CountAsync() : 0;
+        topTriggers = totalCount > 0
+            ? await query.GroupBy(a => a.Trigger)
+                .Select(g => new { Key = g.Key, Value = g.Count() })
+                .OrderByDescending(x => x.Value)
+                .Take(3)
+                .ToListAsync()
+                .ContinueWith(t => t.Result.Select(x => new KeyValuePair<string, int>(x.Key, x.Value)).ToList())
+            : [];
+    }
+
+    private async Task LoadData()
+    {
+        using var db = await DbFactory.CreateDbContextAsync();
+        var query = ApplyFilters(db.CanaryAlerts.AsQueryable());
+
+        alerts = await query
+            .OrderByDescending(a => a.LastSeenAt ?? a.ReceivedAt)
+            .ToListAsync();
+
+        alertsByDay = alerts
+            .GroupBy(a => TZ.ToLocal(a.LastSeenAt ?? a.ReceivedAt).ToString("dd/MM/yyyy"))
+            .OrderByDescending(g => g.First().LastSeenAt ?? g.First().ReceivedAt)
+            .Select(g => new KeyValuePair<string, List<CanaryAlert>>(g.Key, g.ToList()))
+            .ToList();
+    }
+
+    private void ToggleDay(string dateKey)
+    {
+        if (!expandedDays.Remove(dateKey))
+            expandedDays.Add(dateKey);
+    }
+
+    private IQueryable<CanaryAlert> ApplyFilters(IQueryable<CanaryAlert> query)
+    {
+        if (severityFilter > 0)
+            query = query.Where(a => a.Severity == severityFilter);
+
+        if (!string.IsNullOrEmpty(triggerFilter))
+            query = query.Where(a => a.Trigger == triggerFilter);
+
+        if (!string.IsNullOrWhiteSpace(searchTerm))
+        {
+            var term = searchTerm.Trim();
+            query = query.Where(a =>
+                a.HardwareId.Contains(term) ||
+                (a.UserName != null && a.UserName.Contains(term)) ||
+                (a.MachineName != null && a.MachineName.Contains(term)) ||
+                a.Trigger.Contains(term) ||
+                (a.ClientIp != null && a.ClientIp.Contains(term)));
+        }
+
+        return query;
+    }
+
+    private async Task ResetAndLoad()
+    {
+        await LoadStats();
+        await LoadData();
+    }
+
+    private static string GetSeverityBadge(int severity) => severity switch
+    {
+        3 => "bg-danger",
+        2 => "bg-warning text-dark",
+        _ => "bg-info"
+    };
+
+    private static string GetSeverityLabel(int severity) => severity switch
+    {
+        3 => "CRITICAL",
+        2 => "WARNING",
+        _ => "INFO"
+    };
+
+    private static string GetRowClass(int severity) => severity switch
+    {
+        3 => "table-danger",
+        2 => "table-warning",
+        _ => ""
+    };
+
+    private static string Truncate(string? text, int max)
+    {
+        if (string.IsNullOrEmpty(text)) return "--";
+        return text.Length <= max ? text : text[..max] + "...";
+    }
+}

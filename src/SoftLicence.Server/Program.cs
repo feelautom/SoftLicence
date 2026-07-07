@@ -34,6 +34,18 @@ static string GetRateLimitPartition(HttpContext ctx)
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.OnRejected = async (context, cancellationToken) =>
+    {
+        const int retryAfterSeconds = 60;
+
+        context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        context.HttpContext.Response.ContentType = "application/json";
+        context.HttpContext.Response.Headers.RetryAfter = retryAfterSeconds.ToString();
+
+        await context.HttpContext.Response.WriteAsJsonAsync(
+            new { error = "rate_limited", retryAfterSeconds },
+            cancellationToken);
+    };
 
     // Politique pour l'activation client (Stricte) — IPs privées exemptées
     options.AddPolicy("PublicAPI", ctx =>
@@ -57,6 +69,29 @@ builder.Services.AddRateLimiter(options =>
 
     // Politique pour la documentation LLM (Modérée) — IPs privées exemptées
     options.AddPolicy("DocsAPI", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(GetRateLimitPartition(ctx), key =>
+            new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = key == "__unlimited__" ? 10000 : 30,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst
+            }));
+
+    // Politique pour la télémétrie (Souple) — les clients envoient en rafale
+    options.AddPolicy("TelemetryAPI", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(GetRateLimitPartition(ctx), key =>
+            new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = key == "__unlimited__" ? 10000 : 120,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst
+            }));
+
+    // Politique pour le proxy BugTrace. Le desktop enchaine lectures et commentaires
+    // pendant un flux normal, donc la limite IP doit rester souple.
+    options.AddPolicy("BugTraceAPI", ctx =>
         RateLimitPartition.GetFixedWindowLimiter(GetRateLimitPartition(ctx), key =>
             new FixedWindowRateLimiterOptions
             {
@@ -131,7 +166,40 @@ builder.Services.AddSingleton<SoftLicence.Server.Services.AuditNotifier>(); // P
 builder.Services.AddSingleton<SoftLicence.Server.Services.NotificationService>(); // Webhooks & Alertes
 builder.Services.AddTransient<SoftLicence.Server.Services.StatsService>(); // Stats
 builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryAnalyticsService>(); // Telemetry Analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryOverviewAnalyticsService>(); // Telemetry overview analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryDevicesAnalyticsService>(); // Telemetry devices analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.TelemetrySchemaAnalyticsService>(); // Telemetry schema analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryToolUsageAnalyticsService>(); // Telemetry tool usage analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryQuotaAnalyticsService>(); // Telemetry quota analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryCertPinningAnalyticsService>(); // Telemetry cert pinning analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryActivationFunnelAnalyticsService>(); // Telemetry activation funnel analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryActivationFailuresAnalyticsService>(); // Telemetry activation failure detail analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryMachineProfileAnalyticsService>(); // Telemetry machine profile analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.TelemetrySupportProfileAnalyticsService>(); // Telemetry support lookup analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.HwidReuseAlertService>(); // HWID reuse security alerts
+builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryVersionHealthAnalyticsService>(); // Telemetry version health analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryStartupHealthAnalyticsService>(); // Telemetry startup health analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryRawSampleAnalyticsService>(); // Telemetry redacted raw sample analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryInsightsAnalyticsService>(); // Telemetry insights analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.LicenseDurationMigrationImpactAnalyticsService>(); // License duration migration impact analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.FreemiumActivityRankingAnalyticsService>(); // Freemium activity and conversion ranking analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.RecentLicenseOnboardingMetricsAnalyticsService>(); // Recent license onboarding Time-To-Value analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.LicenseUsageScoringAnalyticsService>(); // License usage conversion and retention scoring analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryLicenseHardwareAuditAnalyticsService>(); // Telemetry/license/HWID audit analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.LicenseHardwareVerifierAnalyticsService>(); // Authoritative license/HWID verifier for server-to-server consumers
+builder.Services.AddTransient<SoftLicence.Server.Services.FreemiumAbuseRiskAnalyticsService>(); // Freemium group abuse risk analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.AnalyticsApiKeyAuthService>(); // Analytics/MCP API key auth
+builder.Services.AddTransient<SoftLicence.Server.Services.LlmTipFeedbackService>(); // LLM tips feedback dedicated ingestion
+builder.Services.AddTransient<SoftLicence.Server.Services.SecurityBanAuditAnalyticsService>(); // Security ban read-only audit analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.SecurityCaseContextService>(); // Shared securityCaseId and redacted enrichment context
+builder.Services.AddTransient<SoftLicence.Server.Services.CertPinningBugTraceAlertService>(); // Auto BugTrace tickets for cert pinning alerts
+builder.Services.AddTransient<SoftLicence.Server.Services.FreemiumAbuseBugTraceAlertService>(); // Auto BugTrace tickets for Freemium abuse risk alerts
 builder.Services.AddScoped<SoftLicence.Server.Services.TelemetryService>(); // Télémétrie
+builder.Services.AddScoped<SoftLicence.Server.Services.FingerprintService>(); // Hardware Fingerprints
+builder.Services.AddScoped<SoftLicence.Server.Services.SeatCleanupService>(); // Enforcement un HWID par produit
+builder.Services.AddTransient<SoftLicence.Server.Services.PiracyDetectionService>(); // Détection piratage
+builder.Services.AddSingleton<SoftLicence.Server.Services.IBugTraceProxyService, SoftLicence.Server.Services.BugTraceProxyService>(); // Proxy BugTrace
+builder.Services.AddTransient<SoftLicence.Server.Services.AiAnalysisService>(); // Analyse IA télémétrie
 builder.Services.AddHostedService<SoftLicence.Server.Services.CleanupService>(); // Nettoyage Automatique
 builder.Services.Configure<SoftLicence.Server.Services.SmtpSettings>(builder.Configuration.GetSection("SmtpSettings"));
 builder.Services.AddHttpClient(); // Pour GeoIP et Webhooks
@@ -215,6 +283,7 @@ if (builder.Configuration["IsIntegrationTest"] != "true")
                 {
                     Console.WriteLine("✅ Base de données prête et migrations appliquées.");
                 }
+
                 break;
             }
             catch (Exception ex)
@@ -253,15 +322,6 @@ app.MapControllers();
 // Blazor Routes
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
-
-// Notification de démarrage
-using (var scope = app.Services.CreateScope())
-{
-    var notifier = scope.ServiceProvider.GetRequiredService<SoftLicence.Server.Services.NotificationService>();
-    notifier.Notify(SoftLicence.Server.Services.NotificationService.Triggers.SystemStartup, 
-        "🚀 Serveur SoftLicence opérationnel", 
-        $"Le système de protection est en ligne. Environnement : {app.Environment.EnvironmentName}");
-}
 
 app.Run();
 
