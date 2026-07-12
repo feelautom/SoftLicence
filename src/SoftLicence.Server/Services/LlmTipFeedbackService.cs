@@ -45,10 +45,14 @@ public sealed class LlmTipFeedbackService
     ];
 
     private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
+    private readonly IBugTraceProxyService? _bugTrace;
 
-    public LlmTipFeedbackService(IDbContextFactory<LicenseDbContext> dbFactory)
+    public LlmTipFeedbackService(
+        IDbContextFactory<LicenseDbContext> dbFactory,
+        IBugTraceProxyService? bugTrace = null)
     {
         _dbFactory = dbFactory;
+        _bugTrace = bugTrace;
     }
 
     public async Task<LlmTipFeedbackIngestResponse> SaveUsageAsync(
@@ -196,7 +200,8 @@ public sealed class LlmTipFeedbackService
                 t.LicenseEdition,
                 t.RequestSource,
                 t.RuntimeMode,
-                t.UiMode))
+                t.UiMode,
+                null))
             .ToListAsync(cancellationToken);
     }
 
@@ -347,7 +352,8 @@ public sealed class LlmTipFeedbackService
                 t.RequestSource,
                 t.RuntimeMode,
                 t.UiMode,
-                t.PayloadJson))
+                t.PayloadJson,
+                t.BugTraceTicketRef))
             .FirstOrDefaultAsync(cancellationToken);
     }
 
@@ -420,6 +426,64 @@ public sealed class LlmTipFeedbackService
         tip.ReviewStatus = normalized;
         await db.SaveChangesAsync(cancellationToken);
         return true;
+    }
+
+    public async Task<LlmTipFeedbackBugTraceConversionResult?> ConvertToBugTraceAsync(
+        Guid? id,
+        string? contentHash,
+        Guid? productId,
+        string? priority = null,
+        string? type = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (_bugTrace == null || !_bugTrace.IsConfigured)
+            throw new InvalidOperationException("BugTrace proxy is not configured.");
+        if (!id.HasValue && string.IsNullOrWhiteSpace(contentHash))
+            throw new ArgumentException("id or contentHash is required.");
+
+        var normalizedHash = Trim(contentHash, 128);
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        var query = db.LlmTipFeedbackTips.AsQueryable();
+        if (productId.HasValue)
+            query = query.Where(t => t.ProductId == productId);
+
+        var tip = id.HasValue
+            ? await query.FirstOrDefaultAsync(t => t.Id == id.Value, cancellationToken)
+            : await query.FirstOrDefaultAsync(t => t.ContentHash == normalizedHash, cancellationToken);
+        if (tip == null)
+            return null;
+
+        if (!string.IsNullOrWhiteSpace(tip.BugTraceTicketRef))
+        {
+            tip.ReviewStatus = "converted-to-bugtrace";
+            await db.SaveChangesAsync(cancellationToken);
+            return new LlmTipFeedbackBugTraceConversionResult(
+                tip.Id,
+                tip.ContentHash,
+                tip.ReviewStatus,
+                tip.BugTraceTicketRef,
+                Created: false);
+        }
+
+        var result = await _bugTrace.SubmitTicketAsync(BuildBugTraceTicket(tip, priority, type), cancellationToken);
+        var ticketRef = Trim(
+            TryGetJsonString(result, "ticketNumber")
+                ?? TryGetJsonString(result, "number")
+                ?? TryGetJsonString(result, "id"),
+            32);
+        if (string.IsNullOrWhiteSpace(ticketRef))
+            throw new InvalidOperationException("BugTrace did not return a ticket reference.");
+
+        tip.ReviewStatus = "converted-to-bugtrace";
+        tip.BugTraceTicketRef = ticketRef;
+        await db.SaveChangesAsync(cancellationToken);
+
+        return new LlmTipFeedbackBugTraceConversionResult(
+            tip.Id,
+            tip.ContentHash,
+            tip.ReviewStatus,
+            ticketRef,
+            Created: true);
     }
 
     private static IQueryable<LlmTipFeedbackTip> ApplyAdminFilters(
@@ -518,7 +582,8 @@ public sealed class LlmTipFeedbackService
             t.LicenseEdition,
             t.RequestSource,
             t.RuntimeMode,
-            t.UiMode));
+            t.UiMode,
+            t.BugTraceTicketRef));
     }
 
     private static IQueryable<LlmTipFeedbackTipDetail> ProjectTipDetail(IQueryable<LlmTipFeedbackTip> query)
@@ -545,7 +610,105 @@ public sealed class LlmTipFeedbackService
             t.RequestSource,
             t.RuntimeMode,
             t.UiMode,
-            t.PayloadJson));
+            t.PayloadJson,
+            t.BugTraceTicketRef));
+    }
+
+    private static object BuildBugTraceTicket(LlmTipFeedbackTip tip, string? priority, string? type)
+    {
+        return new
+        {
+            version = Trim(tip.AppVersion, 64) ?? "main",
+            type = NormalizeBugTraceType(type),
+            priority = NormalizeBugTracePriority(priority, tip.Severity),
+            title = $"LLM tip review: {Trim(tip.Title, 180)}",
+            description = BuildBugTraceDescription(tip),
+            reporterEmail = "internal@feelautom.local",
+            isInternal = true,
+            tags = BuildBugTraceTags(tip)
+        };
+    }
+
+    private static string BuildBugTraceDescription(LlmTipFeedbackTip tip)
+    {
+        return string.Join(Environment.NewLine, new[]
+        {
+            "Anonymized LLM Tips feedback item promoted from the SoftLicence admin inbox.",
+            string.Empty,
+            $"Title: {tip.Title}",
+            $"Description: {tip.Description ?? "-"}",
+            $"Category: {tip.Category ?? "-"}",
+            $"Severity: {tip.Severity ?? "-"}",
+            $"Confidence: {tip.Confidence ?? "-"}",
+            $"Approved: {tip.Approved}",
+            $"Upvotes: {tip.Upvotes}",
+            $"Occurrences: {tip.OccurrenceCount}",
+            $"FirstSeenAtUtc: {tip.FirstSeenAtUtc:O}",
+            $"LastSeenAtUtc: {tip.LastSeenAtUtc:O}",
+            $"SubmittedAtUtc: {(tip.SubmittedAtUtc.HasValue ? tip.SubmittedAtUtc.Value.ToString("O") : "-")}",
+            $"App: {tip.AppName} {tip.AppVersion ?? "-"}",
+            $"Context: license={tip.LicenseEdition ?? "-"} source={tip.RequestSource ?? "-"} runtime={tip.RuntimeMode ?? "-"} ui={tip.UiMode ?? "-"}",
+            $"ContentHash: {tip.ContentHash}"
+        });
+    }
+
+    private static string[] BuildBugTraceTags(LlmTipFeedbackTip tip)
+    {
+        var tags = new List<string>
+        {
+            "softlicence",
+            "llm-tip-feedback",
+            "product-review",
+            "manual-promotion",
+            $"hash:{ShortHash(tip.ContentHash)}"
+        };
+
+        AddTag(tags, tip.Category);
+        AddTag(tags, tip.Severity);
+        AddTag(tags, tip.AppName);
+        return tags.ToArray();
+    }
+
+    private static string NormalizeBugTracePriority(string? priority, string? severity)
+    {
+        var candidate = Trim(priority, 20);
+        if (!string.IsNullOrWhiteSpace(candidate))
+        {
+            var upper = candidate.ToUpperInvariant();
+            if (upper is "LOW" or "NORMAL" or "HIGH" or "CRITICAL")
+                return upper;
+        }
+
+        return severity?.ToLowerInvariant() switch
+        {
+            "critical" => "CRITICAL",
+            "error" => "HIGH",
+            _ => "NORMAL"
+        };
+    }
+
+    private static string NormalizeBugTraceType(string? type)
+    {
+        var candidate = Trim(type, 20)?.ToUpperInvariant();
+        return candidate is "BUG" or "IMPROVEMENT" or "TASK" ? candidate : "IMPROVEMENT";
+    }
+
+    private static void AddTag(List<string> tags, string? value)
+    {
+        var normalized = Trim(value, 40)?.ToLowerInvariant();
+        if (!string.IsNullOrWhiteSpace(normalized))
+            tags.Add(normalized);
+    }
+
+    private static string ShortHash(string hash) => hash.Length <= 12 ? hash : hash[..12];
+
+    private static string? TryGetJsonString(JsonElement element, string propertyName)
+    {
+        return element.ValueKind == JsonValueKind.Object
+            && element.TryGetProperty(propertyName, out var value)
+            && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
     }
 
     private static void ValidateCommon(string appName, string schemaVersion)

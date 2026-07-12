@@ -235,7 +235,9 @@
                             </td>
                             <td>
                                 @{
-                                    var hwId = l.Seats?.FirstOrDefault(s => s.IsActive)?.HardwareId ?? l.HardwareId;
+                                    var hasSeatHistory = l.Seats?.Any() ?? false;
+                                    var hwId = l.Seats?.FirstOrDefault(s => s.IsActive)?.HardwareId
+                                        ?? (!hasSeatHistory ? l.HardwareId : null);
                                 }
                                 @if (!string.IsNullOrEmpty(hwId))
                                 {
@@ -284,7 +286,9 @@
                             </td>
                             <td>
                                 @{
-                                    var isActivated = !string.IsNullOrEmpty(l.HardwareId) || (l.Seats?.Any(s => s.IsActive) ?? false);
+                                    var hasSeatHistoryForStatus = l.Seats?.Any() ?? false;
+                                    var isActivated = (l.Seats?.Any(s => s.IsActive) ?? false)
+                                        || (!hasSeatHistoryForStatus && !string.IsNullOrEmpty(l.HardwareId));
                                     var isExpired = l.ExpirationDate.HasValue && DateTime.UtcNow >= l.ExpirationDate.Value;
                                 }
                                 @if (!l.IsActive)
@@ -1142,7 +1146,9 @@
             statTotal = await db.Licenses.CountAsync();
             statRevoked = await db.Licenses.CountAsync(l => !l.IsActive);
             statExpired = await db.Licenses.CountAsync(l => l.IsActive && l.ExpirationDate.HasValue && l.ExpirationDate <= DateTime.UtcNow);
-            statIssued = await db.Licenses.CountAsync(l => l.IsActive && (l.HardwareId == null || l.HardwareId == "") && !l.Seats.Any(s => s.IsActive));
+            statIssued = await db.Licenses.CountAsync(l => l.IsActive
+                && !l.Seats.Any(s => s.IsActive)
+                && (l.Seats.Any() || l.HardwareId == null || l.HardwareId == ""));
             statActive = statTotal - statRevoked - statExpired - statIssued;
 
             bannedHwids = (await db.BannedHardwareIds
@@ -1180,11 +1186,15 @@
                 query = query.Where(l => l.Type != null && l.Type.Slug == filterType);
 
             if (filterStatus == "active")
-                query = query.Where(l => l.IsActive && l.HardwareId != null && (!l.ExpirationDate.HasValue || l.ExpirationDate > DateTime.UtcNow));
+                query = query.Where(l => l.IsActive
+                    && (l.Seats.Any(s => s.IsActive) || (!l.Seats.Any() && l.HardwareId != null))
+                    && (!l.ExpirationDate.HasValue || l.ExpirationDate > DateTime.UtcNow));
             else if (filterStatus == "expired")
                 query = query.Where(l => l.IsActive && l.ExpirationDate.HasValue && l.ExpirationDate <= DateTime.UtcNow);
             else if (filterStatus == "issued")
-                query = query.Where(l => l.IsActive && (l.HardwareId == null || l.HardwareId == ""));
+                query = query.Where(l => l.IsActive
+                    && !l.Seats.Any(s => s.IsActive)
+                    && (l.Seats.Any() || l.HardwareId == null || l.HardwareId == ""));
             else if (filterStatus == "revoked")
                 query = query.Where(l => !l.IsActive);
 
@@ -1320,13 +1330,18 @@
     private async Task DeleteSeat(LicenseSeat seat)
     {
         using var db = await DbFactory.CreateDbContextAsync();
-        var dbSeat = await db.LicenseSeats.FirstOrDefaultAsync(s => s.Id == seat.Id);
+        var dbSeat = await db.LicenseSeats
+            .Include(s => s.License)
+                .ThenInclude(l => l!.Seats)
+            .FirstOrDefaultAsync(s => s.Id == seat.Id);
         if (dbSeat == null) { Toast.ShowError(L["Resets_MsgNotFound"]); return; }
         if (!dbSeat.IsActive) { Toast.ShowInfo(L["Licenses_MsgSeatAlreadyUnlinked"]); await LoadData(); return; }
 
         // On ne supprime plus, on délie (historisation)
         dbSeat.IsActive = false;
         dbSeat.UnlinkedAt = DateTime.UtcNow;
+        if (dbSeat.License != null)
+            SyncLegacyHardwareStateFromSeats(dbSeat.License);
 
         var historyMsg = L["Licenses_Action_UnlinkedManual"].Value.Replace("{0}", dbSeat.HardwareId);
 
@@ -1340,6 +1355,21 @@
         await db.SaveChangesAsync();
         Toast.ShowSuccess(L["Licenses_MsgSeatUnlinked"]);
         await LoadData();
+    }
+
+    private static void SyncLegacyHardwareStateFromSeats(License license)
+    {
+        var activeSeat = license.Seats
+            .Where(s => s.IsActive)
+            .OrderByDescending(s => s.LastCheckInAt)
+            .ThenByDescending(s => s.FirstActivatedAt)
+            .FirstOrDefault();
+
+        license.HardwareId = activeSeat?.HardwareId;
+        license.ActivationDate = activeSeat?.FirstActivatedAt;
+
+        if (activeSeat == null)
+            license.RecoveryCount = 0;
     }
 
     private async Task BanHardwareId(string hardwareId, Guid productId)

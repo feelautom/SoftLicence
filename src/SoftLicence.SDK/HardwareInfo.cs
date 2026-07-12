@@ -7,6 +7,10 @@ namespace SoftLicence.SDK
 {
     public static class HardwareInfo
     {
+        internal delegate string WmiPropertyReader(string className, string propertyName, string? whereClause);
+
+        private static WmiPropertyReader wmiPropertyReader = GetWmiProperty;
+
         public static string GetHardwareId()
         {
             var cpuId = GetCpuId();
@@ -28,22 +32,28 @@ namespace SoftLicence.SDK
 
         private static string GetCpuId()
         {
-            return GetWmiProperty("Win32_Processor", "ProcessorId");
+            return wmiPropertyReader("Win32_Processor", "ProcessorId", null);
         }
 
         private static string GetMotherboardId()
         {
-            return GetWmiProperty("Win32_BaseBoard", "SerialNumber");
+            return wmiPropertyReader("Win32_BaseBoard", "SerialNumber", null);
         }
 
         private static string GetBiosId()
         {
-            return GetWmiProperty("Win32_BIOS", "SerialNumber");
+            return wmiPropertyReader("Win32_BIOS", "SerialNumber", null);
         }
 
         private static string GetDiskId()
         {
-            return GetWmiProperty("Win32_DiskDrive", "SerialNumber");
+            var indexZeroDisk = wmiPropertyReader("Win32_DiskDrive", "SerialNumber", "Index=0");
+            if (!IsMissingWmiValue(indexZeroDisk))
+            {
+                return indexZeroDisk;
+            }
+
+            return wmiPropertyReader("Win32_DiskDrive", "SerialNumber", null);
         }
 
         /// <summary>
@@ -71,13 +81,55 @@ namespace SoftLicence.SDK
             }
         }
 
-        private static string GetWmiProperty(string className, string propertyName)
+        internal static IDisposable UseWmiPropertyReaderForTests(WmiPropertyReader reader)
+        {
+            var previous = wmiPropertyReader;
+            wmiPropertyReader = reader;
+            return new RestoreWmiPropertyReader(previous);
+        }
+
+        private static bool IsMissingWmiValue(string value)
+        {
+            return string.IsNullOrWhiteSpace(value)
+                || string.Equals(value, "UNKNOWN", StringComparison.Ordinal)
+                || string.Equals(value, "NON-WINDOWS", StringComparison.Ordinal);
+        }
+
+        private sealed class RestoreWmiPropertyReader : IDisposable
+        {
+            private readonly WmiPropertyReader previous;
+            private bool disposed;
+
+            public RestoreWmiPropertyReader(WmiPropertyReader previous)
+            {
+                this.previous = previous;
+            }
+
+            public void Dispose()
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+                wmiPropertyReader = previous;
+                disposed = true;
+            }
+        }
+
+        private static string GetWmiProperty(string className, string propertyName, string? whereClause)
         {
             try
             {
                 if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return "NON-WINDOWS";
 
-                using (var searcher = new ManagementObjectSearcher($"SELECT {propertyName} FROM {className}"))
+                var query = $"SELECT {propertyName} FROM {className}";
+                if (!string.IsNullOrWhiteSpace(whereClause))
+                {
+                    query += $" WHERE {whereClause}";
+                }
+
+                using (var searcher = new ManagementObjectSearcher(query))
                 {
                     foreach (ManagementObject obj in searcher.Get())
                     {

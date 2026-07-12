@@ -47,6 +47,7 @@ namespace SoftLicence.Server.Data
         public DbSet<TelemetryDiagnosticResult> TelemetryDiagnosticResults { get; set; }
         public DbSet<TelemetryDiagnosticPort> TelemetryDiagnosticPorts { get; set; }
         public DbSet<TelemetryError> TelemetryErrors { get; set; }
+        public DbSet<TelemetryFloodSuppressionCounter> TelemetryFloodSuppressionCounters { get; set; }
         public DbSet<LicenseRenewal> LicenseRenewals { get; set; }
         public DbSet<BannedIp> BannedIps { get; set; }
         public DbSet<Webhook> Webhooks { get; set; }
@@ -161,6 +162,18 @@ namespace SoftLicence.Server.Data
             modelBuilder.Entity<TelemetryRecord>()
                 .HasIndex(t => new { t.ProductId, t.Timestamp });
 
+            modelBuilder.Entity<TelemetryFloodSuppressionCounter>()
+                .HasOne(c => c.Product)
+                .WithMany()
+                .HasForeignKey(c => c.ProductId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            modelBuilder.Entity<TelemetryFloodSuppressionCounter>()
+                .HasIndex(c => new { c.ProductId, c.HardwareId, c.EventName, c.Type, c.WindowStartUtc });
+
+            modelBuilder.Entity<TelemetryFloodSuppressionCounter>()
+                .HasIndex(c => new { c.ProductId, c.LastSeenUtc });
+
             modelBuilder.Entity<TelemetryEvent>()
                 .HasOne(e => e.Record)
                 .WithOne(r => r.EventData)
@@ -266,10 +279,16 @@ namespace SoftLicence.Server.Data
                 .HasIndex(k => new { k.ProductId, k.Prefix });
 
             modelBuilder.Entity<AnalyticsApiKey>()
+                .Property(k => k.ScopeKind)
+                .HasMaxLength(32)
+                .HasDefaultValue(AnalyticsApiKeyScopeKinds.Product);
+
+            modelBuilder.Entity<AnalyticsApiKey>()
                 .HasOne(k => k.Product)
                 .WithMany(p => p.AnalyticsApiKeys)
                 .HasForeignKey(k => k.ProductId)
-                .OnDelete(DeleteBehavior.Cascade);
+                .OnDelete(DeleteBehavior.Cascade)
+                .IsRequired(false);
 
             modelBuilder.Entity<LlmTipFeedbackEvent>()
                 .HasIndex(e => new { e.ProductId, e.CreatedAtUtc });

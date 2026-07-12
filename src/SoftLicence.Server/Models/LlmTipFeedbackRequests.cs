@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace SoftLicence.Server.Models;
 
 public sealed class LlmTipFeedbackUsageRequest
@@ -51,7 +53,8 @@ public sealed record LlmTipFeedbackTipListItem(
     string? LicenseEdition,
     string? RequestSource,
     string? RuntimeMode,
-    string? UiMode);
+    string? UiMode,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? BugTraceTicketRef = null);
 
 public sealed class LlmTipFeedbackAdminQuery
 {
@@ -77,6 +80,21 @@ public sealed class LlmTipFeedbackReviewStatusRequest
     public string? ContentHash { get; set; }
     public string ReviewStatus { get; set; } = string.Empty;
 }
+
+public sealed class LlmTipFeedbackBugTraceConversionRequest
+{
+    public Guid? Id { get; set; }
+    public string? ContentHash { get; set; }
+    public string? Priority { get; set; }
+    public string? Type { get; set; }
+}
+
+public sealed record LlmTipFeedbackBugTraceConversionResult(
+    Guid Id,
+    string ContentHash,
+    string ReviewStatus,
+    string BugTraceTicketRef,
+    bool Created);
 
 public sealed record LlmTipFeedbackPagedResult<T>(
     int Total,
@@ -127,4 +145,5 @@ public sealed record LlmTipFeedbackTipDetail(
     string? RequestSource,
     string? RuntimeMode,
     string? UiMode,
-    string PayloadJson);
+    string PayloadJson,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? BugTraceTicketRef = null);

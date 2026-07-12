@@ -216,13 +216,8 @@ public sealed class LicenseDurationMigrationImpactAnalyticsService
                 continue;
 
             var expirationDate = license.ExpirationDate.Value;
-            var hardwareIds = new List<(string HardwareId, DateTime? SeatActivation)>();
-            if (!string.IsNullOrWhiteSpace(license.HardwareId))
-                hardwareIds.Add((license.HardwareId, null));
-
-            hardwareIds.AddRange(license.Seats
-                .Where(s => s.IsActive && !string.IsNullOrWhiteSpace(s.HardwareId))
-                .Select(s => (s.HardwareId, (DateTime?)s.FirstActivatedAt)));
+            var hardwareIds = LicenseSeatHardwareResolver.ResolveActiveHardwareIds(license)
+                .Select(h => (h.HardwareId, SeatActivation: h.FirstActivatedAt));
 
             foreach (var seat in hardwareIds
                 .GroupBy(h => h.HardwareId, StringComparer.OrdinalIgnoreCase)
@@ -259,9 +254,8 @@ public sealed class LicenseDurationMigrationImpactAnalyticsService
 
     private static bool IsDeliveredNotActivated(License license)
     {
-        return string.IsNullOrWhiteSpace(license.HardwareId)
-            && !license.ActivationDate.HasValue
-            && !license.Seats.Any(s => s.IsActive && !string.IsNullOrWhiteSpace(s.HardwareId));
+        return LicenseSeatHardwareResolver.ResolveActiveHardwareIds(license).Count == 0
+            && !license.ActivationDate.HasValue;
     }
 
     private static int CountActive(List<MigrationCandidate> candidates, DateTime now, int days)

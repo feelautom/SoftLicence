@@ -1,0 +1,221 @@
+@page "/analytics-keys/global"
+@inject IDbContextFactory<LicenseDbContext> DbFactory
+@inject SoftLicence.Server.Services.AuthService Auth
+@inject SoftLicence.Server.Services.ToastService Toast
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@inject IJSRuntime JS
+@using Microsoft.EntityFrameworkCore
+@using SoftLicence.Server.Data
+
+<div class="container-fluid animate-fade">
+    @if (!isAuthorized)
+    {
+        <div class="text-center py-5">
+            <h2 class="text-white">Access Denied</h2>
+        </div>
+    }
+    else
+    {
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <div>
+                <h3 class="mb-0">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-2"><path d="M12 3v18"/><path d="M3 12h18"/><circle cx="12" cy="12" r="9"/></svg>
+                    Clés analytics globales
+                </h3>
+                <p class="text-muted small mb-0">Accès lecture global aux endpoints <code>X-Analytics-Key</code> pour MCP / LeadOps multi-produit.</p>
+            </div>
+            <span class="badge bg-dark border border-secondary">@globalKeys.Count clé@(globalKeys.Count > 1 ? "s" : "")</span>
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(newAnalyticsApiKeyRaw))
+        {
+            <div class="alert alert-warning bg-dark border-warning text-warning small mt-3 mb-3">
+                <div class="fw-bold mb-2">Nouvelle clé globale à conserver maintenant</div>
+                <div class="input-group input-group-sm">
+                    <input class="form-control font-monospace text-warning bg-black border-warning" value="@newAnalyticsApiKeyRaw" readonly />
+                    <button class="btn btn-outline-warning" @onclick="CopyNewAnalyticsApiKey">Copier</button>
+                    <button class="btn btn-outline-secondary" @onclick="DismissNewAnalyticsApiKey">Masquer</button>
+                </div>
+                <div class="mt-2 text-muted">Cette valeur complète ne sera plus affichée après fermeture ou rechargement.</div>
+            </div>
+        }
+
+        <div class="card bg-dark border-secondary p-3 mb-4">
+            <div class="input-group input-group-sm">
+                <input class="form-control" placeholder="Nom de la clé (ex: Codex MCP Global)" @bind="newAnalyticsApiKeyName" disabled="@isCreatingAnalyticsApiKey" />
+                <button class="btn btn-outline-info" @onclick="CreateGlobalAnalyticsApiKey" disabled="@isCreatingAnalyticsApiKey">
+                    @if (isCreatingAnalyticsApiKey)
+                    {
+                        <span class="spinner-border spinner-border-sm me-1"></span>
+                    }
+                    Créer
+                </button>
+            </div>
+        </div>
+
+        @if (!globalKeys.Any())
+        {
+            <div class="text-muted small border border-secondary rounded p-3 bg-black">
+                Aucune clé analytics globale.
+            </div>
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table table-sm table-dark table-hover align-middle mb-0">
+                    <thead>
+                        <tr>
+                            <th>Nom</th>
+                            <th>Préfixe</th>
+                            <th>Scope</th>
+                            <th>Type</th>
+                            <th>Statut</th>
+                            <th>Créée</th>
+                            <th>Dernier usage</th>
+                            <th class="text-end">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var key in globalKeys)
+                        {
+                            <tr>
+                                <td class="small">@key.Name</td>
+                                <td><code class="text-info">@key.Prefix</code></td>
+                                <td><span class="badge bg-secondary">@key.Scopes</span></td>
+                                <td><span class="badge bg-info text-dark">@key.ScopeKind</span></td>
+                                <td>
+                                    <span class="badge @(key.IsActive ? "bg-success" : "bg-secondary")">
+                                        @(key.IsActive ? "Active" : "Révoquée")
+                                    </span>
+                                </td>
+                                <td><small class="text-muted">@TZ.ToLocal(key.CreatedAtUtc).ToString("dd/MM HH:mm")</small></td>
+                                <td>
+                                    @if (key.LastUsedAtUtc.HasValue)
+                                    {
+                                        <small class="text-muted">@TZ.ToLocal(key.LastUsedAtUtc.Value).ToString("dd/MM HH:mm")</small>
+                                        @if (!string.IsNullOrWhiteSpace(key.LastUsedIp))
+                                        {
+                                            <br />
+                                            <code class="small text-muted">@key.LastUsedIp</code>
+                                        }
+                                    }
+                                    else
+                                    {
+                                        <span class="text-muted small">Jamais</span>
+                                    }
+                                </td>
+                                <td class="text-end">
+                                    <button class="btn btn-sm btn-outline-danger" @onclick="() => RevokeAnalyticsApiKey(key)" disabled="@(!key.IsActive)">
+                                        Révoquer
+                                    </button>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    }
+</div>
+
+@code {
+    private bool isAuthorized;
+    private bool isCreatingAnalyticsApiKey;
+    private string newAnalyticsApiKeyName = "";
+    private string? newAnalyticsApiKeyRaw;
+    private List<AnalyticsApiKey> globalKeys = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        isAuthorized = await Auth.IsRootAsync();
+        if (isAuthorized)
+            await LoadKeys();
+    }
+
+    private async Task LoadKeys()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        globalKeys = await db.AnalyticsApiKeys
+            .AsNoTracking()
+            .Where(k => k.ScopeKind == AnalyticsApiKeyScopeKinds.Global)
+            .OrderByDescending(k => k.CreatedAtUtc)
+            .ToListAsync();
+    }
+
+    private async Task CreateGlobalAnalyticsApiKey()
+    {
+        isCreatingAnalyticsApiKey = true;
+        StateHasChanged();
+
+        try
+        {
+            var rawKey = GenerateAnalyticsApiKey();
+            var key = new AnalyticsApiKey
+            {
+                ProductId = null,
+                Name = string.IsNullOrWhiteSpace(newAnalyticsApiKeyName)
+                    ? "Codex MCP Global"
+                    : newAnalyticsApiKeyName.Trim(),
+                Prefix = SoftLicence.Server.Services.AnalyticsApiKeyAuthService.BuildPrefix(rawKey),
+                KeyHash = SoftLicence.Server.Services.AnalyticsApiKeyAuthService.ComputeKeyHash(rawKey),
+                Scopes = $"{AnalyticsApiKeyScopes.TelemetryRead} {AnalyticsApiKeyScopes.MultiProductRead}",
+                ScopeKind = AnalyticsApiKeyScopeKinds.Global,
+                IsActive = true
+            };
+
+            await using var db = await DbFactory.CreateDbContextAsync();
+            db.AnalyticsApiKeys.Add(key);
+            await db.SaveChangesAsync();
+
+            newAnalyticsApiKeyRaw = rawKey;
+            newAnalyticsApiKeyName = "";
+            Toast.ShowSuccess("Clé analytics globale créée. Copiez-la maintenant.");
+            await LoadKeys();
+        }
+        catch (Exception ex)
+        {
+            Toast.ShowError($"Erreur création clé analytics globale : {ex.Message}");
+        }
+        finally
+        {
+            isCreatingAnalyticsApiKey = false;
+        }
+    }
+
+    private async Task RevokeAnalyticsApiKey(AnalyticsApiKey key)
+    {
+        var confirmed = await JS.InvokeAsync<bool>("confirm", $"Révoquer la clé analytics globale « {key.Name} » ?");
+        if (!confirmed) return;
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var dbKey = await db.AnalyticsApiKeys.FindAsync(key.Id);
+        if (dbKey == null) return;
+
+        dbKey.IsActive = false;
+        await db.SaveChangesAsync();
+        Toast.ShowSuccess("Clé analytics globale révoquée.");
+        await LoadKeys();
+    }
+
+    private async Task CopyNewAnalyticsApiKey()
+    {
+        if (string.IsNullOrWhiteSpace(newAnalyticsApiKeyRaw)) return;
+
+        await JS.InvokeVoidAsync("navigator.clipboard.writeText", newAnalyticsApiKeyRaw);
+        Toast.ShowSuccess("Clé analytics globale copiée.");
+    }
+
+    private void DismissNewAnalyticsApiKey()
+    {
+        newAnalyticsApiKeyRaw = null;
+    }
+
+    private static string GenerateAnalyticsApiKey()
+    {
+        var bytes = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+        return "sla_" + Convert.ToBase64String(bytes)
+            .Replace("+", "-", StringComparison.Ordinal)
+            .Replace("/", "_", StringComparison.Ordinal)
+            .TrimEnd('=');
+    }
+}

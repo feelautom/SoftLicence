@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using SoftLicence.Server.Data;
 using SoftLicence.Server.Services;
 
@@ -19,6 +20,7 @@ public sealed class AnalyticsController : ControllerBase
     private readonly TelemetryActivationFailuresAnalyticsService _activationFailuresAnalytics;
     private readonly TelemetryMachineProfileAnalyticsService _machineProfileAnalytics;
     private readonly TelemetrySupportProfileAnalyticsService _supportProfileAnalytics;
+    private readonly CustomerLicenseTimelineAnalyticsService _customerLicenseTimelineAnalytics;
     private readonly TelemetryVersionHealthAnalyticsService _versionHealthAnalytics;
     private readonly TelemetryStartupHealthAnalyticsService _startupHealthAnalytics;
     private readonly TelemetryRawSampleAnalyticsService _rawSampleAnalytics;
@@ -28,10 +30,12 @@ public sealed class AnalyticsController : ControllerBase
     private readonly RecentLicenseOnboardingMetricsAnalyticsService _recentLicenseOnboardingMetricsAnalytics;
     private readonly LicenseUsageScoringAnalyticsService _licenseUsageScoringAnalytics;
     private readonly TelemetryLicenseHardwareAuditAnalyticsService _telemetryLicenseHardwareAuditAnalytics;
+    private readonly LicenseSeatConsistencyCheckService _licenseSeatConsistencyCheck;
     private readonly LicenseHardwareVerifierAnalyticsService _licenseHardwareVerifierAnalytics;
     private readonly FreemiumAbuseRiskAnalyticsService _freemiumAbuseRiskAnalytics;
     private readonly SecurityBanAuditAnalyticsService _securityBanAuditAnalytics;
     private readonly AnalyticsApiKeyAuthService _apiKeyAuth;
+    private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
 
     public AnalyticsController(
         TelemetryOverviewAnalyticsService overviewAnalytics,
@@ -44,6 +48,7 @@ public sealed class AnalyticsController : ControllerBase
         TelemetryActivationFailuresAnalyticsService activationFailuresAnalytics,
         TelemetryMachineProfileAnalyticsService machineProfileAnalytics,
         TelemetrySupportProfileAnalyticsService supportProfileAnalytics,
+        CustomerLicenseTimelineAnalyticsService customerLicenseTimelineAnalytics,
         TelemetryVersionHealthAnalyticsService versionHealthAnalytics,
         TelemetryStartupHealthAnalyticsService startupHealthAnalytics,
         TelemetryRawSampleAnalyticsService rawSampleAnalytics,
@@ -53,10 +58,12 @@ public sealed class AnalyticsController : ControllerBase
         RecentLicenseOnboardingMetricsAnalyticsService recentLicenseOnboardingMetricsAnalytics,
         LicenseUsageScoringAnalyticsService licenseUsageScoringAnalytics,
         TelemetryLicenseHardwareAuditAnalyticsService telemetryLicenseHardwareAuditAnalytics,
+        LicenseSeatConsistencyCheckService licenseSeatConsistencyCheck,
         LicenseHardwareVerifierAnalyticsService licenseHardwareVerifierAnalytics,
         FreemiumAbuseRiskAnalyticsService freemiumAbuseRiskAnalytics,
         SecurityBanAuditAnalyticsService securityBanAuditAnalytics,
-        AnalyticsApiKeyAuthService apiKeyAuth)
+        AnalyticsApiKeyAuthService apiKeyAuth,
+        IDbContextFactory<LicenseDbContext> dbFactory)
     {
         _overviewAnalytics = overviewAnalytics;
         _devicesAnalytics = devicesAnalytics;
@@ -68,6 +75,7 @@ public sealed class AnalyticsController : ControllerBase
         _activationFailuresAnalytics = activationFailuresAnalytics;
         _machineProfileAnalytics = machineProfileAnalytics;
         _supportProfileAnalytics = supportProfileAnalytics;
+        _customerLicenseTimelineAnalytics = customerLicenseTimelineAnalytics;
         _versionHealthAnalytics = versionHealthAnalytics;
         _startupHealthAnalytics = startupHealthAnalytics;
         _rawSampleAnalytics = rawSampleAnalytics;
@@ -77,10 +85,150 @@ public sealed class AnalyticsController : ControllerBase
         _recentLicenseOnboardingMetricsAnalytics = recentLicenseOnboardingMetricsAnalytics;
         _licenseUsageScoringAnalytics = licenseUsageScoringAnalytics;
         _telemetryLicenseHardwareAuditAnalytics = telemetryLicenseHardwareAuditAnalytics;
+        _licenseSeatConsistencyCheck = licenseSeatConsistencyCheck;
         _licenseHardwareVerifierAnalytics = licenseHardwareVerifierAnalytics;
         _freemiumAbuseRiskAnalytics = freemiumAbuseRiskAnalytics;
         _securityBanAuditAnalytics = securityBanAuditAnalytics;
         _apiKeyAuth = apiKeyAuth;
+        _dbFactory = dbFactory;
+    }
+
+    [HttpGet("support/customer-license-timeline")]
+    public async Task<IActionResult> GetCustomerLicenseTimeline(
+        [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
+        [FromQuery] string? email = null,
+        [FromQuery] string? emailFragment = null,
+        [FromQuery] string? hardwareId = null,
+        [FromQuery] string? licenseId = null,
+        [FromQuery] string? licenseFragment = null,
+        [FromQuery] int days = 30,
+        [FromQuery] string? date = null,
+        [FromQuery] string? fromUtc = null,
+        [FromQuery] string? toUtc = null,
+        [FromQuery] int takeTimeline = 150,
+        [FromQuery] int offset = 0,
+        [FromQuery] bool includeAccessLogs = true,
+        [FromQuery] bool includeNoise = false,
+        [FromQuery] bool importantOnly = true,
+        [FromQuery] bool includeProperties = true,
+        [FromQuery] string? mode = "timeline",
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
+        if (auth == null)
+            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+
+        try
+        {
+            var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+            if (product.Error != null)
+                return product.Error;
+
+            var period = TelemetryAnalyticsPeriod.Resolve(days, date, fromUtc, toUtc);
+            var result = await _customerLicenseTimelineAnalytics.GetTimelineForProductIdAsync(
+                product.ProductId,
+                email,
+                emailFragment,
+                hardwareId,
+                licenseId,
+                licenseFragment,
+                period,
+                takeTimeline,
+                offset,
+                includeAccessLogs,
+                includeNoise,
+                importantOnly,
+                includeProperties,
+                mode,
+                cancellationToken);
+
+            return Ok(result);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(ex.Message);
+        }
+    }
+
+    [HttpGet("products/current")]
+    public async Task<IActionResult> GetCurrentProduct(
+        [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
+        CancellationToken cancellationToken = default)
+    {
+        var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
+        if (auth == null)
+            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+
+        if (auth.IsGlobal)
+        {
+            return Ok(new
+            {
+                generatedAtUtc = DateTime.UtcNow,
+                product = (AnalyticsProductSummary?)null,
+                scopeKind = AnalyticsApiKeyScopeKinds.Global,
+                scopeMode = "global",
+                isMultiProduct = true
+            });
+        }
+
+        if (!auth.ProductId.HasValue)
+            return NotFound("Configured product was not found.");
+
+        var product = await GetProductSummaryAsync(auth.ProductId.Value, cancellationToken);
+        return product == null ? NotFound("Configured product was not found.") : Ok(new
+        {
+            generatedAtUtc = DateTime.UtcNow,
+            product,
+            scopeKind = AnalyticsApiKeyScopeKinds.Product,
+            scopeMode = "configured",
+            isMultiProduct = IsMultiProduct(auth)
+        });
+    }
+
+    [HttpGet("products")]
+    public async Task<IActionResult> ListProducts(
+        [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
+        CancellationToken cancellationToken = default)
+    {
+        var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
+        if (auth == null)
+            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        var query = db.Products.AsNoTracking();
+        if (!IsMultiProduct(auth))
+        {
+            if (!auth.ProductId.HasValue)
+                return StatusCode(StatusCodes.Status403Forbidden, new
+                {
+                    errorCode = "PRODUCT_SCOPE_INVALID",
+                    message = "The analytics key is not configured for a product."
+                });
+
+            query = query.Where(p => p.Id == auth.ProductId.Value);
+        }
+
+        var products = await query
+            .OrderBy(p => p.Name)
+            .Select(p => new AnalyticsProductSummary(
+                p.Id,
+                p.Name,
+                p.MinimumAllowedVersion,
+                p.Licenses.Count,
+                p.TelemetryRecords.Count,
+                p.AnalyticsApiKeys.Count(k => k.IsActive)))
+            .ToListAsync(cancellationToken);
+
+        return Ok(new
+        {
+            generatedAtUtc = DateTime.UtcNow,
+            scopeKind = auth.IsGlobal ? AnalyticsApiKeyScopeKinds.Global : AnalyticsApiKeyScopeKinds.Product,
+            scopeMode = IsMultiProduct(auth) ? "multi-product" : "configured",
+            productsReturned = products.Count,
+            products
+        });
     }
 
     [HttpGet("telemetry/overview")]
@@ -91,6 +239,8 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] string? date = null,
         [FromQuery] string? fromUtc = null,
         [FromQuery] string? toUtc = null,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
@@ -99,9 +249,13 @@ public sealed class AnalyticsController : ControllerBase
 
         try
         {
+            var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+            if (product.Error != null)
+                return product.Error;
+
             var period = TelemetryAnalyticsPeriod.Resolve(days, date, fromUtc, toUtc);
             var result = await _overviewAnalytics.GetOverviewForProductIdAsync(
-                auth.ProductId,
+                product.ProductId,
                 period,
                 top,
                 cancellationToken);
@@ -123,6 +277,8 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] string? toUtc = null,
         [FromQuery] int take = 100,
         [FromQuery] int topEvents = 5,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
@@ -131,9 +287,13 @@ public sealed class AnalyticsController : ControllerBase
 
         try
         {
+            var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+            if (product.Error != null)
+                return product.Error;
+
             var period = TelemetryAnalyticsPeriod.Resolve(days, date, fromUtc, toUtc);
             var result = await _devicesAnalytics.GetDevicesForProductIdAsync(
-                auth.ProductId,
+                product.ProductId,
                 period,
                 take,
                 topEvents,
@@ -152,14 +312,20 @@ public sealed class AnalyticsController : ControllerBase
         [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
         [FromQuery] int days = 7,
         [FromQuery] int topEvents = 25,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
         var result = await _schemaAnalytics.GetSchemaSummaryForProductIdAsync(
-            auth.ProductId,
+            product.ProductId,
             days,
             topEvents,
             cancellationToken);
@@ -172,14 +338,20 @@ public sealed class AnalyticsController : ControllerBase
         [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
         [FromQuery] int days = 7,
         [FromQuery] int top = 20,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
         var result = await _toolUsageAnalytics.GetToolUsageForProductIdAsync(
-            auth.ProductId,
+            product.ProductId,
             days,
             top,
             cancellationToken);
@@ -192,14 +364,20 @@ public sealed class AnalyticsController : ControllerBase
         [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
         [FromQuery] int days = 7,
         [FromQuery] int top = 20,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
         var result = await _quotaAnalytics.GetQuotaSummaryForProductIdAsync(
-            auth.ProductId,
+            product.ProductId,
             days,
             top,
             cancellationToken);
@@ -212,14 +390,20 @@ public sealed class AnalyticsController : ControllerBase
         [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
         [FromQuery] int days = 7,
         [FromQuery] int top = 20,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
         var result = await _startupHealthAnalytics.GetStartupHealthForProductIdAsync(
-            auth.ProductId,
+            product.ProductId,
             days,
             top,
             cancellationToken);
@@ -232,14 +416,20 @@ public sealed class AnalyticsController : ControllerBase
         [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
         [FromQuery] int days = 7,
         [FromQuery] int top = 20,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
         var result = await _certPinningAnalytics.GetCertPinningSummaryForProductIdAsync(
-            auth.ProductId,
+            product.ProductId,
             days,
             top,
             cancellationToken);
@@ -252,14 +442,20 @@ public sealed class AnalyticsController : ControllerBase
         [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
         [FromQuery] int days = 7,
         [FromQuery] int top = 20,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
         var result = await _activationFunnelAnalytics.GetActivationFunnelForProductIdAsync(
-            auth.ProductId,
+            product.ProductId,
             days,
             top,
             cancellationToken);
@@ -277,6 +473,8 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] string? hardwareId = null,
         [FromQuery] string? status = null,
         [FromQuery] int take = 25,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
@@ -285,9 +483,13 @@ public sealed class AnalyticsController : ControllerBase
 
         try
         {
+            var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+            if (product.Error != null)
+                return product.Error;
+
             var period = TelemetryAnalyticsPeriod.Resolve(days, date, fromUtc, toUtc);
             var result = await _activationFailuresAnalytics.GetActivationFailuresForProductIdAsync(
-                auth.ProductId,
+                product.ProductId,
                 period,
                 hardwareId,
                 status,
@@ -309,6 +511,8 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] int days = 7,
         [FromQuery] int top = 20,
         [FromQuery] int take = 25,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
@@ -318,8 +522,12 @@ public sealed class AnalyticsController : ControllerBase
         if (string.IsNullOrWhiteSpace(hardwareId))
             return BadRequest("Missing hardwareId query parameter.");
 
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
         var result = await _machineProfileAnalytics.GetMachineProfileForProductIdAsync(
-            auth.ProductId,
+            product.ProductId,
             hardwareId,
             days,
             top,
@@ -339,6 +547,8 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] string? clientIp,
         [FromQuery] int days = 7,
         [FromQuery] int take = 25,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
@@ -347,8 +557,12 @@ public sealed class AnalyticsController : ControllerBase
 
         try
         {
+            var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+            if (product.Error != null)
+                return product.Error;
+
             var result = await _supportProfileAnalytics.GetSupportProfileForProductIdAsync(
-                auth.ProductId,
+                product.ProductId,
                 hardwareId,
                 email,
                 emailFragment,
@@ -379,6 +593,8 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] string? version = null,
         [FromQuery] string? type = null,
         [FromQuery] int take = 25,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
@@ -387,9 +603,13 @@ public sealed class AnalyticsController : ControllerBase
 
         try
         {
+            var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+            if (product.Error != null)
+                return product.Error;
+
             var period = TelemetryAnalyticsPeriod.Resolve(days, date, fromUtc, toUtc);
             var result = await _rawSampleAnalytics.GetRawSampleForProductIdAsync(
-                auth.ProductId,
+                product.ProductId,
                 period,
                 hardwareId,
                 eventName,
@@ -407,6 +627,110 @@ public sealed class AnalyticsController : ControllerBase
         }
     }
 
+    [HttpGet("telemetry/flood-suppressions")]
+    public async Task<IActionResult> GetTelemetryFloodSuppressions(
+        [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
+        [FromQuery] int days = 7,
+        [FromQuery] string? hardwareId = null,
+        [FromQuery] string? eventName = null,
+        [FromQuery] int take = 25,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
+        if (auth == null)
+            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
+        var boundedDays = Math.Clamp(days, 1, 30);
+        var boundedTake = Math.Clamp(take, 1, 100);
+        var sinceUtc = DateTime.UtcNow.AddDays(-boundedDays);
+
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        var query = db.TelemetryFloodSuppressionCounters
+            .AsNoTracking()
+            .Where(c => c.ProductId == product.ProductId && c.LastSeenUtc >= sinceUtc);
+
+        if (!string.IsNullOrWhiteSpace(hardwareId))
+        {
+            var normalizedHardwareId = hardwareId.Trim();
+            query = query.Where(c => c.HardwareId == normalizedHardwareId || c.HardwareId.StartsWith(normalizedHardwareId));
+        }
+
+        if (!string.IsNullOrWhiteSpace(eventName))
+        {
+            var normalizedEventName = eventName.Trim();
+            query = query.Where(c => c.EventName == normalizedEventName);
+        }
+
+        var rows = await query
+            .OrderByDescending(c => c.SuppressedCount)
+            .ThenByDescending(c => c.LastSeenUtc)
+            .Take(boundedTake)
+            .Select(c => new
+            {
+                c.Id,
+                c.ProductId,
+                c.AppName,
+                c.HardwareId,
+                c.EventName,
+                Type = c.Type.ToString(),
+                c.Version,
+                c.WindowStartUtc,
+                c.WindowEndUtc,
+                c.WindowMinutes,
+                c.Threshold,
+                c.RawStoredCount,
+                c.SuppressedCount,
+                c.FirstSeenUtc,
+                c.LastSeenUtc,
+                c.LastClientIp,
+                c.LastIsp,
+                c.LastPayloadHash
+            })
+            .ToListAsync(cancellationToken);
+
+        var counters = rows.Select(c => new
+        {
+            c.Id,
+            c.ProductId,
+            c.AppName,
+            HardwareId = RedactHardwareId(c.HardwareId),
+            c.EventName,
+            c.Type,
+            c.Version,
+            c.WindowStartUtc,
+            c.WindowEndUtc,
+            c.WindowMinutes,
+            c.Threshold,
+            c.RawStoredCount,
+            c.SuppressedCount,
+            c.FirstSeenUtc,
+            c.LastSeenUtc,
+            c.LastClientIp,
+            c.LastIsp,
+            c.LastPayloadHash
+        }).ToList();
+
+        var totalSuppressed = await query.SumAsync(c => (int?)c.SuppressedCount, cancellationToken) ?? 0;
+        var groupsMatched = await query.CountAsync(cancellationToken);
+
+        return Ok(new
+        {
+            generatedAtUtc = DateTime.UtcNow,
+            productId = product.ProductId,
+            days = boundedDays,
+            groupsMatched,
+            returned = counters.Count,
+            totalSuppressed,
+            counters
+        });
+    }
+
     [HttpGet("security/bans")]
     public async Task<IActionResult> ListSecurityBans(
         [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
@@ -418,14 +742,20 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] string? licenseFragment,
         [FromQuery] bool includeInactive = false,
         [FromQuery] int take = 25,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
         var result = await _securityBanAuditAnalytics.ListBansForProductIdAsync(
-            auth.ProductId,
+            product.ProductId,
             hardwareId,
             componentHash,
             componentType,
@@ -449,8 +779,15 @@ public sealed class AnalyticsController : ControllerBase
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
+        if (!auth.ProductId.HasValue)
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                errorCode = "PRODUCT_SELECTOR_REQUIRED",
+                message = "This endpoint requires a product-scoped analytics key."
+            });
+
         var result = await _securityBanAuditAnalytics.GetBanDetailsForProductIdAsync(
-            auth.ProductId,
+            auth.ProductId.Value,
             banId,
             cancellationToken);
 
@@ -467,8 +804,15 @@ public sealed class AnalyticsController : ControllerBase
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
+        if (!auth.ProductId.HasValue)
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                errorCode = "PRODUCT_SELECTOR_REQUIRED",
+                message = "This endpoint requires a product-scoped analytics key."
+            });
+
         var result = await _securityBanAuditAnalytics.GetBanSourceEventForProductIdAsync(
-            auth.ProductId,
+            auth.ProductId.Value,
             banId,
             cancellationToken);
 
@@ -483,6 +827,8 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] string? date = null,
         [FromQuery] string? fromUtc = null,
         [FromQuery] string? toUtc = null,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
@@ -491,9 +837,13 @@ public sealed class AnalyticsController : ControllerBase
 
         try
         {
+            var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+            if (product.Error != null)
+                return product.Error;
+
             var period = TelemetryAnalyticsPeriod.Resolve(days, date, fromUtc, toUtc);
             var result = await _insightsAnalytics.GetInsightsForProductIdAsync(
-                auth.ProductId,
+                product.ProductId,
                 period,
                 top,
                 cancellationToken);
@@ -511,14 +861,20 @@ public sealed class AnalyticsController : ControllerBase
         [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
         [FromQuery] int days = 7,
         [FromQuery] int top = 20,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
         var result = await _versionHealthAnalytics.GetVersionHealthForProductIdAsync(
-            auth.ProductId,
+            product.ProductId,
             days,
             top,
             cancellationToken);
@@ -536,14 +892,20 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] bool includeSamples = false,
         [FromQuery] int sampleLimit = 30,
         [FromQuery] int topEvents = 20,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
         var result = await _durationMigrationImpactAnalytics.GetImpactForProductIdAsync(
-            auth.ProductId,
+            product.ProductId,
             licenseType,
             currentDurationDays,
             targetDurationDays,
@@ -566,14 +928,20 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] int? activationAgeMaxDays = null,
         [FromQuery] bool includeSamples = false,
         [FromQuery] int take = 50,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
         var result = await _freemiumActivityRankingAnalytics.GetRankingForProductIdAsync(
-            auth.ProductId,
+            product.ProductId,
             licenseType,
             status,
             telemetryDays,
@@ -596,14 +964,20 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] int? activationAgeMaxDays = null,
         [FromQuery] bool includeSamples = false,
         [FromQuery] int take = 50,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
         var result = await _freemiumActivityRankingAnalytics.GetPaidRankingForProductIdAsync(
-            auth.ProductId,
+            product.ProductId,
             licenseTypes,
             status,
             telemetryDays,
@@ -620,14 +994,20 @@ public sealed class AnalyticsController : ControllerBase
     public async Task<IActionResult> GetLicenseTypes(
         [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
         [FromQuery] bool includeFree = true,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
         var result = await _freemiumActivityRankingAnalytics.GetLicenseTypesForProductIdAsync(
-            auth.ProductId,
+            product.ProductId,
             includeFree,
             cancellationToken);
 
@@ -641,14 +1021,20 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] string? licenseType = "paid",
         [FromQuery] string? status = "active",
         [FromQuery] int? activationAgeMaxDays = null,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
         var result = await _recentLicenseOnboardingMetricsAnalytics.GetMetricsForProductIdAsync(
-            auth.ProductId,
+            product.ProductId,
             take,
             licenseType,
             status,
@@ -669,14 +1055,20 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] double? minScore = null,
         [FromQuery] bool includeInactive = false,
         [FromQuery] string? sortBy = "score",
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
         var result = await _licenseUsageScoringAnalytics.GetScoresForProductIdAsync(
-            auth.ProductId,
+            product.ProductId,
             take,
             licenseType,
             status,
@@ -699,6 +1091,8 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] string? toUtc = null,
         [FromQuery] string? activityWindowsDays = "1,3,7,30",
         [FromQuery] int take = 50,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
@@ -707,9 +1101,13 @@ public sealed class AnalyticsController : ControllerBase
 
         try
         {
+            var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+            if (product.Error != null)
+                return product.Error;
+
             var period = TelemetryAnalyticsPeriod.Resolve(days, date, fromUtc, toUtc);
             var result = await _telemetryLicenseHardwareAuditAnalytics.GetAuditForProductIdAsync(
-                auth.ProductId,
+                product.ProductId,
                 period,
                 activityWindowsDays,
                 take,
@@ -723,11 +1121,37 @@ public sealed class AnalyticsController : ControllerBase
         }
     }
 
+    [HttpGet("licenses/seat-consistency")]
+    public async Task<IActionResult> GetLicenseSeatConsistency(
+        [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
+        [FromQuery] int take = 100,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
+        if (auth == null)
+            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
+        var result = await _licenseSeatConsistencyCheck.CheckProductAsync(
+            product.ProductId,
+            take,
+            cancellationToken);
+
+        return Ok(result);
+    }
+
     [HttpGet("licenses/verify-hwid")]
     public async Task<IActionResult> VerifyLicenseHardwareId(
         [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
         [FromQuery] string? hardwareId,
         [FromQuery(Name = "hwid")] string? hwid,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
@@ -738,8 +1162,12 @@ public sealed class AnalyticsController : ControllerBase
         if (string.IsNullOrWhiteSpace(resolvedHardwareId))
             return BadRequest("Missing required hardwareId or hwid query parameter.");
 
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
         var result = await _licenseHardwareVerifierAnalytics.VerifyHardwareIdForProductIdAsync(
-            auth.ProductId,
+            product.ProductId,
             resolvedHardwareId,
             cancellationToken);
 
@@ -755,6 +1183,8 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] string? fromUtc = null,
         [FromQuery] string? toUtc = null,
         [FromQuery] int take = 50,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
@@ -763,9 +1193,13 @@ public sealed class AnalyticsController : ControllerBase
 
         try
         {
+            var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+            if (product.Error != null)
+                return product.Error;
+
             var period = TelemetryAnalyticsPeriod.Resolve(days, date, fromUtc, toUtc);
             var result = await _freemiumAbuseRiskAnalytics.GetRiskForProductIdAsync(
-                auth.ProductId,
+                product.ProductId,
                 period,
                 licenseType,
                 take,
@@ -788,5 +1222,163 @@ public sealed class AnalyticsController : ControllerBase
             AnalyticsApiKeyScopes.TelemetryRead,
             HttpContext.Connection.RemoteIpAddress?.ToString(),
             cancellationToken);
+    }
+
+    private async Task<ResolvedAnalyticsProduct> ResolveAnalyticsProductAsync(
+        AnalyticsApiKeyAuthResult auth,
+        string? productId,
+        string? productName,
+        CancellationToken cancellationToken)
+    {
+        var hasProductId = !string.IsNullOrWhiteSpace(productId);
+        var hasProductName = !string.IsNullOrWhiteSpace(productName);
+        if (hasProductId && hasProductName)
+            return ResolvedAnalyticsProduct.BadRequest("Provide either productId or productName, not both.", "PRODUCT_SELECTOR_AMBIGUOUS");
+
+        if (!hasProductId && !hasProductName)
+        {
+            if (auth.IsGlobal)
+            {
+                return ResolvedAnalyticsProduct.BadRequest(
+                    "Global analytics keys must provide productId or productName for product-scoped endpoints.",
+                    "PRODUCT_SELECTOR_REQUIRED");
+            }
+
+            if (!auth.ProductId.HasValue)
+                return ResolvedAnalyticsProduct.Forbid("The analytics key is not configured for a product.", "PRODUCT_SCOPE_INVALID", new
+                {
+                    scopeKind = auth.ScopeKind
+                });
+
+            SetProductHeaders(auth.ProductId.Value, null, "configured");
+            return new ResolvedAnalyticsProduct(auth.ProductId.Value, "configured", null);
+        }
+
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+
+        Product? requestedProduct;
+        if (hasProductId)
+        {
+            if (!Guid.TryParse(productId, out var parsedProductId))
+                return ResolvedAnalyticsProduct.BadRequest("productId must be a valid UUID.", "PRODUCT_ID_INVALID");
+
+            requestedProduct = await db.Products
+                .AsNoTracking()
+                .FirstOrDefaultAsync(p => p.Id == parsedProductId, cancellationToken);
+        }
+        else
+        {
+            var normalizedProductName = productName!.Trim();
+            var matches = await db.Products
+                .AsNoTracking()
+                .Where(p => p.Name.ToLower() == normalizedProductName.ToLower())
+                .Take(2)
+                .ToListAsync(cancellationToken);
+
+            if (matches.Count > 1)
+                return ResolvedAnalyticsProduct.BadRequest("productName matches multiple products. Use productId.", "PRODUCT_NAME_AMBIGUOUS");
+
+            requestedProduct = matches.SingleOrDefault();
+        }
+
+        if (requestedProduct == null)
+            return ResolvedAnalyticsProduct.NotFound("Requested product was not found.", "PRODUCT_NOT_FOUND");
+
+        if (!auth.IsGlobal && (!auth.ProductId.HasValue || requestedProduct.Id != auth.ProductId.Value))
+        {
+            return ResolvedAnalyticsProduct.Forbid("The analytics key is scoped to a different product.", "PRODUCT_SCOPE_FORBIDDEN", new
+            {
+                configuredProductId = auth.ProductId,
+                requestedProductId = requestedProduct.Id
+            });
+        }
+
+        var scopeMode = auth.IsGlobal
+            ? "explicit-global"
+            : "explicit";
+        SetProductHeaders(requestedProduct.Id, requestedProduct.Name, scopeMode);
+        return new ResolvedAnalyticsProduct(requestedProduct.Id, scopeMode, null);
+    }
+
+    private async Task<AnalyticsProductSummary?> GetProductSummaryAsync(Guid productId, CancellationToken cancellationToken)
+    {
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        return await db.Products
+            .AsNoTracking()
+            .Where(p => p.Id == productId)
+            .Select(p => new AnalyticsProductSummary(
+                p.Id,
+                p.Name,
+                p.MinimumAllowedVersion,
+                p.Licenses.Count,
+                p.TelemetryRecords.Count,
+                p.AnalyticsApiKeys.Count(k => k.IsActive)))
+            .FirstOrDefaultAsync(cancellationToken);
+    }
+
+    private static bool IsMultiProduct(AnalyticsApiKeyAuthResult auth)
+    {
+        return auth.IsGlobal
+            && AnalyticsApiKeyAuthService.HasScope(auth.Scopes, AnalyticsApiKeyScopes.MultiProductRead);
+    }
+
+    private void SetProductHeaders(Guid productId, string? productName, string scopeMode)
+    {
+        Response.Headers["X-SoftLicence-Product-Id"] = productId.ToString("D");
+        if (!string.IsNullOrWhiteSpace(productName))
+            Response.Headers["X-SoftLicence-Product-Name"] = productName;
+        Response.Headers["X-SoftLicence-Product-Scope-Mode"] = scopeMode;
+    }
+
+    private static string RedactHardwareId(string hardwareId)
+    {
+        if (string.IsNullOrWhiteSpace(hardwareId))
+            return "";
+
+        return hardwareId.Length <= 8
+            ? hardwareId
+            : hardwareId[..8] + "...";
+    }
+
+    private sealed record AnalyticsProductSummary(
+        Guid ProductId,
+        string Name,
+        string? MinimumAllowedVersion,
+        int LicenseCount,
+        int TelemetryRecordCount,
+        int ActiveAnalyticsKeyCount);
+
+    private sealed record ResolvedAnalyticsProduct(Guid ProductId, string ScopeMode, IActionResult? Error)
+    {
+        public static ResolvedAnalyticsProduct BadRequest(string message, string code)
+        {
+            return new ResolvedAnalyticsProduct(Guid.Empty, "error", new BadRequestObjectResult(new
+            {
+                errorCode = code,
+                message
+            }));
+        }
+
+        public static ResolvedAnalyticsProduct NotFound(string message, string code)
+        {
+            return new ResolvedAnalyticsProduct(Guid.Empty, "error", new NotFoundObjectResult(new
+            {
+                errorCode = code,
+                message
+            }));
+        }
+
+        public static ResolvedAnalyticsProduct Forbid(string message, string code, object details)
+        {
+            return new ResolvedAnalyticsProduct(Guid.Empty, "error", new ObjectResult(new
+            {
+                errorCode = code,
+                message,
+                details
+            })
+            {
+                StatusCode = StatusCodes.Status403Forbidden
+            });
+        }
     }
 }

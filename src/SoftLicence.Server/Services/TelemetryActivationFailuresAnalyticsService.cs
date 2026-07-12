@@ -64,7 +64,7 @@ public sealed class TelemetryActivationFailuresAnalyticsService
                 && l.Timestamp < period.ToUtc
                 && productNames.Contains(l.AppName.ToLower())
                 && l.Endpoint == "ACTIVATE"
-                && !l.IsSuccess);
+                && (!l.IsSuccess || l.ResultStatus == "BANNED" || l.ResultStatus == "COMPONENT_BANNED"));
 
         if (hardwareId != null)
             query = query.Where(l => l.HardwareId == hardwareId);
@@ -201,6 +201,7 @@ public sealed class TelemetryActivationFailuresAnalyticsService
 
         var primaryRows = await db.Licenses.AsNoTracking()
             .Where(l => productScopeIds.Contains(l.ProductId)
+                && l.Seats.Count == 0
                 && l.HardwareId != null
                 && hardwareIds.Contains(l.HardwareId)
                 && l.CustomerEmail != "")

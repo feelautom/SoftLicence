@@ -91,9 +91,15 @@ public sealed class LlmTipFeedbackController : ControllerBase
 
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
+        if (!auth.ProductId.HasValue)
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                errorCode = "PRODUCT_SELECTOR_REQUIRED",
+                message = "This endpoint requires a product-scoped analytics key."
+            });
 
         var result = await _feedbackService.ListTipsAsync(
-            auth.ProductId,
+            auth.ProductId.Value,
             category,
             sortBy,
             take,
@@ -123,14 +129,21 @@ public sealed class LlmTipFeedbackController : ControllerBase
         var auth = await AuthenticateAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
-        if (productId.HasValue && productId != auth.ProductId)
+        var resolvedProductId = ResolveProductId(auth, productId);
+        if (!resolvedProductId.HasValue)
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                errorCode = "PRODUCT_SELECTOR_REQUIRED",
+                message = "Global analytics keys must provide productId for this endpoint."
+            });
+        if (!auth.IsGlobal && productId.HasValue && productId != auth.ProductId)
             return Forbid();
 
         try
         {
             var result = await _feedbackService.ListAdminTipsAsync(new LlmTipFeedbackAdminQuery
             {
-                ProductId = auth.ProductId,
+                ProductId = resolvedProductId.Value,
                 FromUtc = fromUtc,
                 ToUtc = toUtc,
                 AppVersion = appVersion,
@@ -163,8 +176,14 @@ public sealed class LlmTipFeedbackController : ControllerBase
         var auth = await AuthenticateAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
+        if (!auth.ProductId.HasValue)
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                errorCode = "PRODUCT_SELECTOR_REQUIRED",
+                message = "This endpoint requires a product-scoped analytics key."
+            });
 
-        var result = await _feedbackService.GetTipDetailAsync(idOrContentHash, auth.ProductId, cancellationToken);
+        var result = await _feedbackService.GetTipDetailAsync(idOrContentHash, auth.ProductId.Value, cancellationToken);
         return result == null ? NotFound() : Ok(result);
     }
 
@@ -186,14 +205,21 @@ public sealed class LlmTipFeedbackController : ControllerBase
         var auth = await AuthenticateAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
-        if (productId.HasValue && productId != auth.ProductId)
+        var resolvedProductId = ResolveProductId(auth, productId);
+        if (!resolvedProductId.HasValue)
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                errorCode = "PRODUCT_SELECTOR_REQUIRED",
+                message = "Global analytics keys must provide productId for this endpoint."
+            });
+        if (!auth.IsGlobal && productId.HasValue && productId != auth.ProductId)
             return Forbid();
 
         try
         {
             var result = await _feedbackService.GetAdminOverviewAsync(new LlmTipFeedbackAdminQuery
             {
-                ProductId = auth.ProductId,
+                ProductId = resolvedProductId.Value,
                 FromUtc = fromUtc,
                 ToUtc = toUtc,
                 AppVersion = appVersion,
@@ -226,17 +252,64 @@ public sealed class LlmTipFeedbackController : ControllerBase
         var auth = await AuthenticateAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
+        if (!auth.ProductId.HasValue)
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                errorCode = "PRODUCT_SELECTOR_REQUIRED",
+                message = "This endpoint requires a product-scoped analytics key."
+            });
 
         try
         {
             var updated = await _feedbackService.UpdateReviewStatusAsync(
                 request.Id,
                 request.ContentHash,
-                auth.ProductId,
+                auth.ProductId.Value,
                 request.ReviewStatus,
                 cancellationToken);
 
             return updated ? Ok(new { status = "updated" }) : NotFound(new { error = "llm_tip_feedback_tip_not_found" });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(ex.Message);
+        }
+    }
+
+    [HttpPost("admin/tips/convert-to-bugtrace")]
+    [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("AdminAPI")]
+    public async Task<IActionResult> ConvertAdminTipToBugTrace(
+        [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
+        [FromBody] LlmTipFeedbackBugTraceConversionRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var auth = await AuthenticateAsync(analyticsKey, cancellationToken);
+        if (auth == null)
+            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+        if (!auth.ProductId.HasValue)
+            return StatusCode(StatusCodes.Status403Forbidden, new
+            {
+                errorCode = "PRODUCT_SELECTOR_REQUIRED",
+                message = "This endpoint requires a product-scoped analytics key."
+            });
+
+        try
+        {
+            var result = await _feedbackService.ConvertToBugTraceAsync(
+                request.Id,
+                request.ContentHash,
+                auth.ProductId.Value,
+                request.Priority,
+                request.Type,
+                cancellationToken);
+
+            return result == null
+                ? NotFound(new { error = "llm_tip_feedback_tip_not_found" })
+                : Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = "bugtrace_unavailable", message = ex.Message });
         }
         catch (ArgumentException ex)
         {
@@ -253,5 +326,13 @@ public sealed class LlmTipFeedbackController : ControllerBase
             AnalyticsApiKeyScopes.TelemetryRead,
             HttpContext.Connection.RemoteIpAddress?.ToString(),
             cancellationToken);
+    }
+
+    private static Guid? ResolveProductId(AnalyticsApiKeyAuthResult auth, Guid? requestedProductId)
+    {
+        if (auth.IsGlobal)
+            return requestedProductId;
+
+        return requestedProductId ?? auth.ProductId;
     }
 }

@@ -140,23 +140,13 @@ public sealed class RecentLicenseOnboardingMetricsAnalyticsService
 
     private static OnboardingCandidate BuildCandidate(License license, DateTime now)
     {
-        var activeSeats = license.Seats
-            .Where(s => !string.IsNullOrWhiteSpace(s.HardwareId) && s.IsActive)
-            .OrderBy(s => s.FirstActivatedAt)
-            .ToList();
-
-        var hardwareIds = new List<string>();
-        if (!string.IsNullOrWhiteSpace(license.HardwareId))
-            hardwareIds.Add(license.HardwareId);
-        hardwareIds.AddRange(activeSeats.Select(s => s.HardwareId));
-        hardwareIds = hardwareIds
-            .Where(h => !string.IsNullOrWhiteSpace(h))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        var firstSeatActivation = activeSeats.Count == 0
-            ? (DateTime?)null
-            : activeSeats.Min(s => s.FirstActivatedAt);
+        var resolvedHardwareIds = LicenseSeatHardwareResolver.ResolveActiveHardwareIds(license);
+        var hardwareIds = resolvedHardwareIds.Select(h => h.HardwareId).ToList();
+        var firstSeatActivation = resolvedHardwareIds
+            .Where(h => h.Seat != null)
+            .Select(h => h.FirstActivatedAt)
+            .Where(d => d.HasValue)
+            .Min();
 
         var onboardingStart = license.ActivationDate ?? firstSeatActivation ?? license.CreationDate;
         var activationDateSource = license.ActivationDate.HasValue

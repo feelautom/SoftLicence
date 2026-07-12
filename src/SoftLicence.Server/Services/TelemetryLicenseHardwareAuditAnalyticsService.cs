@@ -196,15 +196,7 @@ public sealed class TelemetryLicenseHardwareAuditAnalyticsService
         foreach (var license in licenses)
         {
             var status = ResolveLicenseStatus(license, now);
-            var hardwareIds = new List<string>();
-            if (!string.IsNullOrWhiteSpace(license.HardwareId))
-                hardwareIds.Add(license.HardwareId);
-
-            hardwareIds.AddRange(license.Seats
-                .Where(s => s.IsActive && !string.IsNullOrWhiteSpace(s.HardwareId))
-                .Select(s => s.HardwareId));
-
-            foreach (var hardwareId in hardwareIds.Distinct(StringComparer.OrdinalIgnoreCase))
+            foreach (var hardwareId in LicenseSeatHardwareResolver.ResolveActiveHardwareIds(license).Select(h => h.HardwareId))
             {
                 result.Add(new AuditLicenseBinding(
                     license.Id,

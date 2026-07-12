@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Moq;
@@ -183,6 +185,88 @@ public sealed class LicenseUsageScoringAnalyticsServiceTests
         Assert.Equal("ex***@example.test", item.CustomerEmailRedacted);
     }
 
+    [Fact]
+    public async Task GetScoresForProductIdAsync_UsesActiveSeatsInsteadOfLegacyHardwareIdWhenSeatHistoryExists()
+    {
+        var now = DateTime.UtcNow;
+        var productId = Guid.NewGuid();
+        var trialTypeId = Guid.NewGuid();
+        var subscriptionTypeId = Guid.NewGuid();
+        var paidTypeId = Guid.NewGuid();
+        var licenseId = Guid.NewGuid();
+
+        await using (var db = new LicenseDbContext(_dbOptions))
+        {
+            SeedProductAndTypes(db, productId, trialTypeId, subscriptionTypeId, paidTypeId);
+            db.Licenses.Add(new License
+            {
+                Id = licenseId,
+                ProductId = productId,
+                LicenseTypeId = paidTypeId,
+                LicenseKey = "SEAT-SOURCE-0001",
+                CustomerEmail = "seat-source@example.test",
+                CustomerName = "Seat Source",
+                HardwareId = "HW-LEGACY-PHANTOM",
+                ActivationDate = now.AddDays(-2),
+                CreationDate = now.AddDays(-2),
+                ExpirationDate = now.AddDays(30),
+                IsActive = true,
+                Seats =
+                {
+                    new LicenseSeat
+                    {
+                        HardwareId = "HW-ACTIVE-SEAT",
+                        FirstActivatedAt = now.AddDays(-1),
+                        LastCheckInAt = now.AddHours(-1),
+                        IsActive = true
+                    }
+                }
+            });
+
+            AddEvent(db, productId, "HW-LEGACY-PHANTOM", "Compile_Success", now.AddHours(-2), "{}");
+            AddEvent(db, productId, "HW-ACTIVE-SEAT", "Project_Open", now.AddHours(-1), "{}");
+            await db.SaveChangesAsync();
+        }
+
+        var service = new LicenseUsageScoringAnalyticsService(_dbFactoryMock.Object, _cache);
+
+        var result = await service.GetScoresForProductIdAsync(productId, take: 10, licenseType: "paid", status: "active");
+
+        var item = Assert.Single(result.Licenses);
+        Assert.Equal(licenseId, item.LicenseId);
+        Assert.Equal(HashHardwareId("HW-ACTIVE-SEAT"), item.HardwareIdHash);
+        Assert.NotEqual(HashHardwareId("HW-LEGACY-PHANTOM"), item.HardwareIdHash);
+        Assert.Equal(1, item.TotalEvents);
+        Assert.Equal(1, item.ProductiveEvents);
+    }
+
+    [Fact]
+    public async Task GetScoresForProductIdAsync_FallsBackToLegacyHardwareIdWhenLicenseHasNoSeatHistory()
+    {
+        var now = DateTime.UtcNow;
+        var productId = Guid.NewGuid();
+        var trialTypeId = Guid.NewGuid();
+        var subscriptionTypeId = Guid.NewGuid();
+        var paidTypeId = Guid.NewGuid();
+
+        await using (var db = new LicenseDbContext(_dbOptions))
+        {
+            SeedProductAndTypes(db, productId, trialTypeId, subscriptionTypeId, paidTypeId);
+            AddLicense(db, productId, paidTypeId, "LEGACY-ONLY-0001", "legacy-only@example.test", "HW-LEGACY-ONLY", now.AddDays(-2), now.AddDays(30));
+            AddEvent(db, productId, "HW-LEGACY-ONLY", "Compile_Success", now.AddHours(-1), "{}");
+            await db.SaveChangesAsync();
+        }
+
+        var service = new LicenseUsageScoringAnalyticsService(_dbFactoryMock.Object, _cache);
+
+        var result = await service.GetScoresForProductIdAsync(productId, take: 10, licenseType: "paid", status: "active");
+
+        var item = Assert.Single(result.Licenses);
+        Assert.Equal(HashHardwareId("HW-LEGACY-ONLY"), item.HardwareIdHash);
+        Assert.Equal(1, item.TotalEvents);
+        Assert.Equal(1, item.ProductiveEvents);
+    }
+
     private static void SeedProductAndTypes(
         LicenseDbContext db,
         Guid productId,
@@ -274,5 +358,11 @@ public sealed class LicenseUsageScoringAnalyticsServiceTests
                 PropertiesJson = propertiesJson
             }
         });
+    }
+
+    private static string HashHardwareId(string hardwareId)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(hardwareId));
+        return Convert.ToHexString(bytes)[..16].ToLowerInvariant();
     }
 }

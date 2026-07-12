@@ -377,13 +377,8 @@ public sealed class FreemiumActivityRankingAnalyticsService
             if (!StatusMatches(status, licenseStatus))
                 continue;
 
-            var hardwareIds = new List<(string HardwareId, DateTime? SeatActivation)>();
-            if (!string.IsNullOrWhiteSpace(license.HardwareId))
-                hardwareIds.Add((license.HardwareId, null));
-
-            hardwareIds.AddRange(license.Seats
-                .Where(s => s.IsActive && !string.IsNullOrWhiteSpace(s.HardwareId))
-                .Select(s => (s.HardwareId, (DateTime?)s.FirstActivatedAt)));
+            var hardwareIds = LicenseSeatHardwareResolver.ResolveActiveHardwareIds(license)
+                .Select(h => (h.HardwareId, SeatActivation: h.FirstActivatedAt));
 
             foreach (var seat in hardwareIds
                 .GroupBy(h => h.HardwareId, StringComparer.OrdinalIgnoreCase)

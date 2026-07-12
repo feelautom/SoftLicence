@@ -42,7 +42,7 @@ public sealed class AnalyticsApiKeyAuthService
         key.LastUsedIp = clientIp;
         await db.SaveChangesAsync(cancellationToken);
 
-        return new AnalyticsApiKeyAuthResult(key.Id, key.ProductId);
+        return new AnalyticsApiKeyAuthResult(key.Id, key.ProductId, key.Scopes, key.ScopeKind);
     }
 
     public static string ComputeKeyHash(string apiKey)
@@ -57,7 +57,7 @@ public sealed class AnalyticsApiKeyAuthService
         return trimmed.Length <= 12 ? trimmed : trimmed[..12];
     }
 
-    private static bool HasScope(string scopes, string requiredScope)
+    public static bool HasScope(string scopes, string requiredScope)
     {
         return scopes
             .Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -65,4 +65,7 @@ public sealed class AnalyticsApiKeyAuthService
     }
 }
 
-public sealed record AnalyticsApiKeyAuthResult(Guid KeyId, Guid ProductId);
+public sealed record AnalyticsApiKeyAuthResult(Guid KeyId, Guid? ProductId, string Scopes, string ScopeKind)
+{
+    public bool IsGlobal => string.Equals(ScopeKind, AnalyticsApiKeyScopeKinds.Global, StringComparison.OrdinalIgnoreCase);
+}

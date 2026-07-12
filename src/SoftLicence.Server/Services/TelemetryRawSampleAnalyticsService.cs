@@ -62,8 +62,7 @@ public sealed class TelemetryRawSampleAnalyticsService
         var query = db.TelemetryRecords.AsNoTracking()
             .Where(r => r.ProductId.HasValue && productScopeIds.Contains(r.ProductId.Value) && r.Timestamp >= period.FromUtc && r.Timestamp < period.ToUtc);
 
-        if (hardwareId != null)
-            query = query.Where(r => r.HardwareId == hardwareId);
+        query = ApplyHardwareIdFilter(query, hardwareId);
 
         if (eventName != null)
             query = query.Where(r => r.EventName == eventName);
@@ -139,6 +138,22 @@ public sealed class TelemetryRawSampleAnalyticsService
     {
         var trimmed = value?.Trim();
         return string.IsNullOrWhiteSpace(trimmed) ? null : trimmed;
+    }
+
+    private static IQueryable<TelemetryRecord> ApplyHardwareIdFilter(IQueryable<TelemetryRecord> query, string? hardwareId)
+    {
+        if (hardwareId == null)
+            return query;
+
+        var normalized = hardwareId.ToUpperInvariant();
+        if (normalized.Length < 6)
+            return query.Where(r => r.HardwareId.ToUpper() == normalized);
+
+        var prefix = normalized[..Math.Min(8, normalized.Length)];
+        return query.Where(r =>
+            r.HardwareId.ToUpper() == normalized
+            || r.HardwareId.ToUpper().Contains(normalized)
+            || r.HardwareId.ToUpper().StartsWith(prefix));
     }
 
     private sealed record RawTelemetryRow(

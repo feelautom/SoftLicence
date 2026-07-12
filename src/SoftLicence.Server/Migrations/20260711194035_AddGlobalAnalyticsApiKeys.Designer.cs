@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using SoftLicence.Server.Data;
@@ -11,9 +12,11 @@ using SoftLicence.Server.Data;
 namespace SoftLicence.Server.Migrations
 {
     [DbContext(typeof(LicenseDbContext))]
-    partial class LicenseDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260711194035_AddGlobalAnalyticsApiKeys")]
+    partial class AddGlobalAnalyticsApiKeys
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -1354,74 +1357,6 @@ namespace SoftLicence.Server.Migrations
                     b.ToTable("TelemetryEvents");
                 });
 
-            modelBuilder.Entity("SoftLicence.Server.Data.TelemetryFloodSuppressionCounter", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("AppName")
-                        .HasColumnType("text");
-
-                    b.Property<string>("EventName")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<DateTime>("FirstSeenUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("HardwareId")
-                        .IsRequired()
-                        .HasColumnType("text");
-
-                    b.Property<string>("LastClientIp")
-                        .HasColumnType("text");
-
-                    b.Property<string>("LastIsp")
-                        .HasColumnType("text");
-
-                    b.Property<string>("LastPayloadHash")
-                        .HasColumnType("text");
-
-                    b.Property<DateTime>("LastSeenUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<Guid?>("ProductId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int>("RawStoredCount")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("SuppressedCount")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("Threshold")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("Type")
-                        .HasColumnType("integer");
-
-                    b.Property<string>("Version")
-                        .HasColumnType("text");
-
-                    b.Property<DateTime>("WindowEndUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<int>("WindowMinutes")
-                        .HasColumnType("integer");
-
-                    b.Property<DateTime>("WindowStartUtc")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ProductId", "LastSeenUtc");
-
-                    b.HasIndex("ProductId", "HardwareId", "EventName", "Type", "WindowStartUtc");
-
-                    b.ToTable("TelemetryFloodSuppressionCounters");
-                });
-
             modelBuilder.Entity("SoftLicence.Server.Data.TelemetryRecord", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1741,16 +1676,6 @@ namespace SoftLicence.Server.Migrations
                         .IsRequired();
 
                     b.Navigation("Record");
-                });
-
-            modelBuilder.Entity("SoftLicence.Server.Data.TelemetryFloodSuppressionCounter", b =>
-                {
-                    b.HasOne("SoftLicence.Server.Data.Product", "Product")
-                        .WithMany()
-                        .HasForeignKey("ProductId")
-                        .OnDelete(DeleteBehavior.Cascade);
-
-                    b.Navigation("Product");
                 });
 
             modelBuilder.Entity("SoftLicence.Server.Data.TelemetryRecord", b =>

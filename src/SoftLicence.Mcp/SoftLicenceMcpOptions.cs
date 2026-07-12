@@ -4,8 +4,10 @@ public sealed class SoftLicenceMcpOptions
 {
     public string? SoftLicenceBaseUrl { get; set; }
     public string? SoftLicenceApiKey { get; set; }
+    public string? SoftLicenceAdminSecret { get; set; }
     public string? SOFTLICENCE_BASE_URL { get; set; }
     public string? SOFTLICENCE_API_KEY { get; set; }
+    public string? SOFTLICENCE_ADMIN_SECRET { get; set; }
 
     public string GetBaseUrl()
     {
@@ -21,6 +23,15 @@ public sealed class SoftLicenceMcpOptions
         var value = FirstNonEmpty(SoftLicenceApiKey, SOFTLICENCE_API_KEY);
         if (value == null)
             throw new InvalidOperationException("Missing SOFTLICENCE_API_KEY.");
+
+        return value.Trim();
+    }
+
+    public string GetAdminSecret()
+    {
+        var value = FirstNonEmpty(SoftLicenceAdminSecret, SOFTLICENCE_ADMIN_SECRET);
+        if (value == null)
+            throw new InvalidOperationException("write_credentials_missing: Missing SOFTLICENCE_ADMIN_SECRET.");
 
         return value.Trim();
     }

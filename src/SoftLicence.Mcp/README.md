@@ -39,13 +39,23 @@ $env:SOFTLICENCE_API_KEY = "sla_xxx"
 dotnet run --project src/SoftLicence.Mcp/SoftLicence.Mcp.csproj
 ```
 
-`SOFTLICENCE_API_KEY` doit etre une cle analytics creee via :
+Pour un MCP mono-produit, `SOFTLICENCE_API_KEY` peut etre une cle analytics produit creee via :
 
 ```http
 POST /api/admin/products/{productId}/analytics-keys
 ```
 
+Pour un MCP multi-produit Codex/LeadOps, `SOFTLICENCE_API_KEY` doit etre une cle globale creee via l'UI root `/analytics-keys/global` ou :
+
+```http
+POST /api/admin/analytics-keys/global
+```
+
+La cle globale a `ProductId=null`, `ScopeKind=Global` et les scopes `telemetry:read analytics:multi-product:read`. Une cle produit avec le scope multi-produit reste bornee a son produit.
+
 Le serveur MCP envoie cette cle dans le header `X-Analytics-Key`.
+
+La configuration client doit pointer vers le dossier stable `D:/Apps/SoftLicence.Mcp/SoftLicence.Mcp.exe`, pas vers un dossier publie versionne comme `SoftLicence.Mcp-<hash>`.
 
 Exemple de configuration client MCP en mode developpement :
 
@@ -88,8 +98,11 @@ Le SDK MCP expose les méthodes C# en noms de tools `snake_case` :
 - `get_telemetry_machine_profile`
 - `get_telemetry_version_health`
 - `get_support_telemetry_profile`
+- `get_customer_license_timeline`
 - `get_license_onboarding_metrics`
 - `get_license_usage_scores`
+- `get_current_product`
+- `list_products`
 
 Toutes les limites sont bornees cote MCP avant l'appel API :
 
@@ -129,6 +142,15 @@ complet ou un prefixe/fragment de 6+ caracteres quand aucun match exact n'existe
 plusieurs machines correspondent, la reponse est bornee et `isAmbiguous=true`.
 `clientIp` accepte IPv4 et IPv6 en correspondance exacte ; les IPv6 sont encodees dans
 l'URL et ne sont pas decoupees sur `:`.
+
+`get_customer_license_timeline` est l'outil support global pour reconstituer l'historique
+client/licence de n'importe quel utilisateur a partir d'un email, HWID, `licenseId` ou
+fragment de cle. Il retourne les emails et HWID internes complets, les cles licence
+redigees, les licences candidates, les sieges, un resume par HWID et une timeline
+chronologique paginee. Il distingue explicitement `Update_RevokeLicense` (clear local
+cote desktop via update-check) d'une vraie trace serveur de deliaison de siege
+(`SeatUnlinked`/equivalent), avec le verdict `no_server_seat_unlink_trace_found` quand
+aucune trace serveur n'est presente dans la fenetre demandee.
 
 `get_license_onboarding_metrics` retourne les licences recentes triees par
 activation ou creation decroissante, avec Time-To-Value onboarding, segmentation simple

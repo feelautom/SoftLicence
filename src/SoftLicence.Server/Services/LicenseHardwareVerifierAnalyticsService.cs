@@ -45,7 +45,10 @@ public sealed class LicenseHardwareVerifierAnalyticsService
         var legacyMatches = await db.Licenses.AsNoTracking()
             .Include(l => l.Type)
             .Include(l => l.Product)
-            .Where(l => productScopeIds.Contains(l.ProductId) && l.HardwareId == normalizedHardwareId)
+            .Include(l => l.Seats)
+            .Where(l => productScopeIds.Contains(l.ProductId)
+                && l.Seats.Count == 0
+                && l.HardwareId == normalizedHardwareId)
             .ToListAsync(cancellationToken);
 
         var candidates = new List<LicenseHardwareCandidate>();

@@ -25,6 +25,8 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         _factory = factory.WithWebHostBuilder(builder =>
         {
             builder.UseSetting("IsIntegrationTest", "true");
+            builder.UseSetting("AdminSettings:ApiSecret", ProductApiSecret);
+            builder.UseSetting("AdminSettings:AllowedIps", "");
             builder.ConfigureServices(services =>
             {
                 // On force une base unique pour cette série de tests
@@ -105,6 +107,258 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
 
         Assert.Equal(HttpStatusCode.OK, res1.StatusCode);
         Assert.Equal(HttpStatusCode.OK, res2.StatusCode);
+    }
+
+    [Fact]
+    public async Task UnlinkReactivateUnlink_ShouldNotKeepStaleLegacyHardwareId()
+    {
+        var client = _factory.CreateClient();
+        string licenseKey;
+        string appId;
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var lic = await CreateLicenseAsync(scope.ServiceProvider, 1);
+            licenseKey = lic.LicenseKey;
+            appId = lic.ProductId.ToString();
+        }
+
+        var firstActivation = await client.PostAsJsonAsync("/api/activation", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "HW-A",
+            AppName = "MultiApp",
+            AppId = appId
+        });
+        Assert.Equal(HttpStatusCode.OK, firstActivation.StatusCode);
+
+        var clientUnlink = await client.PostAsJsonAsync("/api/activation/deactivate", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "HW-A",
+            AppName = "MultiApp",
+            AppId = appId,
+            Source = "settings_button"
+        });
+        Assert.Equal(HttpStatusCode.OK, clientUnlink.StatusCode);
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var license = await db.Licenses.Include(l => l.Seats).SingleAsync(l => l.LicenseKey == licenseKey);
+            Assert.Null(license.HardwareId);
+            Assert.Null(license.ActivationDate);
+            Assert.DoesNotContain(license.Seats, s => s.IsActive);
+        }
+
+        var secondActivation = await client.PostAsJsonAsync("/api/activation", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "HW-B",
+            AppName = "MultiApp",
+            AppId = appId
+        });
+        Assert.Equal(HttpStatusCode.OK, secondActivation.StatusCode);
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var license = await db.Licenses.Include(l => l.Seats).SingleAsync(l => l.LicenseKey == licenseKey);
+            Assert.Equal("HW-B", license.HardwareId);
+            Assert.Contains(license.Seats, s => s.HardwareId == "HW-B" && s.IsActive);
+            Assert.Contains(license.Seats, s => s.HardwareId == "HW-A" && !s.IsActive);
+        }
+
+        client.DefaultRequestHeaders.Add("X-Admin-Secret", ProductApiSecret);
+        var adminUnlink = await client.DeleteAsync($"/api/admin/licenses/{licenseKey}/seats/HW-B");
+        Assert.Equal(HttpStatusCode.OK, adminUnlink.StatusCode);
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var license = await db.Licenses.Include(l => l.Seats).SingleAsync(l => l.LicenseKey == licenseKey);
+            Assert.Null(license.HardwareId);
+            Assert.Null(license.ActivationDate);
+            Assert.DoesNotContain(license.Seats, s => s.IsActive);
+            Assert.Contains(license.Seats, s => s.HardwareId == "HW-B" && !s.IsActive);
+        }
+    }
+
+    [Fact]
+    public async Task Deactivate_WithTrustedSettingsSource_ShouldStoreSourceInHistory()
+    {
+        var client = _factory.CreateClient();
+        string licenseKey;
+        string appId;
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var lic = await CreateLicenseAsync(scope.ServiceProvider, 1);
+            licenseKey = lic.LicenseKey;
+            appId = lic.ProductId.ToString();
+        }
+
+        var activation = await client.PostAsJsonAsync("/api/activation", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "HW-SOURCE",
+            AppName = "MultiApp",
+            AppId = appId
+        });
+        Assert.Equal(HttpStatusCode.OK, activation.StatusCode);
+
+        var unlink = await client.PostAsJsonAsync("/api/activation/deactivate", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "HW-SOURCE",
+            AppName = "MultiApp",
+            AppId = appId,
+            Source = "settings_button"
+        });
+
+        Assert.Equal(HttpStatusCode.OK, unlink.StatusCode);
+
+        using var verifyScope = _factory.Services.CreateScope();
+        var db = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var license = await db.Licenses.SingleAsync(l => l.LicenseKey == licenseKey);
+        var history = await db.LicenseHistories.SingleAsync(h => h.LicenseId == license.Id && h.Action == HistoryActions.UnlinkedApi);
+        var details = Assert.IsType<string>(history.Details);
+        Assert.Contains("settings_button", details);
+        Assert.DoesNotContain("Reset Code", details, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Deactivate_WithoutSource_ShouldClassifyLegacyUnknown_WhenSeatIsNotRecent()
+    {
+        var client = _factory.CreateClient();
+        string licenseKey;
+        string appId;
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var lic = await CreateLicenseAsync(scope.ServiceProvider, 1);
+            licenseKey = lic.LicenseKey;
+            appId = lic.ProductId.ToString();
+        }
+
+        var activation = await client.PostAsJsonAsync("/api/activation", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "HW-LEGACY-SOURCE",
+            AppName = "MultiApp",
+            AppId = appId
+        });
+        Assert.Equal(HttpStatusCode.OK, activation.StatusCode);
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var license = await db.Licenses.Include(l => l.Seats).SingleAsync(l => l.LicenseKey == licenseKey);
+            var seat = Assert.Single(license.Seats, s => s.HardwareId == "HW-LEGACY-SOURCE" && s.IsActive);
+            seat.FirstActivatedAt = DateTime.UtcNow.AddMinutes(-10);
+            await db.SaveChangesAsync();
+        }
+
+        var unlink = await client.PostAsJsonAsync("/api/activation/deactivate", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "HW-LEGACY-SOURCE",
+            AppName = "MultiApp",
+            AppId = appId
+        });
+
+        Assert.Equal(HttpStatusCode.OK, unlink.StatusCode);
+
+        using var verifyScope = _factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var verifyLicense = await verifyDb.Licenses.SingleAsync(l => l.LicenseKey == licenseKey);
+        var history = await verifyDb.LicenseHistories.SingleAsync(h => h.LicenseId == verifyLicense.Id && h.Action == HistoryActions.UnlinkedApi);
+        var details = Assert.IsType<string>(history.Details);
+        Assert.Contains("legacy_unknown", details);
+        Assert.DoesNotContain("Reset Code", details, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Deactivate_WithoutSource_ShouldRejectImmediatePostActivation()
+    {
+        var client = _factory.CreateClient();
+        string licenseKey;
+        string appId;
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var lic = await CreateLicenseAsync(scope.ServiceProvider, 1);
+            licenseKey = lic.LicenseKey;
+            appId = lic.ProductId.ToString();
+        }
+
+        var activation = await client.PostAsJsonAsync("/api/activation", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "HW-IMMEDIATE-LEGACY",
+            AppName = "MultiApp",
+            AppId = appId
+        });
+        Assert.Equal(HttpStatusCode.OK, activation.StatusCode);
+
+        var unlink = await client.PostAsJsonAsync("/api/activation/deactivate", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "HW-IMMEDIATE-LEGACY",
+            AppName = "MultiApp",
+            AppId = appId
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, unlink.StatusCode);
+
+        using var verifyScope = _factory.Services.CreateScope();
+        var db = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var license = await db.Licenses.Include(l => l.Seats).SingleAsync(l => l.LicenseKey == licenseKey);
+        Assert.Contains(license.Seats, s => s.HardwareId == "HW-IMMEDIATE-LEGACY" && s.IsActive);
+        Assert.False(await db.LicenseHistories.AnyAsync(h => h.LicenseId == license.Id && h.Action == HistoryActions.UnlinkedApi));
+    }
+
+    [Fact]
+    public async Task Deactivate_WithTrustedUninstallSource_ShouldAllowImmediatePostActivation()
+    {
+        var client = _factory.CreateClient();
+        string licenseKey;
+        string appId;
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var lic = await CreateLicenseAsync(scope.ServiceProvider, 1);
+            licenseKey = lic.LicenseKey;
+            appId = lic.ProductId.ToString();
+        }
+
+        var activation = await client.PostAsJsonAsync("/api/activation", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "HW-IMMEDIATE-UNINSTALL",
+            AppName = "MultiApp",
+            AppId = appId
+        });
+        Assert.Equal(HttpStatusCode.OK, activation.StatusCode);
+
+        var unlink = await client.PostAsJsonAsync("/api/activation/deactivate", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "HW-IMMEDIATE-UNINSTALL",
+            AppName = "MultiApp",
+            AppId = appId,
+            Source = "uninstall"
+        });
+
+        Assert.Equal(HttpStatusCode.OK, unlink.StatusCode);
+
+        using var verifyScope = _factory.Services.CreateScope();
+        var db = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var license = await db.Licenses.Include(l => l.Seats).SingleAsync(l => l.LicenseKey == licenseKey);
+        Assert.DoesNotContain(license.Seats, s => s.HardwareId == "HW-IMMEDIATE-UNINSTALL" && s.IsActive);
+        var history = await db.LicenseHistories.SingleAsync(h => h.LicenseId == license.Id && h.Action == HistoryActions.UnlinkedApi);
+        var details = Assert.IsType<string>(history.Details);
+        Assert.Contains("uninstall", details);
     }
 
     [Fact]

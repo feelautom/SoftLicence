@@ -164,6 +164,52 @@ public sealed class FreemiumAbuseRiskAnalyticsServiceTests
         Assert.DoesNotContain("Oussama", JsonSerializer.Serialize(group), StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task GetRiskForProductIdAsync_CountsActiveSeatsNotLegacyHardwareIdForMultiSeatLicense()
+    {
+        var now = DateTime.UtcNow;
+        var productId = Guid.NewGuid();
+        var freemiumTypeId = Guid.NewGuid();
+
+        await using (var db = new LicenseDbContext(_dbOptions))
+        {
+            db.Products.Add(new Product { Id = productId, Name = "TIAConnect", PrivateKeyXml = "private", PublicKeyXml = "public", ApiSecret = "secret" });
+            db.LicenseTypes.Add(new LicenseType { Id = freemiumTypeId, ProductId = productId, Name = "TIA Connect Freemium", Slug = "TIA-CONNECT-FREEMIUM", IsFree = true });
+            db.Licenses.Add(new License
+            {
+                Id = Guid.NewGuid(),
+                ProductId = productId,
+                LicenseTypeId = freemiumTypeId,
+                LicenseKey = "MULTI-SEAT",
+                CustomerEmail = "team@examplecorp.com",
+                CustomerName = "Example Corp",
+                HardwareId = "HW-LEGACY-PHANTOM",
+                ActivationDate = now.AddDays(-4),
+                CreationDate = now.AddDays(-4),
+                ExpirationDate = now.AddDays(4),
+                IsActive = true,
+                Seats =
+                {
+                    new LicenseSeat { HardwareId = "HW-SEAT-1", FirstActivatedAt = now.AddDays(-4), LastCheckInAt = now.AddHours(-2), IsActive = true },
+                    new LicenseSeat { HardwareId = "HW-SEAT-2", FirstActivatedAt = now.AddDays(-3), LastCheckInAt = now.AddHours(-1), IsActive = true }
+                }
+            });
+            AddEvent(db, productId, "HW-SEAT-1", "Mcp_ToolCall", now.AddHours(-2), "2.1.997", "203.0.113.10", "{}");
+            AddEvent(db, productId, "HW-SEAT-2", "Compile_Success", now.AddHours(-1), "2.1.997", "203.0.113.11", "{}");
+            AddEvent(db, productId, "HW-LEGACY-PHANTOM", "Tag_Export", now.AddMinutes(-30), "2.1.997", "203.0.113.12", "{}");
+            await db.SaveChangesAsync();
+        }
+
+        var service = new FreemiumAbuseRiskAnalyticsService(_dbFactoryMock.Object, _cache);
+        var period = new TelemetryAnalyticsPeriod(7, now.AddDays(-7), now.AddMinutes(1), "range");
+
+        var result = await service.GetRiskForProductIdAsync(productId, period, take: 10);
+
+        var group = Assert.Single(result.Groups);
+        Assert.Equal(2, group.HardwareIdCount);
+        Assert.Equal(2, group.TelemetryEvents);
+    }
+
     private static void AddLicense(
         LicenseDbContext db,
         Guid productId,

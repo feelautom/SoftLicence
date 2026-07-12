@@ -181,10 +181,10 @@ public sealed class TelemetrySupportProfileAnalyticsService
             .Include(l => l.Seats)
             .Where(l => productScopeIds.Contains(l.ProductId))
             .Where(l =>
-                (criteria.HardwareId != null && (l.HardwareId == criteria.HardwareId || l.Seats.Any(s => s.HardwareId == criteria.HardwareId)))
+                (criteria.HardwareId != null && (l.Seats.Any(s => s.HardwareId == criteria.HardwareId) || (l.Seats.Count == 0 && l.HardwareId == criteria.HardwareId)))
                 || (criteria.IsPartialHardwareIdLookup
-                    && ((l.HardwareId != null && l.HardwareId.ToUpper().Contains(criteria.HardwareId!))
-                        || l.Seats.Any(s => s.HardwareId != null && s.HardwareId.ToUpper().Contains(criteria.HardwareId!))))
+                    && (l.Seats.Any(s => s.HardwareId != null && s.HardwareId.ToUpper().Contains(criteria.HardwareId!))
+                        || (l.Seats.Count == 0 && l.HardwareId != null && l.HardwareId.ToUpper().Contains(criteria.HardwareId!))))
                 || (criteria.Email != null && l.CustomerEmail.ToLower().Contains(criteria.Email.ToLower()))
                 || (criteria.EmailFragment != null && l.CustomerEmail.ToLower().Contains(criteria.EmailFragment.ToLower()))
                 || (rawLicenseFragment != null
@@ -196,7 +196,7 @@ public sealed class TelemetrySupportProfileAnalyticsService
         if (criteria.IsPartialHardwareIdLookup)
         {
             var exactLicenses = licenses
-                .Where(l => l.HardwareId == criteria.HardwareId || l.Seats.Any(s => s.HardwareId == criteria.HardwareId))
+                .Where(l => l.Seats.Any(s => s.HardwareId == criteria.HardwareId) || (l.Seats.Count == 0 && l.HardwareId == criteria.HardwareId))
                 .ToList();
 
             if (exactLicenses.Count > 0)
@@ -207,12 +207,13 @@ public sealed class TelemetrySupportProfileAnalyticsService
         foreach (var license in licenses)
         {
             var matchingSeats = SelectMatchingSeats(license, criteria);
-            if (matchingSeats.Count == 0 && !string.IsNullOrWhiteSpace(license.HardwareId))
+            if (matchingSeats.Count == 0
+                && LicenseSeatHardwareResolver.ResolveActiveHardwareIds(license).SingleOrDefault() is { Seat: null } legacyHardware)
             {
                 matchingSeats.Add(new LicenseSeat
                 {
                     LicenseId = license.Id,
-                    HardwareId = license.HardwareId,
+                    HardwareId = legacyHardware.HardwareId,
                     FirstActivatedAt = license.ActivationDate ?? license.CreationDate,
                     LastCheckInAt = license.ActivationDate ?? license.CreationDate,
                     IsActive = license.IsActive
@@ -317,7 +318,7 @@ public sealed class TelemetrySupportProfileAnalyticsService
 
     private static List<LicenseSeat> SelectMatchingSeats(License license, SupportSearchCriteria criteria)
     {
-        var seats = license.Seats.ToList();
+        var seats = license.Seats.Where(s => !string.IsNullOrWhiteSpace(s.HardwareId)).ToList();
         if (!string.IsNullOrWhiteSpace(criteria.HardwareId))
         {
             return criteria.IsPartialHardwareIdLookup
@@ -325,6 +326,7 @@ public sealed class TelemetrySupportProfileAnalyticsService
                 : seats.Where(s => s.HardwareId == criteria.HardwareId).ToList();
         }
 
+        seats = seats.Where(s => s.IsActive).ToList();
         return seats.Count <= 1 ? seats : seats.Where(s => s.IsActive).Take(MaxCandidates).ToList();
     }
 
@@ -351,7 +353,7 @@ public sealed class TelemetrySupportProfileAnalyticsService
             MaxSeats = license.MaxSeats,
             ActivationDateUtc = license.ActivationDate,
             ExpirationDateUtc = license.ExpirationDate,
-            HardwareId = seat?.HardwareId ?? license.HardwareId,
+            HardwareId = seat?.HardwareId,
             SeatFirstActivatedAtUtc = seat?.FirstActivatedAt,
             SeatLastCheckInAtUtc = seat?.LastCheckInAt
         };
@@ -646,17 +648,14 @@ public sealed class TelemetrySupportProfileAnalyticsService
         var matches = new List<string>();
 
         if (criteria.HardwareId != null
-            && (string.Equals(license.HardwareId, criteria.HardwareId, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(seat?.HardwareId, criteria.HardwareId, StringComparison.OrdinalIgnoreCase)))
+            && string.Equals(seat?.HardwareId, criteria.HardwareId, StringComparison.OrdinalIgnoreCase))
         {
             matches.Add("hardware");
         }
 
         if (criteria.IsPartialHardwareIdLookup
-            && ((!string.IsNullOrWhiteSpace(license.HardwareId)
-                    && license.HardwareId.Contains(criteria.HardwareId!, StringComparison.OrdinalIgnoreCase))
-                || (!string.IsNullOrWhiteSpace(seat?.HardwareId)
-                    && seat.HardwareId.Contains(criteria.HardwareId!, StringComparison.OrdinalIgnoreCase))))
+            && !string.IsNullOrWhiteSpace(seat?.HardwareId)
+            && seat.HardwareId.Contains(criteria.HardwareId!, StringComparison.OrdinalIgnoreCase))
         {
             matches.Add("hardware_fragment");
         }

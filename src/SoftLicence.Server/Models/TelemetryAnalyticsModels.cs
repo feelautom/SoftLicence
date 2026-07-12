@@ -342,6 +342,146 @@ public sealed class TelemetrySupportQuotaSummary
     public List<TelemetryToolCount> RequestSources { get; set; } = new();
 }
 
+public sealed class CustomerLicenseTimelineResponse
+{
+    public DateTime GeneratedAtUtc { get; set; } = DateTime.UtcNow;
+    public bool Cached { get; set; }
+    public DateTime ExpiresAtUtc { get; set; }
+    public int Days { get; set; }
+    public DateTime FromUtc { get; set; }
+    public DateTime ToUtc { get; set; }
+    public string PeriodMode { get; set; } = "rolling";
+    public CustomerLicenseTimelineQuery Query { get; set; } = new();
+    public CustomerLicenseTimelineSummary Summary { get; set; } = new();
+    public List<CustomerLicenseTimelineCandidate> Candidates { get; set; } = new();
+    public List<CustomerLicenseTimelineLicense> Licenses { get; set; } = new();
+    public List<CustomerLicenseTimelineHardwareId> HardwareIds { get; set; } = new();
+    public List<CustomerLicenseTimelineItem> Timeline { get; set; } = new();
+    public int TimelineTotal { get; set; }
+    public int TimelineReturned { get; set; }
+    public int OmittedRecords { get; set; }
+    public bool HasMore { get; set; }
+}
+
+public sealed class CustomerLicenseTimelineQuery
+{
+    public bool HasEmail { get; set; }
+    public bool HasEmailFragment { get; set; }
+    public bool HasHardwareId { get; set; }
+    public bool HasLicenseId { get; set; }
+    public bool HasLicenseFragment { get; set; }
+    public bool IncludeAccessLogs { get; set; }
+    public bool IncludeNoise { get; set; }
+    public bool IncludeProperties { get; set; }
+    public bool ImportantOnly { get; set; }
+    public string Mode { get; set; } = "timeline";
+    public int TakeTimeline { get; set; }
+    public int Offset { get; set; }
+}
+
+public sealed class CustomerLicenseTimelineSummary
+{
+    public int CandidateCount { get; set; }
+    public bool IsAmbiguous { get; set; }
+    public int LicenseCount { get; set; }
+    public int HardwareIdCount { get; set; }
+    public int ActiveSeatCount { get; set; }
+    public int TelemetryRecords { get; set; }
+    public int AccessLogRecords { get; set; }
+    public int LicenseEvents { get; set; }
+    public int SeatEvents { get; set; }
+    public int RealActivityEvents { get; set; }
+    public int SystemNoiseEvents { get; set; }
+    public int DiagnosticEvents { get; set; }
+    public int ErrorEvents { get; set; }
+    public DateTime? FirstEventUtc { get; set; }
+    public DateTime? LastEventUtc { get; set; }
+    public bool UpdateRevokeLicenseSeen { get; set; }
+    public bool ServerSeatUnlinkTraceSeen { get; set; }
+    public bool LicenseDeactivationTraceSeen { get; set; }
+    public string ServerDeactivationVerdict { get; set; } = "not_evaluated";
+    public List<string> VerdictCodes { get; set; } = new();
+    public List<string> Notes { get; set; } = new();
+}
+
+public sealed class CustomerLicenseTimelineCandidate
+{
+    public Guid? LicenseId { get; set; }
+    public string MatchType { get; set; } = "";
+    public string? ProductName { get; set; }
+    public string? CustomerName { get; set; }
+    public string? CustomerEmail { get; set; }
+    public string? CustomerEmailRedacted { get; set; }
+    public string? LicenseKeyRedacted { get; set; }
+    public string? LicenseKeyFirstSegment { get; set; }
+    public string? LicenseStatus { get; set; }
+    public string? HardwareId { get; set; }
+}
+
+public sealed class CustomerLicenseTimelineLicense
+{
+    public Guid LicenseId { get; set; }
+    public Guid ProductId { get; set; }
+    public string? ProductName { get; set; }
+    public string? CustomerName { get; set; }
+    public string? CustomerEmail { get; set; }
+    public string? CustomerEmailRedacted { get; set; }
+    public string? LicenseKeyRedacted { get; set; }
+    public string? LicenseKeyFirstSegment { get; set; }
+    public string LicenseStatus { get; set; } = "";
+    public string? LicenseTypeSlug { get; set; }
+    public string? LicenseTypeName { get; set; }
+    public string? LicenseEdition { get; set; }
+    public DateTime CreationDateUtc { get; set; }
+    public DateTime? ActivationDateUtc { get; set; }
+    public DateTime? ExpirationDateUtc { get; set; }
+    public DateTime? RevokedAtUtc { get; set; }
+    public int MaxSeats { get; set; }
+    public int ActiveSeats { get; set; }
+    public int TotalSeats { get; set; }
+    public List<string> HardwareIds { get; set; } = new();
+}
+
+public sealed class CustomerLicenseTimelineHardwareId
+{
+    public string HardwareId { get; set; } = "";
+    public string HardwareIdRedacted { get; set; } = "";
+    public int TelemetryRecords { get; set; }
+    public int RealActivityEvents { get; set; }
+    public int SystemNoiseEvents { get; set; }
+    public DateTime? FirstTelemetryUtc { get; set; }
+    public DateTime? LastTelemetryUtc { get; set; }
+    public bool IsCurrentActiveSeat { get; set; }
+    public DateTime? SeatFirstActivatedAtUtc { get; set; }
+    public DateTime? SeatLastCheckInAtUtc { get; set; }
+    public DateTime? SeatDeactivatedAtUtc { get; set; }
+    public List<TelemetryToolCount> TopEvents { get; set; } = new();
+    public List<TelemetryToolCount> Versions { get; set; } = new();
+    public List<TelemetryToolCount> ClientIps { get; set; } = new();
+    public List<TelemetryToolCount> Environment { get; set; } = new();
+    public List<CustomerLicenseTimelineItem> RecentSignificantEvents { get; set; } = new();
+}
+
+public sealed class CustomerLicenseTimelineItem
+{
+    public DateTime TimestampUtc { get; set; }
+    public string Source { get; set; } = "";
+    public string? HardwareId { get; set; }
+    public string? HardwareIdRedacted { get; set; }
+    public Guid? LicenseId { get; set; }
+    public string? EventName { get; set; }
+    public string? Action { get; set; }
+    public string Category { get; set; } = "usage";
+    public string Severity { get; set; } = "info";
+    public string Result { get; set; } = "observed";
+    public string? ReasonCode { get; set; }
+    public string? ClientIp { get; set; }
+    public string? AppVersion { get; set; }
+    public Dictionary<string, string> ShortProperties { get; set; } = new();
+    public string? CorrelationId { get; set; }
+    public string? SessionCorrelationId { get; set; }
+}
+
 public sealed class TelemetrySupportQuotaMetric
 {
     public string QuotaKey { get; set; } = "";

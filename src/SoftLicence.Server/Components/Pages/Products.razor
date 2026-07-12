@@ -1682,6 +1682,7 @@
                 Prefix = SoftLicence.Server.Services.AnalyticsApiKeyAuthService.BuildPrefix(rawKey),
                 KeyHash = SoftLicence.Server.Services.AnalyticsApiKeyAuthService.ComputeKeyHash(rawKey),
                 Scopes = AnalyticsApiKeyScopes.TelemetryRead,
+                ScopeKind = AnalyticsApiKeyScopeKinds.Product,
                 IsActive = true
             };
 

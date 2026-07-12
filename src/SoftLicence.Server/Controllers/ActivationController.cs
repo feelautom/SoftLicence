@@ -15,6 +15,9 @@ namespace SoftLicence.Server.Controllers
     [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("PublicAPI")]
     public class ActivationController : ControllerBase
     {
+        private const string ActivationErrorCodeHeader = "X-SoftLicence-Error-Code";
+        private static readonly TimeSpan AnonymousDeactivationGuardWindow = TimeSpan.FromMinutes(5);
+
         private readonly LicenseDbContext _db;
         private readonly ILogger<ActivationController> _logger;
         private readonly Services.EncryptionService _encryption;
@@ -120,12 +123,57 @@ namespace SoftLicence.Server.Controllers
         private void TagActivationFailure(string resultStatus)
         {
             HttpContext.Items[LogKeys.ResultStatusOverride] = resultStatus;
+            Response.Headers[ActivationErrorCodeHeader] = resultStatus;
+        }
+
+        private IActionResult ActivationJsonFailure(string errorCode, string errorMessage)
+        {
+            TagActivationFailure(errorCode);
+            return Ok(new { isSuccess = false, errorMessage, errorCode });
         }
 
         private static Dictionary<string, string> BuildFeatures(IEnumerable<LicenseTypeCustomParam>? customParams)
         {
             if (customParams == null) return new Dictionary<string, string>();
             return customParams.ToDictionary(p => p.Key, p => p.Value);
+        }
+
+        private static void SyncLegacyHardwareStateFromSeats(License license)
+        {
+            var activeSeat = license.Seats
+                .Where(s => s.IsActive)
+                .OrderByDescending(s => s.LastCheckInAt)
+                .ThenByDescending(s => s.FirstActivatedAt)
+                .FirstOrDefault();
+
+            license.HardwareId = activeSeat?.HardwareId;
+            license.ActivationDate = activeSeat?.FirstActivatedAt;
+
+            if (activeSeat == null)
+                license.RecoveryCount = 0;
+        }
+
+        private static string NormalizeDeactivationSource(string? source, string? deactivationSource)
+        {
+            var raw = string.IsNullOrWhiteSpace(source) ? deactivationSource : source;
+            if (string.IsNullOrWhiteSpace(raw))
+                return "legacy_unknown";
+
+            return raw.Trim().ToLowerInvariant() switch
+            {
+                "settings_button" or "settings" or "settings-button" => "settings_button",
+                "uninstall" or "uninstaller" => "uninstall",
+                "portal" => "portal",
+                "admin" => "admin",
+                "legacy_unknown" => "legacy_unknown",
+                "unknown" => "unknown",
+                _ => "unknown"
+            };
+        }
+
+        private static bool IsTrustedImmediateDeactivationSource(string source)
+        {
+            return source is "settings_button" or "uninstall";
         }
 
         private static void ApplyPluginMetadataFromReference(LicenseModel model)
@@ -327,7 +375,7 @@ namespace SoftLicence.Server.Controllers
                 compBanned = cb;
             }
             if (hwidBanned || compBanned)
-                return Ok(new { isSuccess = false, errorMessage = "Access denied by server" });
+                return ActivationJsonFailure(compBanned ? "COMPONENT_BANNED" : "BANNED", "Access denied by server");
 
             if (req.ComponentFingerprints != null)
             {
@@ -555,7 +603,7 @@ namespace SoftLicence.Server.Controllers
                 compBanned = cb;
             }
             if (compBanned)
-                return Ok(new { isSuccess = false, errorMessage = "Access denied by server" });
+                return ActivationJsonFailure("COMPONENT_BANNED", "Access denied by server");
 
             // Utiliser le nom canonique pour le log
             HttpContext.Items[LogKeys.AppName] = product.Name;
@@ -564,7 +612,7 @@ namespace SoftLicence.Server.Controllers
             if (cleanKey.EndsWith("-FREE-TRIAL") || cleanKey == "FREE-TRIAL")
             {
                 if (hwidBanned)
-                    return Ok(new { isSuccess = false, errorMessage = "Access denied by server" });
+                    return ActivationJsonFailure("BANNED", "Access denied by server");
 
                 _logger.LogInformation("Detection d'une demande AUTO-TRIAL pour {AppName}", product.Name);
                 HttpContext.Items[LogKeys.Endpoint] = "TRIAL_AUTO";
@@ -854,11 +902,11 @@ namespace SoftLicence.Server.Controllers
             if (hwidBanned)
             {
                 if (!IsPaidLicenseEligibleForAutoUnban(license))
-                    return Ok(new { isSuccess = false, errorMessage = "Access denied by server" });
+                    return ActivationJsonFailure("BANNED", "Access denied by server");
 
                 var (canProceed, permanentBan) = await _security.TryAutoUnbanForPaidLicenseAsync(req.HardwareId, license.ProductId);
                 if (!canProceed)
-                    return Ok(new { isSuccess = false, errorMessage = permanentBan ? "Access permanently denied" : "Access denied by server" });
+                    return ActivationJsonFailure("BANNED", permanentBan ? "Access permanently denied" : "Access denied by server");
 
                 hwidBanned = false;
             }
@@ -871,6 +919,8 @@ namespace SoftLicence.Server.Controllers
                 // Poste déjà connu : On met à jour la date de passage
                 existingSeat.LastCheckInAt = DateTime.UtcNow;
                 if (!string.IsNullOrEmpty(req.AppVersion)) existingSeat.AppVersion = req.AppVersion;
+                license.HardwareId = req.HardwareId;
+                license.ActivationDate = existingSeat.FirstActivatedAt;
                 var resolvedVersion = req.AppVersion ?? existingSeat.AppVersion ?? "Unknown";
                 license.RecoveryCount++;
                 TagLog(req, "RECOVERY");
@@ -898,7 +948,7 @@ namespace SoftLicence.Server.Controllers
 
                 if (currentSeatsCount >= license.MaxSeats)
                 {
-                    TagActivationFailure("MAX_ACTIVATIONS_REACHED");
+                    TagActivationFailure("SEAT_LIMIT");
                     _logger.LogWarning("Activation echouee : Limite de postes atteinte ({Max}) pour la clé '{LicenseKey}'", license.MaxSeats, cleanKey);
                     return BadRequest(string.Format(_localizer["Api_MaxActivationsReached"].Value, license.MaxSeats));
                 }
@@ -936,11 +986,11 @@ namespace SoftLicence.Server.Controllers
                     PerformedBy = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown"
                 });
 
-                // Pour la compatibilité v1, on met à jour le HardwareId principal si c'est le premier poste
-                if (string.IsNullOrEmpty(license.HardwareId))
+                // Pour la compatibilité v1, on garde le champ principal aligné sur le premier poste actif.
+                if (currentSeatsCount == 0 || string.IsNullOrEmpty(license.HardwareId))
                 {
                     license.HardwareId = req.HardwareId;
-                    license.ActivationDate = DateTime.UtcNow;
+                    license.ActivationDate = newSeat.FirstActivatedAt;
 
                     // Démarrer le décompte de validité à la première activation
                     if (license.ValidityDays.HasValue && !license.ExpirationDate.HasValue)
@@ -1254,10 +1304,12 @@ namespace SoftLicence.Server.Controllers
                     _db.LicenseHistories.Add(new LicenseHistory {
                         LicenseId = license.Id,
                         Action = HistoryActions.UnlinkedApi,
-                        Details = string.Format(_localizer["Licenses_Action_UnlinkedApi"].Value, seat.HardwareId),
+                        Details = string.Format(_localizer["Licenses_Action_UnlinkedApiResetCode"].Value, seat.HardwareId),
                         PerformedBy = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown"
                     });
                 }
+
+                SyncLegacyHardwareStateFromSeats(license);
             }
 
             await _db.SaveChangesAsync();
@@ -1271,6 +1323,8 @@ namespace SoftLicence.Server.Controllers
             public required string HardwareId { get; set; }
             public required string AppName { get; set; }
             public string? AppId { get; set; }
+            public string? Source { get; set; }
+            public string? DeactivationSource { get; set; }
             public Dictionary<string, string>? ComponentFingerprints { get; set; }
         }
 
@@ -1278,10 +1332,12 @@ namespace SoftLicence.Server.Controllers
         public async Task<IActionResult> Deactivate([FromBody] DeactivateRequest req)
         {
             var cleanKey = req.LicenseKey.Trim().ToUpper();
+            var source = NormalizeDeactivationSource(req.Source, req.DeactivationSource);
             HttpContext.Items[LogKeys.AppName] = req.AppName;
             HttpContext.Items[LogKeys.LicenseKey] = cleanKey;
             HttpContext.Items[LogKeys.HardwareId] = req.HardwareId;
             HttpContext.Items[LogKeys.Endpoint] = "DEACTIVATE";
+            HttpContext.Items["DeactivationSource"] = source;
 
             if (await _security.IsHardwareIdBannedAsync(req.HardwareId))
                 return StatusCode(403, "Access denied");
@@ -1315,14 +1371,35 @@ namespace SoftLicence.Server.Controllers
             var seat = license.Seats?.FirstOrDefault(s => s.HardwareId == req.HardwareId && s.IsActive);
             if (seat == null) return NotFound("Appareil non trouvé ou déjà délié.");
 
+            var seatAge = DateTime.UtcNow - seat.FirstActivatedAt;
+            if (seatAge < AnonymousDeactivationGuardWindow
+                && !IsTrustedImmediateDeactivationSource(source))
+            {
+                _logger.LogWarning(
+                    "Immediate deactivation refused for license {LicenseId}, HWID {HardwareId}, source {DeactivationSource}, seat age {SeatAgeSeconds}s.",
+                    license.Id,
+                    req.HardwareId,
+                    source,
+                    Math.Round(seatAge.TotalSeconds));
+                return BadRequest(_localizer["Api_DeactivationTooRecentRequiresSource"].Value);
+            }
+
             seat.IsActive = false;
             seat.UnlinkedAt = DateTime.UtcNow;
+            SyncLegacyHardwareStateFromSeats(license);
+
+            _logger.LogInformation(
+                "Client deactivation accepted for license {LicenseId}, HWID {HardwareId}, source {DeactivationSource}, seat age {SeatAgeSeconds}s.",
+                license.Id,
+                req.HardwareId,
+                source,
+                Math.Round(seatAge.TotalSeconds));
 
             _db.LicenseHistories.Add(new LicenseHistory
             {
                 LicenseId = license.Id,
                 Action = HistoryActions.UnlinkedApi,
-                Details = string.Format(_localizer["Licenses_Action_UnlinkedApi"].Value, req.HardwareId),
+                Details = string.Format(_localizer["Licenses_Action_UnlinkedApi"].Value, req.HardwareId, source),
                 PerformedBy = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown"
             });
 

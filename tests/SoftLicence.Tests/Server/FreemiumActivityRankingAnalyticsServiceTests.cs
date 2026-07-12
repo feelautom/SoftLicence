@@ -249,6 +249,48 @@ public sealed class FreemiumActivityRankingAnalyticsServiceTests
         Assert.Single(paidOnly.LicenseTypes);
     }
 
+    [Fact]
+    public async Task GetRankingForProductIdAsync_DoesNotRankLegacyHardwareIdWhenActiveSeatExists()
+    {
+        var now = DateTime.UtcNow;
+        var productId = Guid.NewGuid();
+        var typeId = Guid.NewGuid();
+
+        await using (var db = new LicenseDbContext(_dbOptions))
+        {
+            db.Products.Add(new Product { Id = productId, Name = "TIAConnect", PrivateKeyXml = "private", PublicKeyXml = "public", ApiSecret = "secret" });
+            db.LicenseTypes.Add(new LicenseType { Id = typeId, ProductId = productId, Name = "TIA Connect Freemium", Slug = "TIA-CONNECT-FREEMIUM", IsFree = true });
+            db.Licenses.Add(new License
+            {
+                Id = Guid.NewGuid(),
+                ProductId = productId,
+                LicenseTypeId = typeId,
+                LicenseKey = "FREE-LEGACY-SEAT",
+                CustomerEmail = "phantom@example.test",
+                CustomerName = "Phantom",
+                HardwareId = "HW-LEGACY-PHANTOM",
+                ActivationDate = now.AddDays(-3),
+                CreationDate = now.AddDays(-3),
+                ExpirationDate = now.AddDays(3),
+                IsActive = true,
+                Seats =
+                {
+                    new LicenseSeat { HardwareId = "HW-ACTIVE-SEAT", FirstActivatedAt = now.AddDays(-2), LastCheckInAt = now.AddHours(-1), IsActive = true }
+                }
+            });
+            AddEvent(db, productId, "HW-LEGACY-PHANTOM", "BlockGeneration_Success", now.AddHours(-1), "{}");
+            await db.SaveChangesAsync();
+        }
+
+        var service = new FreemiumActivityRankingAnalyticsService(_dbFactoryMock.Object, _cache);
+
+        var result = await service.GetRankingForProductIdAsync(productId, status: "active", telemetryDays: 7, take: 10);
+
+        Assert.Equal(1, result.Summary.TotalLicensesInFilter);
+        Assert.Equal(0, result.Summary.RankedMachines);
+        Assert.Empty(result.Rankings);
+    }
+
     private static void AddLicense(
         LicenseDbContext db,
         Guid productId,

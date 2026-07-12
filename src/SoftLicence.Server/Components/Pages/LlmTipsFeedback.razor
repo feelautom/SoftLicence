@@ -254,7 +254,17 @@ else
                                                         Hash complet: <code>@selectedTip.ContentHash</code><br />
                                                         Premier signal: @TZ.ToLocal(selectedTip.FirstSeenAtUtc).ToString("dd/MM/yyyy HH:mm") ·
                                                         Soumis: @(selectedTip.SubmittedAtUtc.HasValue ? TZ.ToLocal(selectedTip.SubmittedAtUtc.Value).ToString("dd/MM/yyyy HH:mm") : "-")<br />
-                                                        App: @Display(selectedTip.AppName) @Display(selectedTip.AppVersion) · Licence: @Display(selectedTip.LicenseEdition)
+                                                        App: @Display(selectedTip.AppName) @Display(selectedTip.AppVersion) · Licence: @Display(selectedTip.LicenseEdition)<br />
+                                                        BugTrace: @Display(selectedTip.BugTraceTicketRef)
+                                                    </div>
+                                                    <div class="d-flex align-items-center gap-2 mt-3">
+                                                        <button class="btn btn-warning btn-sm" disabled="@(!CanConvertSelectedTip || convertingToBugTrace)" @onclick="ConvertSelectedTipToBugTrace">
+                                                            Convertir BugTrace
+                                                        </button>
+                                                        @if (!string.IsNullOrWhiteSpace(conversionMessage))
+                                                        {
+                                                            <span class="small text-muted">@conversionMessage</span>
+                                                        }
                                                     </div>
                                                 </div>
                                                 <div class="col-md-5">
@@ -296,6 +306,13 @@ else
     private int selectedDays = 30;
     private LlmTipFeedbackAdminOverview? overview;
     private LlmTipFeedbackTipDetail? selectedTip;
+    private bool convertingToBugTrace;
+    private string? conversionMessage;
+
+    private bool CanConvertSelectedTip =>
+        selectedTip != null &&
+        string.IsNullOrWhiteSpace(selectedTip.BugTraceTicketRef) &&
+        selectedTip.ReviewStatus != "converted-to-bugtrace";
 
     protected override async Task OnInitializedAsync()
     {
@@ -328,6 +345,7 @@ else
     {
         loading = true;
         selectedTip = null;
+        conversionMessage = null;
 
         overview = await FeedbackService.GetAdminOverviewAsync(new LlmTipFeedbackAdminQuery
         {
@@ -352,6 +370,7 @@ else
 
     private async Task SelectTip(Guid id)
     {
+        conversionMessage = null;
         selectedTip = selectedTip?.Id == id
             ? null
             : await FeedbackService.GetTipDetailAsync(id);
@@ -362,6 +381,38 @@ else
         if (string.IsNullOrWhiteSpace(status)) return;
         await FeedbackService.UpdateReviewStatusAsync(id, status);
         await LoadData();
+    }
+
+    private async Task ConvertSelectedTipToBugTrace()
+    {
+        if (selectedTip == null) return;
+
+        var selectedId = selectedTip.Id;
+        convertingToBugTrace = true;
+        conversionMessage = null;
+        try
+        {
+            var result = await FeedbackService.ConvertToBugTraceAsync(
+                selectedId,
+                contentHash: null,
+                selectedTip.ProductId,
+                priority: null,
+                type: null);
+
+            await LoadData();
+            selectedTip = await FeedbackService.GetTipDetailAsync(selectedId);
+            conversionMessage = result == null
+                ? "Tip introuvable."
+                : $"Ticket {result.BugTraceTicketRef} cree.";
+        }
+        catch (Exception ex)
+        {
+            conversionMessage = ex.Message;
+        }
+        finally
+        {
+            convertingToBugTrace = false;
+        }
     }
 
     private static string Display(string? value) => string.IsNullOrWhiteSpace(value) ? "-" : value;

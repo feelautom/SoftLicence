@@ -219,15 +219,21 @@ namespace SoftLicence.SDK
 
         public async Task<DeactivationResult> DeactivateAsync(string licenseKey, string appName, string? appId = null)
         {
+            var hwId = HardwareInfo.GetHardwareId();
+            return await DeactivateAsync(licenseKey, appName, hwId, "settings_button", appId);
+        }
+
+        public async Task<DeactivationResult> DeactivateAsync(string licenseKey, string appName, string hardwareId, string source, string? appId = null)
+        {
             try
             {
-                var hwId = HardwareInfo.GetHardwareId();
                 var payload = new Dictionary<string, string?>
                 {
                     ["LicenseKey"] = licenseKey,
-                    ["HardwareId"] = hwId,
+                    ["HardwareId"] = hardwareId,
                     ["AppName"] = appName,
-                    ["AppId"] = appId
+                    ["AppId"] = appId,
+                    ["Source"] = source
                 }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
 
                 var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");

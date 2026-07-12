@@ -40,7 +40,8 @@ public sealed class SecurityCaseContextService
         var licenses = await db.Licenses.AsNoTracking()
             .Include(l => l.Seats)
             .Where(l => l.ProductId == productId
-                && (l.HardwareId == hardwareId || l.Seats.Any(s => s.HardwareId == hardwareId)))
+                && (l.Seats.Any(s => s.HardwareId == hardwareId)
+                    || (l.Seats.Count == 0 && l.HardwareId == hardwareId)))
             .ToListAsync(cancellationToken);
 
         var failures = await db.AccessLogs.AsNoTracking()
@@ -52,7 +53,7 @@ public sealed class SecurityCaseContextService
 
         var activations = licenses
             .SelectMany(l => l.Seats.Where(s => s.HardwareId == hardwareId).Select(s => (DateTime?)s.FirstActivatedAt))
-            .Concat(licenses.Select(l => l.ActivationDate))
+            .Concat(licenses.Where(l => l.Seats.Count == 0 && l.HardwareId == hardwareId).Select(l => l.ActivationDate))
             .Count(date => date.HasValue && date.Value >= recentSince);
 
         return new SecurityCaseContext

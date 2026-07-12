@@ -329,6 +329,108 @@ public sealed class TelemetrySupportProfileAnalyticsServiceTests
         Assert.Contains(profile.Candidates[0].ClientIps, ip => ip.Name == "2001:db8::42" && ip.Count == 3);
     }
 
+    [Fact]
+    public async Task GetSupportProfileForProductIdAsync_ByEmailUsesActiveSeatInsteadOfLegacyHardwareId()
+    {
+        var productId = await SeedAsync();
+        await using (var db = new LicenseDbContext(_dbOptions))
+        {
+            var typeId = await db.LicenseTypes.Where(t => t.ProductId == productId).Select(t => t.Id).FirstAsync();
+            db.Licenses.Add(new License
+            {
+                Id = Guid.NewGuid(),
+                ProductId = productId,
+                LicenseTypeId = typeId,
+                LicenseKey = "LEGA-CYHW-CCCC-DDDD",
+                CustomerName = "Legacy Phantom",
+                CustomerEmail = "legacyphantom@example.com",
+                HardwareId = "HW-LEGACY-PHANTOM",
+                ActivationDate = DateTime.UtcNow.AddDays(-3),
+                IsActive = true,
+                MaxSeats = 1,
+                Seats =
+                {
+                    new LicenseSeat
+                    {
+                        HardwareId = "HW-ACTIVE-TRUTH",
+                        FirstActivatedAt = DateTime.UtcNow.AddDays(-2),
+                        LastCheckInAt = DateTime.UtcNow.AddHours(-1),
+                        IsActive = true
+                    }
+                }
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var service = CreateService();
+
+        var byEmail = await service.GetSupportProfileForProductIdAsync(
+            productId,
+            hardwareId: null,
+            email: "legacyphantom@example.com",
+            emailFragment: null,
+            licenseFragment: null,
+            clientIp: null,
+            days: 7,
+            take: 10);
+
+        var candidate = Assert.Single(byEmail.Candidates);
+        Assert.Equal("HW-ACTIVE-TRUTH", candidate.HardwareId);
+        Assert.DoesNotContain("hardware", candidate.MatchType);
+
+        var byLegacyHardware = await service.GetSupportProfileForProductIdAsync(
+            productId,
+            hardwareId: "HW-LEGACY-PHANTOM",
+            email: null,
+            emailFragment: null,
+            licenseFragment: null,
+            clientIp: null,
+            days: 7,
+            take: 10);
+
+        Assert.Equal(0, byLegacyHardware.CandidateCount);
+    }
+
+    [Fact]
+    public async Task GetSupportProfileForProductIdAsync_FallsBackToLegacyHardwareIdWhenNoSeatHistoryExists()
+    {
+        var productId = await SeedAsync();
+        await using (var db = new LicenseDbContext(_dbOptions))
+        {
+            var typeId = await db.LicenseTypes.Where(t => t.ProductId == productId).Select(t => t.Id).FirstAsync();
+            db.Licenses.Add(new License
+            {
+                Id = Guid.NewGuid(),
+                ProductId = productId,
+                LicenseTypeId = typeId,
+                LicenseKey = "ONLY-LEGA-CCCC-DDDD",
+                CustomerName = "Legacy Only",
+                CustomerEmail = "legacyonly@example.com",
+                HardwareId = "HW-LEGACY-ONLY",
+                ActivationDate = DateTime.UtcNow.AddDays(-3),
+                IsActive = true,
+                MaxSeats = 1
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var service = CreateService();
+
+        var profile = await service.GetSupportProfileForProductIdAsync(
+            productId,
+            hardwareId: "HW-LEGACY-ONLY",
+            email: null,
+            emailFragment: null,
+            licenseFragment: null,
+            clientIp: null,
+            days: 7,
+            take: 10);
+
+        var candidate = Assert.Single(profile.Candidates);
+        Assert.Equal("HW-LEGACY-ONLY", candidate.HardwareId);
+        Assert.Contains("hardware", candidate.MatchType);
+    }
+
     private TelemetrySupportProfileAnalyticsService CreateService()
     {
         return new TelemetrySupportProfileAnalyticsService(

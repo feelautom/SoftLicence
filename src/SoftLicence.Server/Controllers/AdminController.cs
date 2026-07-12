@@ -127,6 +127,21 @@ namespace SoftLicence.Server.Controllers
             HttpContext.Items[LogKeys.LicenseKey] = details;
         }
 
+        private static void SyncLegacyHardwareStateFromSeats(License license)
+        {
+            var activeSeat = license.Seats
+                .Where(s => s.IsActive)
+                .OrderByDescending(s => s.LastCheckInAt)
+                .ThenByDescending(s => s.FirstActivatedAt)
+                .FirstOrDefault();
+
+            license.HardwareId = activeSeat?.HardwareId;
+            license.ActivationDate = activeSeat?.FirstActivatedAt;
+
+            if (activeSeat == null)
+                license.RecoveryCount = 0;
+        }
+
         // ── Helpers internes ──────────────────────────────────────────────────────
 
         /// <summary>Autorise uniquement les IPs du réseau interne (Docker / RFC 1918).</summary>
@@ -476,6 +491,7 @@ namespace SoftLicence.Server.Controllers
                 Prefix = Services.AnalyticsApiKeyAuthService.BuildPrefix(rawKey),
                 KeyHash = Services.AnalyticsApiKeyAuthService.ComputeKeyHash(rawKey),
                 Scopes = string.IsNullOrWhiteSpace(req?.Scopes) ? AnalyticsApiKeyScopes.TelemetryRead : req.Scopes.Trim(),
+                ScopeKind = AnalyticsApiKeyScopeKinds.Product,
                 ExpiresAtUtc = req?.ExpiresAtUtc,
                 IsActive = true
             };
@@ -490,9 +506,92 @@ namespace SoftLicence.Server.Controllers
                 key.Name,
                 key.Prefix,
                 key.Scopes,
+                key.ScopeKind,
                 key.ExpiresAtUtc,
                 ApiKey = rawKey
             });
+        }
+
+        [HttpGet("analytics-keys/global")]
+        public async Task<IActionResult> GetGlobalAnalyticsApiKeys()
+        {
+            TagLog("LIST_GLOBAL_ANALYTICS_KEYS");
+            var (authorized, scopedProductId) = await GetAuthContextAsync();
+            if (!authorized || scopedProductId != null) return Unauthorized();
+
+            var keys = await _db.AnalyticsApiKeys
+                .AsNoTracking()
+                .Where(k => k.ScopeKind == AnalyticsApiKeyScopeKinds.Global)
+                .OrderByDescending(k => k.CreatedAtUtc)
+                .Select(k => new
+                {
+                    k.Id,
+                    k.Name,
+                    k.Prefix,
+                    k.Scopes,
+                    k.ScopeKind,
+                    k.IsActive,
+                    k.CreatedAtUtc,
+                    k.ExpiresAtUtc,
+                    k.LastUsedAtUtc,
+                    k.LastUsedIp
+                })
+                .ToListAsync();
+
+            return Ok(keys);
+        }
+
+        [HttpPost("analytics-keys/global")]
+        public async Task<IActionResult> CreateGlobalAnalyticsApiKey([FromBody] CreateAnalyticsApiKeyRequest? req)
+        {
+            TagLog("CREATE_GLOBAL_ANALYTICS_KEY");
+            var (authorized, scopedProductId) = await GetAuthContextAsync();
+            if (!authorized || scopedProductId != null) return Unauthorized();
+
+            var rawKey = GenerateAnalyticsApiKey();
+            var key = new AnalyticsApiKey
+            {
+                ProductId = null,
+                Name = string.IsNullOrWhiteSpace(req?.Name) ? "Global MCP analytics" : req.Name.Trim(),
+                Prefix = Services.AnalyticsApiKeyAuthService.BuildPrefix(rawKey),
+                KeyHash = Services.AnalyticsApiKeyAuthService.ComputeKeyHash(rawKey),
+                Scopes = string.IsNullOrWhiteSpace(req?.Scopes)
+                    ? $"{AnalyticsApiKeyScopes.TelemetryRead} {AnalyticsApiKeyScopes.MultiProductRead}"
+                    : req.Scopes.Trim(),
+                ScopeKind = AnalyticsApiKeyScopeKinds.Global,
+                ExpiresAtUtc = req?.ExpiresAtUtc,
+                IsActive = true
+            };
+
+            _db.AnalyticsApiKeys.Add(key);
+            await _db.SaveChangesAsync();
+
+            return Ok(new
+            {
+                key.Id,
+                key.ProductId,
+                key.Name,
+                key.Prefix,
+                key.Scopes,
+                key.ScopeKind,
+                key.ExpiresAtUtc,
+                ApiKey = rawKey
+            });
+        }
+
+        [HttpPost("analytics-keys/{keyId:guid}/revoke")]
+        public async Task<IActionResult> RevokeAnalyticsApiKey(Guid keyId)
+        {
+            TagLog("REVOKE_ANALYTICS_KEY", keyId.ToString());
+            var (authorized, scopedProductId) = await GetAuthContextAsync();
+            if (!authorized || scopedProductId != null) return Unauthorized();
+
+            var key = await _db.AnalyticsApiKeys.FindAsync(keyId);
+            if (key == null) return NotFound();
+
+            key.IsActive = false;
+            await _db.SaveChangesAsync();
+            return Ok(new { key.Id, key.IsActive });
         }
 
         private static string GenerateAnalyticsApiKey()
@@ -874,6 +973,7 @@ namespace SoftLicence.Server.Controllers
 
             seat.IsActive = false;
             seat.UnlinkedAt = DateTime.UtcNow;
+            SyncLegacyHardwareStateFromSeats(license);
 
             _db.LicenseHistories.Add(new LicenseHistory
             {
@@ -1454,6 +1554,7 @@ namespace SoftLicence.Server.Controllers
             public string Reason { get; set; } = "Manual ban";
             public Guid? ProductId { get; set; }
             public DateTime? ExpiresAt { get; set; }
+            public string? BanCategory { get; set; }
         }
 
         [HttpPost("banned-hwids")]
@@ -1462,7 +1563,7 @@ namespace SoftLicence.Server.Controllers
             var (auth, _) = await GetAuthContextAsync();
             if (!auth) return Unauthorized();
 
-            await _security.BanHardwareIdAsync(req.HardwareId.Trim(), req.Reason, req.ProductId, req.ExpiresAt);
+            await _security.BanHardwareIdAsync(req.HardwareId.Trim(), req.Reason, req.ProductId, req.ExpiresAt, banCategory: req.BanCategory);
             return Ok(new { Message = $"Hardware ID {req.HardwareId} banned" });
         }
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## SDK v1.1.10 — Unreleased
+- fix(sdk): stabilize disk fingerprint selection by reading `Win32_DiskDrive.SerialNumber` with `Index=0` before falling back to the legacy first non-empty disk serial
+- test(sdk): cover variable WMI disk order, multi-disk `Index=0` selection, legacy fallback, and `FP_DISK` alignment
+- note(sdk): this stabilizes future HWID calculation; accepting an old and new divergent HWID for already-activated licenses remains a separate server/license migration design
+
 ## SDK v1.1.9 — 2026-07-07
 - feat(sdk): add optional signed plugin/sub-product metadata: `PluginId`, `PluginVersion`, `MinAppVersion`, `AllowedFeatures`
 - fix(sdk): keep standard license JSON compatible with legacy clients by omitting null plugin fields

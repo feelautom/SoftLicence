@@ -136,6 +136,109 @@ public class TelemetryServiceTests
     }
 
     [Fact]
+    public async Task SaveEventAsync_WhenSameEventFloods_ShouldSuppressAfterThreshold()
+    {
+        using (var db = new LicenseDbContext(_dbOptions))
+        {
+            await SeedProductAsync(db, "YOUR_APP_NAME");
+        }
+
+        var service = BuildTelemetryServiceWithFloodSettings(threshold: 3, windowMinutes: 10);
+        var request = new TelemetryEventRequest
+        {
+            AppName = "YOUR_APP_NAME",
+            HardwareId = "HW-FLOOD",
+            Version = "1.1.34",
+            EventName = "NativeExtractionFailed",
+            Properties = new Dictionary<string, string>
+            {
+                ["reason"] = "native dll missing"
+            }
+        };
+
+        for (var i = 0; i < 5; i++)
+        {
+            await service.SaveEventAsync(request, "185.162.248.75");
+        }
+
+        using var checkDb = new LicenseDbContext(_dbOptions);
+        Assert.Equal(3, await checkDb.TelemetryRecords.CountAsync(t =>
+            t.HardwareId == "HW-FLOOD" && t.EventName == "NativeExtractionFailed"));
+
+        var counter = await checkDb.TelemetryFloodSuppressionCounters.SingleAsync(c =>
+            c.HardwareId == "HW-FLOOD" && c.EventName == "NativeExtractionFailed");
+        Assert.Equal(3, counter.RawStoredCount);
+        Assert.Equal(2, counter.SuppressedCount);
+        Assert.Equal(3, counter.Threshold);
+        Assert.Equal("185.162.248.75", counter.LastClientIp);
+        Assert.Equal("Test ISP", counter.LastIsp);
+        Assert.False(string.IsNullOrWhiteSpace(counter.LastPayloadHash));
+    }
+
+    [Fact]
+    public async Task SaveEventAsync_WhenOneEventFloods_ShouldStillStoreDifferentEvent()
+    {
+        using (var db = new LicenseDbContext(_dbOptions))
+        {
+            await SeedProductAsync(db, "YOUR_APP_NAME");
+        }
+
+        var service = BuildTelemetryServiceWithFloodSettings(threshold: 1, windowMinutes: 10);
+
+        await service.SaveEventAsync(new TelemetryEventRequest
+        {
+            AppName = "YOUR_APP_NAME",
+            HardwareId = "HW-FLOOD-DIFFERENT",
+            Version = "1.1.34",
+            EventName = "NativeExtractionFailed"
+        });
+        await service.SaveEventAsync(new TelemetryEventRequest
+        {
+            AppName = "YOUR_APP_NAME",
+            HardwareId = "HW-FLOOD-DIFFERENT",
+            Version = "1.1.34",
+            EventName = "NativeExtractionFailed"
+        });
+        await service.SaveEventAsync(new TelemetryEventRequest
+        {
+            AppName = "YOUR_APP_NAME",
+            HardwareId = "HW-FLOOD-DIFFERENT",
+            Version = "1.1.34",
+            EventName = "Startup_AppStarted"
+        });
+
+        using var checkDb = new LicenseDbContext(_dbOptions);
+        Assert.Single(await checkDb.TelemetryRecords.Where(t => t.EventName == "NativeExtractionFailed").ToListAsync());
+        Assert.Single(await checkDb.TelemetryRecords.Where(t => t.EventName == "Startup_AppStarted").ToListAsync());
+        Assert.Single(await checkDb.TelemetryFloodSuppressionCounters.ToListAsync());
+    }
+
+    [Fact]
+    public async Task SaveEventAsync_WhenSecurityEventRepeats_ShouldNotSuppress()
+    {
+        using (var db = new LicenseDbContext(_dbOptions))
+        {
+            await SeedProductAsync(db, "YOUR_APP_NAME");
+        }
+
+        var service = BuildTelemetryServiceWithFloodSettings(threshold: 1, windowMinutes: 10);
+        var request = new TelemetryEventRequest
+        {
+            AppName = "YOUR_APP_NAME",
+            HardwareId = "HW-SECURITY-FLOOD",
+            Version = "1.1.34",
+            EventName = "Startup_SecurityAlert_RuntimeCheck"
+        };
+
+        await service.SaveEventAsync(request);
+        await service.SaveEventAsync(request);
+
+        using var checkDb = new LicenseDbContext(_dbOptions);
+        Assert.Equal(2, await checkDb.TelemetryRecords.CountAsync(t => t.HardwareId == "HW-SECURITY-FLOOD"));
+        Assert.False(await checkDb.TelemetryFloodSuppressionCounters.AnyAsync());
+    }
+
+    [Fact]
     public async Task GetTelemetryForProductAsync_ShouldRespectIsolation()
     {
         // Arrange
@@ -348,6 +451,68 @@ public class TelemetryServiceTests
         }
 
         Assert.Single(bugTrace.SubmittedTickets);
+    }
+
+    [Fact]
+    public async Task SaveEventAsync_WhenProductWebhookReturnsNonSuccess_ShouldPersistLastError()
+    {
+        Guid productId;
+        using (var db = new LicenseDbContext(_dbOptions))
+        {
+            productId = Guid.NewGuid();
+            db.Products.Add(new Product
+            {
+                Id = productId,
+                Name = "YOUR_APP_NAME",
+                PrivateKeyXml = "key",
+                PublicKeyXml = "key",
+                ApiSecret = "secret-YOUR_APP_NAME"
+            });
+            db.ProductWebhooks.Add(new ProductWebhook
+            {
+                ProductId = productId,
+                Name = "YOUR_APP_NAME_Web_api",
+                Url = "https://api.YOUR_APP_NAME.EXAMPLE.COM/api/webhooks/softlicence",
+                Secret = "configured-secret",
+                IsEnabled = true
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var handler = new StaticHttpHandler(HttpStatusCode.Unauthorized);
+        _httpFactoryMock.Setup(f => f.CreateClient(It.IsAny<string>()))
+            .Returns(new HttpClient(handler));
+
+        var service = new TelemetryService(
+            _dbFactoryMock.Object,
+            _loggerMock.Object,
+            _geoIpMock.Object,
+            _httpFactoryMock.Object,
+            null!,
+            null!,
+            null!);
+
+        await service.SaveEventAsync(new TelemetryEventRequest
+        {
+            AppName = "YOUR_APP_NAME",
+            HardwareId = "HW-WEBHOOK-401",
+            Version = "1.1.34",
+            EventName = "NativeExtractionFailed"
+        });
+
+        ProductWebhook? webhook = null;
+        for (var i = 0; i < 20; i++)
+        {
+            await Task.Delay(50);
+            using var checkDb = new LicenseDbContext(_dbOptions);
+            webhook = await checkDb.ProductWebhooks.AsNoTracking().SingleAsync(w => w.ProductId == productId);
+            if (webhook.LastError != null)
+                break;
+        }
+
+        Assert.NotNull(webhook);
+        Assert.NotNull(webhook.LastTriggeredAt);
+        Assert.Equal("HTTP 401 Unauthorized", webhook.LastError);
     }
 
     [Fact]
@@ -614,6 +779,32 @@ public class TelemetryServiceTests
             settings);
     }
 
+    private TelemetryService BuildTelemetryServiceWithFloodSettings(int threshold, int windowMinutes)
+    {
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["TelemetryFloodSuppressionEnabled"] = "true",
+                ["TelemetryFloodSuppressionThreshold"] = threshold.ToString(),
+                ["TelemetryFloodSuppressionWindowMinutes"] = windowMinutes.ToString()
+            })
+            .Build();
+
+        var settings = new SettingsService(
+            _dbFactoryMock.Object,
+            config,
+            Mock.Of<ILogger<SettingsService>>());
+
+        return new TelemetryService(
+            _dbFactoryMock.Object,
+            _loggerMock.Object,
+            _geoIpMock.Object,
+            _httpFactoryMock.Object,
+            null!,
+            null!,
+            settings);
+    }
+
     private static TelemetryEventRequest BuildCertPinningRequest(string hardwareId)
     {
         return new TelemetryEventRequest
@@ -686,6 +877,21 @@ public class TelemetryServiceTests
 
             _capturedRequests.Add(clone);
             return new HttpResponseMessage(HttpStatusCode.OK);
+        }
+    }
+
+    private sealed class StaticHttpHandler : HttpMessageHandler
+    {
+        private readonly HttpStatusCode _statusCode;
+
+        public StaticHttpHandler(HttpStatusCode statusCode)
+        {
+            _statusCode = statusCode;
+        }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            return Task.FromResult(new HttpResponseMessage(_statusCode));
         }
     }
 }

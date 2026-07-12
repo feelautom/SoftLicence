@@ -168,6 +168,187 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
     }
 
     [Fact]
+    public async Task PostActivation_WithDisabledLicense_ShouldExposeStructuredCodeWithoutChangingBody()
+    {
+        var client = _factory.CreateClient();
+        var licenseKey = $"DISABLED-{Guid.NewGuid():N}".ToUpperInvariant();
+        var hardwareId = $"HW-DISABLED-{Guid.NewGuid():N}";
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            await SeedDataAsync(scope.ServiceProvider);
+            var product = await db.Products.FirstAsync(p => p.Name == "YOUR_APP_NAME");
+            var type = await db.LicenseTypes.FirstAsync(t => t.Slug == "TRIAL");
+
+            db.Licenses.Add(new License
+            {
+                LicenseKey = licenseKey,
+                ProductId = product.Id,
+                LicenseTypeId = type.Id,
+                CustomerName = "Disabled",
+                CustomerEmail = "disabled@test.local",
+                IsActive = false,
+                MaxSeats = 1
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var response = await client.PostAsJsonAsync("/api/activation", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = hardwareId,
+            AppName = "YOUR_APP_NAME"
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("LICENSE_DISABLED", response.Headers.GetValues("X-SoftLicence-Error-Code").Single());
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("LICENSE_DISABLED", body, StringComparison.OrdinalIgnoreCase);
+
+        var log = await WaitForActivationLogAsync(licenseKey, hardwareId);
+        Assert.Equal("LICENSE_DISABLED", log.ResultStatus);
+    }
+
+    [Fact]
+    public async Task PostActivation_WithInvalidPartner_ShouldExposePartnerInvalidWithoutChangingDisabledBody()
+    {
+        var client = _factory.CreateClient();
+        var licenseKey = $"PARTNER-{Guid.NewGuid():N}".ToUpperInvariant();
+        var hardwareId = $"HW-PARTNER-{Guid.NewGuid():N}";
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            await SeedDataAsync(scope.ServiceProvider);
+            var product = await db.Products.FirstAsync(p => p.Name == "YOUR_APP_NAME");
+            var type = await db.LicenseTypes.FirstAsync(t => t.Slug == "TRIAL");
+
+            db.Licenses.Add(new License
+            {
+                LicenseKey = licenseKey,
+                ProductId = product.Id,
+                LicenseTypeId = type.Id,
+                CustomerName = "Partner",
+                CustomerEmail = "partner@test.local",
+                PartnerCode = "MISSING-PARTNER",
+                IsActive = true,
+                MaxSeats = 1
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var response = await client.PostAsJsonAsync("/api/activation", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = hardwareId,
+            AppName = "YOUR_APP_NAME"
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("PARTNER_INVALID", response.Headers.GetValues("X-SoftLicence-Error-Code").Single());
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("PARTNER_INVALID", body, StringComparison.OrdinalIgnoreCase);
+
+        var log = await WaitForActivationLogAsync(licenseKey, hardwareId);
+        Assert.Equal("PARTNER_INVALID", log.ResultStatus);
+    }
+
+    [Fact]
+    public async Task PostActivation_WhenSeatLimitReached_ShouldExposeSeatLimitCode()
+    {
+        var client = _factory.CreateClient();
+        var licenseKey = $"SEAT-LIMIT-{Guid.NewGuid():N}".ToUpperInvariant();
+        var firstActivatedAt = DateTime.UtcNow.AddDays(-1);
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            await SeedDataAsync(scope.ServiceProvider);
+            var product = await db.Products.FirstAsync(p => p.Name == "YOUR_APP_NAME");
+            var type = await db.LicenseTypes.FirstAsync(t => t.Slug == "TRIAL");
+            var license = new License
+            {
+                LicenseKey = licenseKey,
+                ProductId = product.Id,
+                LicenseTypeId = type.Id,
+                CustomerName = "Seat Limit",
+                CustomerEmail = "seat-limit@test.local",
+                HardwareId = "HW-FIRST-SEAT",
+                ActivationDate = firstActivatedAt,
+                IsActive = true,
+                MaxSeats = 1,
+                AllowedVersions = "*"
+            };
+
+            db.Licenses.Add(license);
+            db.LicenseSeats.Add(new LicenseSeat
+            {
+                LicenseId = license.Id,
+                HardwareId = "HW-FIRST-SEAT",
+                FirstActivatedAt = firstActivatedAt,
+                LastCheckInAt = firstActivatedAt,
+                IsActive = true
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var response = await client.PostAsJsonAsync("/api/activation", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "HW-SECOND-SEAT",
+            AppName = "YOUR_APP_NAME"
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("SEAT_LIMIT", response.Headers.GetValues("X-SoftLicence-Error-Code").Single());
+
+        var log = await WaitForActivationLogAsync(licenseKey, "HW-SECOND-SEAT");
+        Assert.Equal("SEAT_LIMIT", log.ResultStatus);
+    }
+
+    [Fact]
+    public async Task PostActivation_WithValidLicense_ShouldNotExposeActivationErrorCodeHeader()
+    {
+        var client = _factory.CreateClient();
+        var licenseKey = $"VALID-{Guid.NewGuid():N}".ToUpperInvariant();
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            await SeedDataAsync(scope.ServiceProvider);
+            var product = await db.Products.FirstAsync(p => p.Name == "YOUR_APP_NAME");
+            var type = await db.LicenseTypes.FirstAsync(t => t.Slug == "TRIAL");
+
+            db.Licenses.Add(new License
+            {
+                LicenseKey = licenseKey,
+                ProductId = product.Id,
+                LicenseTypeId = type.Id,
+                CustomerName = "Valid",
+                CustomerEmail = "valid@test.local",
+                IsActive = true,
+                MaxSeats = 1,
+                AllowedVersions = "*"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var response = await client.PostAsJsonAsync("/api/activation", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "HW-VALID-ACTIVATION",
+            AppName = "YOUR_APP_NAME",
+            AppVersion = "2.2.640"
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.False(response.Headers.Contains("X-SoftLicence-Error-Code"));
+        var result = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(result.TryGetProperty("licenseFile", out _));
+    }
+
+    [Fact]
     public async Task PostActivation_WithAutoTrial_ShouldGenerateNewLicense()
     {
         var client = _factory.CreateClient();

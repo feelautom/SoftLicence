@@ -56,7 +56,7 @@ public class PiracyDetectionService
             .ToListAsync();
 
         var licensedDirect = await db.Licenses
-            .Where(l => l.ProductId == productId && l.HardwareId != null && l.IsActive)
+            .Where(l => l.ProductId == productId && l.Seats.Count == 0 && l.HardwareId != null && l.IsActive)
             .Select(l => l.HardwareId!)
             .ToListAsync();
 

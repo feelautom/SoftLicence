@@ -241,12 +241,8 @@ public sealed class SecurityBanAuditAnalyticsService
 
             var rows = await licenses.Take(MaxTake).ToListAsync(cancellationToken);
             foreach (var license in rows)
-            {
-                if (!string.IsNullOrWhiteSpace(license.HardwareId))
-                    hwids.Add(license.HardwareId);
-                foreach (var seat in license.Seats.Where(s => !string.IsNullOrWhiteSpace(s.HardwareId)))
-                    hwids.Add(seat.HardwareId);
-            }
+            foreach (var resolved in LicenseSeatHardwareResolver.ResolveActiveHardwareIds(license))
+                hwids.Add(resolved.HardwareId);
         }
 
         return hwids;

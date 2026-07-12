@@ -45,6 +45,52 @@ public class TelemetryRecord
     public TelemetryError? ErrorData { get; set; }
 }
 
+public class TelemetryFloodSuppressionCounter
+{
+    [Key]
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public Guid? ProductId { get; set; }
+    public Product? Product { get; set; }
+
+    [Required]
+    public string HardwareId { get; set; } = string.Empty;
+
+    public string? AppName { get; set; }
+
+    public string? Version { get; set; }
+
+    [Required]
+    public string EventName { get; set; } = string.Empty;
+
+    [Required]
+    public TelemetryType Type { get; set; }
+
+    [Required]
+    public DateTime WindowStartUtc { get; set; }
+
+    [Required]
+    public DateTime WindowEndUtc { get; set; }
+
+    public int WindowMinutes { get; set; }
+
+    public int Threshold { get; set; }
+
+    public int RawStoredCount { get; set; }
+
+    public int SuppressedCount { get; set; }
+
+    public DateTime FirstSeenUtc { get; set; }
+
+    public DateTime LastSeenUtc { get; set; }
+
+    public string? LastClientIp { get; set; }
+
+    public string? LastIsp { get; set; }
+
+    public string? LastPayloadHash { get; set; }
+}
+
 public class TelemetryEvent
 {
     [Key]

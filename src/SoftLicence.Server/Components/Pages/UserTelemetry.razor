@@ -308,7 +308,7 @@
         }
 
         <!-- Daily usage chart (Paid licenses) -->
-        @if (dailyUsage.Any() && dailyUsage.Any(d => d.Count > 0))
+        @if (dailyUsage.Any())
         {
             var maxCount = dailyUsage.Max(d => d.Count);
             if (maxCount == 0) maxCount = 1;
@@ -318,9 +318,22 @@
             var barW = 100.0 / dailyUsage.Count;
             <div class="card bg-dark border-secondary mb-4">
                 <div class="card-body py-3">
-                    <div class="d-flex justify-content-between align-items-center mb-3">
-                        <h6 class="text-success mb-0">Activité réelle — 30 derniers jours</h6>
-                        <span class="small text-muted">@totalEvents événements utiles · @activeDays jours actifs · moy. @(activeDays > 0 ? totalEvents / activeDays : 0)/jour</span>
+                    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                        <div class="d-flex flex-wrap align-items-center gap-2">
+                            <h6 class="text-success mb-0">Activité réelle — @DailyUsageWindowDays jours</h6>
+                            <span class="small text-muted">@DailyUsageWindowStart.ToString("dd/MM/yyyy") - @DailyUsageWindowEnd.ToString("dd/MM/yyyy")</span>
+                        </div>
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="small text-muted">@totalEvents événements utiles · @activeDays jours actifs · moy. @(activeDays > 0 ? totalEvents / activeDays : 0)/jour</span>
+                            <div class="btn-group btn-group-sm" role="group" aria-label="Navigation période activité réelle">
+                                <button class="btn btn-outline-secondary" title="30 jours précédents" disabled="@(!CanGoPreviousDailyUsageWindow)" @onclick="PreviousDailyUsageWindow">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M11.354 1.646a.5.5 0 0 1 0 .708L5.707 8l5.647 5.646a.5.5 0 0 1-.708.708l-6-6a.5.5 0 0 1 0-.708l6-6a.5.5 0 0 1 .708 0z"/></svg>
+                                </button>
+                                <button class="btn btn-outline-secondary" title="30 jours suivants" disabled="@(!CanGoNextDailyUsageWindow)" @onclick="NextDailyUsageWindow">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M4.646 1.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1 0 .708l-6 6a.5.5 0 0 1-.708-.708L10.293 8 4.646 2.354a.5.5 0 0 1 0-.708z"/></svg>
+                                </button>
+                            </div>
+                        </div>
                     </div>
                     <svg width="100%" height="@(chartH + 20)" viewBox="0 0 1000 @(chartH + 20)" preserveAspectRatio="none">
                         @for (var i = 0; i < dailyUsage.Count; i++)
@@ -806,7 +819,14 @@
     // Quotas
     private Dictionary<string, List<QuotaDayData>> quotaData = new();
     // Daily usage (paid licenses)
+    private const int DailyUsageWindowDays = 30;
     private List<DailyUsageData> dailyUsage = new();
+    private int dailyUsageWindowOffset;
+    private DateTime DailyUsageWindowEnd => SoftLicence.Server.Services.TimeZoneService.ParisDateDaysAgo(dailyUsageWindowOffset * DailyUsageWindowDays);
+    private DateTime DailyUsageWindowStart => DailyUsageWindowEnd.AddDays(-(DailyUsageWindowDays - 1));
+    private DateTime DailyUsageMinDate => SoftLicence.Server.Services.TimeZoneService.ToParisDate(license?.ActivationDate ?? license?.CreationDate ?? DateTime.UtcNow);
+    private bool CanGoPreviousDailyUsageWindow => DailyUsageWindowEnd.AddDays(-DailyUsageWindowDays) >= DailyUsageMinDate;
+    private bool CanGoNextDailyUsageWindow => dailyUsageWindowOffset > 0;
     // Cluster info
     private ClusterInfo? clusterInfo;
     private bool isFreemium => license?.Type?.Slug?.Contains("FREEMIUM", StringComparison.OrdinalIgnoreCase) == true;
@@ -1020,10 +1040,13 @@
         if (!hardwareIds.Any()) return;
 
         await using var db = await DbFactory.CreateDbContextAsync();
-        var since = DateTime.UtcNow.AddDays(-30);
+        var startDate = DailyUsageWindowStart;
+        var endDate = DailyUsageWindowEnd;
+        var startUtc = SoftLicence.Server.Services.TimeZoneService.ParisDateToUtcRange(startDate).StartUtc;
+        var endUtc = SoftLicence.Server.Services.TimeZoneService.ParisDateToUtcRange(endDate).EndUtc;
 
         var query = db.TelemetryRecords.AsNoTracking()
-            .Where(t => hardwareIds.Contains(t.HardwareId) && t.Timestamp >= since)
+            .Where(t => hardwareIds.Contains(t.HardwareId) && t.Timestamp >= startUtc && t.Timestamp < endUtc)
             .Where(t => license!.ProductId == Guid.Empty || t.ProductId == license.ProductId);
 
         if (FilterHardwareId != null)
@@ -1040,11 +1063,25 @@
             .ToDictionary(g => g.Key, g => g.Count());
 
         var days = new List<DailyUsageData>();
-        for (var d = SoftLicence.Server.Services.TimeZoneService.ParisDateDaysAgo(30); d <= SoftLicence.Server.Services.TimeZoneService.ParisDateDaysAgo(0); d = d.AddDays(1))
+        for (var d = startDate; d <= endDate; d = d.AddDays(1))
         {
             days.Add(new DailyUsageData { Date = d, Count = grouped.GetValueOrDefault(d, 0) });
         }
         dailyUsage = days;
+    }
+
+    private async Task PreviousDailyUsageWindow()
+    {
+        if (!CanGoPreviousDailyUsageWindow) return;
+        dailyUsageWindowOffset++;
+        await LoadDailyUsage();
+    }
+
+    private async Task NextDailyUsageWindow()
+    {
+        if (!CanGoNextDailyUsageWindow) return;
+        dailyUsageWindowOffset--;
+        await LoadDailyUsage();
     }
 
     private async Task Refresh()

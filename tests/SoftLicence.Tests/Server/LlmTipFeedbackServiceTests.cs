@@ -322,6 +322,38 @@ public sealed class LlmTipFeedbackServiceTests
     }
 
     [Fact]
+    public async Task ConvertToBugTraceAsync_CreatesAnonymizedTicketAndMarksTipConverted()
+    {
+        await SeedProductAsync("TIAConnect");
+        var bugTrace = new FakeBugTraceProxyService();
+        var service = new LlmTipFeedbackService(_dbFactoryMock.Object, bugTrace);
+        await service.SaveTipAsync(BuildTip("hash-convert-bugtrace", upvotes: 8, severity: "critical"));
+        var tip = (await service.GetAdminOverviewAsync(new LlmTipFeedbackAdminQuery { Days = 0 })).Tips.Single();
+
+        var result = await service.ConvertToBugTraceAsync(tip.Id, null, tip.ProductId);
+
+        Assert.NotNull(result);
+        Assert.True(result.Created);
+        Assert.Equal("converted-to-bugtrace", result.ReviewStatus);
+        Assert.Equal("BT-00042", result.BugTraceTicketRef);
+        var submitted = Assert.Single(bugTrace.SubmittedTickets);
+        var submittedJson = JsonSerializer.Serialize(submitted);
+        Assert.Contains("LLM tip review:", submittedJson);
+        Assert.Contains("hash-convert-bugtrace", submittedJson);
+        Assert.Contains("CRITICAL", submittedJson);
+
+        var detail = await service.GetTipDetailAsync(tip.Id);
+        Assert.NotNull(detail);
+        Assert.Equal("converted-to-bugtrace", detail.ReviewStatus);
+        Assert.Equal("BT-00042", detail.BugTraceTicketRef);
+
+        var second = await service.ConvertToBugTraceAsync(tip.Id, null, tip.ProductId);
+        Assert.NotNull(second);
+        Assert.False(second.Created);
+        Assert.Single(bugTrace.SubmittedTickets);
+    }
+
+    [Fact]
     public async Task PostTip_WhenPersistenceFails_ReturnsServiceUnavailableInsteadOfAccepted()
     {
         var controller = BuildControllerWithFailingPersistence();

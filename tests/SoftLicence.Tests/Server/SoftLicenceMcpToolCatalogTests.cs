@@ -35,6 +35,30 @@ public sealed class SoftLicenceMcpToolCatalogTests
         Assert.Equal("get_license_usage_scores", ToSnakeCase(usageScoresMethod.Name));
     }
 
+    [Fact]
+    public void HardwareBanWriteTools_UseExpectedPublishedNames()
+    {
+        var toolMethods = typeof(SoftLicenceAnalyticsTools)
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+            .Where(method => method.GetCustomAttribute<McpServerToolAttribute>() is not null)
+            .ToArray();
+
+        Assert.Contains(toolMethods, method => ToSnakeCase(method.Name) == "create_security_hardware_ban");
+        Assert.Contains(toolMethods, method => ToSnakeCase(method.Name) == "unban_security_hardware_ban");
+        Assert.Contains(toolMethods, method => ToSnakeCase(method.Name) == "get_security_hardware_ban_categories");
+    }
+
+    [Fact]
+    public void CustomerLicenseTimelineTool_UsesExpectedPublishedName()
+    {
+        var toolMethods = typeof(SoftLicenceAnalyticsTools)
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+            .Where(method => method.GetCustomAttribute<McpServerToolAttribute>() is not null)
+            .ToArray();
+
+        Assert.Contains(toolMethods, method => ToSnakeCase(method.Name) == "get_customer_license_timeline");
+    }
+
     private static string ToSnakeCase(string value)
     {
         var chars = new List<char>(value.Length + 8);

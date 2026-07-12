@@ -126,30 +126,37 @@ public class TelemetryAnalyticsService
     {
         var alerts = new List<CoherenceAlert>();
 
-        // Charger les licences actives avec HardwareId et CustomParams
+        // Charger les licences actives avec seats et CustomParams.
         var licensesQuery = db.Licenses
+            .Include(l => l.Seats)
             .Include(l => l.Type).ThenInclude(t => t!.CustomParams)
-            .Where(l => l.IsActive && l.HardwareId != null);
+            .Where(l => l.IsActive);
 
         if (productId.HasValue)
             licensesQuery = licensesQuery.Where(l => l.ProductId == productId.Value);
 
         var licenses = await licensesQuery
             .Where(l => l.Type != null && l.Type.CustomParams.Any())
-            .Select(l => new
-            {
-                l.HardwareId,
-                l.CustomerName,
-                l.LicenseKey,
-                l.ProductId,
-                CustomParams = l.Type!.CustomParams.Select(p => new { p.Key, p.Value }).ToList()
-            })
             .ToListAsync();
 
         if (licenses.Count == 0) return alerts;
 
         // Récupérer le dernier événement télémétrie par HardwareId
-        var hwIds = licenses.Select(l => l.HardwareId!).Distinct().ToList();
+        var licenseBindings = licenses
+            .SelectMany(l => LicenseSeatHardwareResolver.ResolveActiveHardwareIds(l)
+                .Select(h => new
+                {
+                    h.HardwareId,
+                    l.CustomerName,
+                    l.LicenseKey,
+                    CustomParams = l.Type!.CustomParams.Select(p => new { p.Key, p.Value }).ToList()
+                }))
+            .ToList();
+
+        var hwIds = licenseBindings
+            .Select(l => l.HardwareId)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
         var latestEvents = await db.TelemetryRecords
             .Where(r => hwIds.Contains(r.HardwareId) && r.Type == TelemetryType.Event && r.Timestamp >= since)
@@ -160,9 +167,9 @@ public class TelemetryAnalyticsService
 
         var eventsByHw = latestEvents.ToDictionary(e => e.HardwareId, e => e);
 
-        foreach (var lic in licenses)
+        foreach (var lic in licenseBindings)
         {
-            if (lic.HardwareId == null || !eventsByHw.TryGetValue(lic.HardwareId, out var telemetry))
+            if (!eventsByHw.TryGetValue(lic.HardwareId, out var telemetry))
                 continue;
 
             if (telemetry.EventData?.PropertiesJson == null)

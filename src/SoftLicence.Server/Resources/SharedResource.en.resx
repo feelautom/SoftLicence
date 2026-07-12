@@ -139,7 +139,8 @@
   <data name="Licenses_Action_Activated" xml:space="preserve"><value>Hardware ID: {0} | Version: {1}</value></data>
   <data name="Licenses_Action_Revoked" xml:space="preserve"><value>Reason: {0}</value></data>
   <data name="Licenses_Action_UnlinkedManual" xml:space="preserve"><value>Hardware ID: {0} unlinked manually by Admin</value></data>
-  <data name="Licenses_Action_UnlinkedApi" xml:space="preserve"><value>Hardware ID: {0} unlinked via API Reset Code</value></data>
+  <data name="Licenses_Action_UnlinkedApi" xml:space="preserve"><value>Hardware ID: {0} unlinked via client API (source: {1})</value></data>
+  <data name="Licenses_Action_UnlinkedApiResetCode" xml:space="preserve"><value>Hardware ID: {0} unlinked via reset code API</value></data>
   <data name="Licenses_Action_UnlinkedAdminTool" xml:space="preserve"><value>Hardware ID: {0} unlinked via Admin SOS Tool</value></data>
   <data name="Licenses_Action_GlobalReset" xml:space="preserve"><value>{0} seat(s) unlinked manually by Admin</value></data>
   <data name="Licenses_SeatStatusActive" xml:space="preserve"><value>Active seat</value></data>
@@ -467,6 +468,7 @@
   <data name="Api_MaxActivationsReached" xml:space="preserve"><value>This license has reached its maximum activations ({0}). Please unlink an old seat or contact support.</value></data>
   <data name="Api_MaxDailyActivationsReached" xml:space="preserve"><value>Daily activation limit reached ({0}/day). Try again tomorrow.</value></data>
   <data name="Api_MaxDailyUnlinksReached" xml:space="preserve"><value>Daily unlink limit reached ({0}/day). Try again tomorrow.</value></data>
+  <data name="Api_DeactivationTooRecentRequiresSource" xml:space="preserve"><value>Deactivation was refused because this seat was activated too recently without a trusted deactivation source. Update the client or try again later.</value></data>
   <data name="Api_InternalErrorServerKey" xml:space="preserve"><value>Internal Error: Server signature key unreadable.</value></data>
   <data name="Api_NoEmail" xml:space="preserve"><value>No email associated with this license. Contact support.</value></data>
   <data name="Api_EmailMismatch" xml:space="preserve"><value>Email does not match this license.</value></data>

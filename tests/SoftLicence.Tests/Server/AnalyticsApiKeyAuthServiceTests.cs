@@ -34,6 +34,8 @@ public sealed class AnalyticsApiKeyAuthServiceTests
 
         Assert.NotNull(result);
         Assert.Equal(productId, result.ProductId);
+        Assert.False(result.IsGlobal);
+        Assert.Equal(AnalyticsApiKeyScopeKinds.Product, result.ScopeKind);
 
         await using var db = new LicenseDbContext(_dbOptions);
         var storedKey = await db.AnalyticsApiKeys.SingleAsync();
@@ -83,6 +85,35 @@ public sealed class AnalyticsApiKeyAuthServiceTests
         Assert.Null(result);
     }
 
+    [Fact]
+    public async Task ValidateAsync_WhenGlobalKeyIsValid_ReturnsGlobalScope()
+    {
+        const string rawKey = "sla_test_global_valid_key";
+        await using (var db = new LicenseDbContext(_dbOptions))
+        {
+            db.AnalyticsApiKeys.Add(new AnalyticsApiKey
+            {
+                ProductId = null,
+                Name = "Global test analytics key",
+                Prefix = AnalyticsApiKeyAuthService.BuildPrefix(rawKey),
+                KeyHash = AnalyticsApiKeyAuthService.ComputeKeyHash(rawKey),
+                Scopes = $"{AnalyticsApiKeyScopes.TelemetryRead} {AnalyticsApiKeyScopes.MultiProductRead}",
+                ScopeKind = AnalyticsApiKeyScopeKinds.Global,
+                IsActive = true
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var service = new AnalyticsApiKeyAuthService(_dbFactoryMock.Object);
+
+        var result = await service.ValidateAsync(rawKey, AnalyticsApiKeyScopes.TelemetryRead, "127.0.0.1");
+
+        Assert.NotNull(result);
+        Assert.Null(result.ProductId);
+        Assert.True(result.IsGlobal);
+        Assert.Equal(AnalyticsApiKeyScopeKinds.Global, result.ScopeKind);
+    }
+
     private async Task SeedKeyAsync(
         Guid productId,
         string rawKey,
@@ -106,6 +137,7 @@ public sealed class AnalyticsApiKeyAuthServiceTests
             Prefix = AnalyticsApiKeyAuthService.BuildPrefix(rawKey),
             KeyHash = AnalyticsApiKeyAuthService.ComputeKeyHash(rawKey),
             Scopes = scopes,
+            ScopeKind = AnalyticsApiKeyScopeKinds.Product,
             IsActive = isActive,
             ExpiresAtUtc = expiresAtUtc
         });

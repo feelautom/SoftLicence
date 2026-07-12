@@ -1,6 +1,8 @@
 using System.Text.Json;
 using System.Net.Http.Json;
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
 using SoftLicence.Server.Data;
 using SoftLicence.Server.Models;
@@ -21,6 +23,9 @@ public class TelemetryService
     private static readonly ConcurrentDictionary<string, DateTime> _certPinningAlertCache = new();
     private static readonly TimeSpan CertPinningAlertCooldown = TimeSpan.FromMinutes(15);
     private const string DefaultCertPinningAlertUrl = "https://ntfy.websitedev.fr/vps-check-tia-pinned-certs";
+    private const string FloodSuppressionEnabledSetting = "TelemetryFloodSuppressionEnabled";
+    private const string FloodSuppressionWindowMinutesSetting = "TelemetryFloodSuppressionWindowMinutes";
+    private const string FloodSuppressionThresholdSetting = "TelemetryFloodSuppressionThreshold";
 
     public TelemetryService(
         IDbContextFactory<LicenseDbContext> dbFactory,
@@ -49,6 +54,22 @@ public class TelemetryService
         using var db = await _dbFactory.CreateDbContextAsync();
         var productId = await GetProductIdAsync(db, req.AppName);
         var geo = ip != null ? await _geoIp.GetGeoInfoAsync(ip) : null;
+        var propertiesJson = req.Properties != null ? JsonSerializer.Serialize(req.Properties) : null;
+
+        if (!await ShouldStoreTelemetryAsync(
+            db,
+            productId,
+            req.AppName,
+            req.HardwareId,
+            req.EventName,
+            req.Version,
+            TelemetryType.Event,
+            ip,
+            geo?.Isp,
+            propertiesJson))
+        {
+            return;
+        }
 
         var record = new TelemetryRecord
         {
@@ -65,7 +86,7 @@ public class TelemetryService
 
         record.EventData = new TelemetryEvent
         {
-            PropertiesJson = req.Properties != null ? JsonSerializer.Serialize(req.Properties) : null
+            PropertiesJson = propertiesJson
         };
 
         db.TelemetryRecords.Add(record);
@@ -311,6 +332,27 @@ public class TelemetryService
         using var db = await _dbFactory.CreateDbContextAsync();
         var productId = await GetProductIdAsync(db, req.AppName);
         var geo = ip != null ? await _geoIp.GetGeoInfoAsync(ip) : null;
+        var payloadJson = JsonSerializer.Serialize(new
+        {
+            req.Score,
+            req.Results,
+            req.Ports
+        });
+
+        if (!await ShouldStoreTelemetryAsync(
+            db,
+            productId,
+            req.AppName,
+            req.HardwareId,
+            req.EventName,
+            req.Version,
+            TelemetryType.Diagnostic,
+            ip,
+            geo?.Isp,
+            payloadJson))
+        {
+            return;
+        }
 
         var record = new TelemetryRecord
         {
@@ -360,6 +402,27 @@ public class TelemetryService
         using var db = await _dbFactory.CreateDbContextAsync();
         var productId = await GetProductIdAsync(db, req.AppName);
         var geo = ip != null ? await _geoIp.GetGeoInfoAsync(ip) : null;
+        var payloadJson = JsonSerializer.Serialize(new
+        {
+            req.ErrorType,
+            req.Message,
+            req.StackTrace
+        });
+
+        if (!await ShouldStoreTelemetryAsync(
+            db,
+            productId,
+            req.AppName,
+            req.HardwareId,
+            req.EventName,
+            req.Version,
+            TelemetryType.Error,
+            ip,
+            geo?.Isp,
+            payloadJson))
+        {
+            return;
+        }
 
         var record = new TelemetryRecord
         {
@@ -474,9 +537,21 @@ public class TelemetryService
                             request.Headers.Add("X-Webhook-Secret", hook.Secret);
                         }
 
-                        await client.SendAsync(request);
+                        var response = await client.SendAsync(request);
                         hook.LastTriggeredAt = DateTime.UtcNow;
-                        hook.LastError = null;
+                        if (response.IsSuccessStatusCode)
+                        {
+                            hook.LastError = null;
+                        }
+                        else
+                        {
+                            hook.LastError = $"HTTP {(int)response.StatusCode} {response.ReasonPhrase}".Trim();
+                            _logger.LogWarning("Echec webhook produit {Name} ({Url}): {StatusCode} {ReasonPhrase}",
+                                hook.Name,
+                                hook.Url,
+                                (int)response.StatusCode,
+                                response.ReasonPhrase);
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -621,6 +696,134 @@ public class TelemetryService
     {
         var product = await db.Products.AsNoTracking().FirstOrDefaultAsync(p => p.Name.ToLower() == appName.ToLower());
         return product?.Id;
+    }
+
+    private async Task<bool> ShouldStoreTelemetryAsync(
+        LicenseDbContext db,
+        Guid? productId,
+        string appName,
+        string hardwareId,
+        string eventName,
+        string? version,
+        TelemetryType type,
+        string? ip,
+        string? isp,
+        string? payloadJson)
+    {
+        if (IsFloodSuppressionExempt(eventName, type))
+            return true;
+
+        if (_settings is null)
+            return true;
+
+        var enabledRaw = await _settings.GetSettingAsync(FloodSuppressionEnabledSetting, "true");
+        if (bool.TryParse(enabledRaw, out var enabled) && !enabled)
+            return true;
+
+        var windowMinutes = await GetClampedIntSettingAsync(FloodSuppressionWindowMinutesSetting, 10, 1, 1440);
+        var threshold = await GetClampedIntSettingAsync(FloodSuppressionThresholdSetting, 10, 1, 1000);
+        var now = DateTime.UtcNow;
+        var windowStart = FloorToWindow(now, windowMinutes);
+        var windowEnd = windowStart.AddMinutes(windowMinutes);
+
+        var rawStoredCount = await db.TelemetryRecords.AsNoTracking().CountAsync(t =>
+            t.ProductId == productId
+            && t.HardwareId == hardwareId
+            && t.EventName == eventName
+            && t.Version == version
+            && t.Type == type
+            && t.Timestamp >= windowStart
+            && t.Timestamp < windowEnd);
+
+        if (rawStoredCount < threshold)
+            return true;
+
+        var payloadHash = ComputeSha256(payloadJson);
+        var counter = await db.TelemetryFloodSuppressionCounters.FirstOrDefaultAsync(c =>
+            c.ProductId == productId
+            && c.HardwareId == hardwareId
+            && c.EventName == eventName
+            && c.Version == version
+            && c.Type == type
+            && c.WindowStartUtc == windowStart);
+
+        if (counter == null)
+        {
+            db.TelemetryFloodSuppressionCounters.Add(new TelemetryFloodSuppressionCounter
+            {
+                ProductId = productId,
+                HardwareId = hardwareId,
+                AppName = appName,
+                Version = version,
+                EventName = eventName,
+                Type = type,
+                WindowStartUtc = windowStart,
+                WindowEndUtc = windowEnd,
+                WindowMinutes = windowMinutes,
+                Threshold = threshold,
+                RawStoredCount = rawStoredCount,
+                SuppressedCount = 1,
+                FirstSeenUtc = now,
+                LastSeenUtc = now,
+                LastClientIp = ip,
+                LastIsp = isp,
+                LastPayloadHash = payloadHash
+            });
+        }
+        else
+        {
+            counter.RawStoredCount = Math.Max(counter.RawStoredCount, rawStoredCount);
+            counter.SuppressedCount++;
+            counter.LastSeenUtc = now;
+            counter.LastClientIp = ip;
+            counter.LastIsp = isp;
+            counter.LastPayloadHash = payloadHash;
+        }
+
+        await db.SaveChangesAsync();
+        _logger.LogInformation(
+            "Suppressed telemetry flood for {AppName} {HardwareId} {EventName} {Type}: raw={RawStoredCount}, suppressed={SuppressedCount}, window={WindowStart:o}",
+            appName,
+            hardwareId,
+            eventName,
+            type,
+            rawStoredCount,
+            counter?.SuppressedCount ?? 1,
+            windowStart);
+
+        return false;
+    }
+
+    private async Task<int> GetClampedIntSettingAsync(string key, int defaultValue, int min, int max)
+    {
+        var raw = await _settings.GetSettingAsync(key, defaultValue.ToString());
+        return int.TryParse(raw, out var parsed) ? Math.Clamp(parsed, min, max) : defaultValue;
+    }
+
+    private static bool IsFloodSuppressionExempt(string eventName, TelemetryType type)
+    {
+        if (type == TelemetryType.Error)
+            return true;
+
+        return eventName.Contains("Security", StringComparison.OrdinalIgnoreCase)
+            || eventName.Contains("Integrity", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(eventName, "CertPinningFailed", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(eventName, "CertPinningRecovered", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static DateTime FloorToWindow(DateTime utc, int windowMinutes)
+    {
+        var ticks = TimeSpan.FromMinutes(windowMinutes).Ticks;
+        return new DateTime(utc.Ticks / ticks * ticks, DateTimeKind.Utc);
+    }
+
+    private static string? ComputeSha256(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return null;
+
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(value));
+        return Convert.ToHexString(bytes);
     }
 
     private async Task BanBinaryPatchAsync(string hardwareId, string banReason, Guid productId, Dictionary<string, string> mismatchedBinaries, bool silent)

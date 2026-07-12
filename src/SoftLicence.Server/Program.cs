@@ -176,6 +176,7 @@ builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryActivationFun
 builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryActivationFailuresAnalyticsService>(); // Telemetry activation failure detail analytics
 builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryMachineProfileAnalyticsService>(); // Telemetry machine profile analytics
 builder.Services.AddTransient<SoftLicence.Server.Services.TelemetrySupportProfileAnalyticsService>(); // Telemetry support lookup analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.CustomerLicenseTimelineAnalyticsService>(); // Global customer/license support timeline analytics
 builder.Services.AddTransient<SoftLicence.Server.Services.HwidReuseAlertService>(); // HWID reuse security alerts
 builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryVersionHealthAnalyticsService>(); // Telemetry version health analytics
 builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryStartupHealthAnalyticsService>(); // Telemetry startup health analytics
@@ -186,6 +187,7 @@ builder.Services.AddTransient<SoftLicence.Server.Services.FreemiumActivityRankin
 builder.Services.AddTransient<SoftLicence.Server.Services.RecentLicenseOnboardingMetricsAnalyticsService>(); // Recent license onboarding Time-To-Value analytics
 builder.Services.AddTransient<SoftLicence.Server.Services.LicenseUsageScoringAnalyticsService>(); // License usage conversion and retention scoring analytics
 builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryLicenseHardwareAuditAnalyticsService>(); // Telemetry/license/HWID audit analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.LicenseSeatConsistencyCheckService>(); // Read-only license seat/legacy consistency check
 builder.Services.AddTransient<SoftLicence.Server.Services.LicenseHardwareVerifierAnalyticsService>(); // Authoritative license/HWID verifier for server-to-server consumers
 builder.Services.AddTransient<SoftLicence.Server.Services.FreemiumAbuseRiskAnalyticsService>(); // Freemium group abuse risk analytics
 builder.Services.AddTransient<SoftLicence.Server.Services.AnalyticsApiKeyAuthService>(); // Analytics/MCP API key auth

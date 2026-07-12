@@ -15,13 +15,29 @@ public sealed class SoftLicenceAnalyticsTools
     }
 
     [McpServerTool]
-    [Description("Get a compact read-only overview of SoftLicence telemetry activity for the configured product.")]
+    [Description("Get the SoftLicence product currently selected by this MCP analytics key. Use this before product-specific investigations.")]
+    public async Task<JsonElement> GetCurrentProduct(CancellationToken cancellationToken = default)
+    {
+        return await _client.GetCurrentProductAsync(cancellationToken);
+    }
+
+    [McpServerTool]
+    [Description("List SoftLicence products accessible with this MCP analytics key. Mono-product keys return only their configured product.")]
+    public async Task<JsonElement> ListProducts(CancellationToken cancellationToken = default)
+    {
+        return await _client.ListProductsAsync(cancellationToken);
+    }
+
+    [McpServerTool]
+    [Description("Get a compact read-only overview of SoftLicence telemetry activity. Defaults to the configured product; pass productId or productName only when the key is authorized for that product.")]
     public async Task<JsonElement> GetTelemetryOverview(
         [Description("Time window in days. Clamped from 1 to 30.")] int days = 7,
         [Description("Maximum number of grouped items. Clamped from 1 to 100.")] int top = 20,
         [Description("Explicit UTC calendar day in YYYY-MM-DD format. Optional. Overrides days when provided.")] string? date = null,
         [Description("Explicit UTC range start. Must be provided with toUtc. Optional.")] string? fromUtc = null,
         [Description("Explicit UTC range end. Must be provided with fromUtc. Optional.")] string? toUtc = null,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         return await _client.GetTelemetryOverviewAsync(
@@ -30,11 +46,13 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeOptional(date),
             NormalizeOptional(fromUtc),
             NormalizeOptional(toUtc),
-            cancellationToken);
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
-    [Description("List unique telemetry devices/HardwareIds for the configured product over a bounded period.")]
+    [Description("List unique telemetry devices/HardwareIds for a SoftLicence product over a bounded period.")]
     public async Task<JsonElement> GetTelemetryDevices(
         [Description("Time window in days. Clamped from 1 to 30. Ignored when date or fromUtc/toUtc is provided.")] int days = 7,
         [Description("Explicit UTC calendar day in YYYY-MM-DD format. Optional.")] string? date = null,
@@ -42,6 +60,8 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Explicit UTC range end. Must be provided with fromUtc. Optional.")] string? toUtc = null,
         [Description("Maximum number of returned devices. Clamped from 1 to 500.")] int take = 100,
         [Description("Maximum number of top events/families per device. Clamped from 1 to 20.")] int topEvents = 5,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         return await _client.GetTelemetryDevicesAsync(
@@ -51,7 +71,9 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeOptional(toUtc),
             Math.Clamp(take, 1, 500),
             Math.Clamp(topEvents, 1, 20),
-            cancellationToken);
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -59,9 +81,16 @@ public sealed class SoftLicenceAnalyticsTools
     public async Task<JsonElement> GetTelemetrySchemaSummary(
         [Description("Time window in days. Clamped from 1 to 30.")] int days = 7,
         [Description("Maximum number of events. Clamped from 1 to 100.")] int topEvents = 25,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
-        return await _client.GetTelemetrySchemaSummaryAsync(ClampDays(days), ClampTop(topEvents), cancellationToken);
+        return await _client.GetTelemetrySchemaSummaryAsync(
+            ClampDays(days),
+            ClampTop(topEvents),
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -69,9 +98,16 @@ public sealed class SoftLicenceAnalyticsTools
     public async Task<JsonElement> GetTelemetryToolUsage(
         [Description("Time window in days. Clamped from 1 to 30.")] int days = 7,
         [Description("Maximum number of grouped items. Clamped from 1 to 100.")] int top = 20,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
-        return await _client.GetTelemetryToolUsageAsync(ClampDays(days), ClampTop(top), cancellationToken);
+        return await _client.GetTelemetryToolUsageAsync(
+            ClampDays(days),
+            ClampTop(top),
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -79,9 +115,16 @@ public sealed class SoftLicenceAnalyticsTools
     public async Task<JsonElement> GetTelemetryQuotaSummary(
         [Description("Time window in days. Clamped from 1 to 30.")] int days = 7,
         [Description("Maximum number of grouped items. Clamped from 1 to 100.")] int top = 20,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
-        return await _client.GetTelemetryQuotaSummaryAsync(ClampDays(days), ClampTop(top), cancellationToken);
+        return await _client.GetTelemetryQuotaSummaryAsync(
+            ClampDays(days),
+            ClampTop(top),
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -89,9 +132,16 @@ public sealed class SoftLicenceAnalyticsTools
     public async Task<JsonElement> GetTelemetryStartupHealth(
         [Description("Time window in days. Clamped from 1 to 30.")] int days = 7,
         [Description("Maximum number of grouped items. Clamped from 1 to 100.")] int top = 20,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
-        return await _client.GetTelemetryStartupHealthAsync(ClampDays(days), ClampTop(top), cancellationToken);
+        return await _client.GetTelemetryStartupHealthAsync(
+            ClampDays(days),
+            ClampTop(top),
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -99,9 +149,16 @@ public sealed class SoftLicenceAnalyticsTools
     public async Task<JsonElement> GetTelemetryCertPinningSummary(
         [Description("Time window in days. Clamped from 1 to 30.")] int days = 7,
         [Description("Maximum number of grouped items. Clamped from 1 to 100.")] int top = 20,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
-        return await _client.GetTelemetryCertPinningSummaryAsync(ClampDays(days), ClampTop(top), cancellationToken);
+        return await _client.GetTelemetryCertPinningSummaryAsync(
+            ClampDays(days),
+            ClampTop(top),
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -109,9 +166,16 @@ public sealed class SoftLicenceAnalyticsTools
     public async Task<JsonElement> GetTelemetryActivationFunnel(
         [Description("Time window in days. Clamped from 1 to 30.")] int days = 7,
         [Description("Maximum number of grouped items. Clamped from 1 to 100.")] int top = 20,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
-        return await _client.GetTelemetryActivationFunnelAsync(ClampDays(days), ClampTop(top), cancellationToken);
+        return await _client.GetTelemetryActivationFunnelAsync(
+            ClampDays(days),
+            ClampTop(top),
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -124,6 +188,8 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Exact HardwareId filter. Optional.")] string? hardwareId = null,
         [Description("Exact failure status filter, such as BAD_REQUEST, INVALID_KEY, REVOKED, or FORBIDDEN. Optional.")] string? status = null,
         [Description("Maximum number of returned failures. Clamped from 1 to 50.")] int take = 25,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         return await _client.GetActivationFailuresAsync(
@@ -134,7 +200,9 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeOptional(hardwareId),
             NormalizeOptional(status),
             Math.Clamp(take, 1, 50),
-            cancellationToken);
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -144,6 +212,8 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Time window in days. Clamped from 1 to 30.")] int days = 7,
         [Description("Maximum number of grouped items. Clamped from 1 to 100.")] int top = 20,
         [Description("Maximum number of recent records. Clamped from 1 to 50.")] int take = 25,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(hardwareId))
@@ -154,7 +224,9 @@ public sealed class SoftLicenceAnalyticsTools
             ClampDays(days),
             ClampTop(top),
             Math.Clamp(take, 1, 50),
-            cancellationToken);
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -162,9 +234,16 @@ public sealed class SoftLicenceAnalyticsTools
     public async Task<JsonElement> GetTelemetryVersionHealth(
         [Description("Time window in days. Clamped from 1 to 30.")] int days = 7,
         [Description("Maximum number of grouped items. Clamped from 1 to 100.")] int top = 20,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
-        return await _client.GetTelemetryVersionHealthAsync(ClampDays(days), ClampTop(top), cancellationToken);
+        return await _client.GetTelemetryVersionHealthAsync(
+            ClampDays(days),
+            ClampTop(top),
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -177,6 +256,8 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Exact client IP address, IPv4 or IPv6. Optional. IPv6 is URL-encoded and never split on colon.")] string? clientIp = null,
         [Description("Time window in days. Clamped from 1 to 30.")] int days = 7,
         [Description("Maximum number of recent records in the resolved machine profile. Clamped from 1 to 50.")] int take = 25,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(hardwareId)
@@ -196,7 +277,63 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeOptional(clientIp),
             ClampDays(days),
             Math.Clamp(take, 1, 50),
-            cancellationToken);
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
+    }
+
+    [McpServerTool]
+    [Description("Get a global read-only customer/license investigation timeline by email, HardwareId, licenseId, or license-key fragment. Generic for any customer; returns full internal emails/HWIDs, redacted license keys, per-HWID summaries, license/seat/update/access-log events, and explicitly distinguishes Update_RevokeLicense local clears from server-side seat unlink traces.")]
+    public async Task<JsonElement> GetCustomerLicenseTimeline(
+        [Description("Customer email. Optional when another lookup field is provided.")] string? email = null,
+        [Description("Customer email fragment, minimum 3 characters. Optional.")] string? emailFragment = null,
+        [Description("HardwareId to inspect. Full IDs are exact; 6+ character hex fragments can match partial HWIDs. Optional.")] string? hardwareId = null,
+        [Description("License UUID. Optional.")] string? licenseId = null,
+        [Description("License-key fragment or first segment, minimum 6 non-separator characters. Full license keys are never returned. Optional.")] string? licenseFragment = null,
+        [Description("Time window in days. Clamped from 1 to 30. Ignored when date or fromUtc/toUtc is provided.")] int days = 30,
+        [Description("Explicit UTC calendar day in YYYY-MM-DD format. Optional.")] string? date = null,
+        [Description("Explicit UTC range start. Must be provided with toUtc. Optional.")] string? fromUtc = null,
+        [Description("Explicit UTC range end. Must be provided with fromUtc. Optional.")] string? toUtc = null,
+        [Description("Maximum number of timeline items returned. Clamped from 1 to 500.")] int takeTimeline = 150,
+        [Description("Timeline offset for pagination. Minimum 0.")] int offset = 0,
+        [Description("Include activation/update HTTP access logs when available.")] bool includeAccessLogs = true,
+        [Description("Include noisy heartbeat/UI events. Default false.")] bool includeNoise = false,
+        [Description("When true, keep the timeline focused on license/support/security/update events.")] bool importantOnly = true,
+        [Description("Include redacted event properties instead of only property-key summaries. Default true for internal investigations.")] bool includeProperties = true,
+        [Description("Output mode: summary, timeline, or full.")] string? mode = "timeline",
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(email)
+            && string.IsNullOrWhiteSpace(emailFragment)
+            && string.IsNullOrWhiteSpace(hardwareId)
+            && string.IsNullOrWhiteSpace(licenseId)
+            && string.IsNullOrWhiteSpace(licenseFragment))
+        {
+            throw new ArgumentException("At least one lookup field is required.");
+        }
+
+        return await _client.GetCustomerLicenseTimelineAsync(
+            NormalizeOptional(email),
+            NormalizeOptional(emailFragment),
+            NormalizeOptional(hardwareId),
+            NormalizeOptional(licenseId),
+            NormalizeOptional(licenseFragment),
+            ClampDays(days),
+            NormalizeOptional(date),
+            NormalizeOptional(fromUtc),
+            NormalizeOptional(toUtc),
+            Math.Clamp(takeTimeline, 1, 500),
+            Math.Max(0, offset),
+            includeAccessLogs,
+            includeNoise,
+            importantOnly,
+            includeProperties,
+            NormalizeTimelineMode(mode),
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -206,12 +343,14 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Explicit UTC calendar day in YYYY-MM-DD format. Optional.")] string? date = null,
         [Description("Explicit UTC range start. Must be provided with toUtc. Optional.")] string? fromUtc = null,
         [Description("Explicit UTC range end. Must be provided with fromUtc. Optional.")] string? toUtc = null,
-        [Description("Exact HardwareId filter. Optional.")] string? hardwareId = null,
+        [Description("HardwareId exact value, prefix, or fragment of 6+ characters. Optional. Full IDs can match legacy/truncated stored values.")] string? hardwareId = null,
         [Description("Exact event name filter. Optional.")] string? eventName = null,
         [Description("Event family filter such as mcp, startup, api, compile, cert-pinning. Optional.")] string? eventFamily = null,
         [Description("Exact app version filter. Optional.")] string? version = null,
         [Description("Telemetry type filter: Event, Diagnostic, or Error. Optional.")] string? type = null,
         [Description("Maximum number of returned records. Clamped from 1 to 50.")] int take = 25,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         return await _client.GetTelemetryRawSampleAsync(
@@ -225,7 +364,30 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeOptional(version),
             NormalizeOptional(type),
             Math.Clamp(take, 1, 50),
-            cancellationToken);
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
+    }
+
+    [McpServerTool]
+    [Description("List deterministic telemetry flood suppressions for a product. Use this to see which repeated event groups are no longer written as raw telemetry rows.")]
+    public async Task<JsonElement> GetTelemetryFloodSuppressions(
+        [Description("Time window in days. Clamped from 1 to 30.")] int days = 7,
+        [Description("Optional HardwareId exact value or prefix filter. Returned HardwareIds are redacted.")] string? hardwareId = null,
+        [Description("Optional exact event name filter, for example NativeExtractionFailed.")] string? eventName = null,
+        [Description("Maximum number of suppression groups. Clamped from 1 to 100.")] int take = 25,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        return await _client.GetTelemetryFloodSuppressionsAsync(
+            ClampDays(days),
+            NormalizeOptional(hardwareId),
+            NormalizeOptional(eventName),
+            Math.Clamp(take, 1, 100),
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -236,6 +398,8 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Explicit UTC calendar day in YYYY-MM-DD format. Optional.")] string? date = null,
         [Description("Explicit UTC range start. Must be provided with toUtc. Optional.")] string? fromUtc = null,
         [Description("Explicit UTC range end. Must be provided with fromUtc. Optional.")] string? toUtc = null,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         return await _client.GetTelemetryInsightsAsync(
@@ -244,7 +408,9 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeOptional(date),
             NormalizeOptional(fromUtc),
             NormalizeOptional(toUtc),
-            cancellationToken);
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -257,6 +423,8 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Return redacted bounded candidate samples. Default: false.")] bool includeSamples = false,
         [Description("Maximum number of returned samples. Clamped from 1 to 50.")] int sampleLimit = 30,
         [Description("Maximum number of top telemetry events. Clamped from 1 to 100.")] int topEvents = 20,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         currentDurationDays = Math.Clamp(currentDurationDays, 1, 3650);
@@ -270,7 +438,9 @@ public sealed class SoftLicenceAnalyticsTools
             includeSamples,
             Math.Clamp(sampleLimit, 1, 50),
             ClampTop(topEvents),
-            cancellationToken);
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -283,6 +453,8 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Maximum activation age in days. Optional. Example: 30.")] int? activationAgeMaxDays = null,
         [Description("Include up to 10 recent redacted event samples per ranked machine. Default: false.")] bool includeSamples = false,
         [Description("Maximum number of ranked machines returned. Clamped from 1 to 100.")] int take = 50,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         return await _client.GetFreemiumActivityRankingAsync(
@@ -293,7 +465,9 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeAge(activationAgeMaxDays),
             includeSamples,
             Math.Clamp(take, 1, 100),
-            cancellationToken);
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -306,6 +480,8 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Maximum activation age in days. Optional. Example: 365.")] int? activationAgeMaxDays = null,
         [Description("Include up to 10 recent redacted event samples per ranked machine. Default: false.")] bool includeSamples = false,
         [Description("Maximum number of ranked machines returned. Clamped from 1 to 100.")] int take = 50,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         return await _client.GetPaidActivityRankingAsync(
@@ -316,16 +492,24 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeAge(activationAgeMaxDays),
             includeSamples,
             Math.Clamp(take, 1, 100),
-            cancellationToken);
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
-    [Description("List available license type slugs for the configured product with active, expired, revoked, and total license counts.")]
+    [Description("List available license type slugs for a SoftLicence product with active, expired, revoked, and total license counts.")]
     public async Task<JsonElement> GetLicenseTypes(
         [Description("Include free/Freemium/trial license types. Default: true. Set false to list only paid/non-Freemium types.")] bool includeFree = true,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
-        return await _client.GetLicenseTypesAsync(includeFree, cancellationToken);
+        return await _client.GetLicenseTypesAsync(
+            includeFree,
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -335,6 +519,8 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("License type group: paid, freemium, or all. Default: paid.")] string? licenseType = "paid",
         [Description("License status filter: active, expired, revoked, not_activated, expired_or_revoked, or all. Default: active.")] string? status = "active",
         [Description("Maximum activation/onboarding age in days. Optional.")] int? activationAgeMaxDays = null,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         return await _client.GetRecentLicenseOnboardingMetricsAsync(
@@ -342,7 +528,9 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeOnboardingLicenseType(licenseType),
             NormalizeOnboardingStatus(status),
             NormalizeAge(activationAgeMaxDays),
-            cancellationToken);
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -356,6 +544,8 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Minimum score across usage/conversion/retention. Clamped from 0 to 100. Optional.")] double? minScore = null,
         [Description("Include inactive licenses in addition to the status filter. Default: false.")] bool includeInactive = false,
         [Description("Sort field: score, conversionPotential, retentionConfidence, or recentActivity. Default: score.")] string? sortBy = "score",
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         return await _client.GetLicenseUsageScoresAsync(
@@ -367,7 +557,9 @@ public sealed class SoftLicenceAnalyticsTools
             minScore.HasValue ? Math.Clamp(minScore.Value, 0, 100) : null,
             includeInactive,
             NormalizeUsageSort(sortBy),
-            cancellationToken);
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -379,6 +571,8 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Explicit UTC range end. Must be provided with fromUtc. Optional.")] string? toUtc = null,
         [Description("Comma-separated activity windows in days. Default: 1,3,7,30.")] string? activityWindowsDays = "1,3,7,30",
         [Description("Maximum number of returned redacted anomalies. Clamped from 1 to 100.")] int take = 50,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         return await _client.GetTelemetryLicenseHardwareAuditAsync(
@@ -388,7 +582,9 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeOptional(toUtc),
             NormalizeActivityWindows(activityWindowsDays),
             Math.Clamp(take, 1, 100),
-            cancellationToken);
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -400,6 +596,8 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Explicit UTC range start. Must be provided with toUtc. Optional.")] string? fromUtc = null,
         [Description("Explicit UTC range end. Must be provided with fromUtc. Optional.")] string? toUtc = null,
         [Description("Maximum number of returned groups. Clamped from 1 to 100.")] int take = 50,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         return await _client.GetFreemiumAbuseRiskAsync(
@@ -409,7 +607,9 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeOptional(fromUtc),
             NormalizeOptional(toUtc),
             Math.Clamp(take, 1, 100),
-            cancellationToken);
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -421,6 +621,8 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Exact client IP to resolve to recent HWIDs. Optional.")] string? clientIp = null,
         [Description("Email fragment used to resolve license HWIDs. Optional.")] string? emailFragment = null,
         [Description("License-key fragment used to resolve license HWIDs. Optional. Full keys are not returned.")] string? licenseFragment = null,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         EnsureSecurityBanLookup(hardwareId, componentHash, componentType, clientIp, emailFragment, licenseFragment);
@@ -433,7 +635,9 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeOptional(licenseFragment),
             includeInactive: false,
             take: 25,
-            cancellationToken);
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -447,6 +651,8 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("License-key fragment used to resolve license HWIDs. Optional.")] string? licenseFragment = null,
         [Description("Include inactive/expired/unbanned rows. Default: false.")] bool includeInactive = false,
         [Description("Maximum number of records. Clamped from 1 to 100.")] int take = 25,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         return await _client.ListSecurityBansAsync(
@@ -458,7 +664,9 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeOptional(licenseFragment),
             includeInactive,
             Math.Clamp(take, 1, 100),
-            cancellationToken);
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -483,6 +691,67 @@ public sealed class SoftLicenceAnalyticsTools
             throw new ArgumentException("banId must be a valid UUID.", nameof(banId));
 
         return await _client.GetSecurityBanSourceEventAsync(parsed, cancellationToken);
+    }
+
+    [McpServerTool]
+    [Description("List supported SoftLicence hardware-ban categories for MCP write tools. This does not require write credentials.")]
+    public JsonElement GetSecurityHardwareBanCategories()
+    {
+        return _client.GetSecurityHardwareBanCategories();
+    }
+
+    [McpServerTool]
+    [Description("Create or reactivate a SoftLicence hardware-id ban through the admin API. Requires SOFTLICENCE_ADMIN_SECRET, separate from the read-only analytics key. Returns mutation result plus post-mutation verification.")]
+    public async Task<JsonElement> CreateSecurityHardwareBan(
+        [Description("HardwareId to ban. Required.")] string hardwareId,
+        [Description("Ban reason. Required and stored in audit history.")] string reason,
+        [Description("Ban category: manual, piracy, debugger, outdated_version, quota_abuse, dev_canary_quarantine.")] string? category = "manual",
+        [Description("Optional product UUID. Omit to ban for all products.")] string? productId = null,
+        [Description("Optional UTC expiration timestamp. Use either expiresAt or durationDays, not both.")] string? expiresAt = null,
+        [Description("Optional duration in days for a temporary ban. Use either expiresAt or durationDays, not both.")] int? durationDays = null,
+        [Description("Optional BugTrace ticket reference for audit, for example TKT-999381.")] string? ticketRef = null,
+        [Description("Optional actor name for audit.")] string? createdBy = "Codex MCP",
+        [Description("Optional compact audit note. Do not include secrets.")] string? auditNote = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(hardwareId))
+            throw new ArgumentException("hardwareId is required.", nameof(hardwareId));
+        if (string.IsNullOrWhiteSpace(reason))
+            throw new ArgumentException("reason is required.", nameof(reason));
+        if (!string.IsNullOrWhiteSpace(expiresAt) && durationDays.HasValue)
+            throw new ArgumentException("Use either expiresAt or durationDays, not both.");
+
+        return await _client.CreateSecurityHardwareBanAsync(
+            hardwareId.Trim(),
+            reason.Trim(),
+            NormalizeHardwareBanCategory(category),
+            NormalizeOptional(productId),
+            NormalizeOptional(expiresAt),
+            durationDays.HasValue ? Math.Clamp(durationDays.Value, 1, 3650) : null,
+            NormalizeOptional(ticketRef),
+            NormalizeOptional(createdBy),
+            NormalizeOptional(auditNote),
+            cancellationToken);
+    }
+
+    [McpServerTool]
+    [Description("Deactivate a SoftLicence hardware-id ban by banId through the admin API. Requires SOFTLICENCE_ADMIN_SECRET, separate from the read-only analytics key. Returns mutation result plus post-mutation verification.")]
+    public async Task<JsonElement> UnbanSecurityHardwareBan(
+        [Description("Ban UUID returned by list_security_bans/get_security_ban_status.")] string banId,
+        [Description("Optional BugTrace ticket reference for audit, for example TKT-999381.")] string? ticketRef = null,
+        [Description("Optional actor name for audit.")] string? createdBy = "Codex MCP",
+        [Description("Optional compact audit note. Do not include secrets.")] string? auditNote = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Guid.TryParse(NormalizeOptional(banId), out var parsed))
+            throw new ArgumentException("banId must be a valid UUID.", nameof(banId));
+
+        return await _client.UnbanSecurityHardwareBanAsync(
+            parsed,
+            NormalizeOptional(ticketRef),
+            NormalizeOptional(createdBy),
+            NormalizeOptional(auditNote),
+            cancellationToken);
     }
 
     [McpServerTool]
@@ -609,6 +878,22 @@ public sealed class SoftLicenceAnalyticsTools
         };
     }
 
+    private static string NormalizeHardwareBanCategory(string? category)
+    {
+        var normalized = NormalizeOptional(category)?.ToLowerInvariant().Replace('-', '_');
+        return normalized switch
+        {
+            "manual" => "manual",
+            "piracy" => "piracy",
+            "debugger" or "reverseengineering" or "reverse_engineering" => "debugger",
+            "outdated_version" or "outdatedversion" => "outdated_version",
+            "quota_abuse" or "quotaabuse" => "quota_abuse",
+            "dev_canary_quarantine" or "devcanaryquarantine" => "dev_canary_quarantine",
+            null => "manual",
+            _ => throw new ArgumentException("Unsupported hardware ban category. Use get_security_hardware_ban_categories.")
+        };
+    }
+
     private static string NormalizeLlmTipSortBy(string? sortBy)
     {
         var normalized = NormalizeOptional(sortBy)?.ToLowerInvariant();
@@ -627,6 +912,16 @@ public sealed class SoftLicenceAnalyticsTools
     private static string NormalizeSortDir(string? sortDir)
     {
         return string.Equals(NormalizeOptional(sortDir), "asc", StringComparison.OrdinalIgnoreCase) ? "asc" : "desc";
+    }
+
+    private static string NormalizeTimelineMode(string? mode)
+    {
+        var normalized = NormalizeOptional(mode)?.ToLowerInvariant();
+        return normalized switch
+        {
+            "summary" or "timeline" or "full" => normalized,
+            _ => "timeline"
+        };
     }
 
     private static void EnsureSecurityBanLookup(

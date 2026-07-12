@@ -9,6 +9,53 @@ namespace SoftLicence.Tests.Server;
 public sealed class SoftLicenceMcpClientTests
 {
     [Fact]
+    public async Task GetCurrentProductAsync_SendsAnalyticsKeyAndExpectedUrl()
+    {
+        HttpRequestMessage? capturedRequest = null;
+        var handler = new CapturingHandler(request =>
+        {
+            capturedRequest = request;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"product":{"name":"T-IA Connect"}}""", Encoding.UTF8, "application/json")
+            };
+        });
+        var client = CreateClient(handler);
+
+        var result = await client.GetCurrentProductAsync(CancellationToken.None);
+
+        Assert.Equal("T-IA Connect", result.GetProperty("product").GetProperty("name").GetString());
+        Assert.NotNull(capturedRequest);
+        Assert.Equal(
+            "https://softlicence.test/api/analytics/products/current",
+            capturedRequest.RequestUri!.AbsoluteUri);
+        Assert.True(capturedRequest.Headers.TryGetValues("X-Analytics-Key", out var values));
+        Assert.Equal("analytics-key", Assert.Single(values));
+    }
+
+    [Fact]
+    public async Task ListProductsAsync_SendsExpectedUrl()
+    {
+        HttpRequestMessage? capturedRequest = null;
+        var handler = new CapturingHandler(request =>
+        {
+            capturedRequest = request;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"productsReturned":1}""", Encoding.UTF8, "application/json")
+            };
+        });
+        var client = CreateClient(handler);
+
+        await client.ListProductsAsync(CancellationToken.None);
+
+        Assert.NotNull(capturedRequest);
+        Assert.Equal(
+            "https://softlicence.test/api/analytics/products",
+            capturedRequest.RequestUri!.AbsoluteUri);
+    }
+
+    [Fact]
     public async Task GetTelemetryOverviewAsync_SendsAnalyticsKeyAndExpectedUrl()
     {
         HttpRequestMessage? capturedRequest = null;
@@ -32,6 +79,36 @@ public sealed class SoftLicenceMcpClientTests
             capturedRequest.RequestUri!.AbsoluteUri);
         Assert.True(capturedRequest.Headers.TryGetValues("X-Analytics-Key", out var values));
         Assert.Equal("analytics-key", Assert.Single(values));
+    }
+
+    [Fact]
+    public async Task GetTelemetryOverviewAsync_EncodesProductSelector()
+    {
+        HttpRequestMessage? capturedRequest = null;
+        var handler = new CapturingHandler(request =>
+        {
+            capturedRequest = request;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"recordsAnalyzed":1}""", Encoding.UTF8, "application/json")
+            };
+        });
+        var client = CreateClient(handler);
+
+        await client.GetTelemetryOverviewAsync(
+            days: 7,
+            top: 20,
+            date: null,
+            fromUtc: null,
+            toUtc: null,
+            CancellationToken.None,
+            productId: null,
+            productName: "YOUR_APP_NAME");
+
+        Assert.NotNull(capturedRequest);
+        Assert.Equal(
+            "https://softlicence.test/api/analytics/telemetry/overview?days=7&top=20&productName=YOUR_APP_NAME",
+            capturedRequest.RequestUri!.AbsoluteUri);
     }
 
     [Fact]
@@ -141,6 +218,35 @@ public sealed class SoftLicenceMcpClientTests
     }
 
     [Fact]
+    public async Task GetTelemetryFloodSuppressionsAsync_EncodesFilters()
+    {
+        HttpRequestMessage? capturedRequest = null;
+        var handler = new CapturingHandler(request =>
+        {
+            capturedRequest = request;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"groupsMatched":1}""", Encoding.UTF8, "application/json")
+            };
+        });
+        var client = CreateClient(handler);
+
+        await client.GetTelemetryFloodSuppressionsAsync(
+            days: 7,
+            hardwareId: "8A96631C",
+            eventName: "NativeExtractionFailed",
+            take: 25,
+            CancellationToken.None,
+            productId: null,
+            productName: "YOUR_APP_NAME");
+
+        Assert.NotNull(capturedRequest);
+        Assert.Equal(
+            "https://softlicence.test/api/analytics/telemetry/flood-suppressions?days=7&hardwareId=8A96631C&eventName=NativeExtractionFailed&take=25&productName=YOUR_APP_NAME",
+            capturedRequest.RequestUri!.AbsoluteUri);
+    }
+
+    [Fact]
     public async Task GetTelemetryInsightsAsync_EncodesExplicitRange()
     {
         HttpRequestMessage? capturedRequest = null;
@@ -225,6 +331,47 @@ public sealed class SoftLicenceMcpClientTests
         Assert.NotNull(capturedRequest);
         Assert.Equal(
             "https://softlicence.test/api/analytics/support/profile?hardwareId=769C9325&emailFragment=fra&licenseFragment=AAAA-BB&clientIp=2001%3Adb8%3A%3A42&days=7&take=25",
+            capturedRequest.RequestUri!.AbsoluteUri);
+    }
+
+    [Fact]
+    public async Task GetCustomerLicenseTimelineAsync_EncodesTimelineParameters()
+    {
+        HttpRequestMessage? capturedRequest = null;
+        var handler = new CapturingHandler(request =>
+        {
+            capturedRequest = request;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"timelineReturned":1}""", Encoding.UTF8, "application/json")
+            };
+        });
+        var client = CreateClient(handler);
+
+        await client.GetCustomerLicenseTimelineAsync(
+            email: "customer@example.com",
+            emailFragment: null,
+            hardwareId: "55BA0C1B",
+            licenseId: null,
+            licenseFragment: "9B1784",
+            days: 30,
+            date: null,
+            fromUtc: "2026-07-01T00:00:00Z",
+            toUtc: "2026-07-12T00:00:00Z",
+            takeTimeline: 500,
+            offset: 25,
+            includeAccessLogs: true,
+            includeNoise: false,
+            importantOnly: true,
+            includeProperties: true,
+            mode: "full",
+            CancellationToken.None,
+            productId: null,
+            productName: "TIAConnect");
+
+        Assert.NotNull(capturedRequest);
+        Assert.Equal(
+            "https://softlicence.test/api/analytics/support/customer-license-timeline?email=customer%40example.com&hardwareId=55BA0C1B&licenseFragment=9B1784&days=30&fromUtc=2026-07-01T00%3A00%3A00Z&toUtc=2026-07-12T00%3A00%3A00Z&takeTimeline=500&offset=25&includeAccessLogs=true&includeNoise=false&importantOnly=true&includeProperties=true&mode=full&productName=TIAConnect",
             capturedRequest.RequestUri!.AbsoluteUri);
     }
 
@@ -391,6 +538,32 @@ public sealed class SoftLicenceMcpClientTests
         Assert.NotNull(capturedRequest);
         Assert.Equal(
             "https://softlicence.test/api/analytics/licenses/types?includeFree=false",
+            capturedRequest.RequestUri!.AbsoluteUri);
+    }
+
+    [Fact]
+    public async Task GetLicenseTypesAsync_EncodesProductSelector()
+    {
+        HttpRequestMessage? capturedRequest = null;
+        var handler = new CapturingHandler(request =>
+        {
+            capturedRequest = request;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"totalTypes":2}""", Encoding.UTF8, "application/json")
+            };
+        });
+        var client = CreateClient(handler);
+
+        await client.GetLicenseTypesAsync(
+            includeFree: true,
+            CancellationToken.None,
+            productId: "11111111-2222-3333-4444-555555555555",
+            productName: null);
+
+        Assert.NotNull(capturedRequest);
+        Assert.Equal(
+            "https://softlicence.test/api/analytics/licenses/types?includeFree=true&productId=11111111-2222-3333-4444-555555555555",
             capturedRequest.RequestUri!.AbsoluteUri);
     }
 

@@ -79,6 +79,171 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
     }
 
     [Fact]
+    public async Task CurrentProduct_WhenProductKeyIsValid_ReturnsConfiguredProduct()
+    {
+        await SeedTelemetryAsync();
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
+
+        var response = await client.GetAsync("/api/analytics/products/current");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        Assert.Equal("configured", GetString(json, "scopeMode"));
+        Assert.False(GetBool(json, "isMultiProduct"));
+
+        var product = GetProperty(json, "product");
+        Assert.Equal("T-IA Connect", GetString(product, "name"));
+        Assert.NotEqual(Guid.Empty, Guid.Parse(GetString(product, "productId")!));
+    }
+
+    [Fact]
+    public async Task ListProducts_WithMonoProductKey_ReturnsOnlyConfiguredProduct()
+    {
+        await SeedTelemetryAsync();
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
+
+        var response = await client.GetAsync("/api/analytics/products");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        Assert.Equal("configured", GetString(json, "scopeMode"));
+        Assert.Equal(1, GetInt(json, "productsReturned"));
+
+        var product = Assert.Single(GetArray(json, "products"));
+        Assert.Equal("T-IA Connect", GetString(product, "name"));
+    }
+
+    [Fact]
+    public async Task CurrentProduct_WithGlobalKey_ReturnsGlobalScopeWithoutConfiguredProduct()
+    {
+        await SeedTelemetryAsync();
+        const string globalKey = "sla_test_current_global_key_001";
+        await SeedGlobalAnalyticsKeyAsync(globalKey);
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", globalKey);
+
+        var response = await client.GetAsync("/api/analytics/products/current");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        Assert.Equal(AnalyticsApiKeyScopeKinds.Global, GetString(json, "scopeKind"));
+        Assert.Equal("global", GetString(json, "scopeMode"));
+        Assert.True(GetBool(json, "isMultiProduct"));
+        Assert.Equal(JsonValueKind.Null, GetProperty(json, "product").ValueKind);
+    }
+
+    [Fact]
+    public async Task ListProducts_WithGlobalKey_ReturnsAllProducts()
+    {
+        await SeedTelemetryAsync();
+        const string globalKey = "sla_test_list_global_key_001";
+        await SeedGlobalAnalyticsKeyAsync(globalKey);
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", globalKey);
+
+        var response = await client.GetAsync("/api/analytics/products");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        Assert.Equal(AnalyticsApiKeyScopeKinds.Global, GetString(json, "scopeKind"));
+        Assert.Equal("multi-product", GetString(json, "scopeMode"));
+        Assert.True(GetInt(json, "productsReturned") >= 2);
+        var names = GetArray(json, "products").Select(p => GetString(p, "name")).ToList();
+        Assert.Contains("T-IA Connect", names);
+        Assert.Contains("Other Product", names);
+    }
+
+    [Fact]
+    public async Task TelemetryOverview_WithMonoProductKeyAndDifferentProductName_ReturnsForbidden()
+    {
+        await SeedTelemetryAsync();
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
+
+        var response = await client.GetAsync("/api/analytics/telemetry/overview?productName=Other%20Product");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        Assert.Equal("PRODUCT_SCOPE_FORBIDDEN", GetString(json, "errorCode"));
+    }
+
+    [Fact]
+    public async Task TelemetryOverview_WithProductKeyAndMultiProductScopeStillReturnsForbidden()
+    {
+        await SeedTelemetryAsync();
+        const string multiProductKey = "sla_test_multi_product_key_001";
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var productId = await db.Products
+                .Where(p => p.Name == "T-IA Connect")
+                .Select(p => p.Id)
+                .SingleAsync();
+
+            db.AnalyticsApiKeys.Add(new AnalyticsApiKey
+            {
+                ProductId = productId,
+                Name = "Multi-product analytics test key",
+                Prefix = AnalyticsApiKeyAuthService.BuildPrefix(multiProductKey),
+                KeyHash = AnalyticsApiKeyAuthService.ComputeKeyHash(multiProductKey),
+                Scopes = $"{AnalyticsApiKeyScopes.TelemetryRead} {AnalyticsApiKeyScopes.MultiProductRead}",
+                ScopeKind = AnalyticsApiKeyScopeKinds.Product,
+                IsActive = true
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", multiProductKey);
+
+        var response = await client.GetAsync("/api/analytics/telemetry/overview?days=7&top=10&productName=Other%20Product");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        Assert.Equal("PRODUCT_SCOPE_FORBIDDEN", GetString(json, "errorCode"));
+    }
+
+    [Fact]
+    public async Task TelemetryOverview_WithGlobalKeyAndProductName_ReturnsRequestedProduct()
+    {
+        await SeedTelemetryAsync();
+        const string globalKey = "sla_test_global_product_key_001";
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            db.AnalyticsApiKeys.Add(new AnalyticsApiKey
+            {
+                ProductId = null,
+                Name = "Global analytics test key",
+                Prefix = AnalyticsApiKeyAuthService.BuildPrefix(globalKey),
+                KeyHash = AnalyticsApiKeyAuthService.ComputeKeyHash(globalKey),
+                Scopes = $"{AnalyticsApiKeyScopes.TelemetryRead} {AnalyticsApiKeyScopes.MultiProductRead}",
+                ScopeKind = AnalyticsApiKeyScopeKinds.Global,
+                IsActive = true
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", globalKey);
+
+        var response = await client.GetAsync("/api/analytics/telemetry/overview?days=7&top=10&productName=Other%20Product");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(response.Headers.TryGetValues("X-SoftLicence-Product-Scope-Mode", out var scopeModes));
+        Assert.Equal("explicit-global", Assert.Single(scopeModes));
+        var json = await ReadJsonAsync(response);
+        Assert.Equal(1, GetInt(json, "recordsAnalyzed"));
+        var topEvents = GetArray(json, "topEvents");
+        Assert.Contains(topEvents, e => GetString(e, "name") == "OtherProduct_Event");
+        Assert.DoesNotContain(topEvents, e => GetString(e, "name") == "Startup_AppStarted");
+    }
+
+    [Fact]
     public async Task TelemetryOverview_WhenDateIsProvided_UsesCalendarDayPeriod()
     {
         await SeedTelemetryAsync();
@@ -117,6 +282,93 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
         var properties = GetProperty(startup, "properties");
         Assert.Equal("Pass", GetString(properties, "OverallStatus"));
         Assert.Throws<KeyNotFoundException>(() => GetProperty(properties, "LicenseKey"));
+    }
+
+    [Fact]
+    public async Task TelemetryRawSample_WhenStoredHardwareIdIsTruncated_MatchesFullHardwareIdPrefix()
+    {
+        await SeedTelemetryAsync();
+        const string globalKey = "sla_test_raw_sample_global_key_001";
+        await SeedGlobalAnalyticsKeyAsync(globalKey);
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var productId = await db.Products
+                .Where(p => p.Name == "Other Product")
+                .Select(p => p.Id)
+                .SingleAsync();
+
+            AddEvent(db, productId, "8A96631C...", "NativeExtractionFailed", "1.1.34", "{}", DateTime.UtcNow.AddMinutes(-5));
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", globalKey);
+
+        var response = await client.GetAsync("/api/analytics/telemetry/raw-sample?productName=Other%20Product&hardwareId=8A96631C369E5493&eventName=NativeExtractionFailed&take=10");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        Assert.Equal(1, GetInt(json, "recordsMatched"));
+
+        var record = Assert.Single(GetArray(json, "records"));
+        Assert.Equal("8A96631C...", GetString(record, "hardwareId"));
+        Assert.Equal("NativeExtractionFailed", GetString(record, "eventName"));
+    }
+
+    [Fact]
+    public async Task TelemetryFloodSuppressions_ReturnsRedactedSuppressionCounters()
+    {
+        await SeedTelemetryAsync();
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var productId = await db.Products
+                .Where(p => p.Name == "T-IA Connect")
+                .Select(p => p.Id)
+                .SingleAsync();
+
+            db.TelemetryFloodSuppressionCounters.Add(new TelemetryFloodSuppressionCounter
+            {
+                ProductId = productId,
+                AppName = "TIAConnect",
+                HardwareId = "8A96631C369E5493",
+                EventName = "NativeExtractionFailed",
+                Version = "1.1.34",
+                Type = TelemetryType.Event,
+                WindowStartUtc = DateTime.UtcNow.AddMinutes(-10),
+                WindowEndUtc = DateTime.UtcNow,
+                WindowMinutes = 10,
+                Threshold = 10,
+                RawStoredCount = 10,
+                SuppressedCount = 384,
+                FirstSeenUtc = DateTime.UtcNow.AddMinutes(-9),
+                LastSeenUtc = DateTime.UtcNow.AddMinutes(-1),
+                LastClientIp = "185.162.248.75",
+                LastIsp = "netcup GmbH",
+                LastPayloadHash = "ABC123"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
+
+        var response = await client.GetAsync("/api/analytics/telemetry/flood-suppressions?days=7&hardwareId=8A96631C&eventName=NativeExtractionFailed&take=10");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("8A96631C369E5493", body, StringComparison.OrdinalIgnoreCase);
+
+        using var doc = JsonDocument.Parse(body);
+        Assert.Equal(1, GetInt(doc.RootElement, "groupsMatched"));
+        Assert.Equal(384, GetInt(doc.RootElement, "totalSuppressed"));
+
+        var counter = Assert.Single(GetArray(doc.RootElement, "counters"));
+        Assert.Equal("8A96631C...", GetString(counter, "hardwareId"));
+        Assert.Equal("NativeExtractionFailed", GetString(counter, "eventName"));
+        Assert.Equal(384, GetInt(counter, "suppressedCount"));
     }
 
     [Fact]
@@ -191,6 +443,143 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
         Assert.Equal("BAD_REQUEST", GetString(failure, "status"));
         Assert.Equal("Invalid license key format", GetString(failure, "failureReason"));
         Assert.Equal("2.1.900", GetString(failure, "clientVersion"));
+    }
+
+    [Fact]
+    public async Task TelemetryActivationFailures_IncludesStructuredBannedBusinessFailureFromAccessLogs()
+    {
+        await SeedTelemetryAsync();
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            AddAccessLog(db, "T-IA Connect", "ACTIVATE", true, 200, "BANNED", "HW-BANNED-200", "10.0.0.9", """{"isSuccess":false,"errorCode":"BANNED"}""", DateTime.UtcNow.AddMinutes(-5));
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
+
+        var response = await client.GetAsync("/api/analytics/telemetry/activation-failures?days=7&hardwareId=HW-BANNED-200&take=10");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        Assert.Equal(1, GetInt(json, "recordsMatched"));
+
+        var failure = Assert.Single(GetArray(json, "failures"));
+        Assert.Equal("HW-BANNED-200", GetString(failure, "hardwareId"));
+        Assert.Equal("BANNED", GetString(failure, "status"));
+        Assert.Equal(200, GetInt(failure, "statusCode"));
+    }
+
+    [Fact]
+    public async Task LicenseSeatConsistency_ReturnsLegacySeatMismatchesWithoutRepairingData()
+    {
+        await SeedTelemetryAsync();
+        var analyticsKey = $"sla_consistency_{Guid.NewGuid():N}";
+        Guid productId;
+        Guid staleLicenseId;
+        Guid noActiveSeatLicenseId;
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            productId = await db.Products
+                .Where(p => p.Name == "T-IA Connect")
+                .Select(p => p.Id)
+                .SingleAsync();
+
+            db.AnalyticsApiKeys.Add(new AnalyticsApiKey
+            {
+                ProductId = productId,
+                Name = "Consistency test key",
+                Prefix = AnalyticsApiKeyAuthService.BuildPrefix(analyticsKey),
+                KeyHash = AnalyticsApiKeyAuthService.ComputeKeyHash(analyticsKey),
+                Scopes = AnalyticsApiKeyScopes.TelemetryRead,
+                IsActive = true
+            });
+
+            var staleLicense = new License
+            {
+                Id = Guid.NewGuid(),
+                ProductId = productId,
+                LicenseKey = "CONSISTENCY-STALE-001",
+                CustomerName = "Stale Legacy",
+                CustomerEmail = "stale@example.test",
+                HardwareId = "HW-OLD-LEGACY",
+                ActivationDate = DateTime.UtcNow.AddDays(-5),
+                CreationDate = DateTime.UtcNow.AddDays(-6),
+                IsActive = true,
+                MaxSeats = 1
+            };
+            staleLicenseId = staleLicense.Id;
+            db.Licenses.Add(staleLicense);
+            db.LicenseSeats.Add(new LicenseSeat
+            {
+                LicenseId = staleLicense.Id,
+                HardwareId = "HW-ACTIVE-SEAT",
+                FirstActivatedAt = DateTime.UtcNow.AddDays(-1),
+                LastCheckInAt = DateTime.UtcNow,
+                IsActive = true
+            });
+
+            var noActiveSeatLicense = new License
+            {
+                Id = Guid.NewGuid(),
+                ProductId = productId,
+                LicenseKey = "CONSISTENCY-NOACTIVE-001",
+                CustomerName = "No Active Seat",
+                CustomerEmail = "no-active@example.test",
+                HardwareId = "HW-LEGACY-NO-ACTIVE",
+                ActivationDate = DateTime.UtcNow.AddDays(-4),
+                CreationDate = DateTime.UtcNow.AddDays(-6),
+                IsActive = true,
+                MaxSeats = 1
+            };
+            noActiveSeatLicenseId = noActiveSeatLicense.Id;
+            db.Licenses.Add(noActiveSeatLicense);
+            db.LicenseSeats.Add(new LicenseSeat
+            {
+                LicenseId = noActiveSeatLicense.Id,
+                HardwareId = "HW-INACTIVE-SEAT",
+                FirstActivatedAt = DateTime.UtcNow.AddDays(-4),
+                LastCheckInAt = DateTime.UtcNow.AddDays(-3),
+                IsActive = false
+            });
+
+            await db.SaveChangesAsync();
+        }
+
+        using (var serviceScope = _factory.Services.CreateScope())
+        {
+            var check = serviceScope.ServiceProvider.GetRequiredService<LicenseSeatConsistencyCheckService>();
+            var direct = await check.CheckProductAsync(productId, take: 10);
+            Assert.Equal(2, direct.AnomaliesDetected);
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", analyticsKey);
+
+        var response = await client.GetAsync("/api/analytics/licenses/seat-consistency?take=10");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        Assert.Equal(2, GetInt(json, "anomaliesDetected"));
+        Assert.Equal(2, GetInt(json, "anomaliesReturned"));
+
+        var anomalies = GetArray(json, "anomalies");
+        Assert.Contains(anomalies, a =>
+            GetString(a, "anomalyType") == "LEGACY_DIFFERS_FROM_ACTIVE_SEAT"
+            && GetString(a, "legacyHardwareId") == "HW-OLD-LEGACY"
+            && GetString(a, "expectedHardwareId") == "HW-ACTIVE-SEAT");
+        Assert.Contains(anomalies, a =>
+            GetString(a, "anomalyType") == "STALE_LEGACY_WITH_NO_ACTIVE_SEAT"
+            && GetString(a, "legacyHardwareId") == "HW-LEGACY-NO-ACTIVE"
+            && GetString(a, "expectedHardwareId") == null);
+
+        using var verifyScope = _factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        Assert.Equal("HW-OLD-LEGACY", (await verifyDb.Licenses.FindAsync(staleLicenseId))!.HardwareId);
+        Assert.Equal("HW-LEGACY-NO-ACTIVE", (await verifyDb.Licenses.FindAsync(noActiveSeatLicenseId))!.HardwareId);
     }
 
     [Fact]
@@ -514,15 +903,46 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
         Assert.False(string.IsNullOrWhiteSpace(rawKey));
         Assert.StartsWith("sla_", rawKey, StringComparison.Ordinal);
         Assert.Equal(AnalyticsApiKeyScopes.TelemetryRead, GetString(json, "scopes"));
+        Assert.Equal(AnalyticsApiKeyScopeKinds.Product, GetString(json, "scopeKind"));
 
         using var scope = _factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
         var storedKey = await db.AnalyticsApiKeys.SingleAsync(k => k.ProductId == productId);
 
         Assert.Equal("MCP test key", storedKey.Name);
+        Assert.Equal(AnalyticsApiKeyScopeKinds.Product, storedKey.ScopeKind);
         Assert.Equal(AnalyticsApiKeyAuthService.BuildPrefix(rawKey!), storedKey.Prefix);
         Assert.Equal(AnalyticsApiKeyAuthService.ComputeKeyHash(rawKey!), storedKey.KeyHash);
         Assert.DoesNotContain(rawKey!, storedKey.KeyHash, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CreateGlobalAnalyticsApiKey_WhenAdminSecretIsValid_ReturnsGlobalKey()
+    {
+        await SeedProductOnlyAsync();
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Admin-Secret", "admin-secret");
+
+        var response = await client.PostAsJsonAsync(
+            "/api/admin/analytics-keys/global",
+            new { name = "Codex MCP Global" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        var rawKey = GetString(json, "apiKey");
+        Assert.False(string.IsNullOrWhiteSpace(rawKey));
+        Assert.StartsWith("sla_", rawKey, StringComparison.Ordinal);
+        Assert.Equal(AnalyticsApiKeyScopeKinds.Global, GetString(json, "scopeKind"));
+        Assert.Contains(AnalyticsApiKeyScopes.MultiProductRead, GetString(json, "scopes"));
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var storedKey = await db.AnalyticsApiKeys.SingleAsync(k => k.ScopeKind == AnalyticsApiKeyScopeKinds.Global);
+
+        Assert.Null(storedKey.ProductId);
+        Assert.Equal("Codex MCP Global", storedKey.Name);
+        Assert.Equal(AnalyticsApiKeyAuthService.BuildPrefix(rawKey!), storedKey.Prefix);
+        Assert.Equal(AnalyticsApiKeyAuthService.ComputeKeyHash(rawKey!), storedKey.KeyHash);
     }
 
     [Fact]
@@ -757,6 +1177,24 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
         AddAccessLog(db, "T-IA Connect", "ACTIVATE", false, 400, "BAD_REQUEST", "HW-A", "10.0.0.1", "Invalid license key format", DateTime.UtcNow.AddMinutes(-40));
         AddAccessLog(db, "T-IA Connect", "ACTIVATE", false, 403, "REVOKED", "HW-B", "10.0.0.2", "License revoked", DateTime.UtcNow.AddMinutes(-30));
         AddAccessLog(db, "Other Product", "ACTIVATE", false, 400, "BAD_REQUEST", "HW-C", "10.0.0.3", "Other product failure", DateTime.UtcNow.AddMinutes(-20));
+
+        await db.SaveChangesAsync();
+    }
+
+    private async Task SeedGlobalAnalyticsKeyAsync(string rawKey)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        db.AnalyticsApiKeys.Add(new AnalyticsApiKey
+        {
+            ProductId = null,
+            Name = "Global analytics test key",
+            Prefix = AnalyticsApiKeyAuthService.BuildPrefix(rawKey),
+            KeyHash = AnalyticsApiKeyAuthService.ComputeKeyHash(rawKey),
+            Scopes = $"{AnalyticsApiKeyScopes.TelemetryRead} {AnalyticsApiKeyScopes.MultiProductRead}",
+            ScopeKind = AnalyticsApiKeyScopeKinds.Global,
+            IsActive = true
+        });
 
         await db.SaveChangesAsync();
     }

@@ -44,6 +44,11 @@ namespace SoftLicence.SDK
         Task<DeactivationResult> DeactivateAsync(string licenseKey, string appName, string? appId = null);
 
         /// <summary>
+        /// Délie un matériel explicite en indiquant la source du déliement (settings_button, uninstall, portal, admin).
+        /// </summary>
+        Task<DeactivationResult> DeactivateAsync(string licenseKey, string appName, string hardwareId, string source, string? appId = null);
+
+        /// <summary>
         /// Demande un code de reset envoyé par email. Délie tous les postes après confirmation.
         /// Utile si la machine est perdue ou inaccessible.
         /// </summary>

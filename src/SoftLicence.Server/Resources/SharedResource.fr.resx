@@ -139,7 +139,8 @@
   <data name="Licenses_Action_Activated" xml:space="preserve"><value>ID Matériel : {0} | Version : {1}</value></data>
   <data name="Licenses_Action_Revoked" xml:space="preserve"><value>Motif : {0}</value></data>
   <data name="Licenses_Action_UnlinkedManual" xml:space="preserve"><value>ID Matériel : {0} délié manuellement par l'Admin</value></data>
-  <data name="Licenses_Action_UnlinkedApi" xml:space="preserve"><value>ID Matériel : {0} délié via Code Reset API</value></data>
+  <data name="Licenses_Action_UnlinkedApi" xml:space="preserve"><value>ID Matériel : {0} délié via API client (source : {1})</value></data>
+  <data name="Licenses_Action_UnlinkedApiResetCode" xml:space="preserve"><value>ID Matériel : {0} délié via API de code de réinitialisation</value></data>
   <data name="Licenses_Action_UnlinkedAdminTool" xml:space="preserve"><value>ID Matériel : {0} délié via l'outil SOS Admin</value></data>
   <data name="Licenses_Action_GlobalReset" xml:space="preserve"><value>{0} poste(s) délié(s) manuellement par l'Admin</value></data>
   <data name="Licenses_SeatStatusActive" xml:space="preserve"><value>Poste actif</value></data>
@@ -467,6 +468,7 @@
   <data name="Api_MaxActivationsReached" xml:space="preserve"><value>Cette licence a atteint son nombre maximum d'activations ({0}). Veuillez délier un ancien poste ou contacter le support.</value></data>
   <data name="Api_MaxDailyActivationsReached" xml:space="preserve"><value>Limite d'activations quotidiennes atteinte ({0}/jour). Réessayez demain.</value></data>
   <data name="Api_MaxDailyUnlinksReached" xml:space="preserve"><value>Limite de déliements quotidiens atteinte ({0}/jour). Réessayez demain.</value></data>
+  <data name="Api_DeactivationTooRecentRequiresSource" xml:space="preserve"><value>Le déliement est refusé car ce poste vient d'être activé et la source de déliement n'est pas fiable. Mettez le client à jour ou réessayez plus tard.</value></data>
   <data name="Api_InternalErrorServerKey" xml:space="preserve"><value>Erreur interne : La clé de signature du serveur est illisible.</value></data>
   <data name="Api_NoEmail" xml:space="preserve"><value>Aucun email n'est associé à cette licence. Contactez le support.</value></data>
   <data name="Api_EmailMismatch" xml:space="preserve"><value>L'email ne correspond pas à cette licence.</value></data>

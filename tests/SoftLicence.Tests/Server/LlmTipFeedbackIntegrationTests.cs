@@ -16,6 +16,7 @@ public sealed class LlmTipFeedbackIntegrationTests : IClassFixture<WebApplicatio
 {
     private readonly WebApplicationFactory<Program> _factory;
     private readonly string _dbName = Guid.NewGuid().ToString();
+    private readonly FakeBugTraceProxyService _fakeBugTrace = new();
 
     public LlmTipFeedbackIntegrationTests(WebApplicationFactory<Program> factory)
     {
@@ -26,7 +27,9 @@ public sealed class LlmTipFeedbackIntegrationTests : IClassFixture<WebApplicatio
             {
                 services.RemoveAll<DbContextOptions<LicenseDbContext>>();
                 services.RemoveAll<IDbContextFactory<LicenseDbContext>>();
+                services.RemoveAll<IBugTraceProxyService>();
                 services.AddDbContextFactory<LicenseDbContext>(options => options.UseInMemoryDatabase(_dbName));
+                services.AddSingleton<IBugTraceProxyService>(_fakeBugTrace);
             });
         });
     }
@@ -115,6 +118,62 @@ public sealed class LlmTipFeedbackIntegrationTests : IClassFixture<WebApplicatio
 
         Assert.False(await db.LlmTipFeedbackEvents.AnyAsync());
         Assert.False(await db.LlmTipFeedbackTips.AnyAsync());
+        Assert.False(await db.TelemetryRecords.AnyAsync());
+        Assert.False(await db.TelemetryEvents.AnyAsync());
+    }
+
+    [Fact]
+    public async Task AdminConvertToBugTraceEndpoint_CreatesTicketAndMarksTipConverted()
+    {
+        _fakeBugTrace.SubmittedTickets.Clear();
+        await SeedProductAndAnalyticsKeyAsync("TIAConnect", "llm-feedback-convert-key");
+        var client = _factory.CreateClient();
+
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/llm-tips-feedback/tips", new
+        {
+            appName = "TIAConnect",
+            version = "2.2.600",
+            schemaVersion = "1",
+            anonymized = true,
+            contentHash = "admin-convert-bugtrace-hash",
+            category = "lad",
+            title = "Convert this LLM tip",
+            description = "Anonymized product workflow issue.",
+            severity = "warning",
+            confidence = "confirmed",
+            approved = true,
+            upvotes = 4,
+            submittedAt = DateTime.UtcNow.AddMinutes(-1),
+            context = new Dictionary<string, string>
+            {
+                ["requestSource"] = "MCP",
+                ["runtimeMode"] = "Desktop",
+                ["uiMode"] = "Gui",
+                ["licenseEdition"] = "Pro"
+            }
+        })).StatusCode);
+
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", "llm-feedback-convert-key");
+        var convertResponse = await client.PostAsJsonAsync("/api/llm-tips-feedback/admin/tips/convert-to-bugtrace", new
+        {
+            contentHash = "admin-convert-bugtrace-hash"
+        });
+
+        Assert.Equal(HttpStatusCode.OK, convertResponse.StatusCode);
+        var converted = await convertResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("converted-to-bugtrace", converted.GetProperty("reviewStatus").GetString());
+        Assert.Equal("BT-00042", converted.GetProperty("bugTraceTicketRef").GetString());
+        Assert.True(converted.GetProperty("created").GetBoolean());
+        Assert.Single(_fakeBugTrace.SubmittedTickets);
+
+        var detailResponse = await client.GetAsync("/api/llm-tips-feedback/admin/tips/admin-convert-bugtrace-hash");
+        Assert.Equal(HttpStatusCode.OK, detailResponse.StatusCode);
+        var detail = await detailResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("converted-to-bugtrace", detail.GetProperty("reviewStatus").GetString());
+        Assert.Equal("BT-00042", detail.GetProperty("bugTraceTicketRef").GetString());
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
         Assert.False(await db.TelemetryRecords.AnyAsync());
         Assert.False(await db.TelemetryEvents.AnyAsync());
     }
