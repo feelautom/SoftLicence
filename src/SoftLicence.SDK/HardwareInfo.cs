@@ -11,12 +11,44 @@ namespace SoftLicence.SDK
 
         private static WmiPropertyReader wmiPropertyReader = GetWmiProperty;
 
+        /// <summary>
+        /// Returns the contractual hardware ID used by SDK 1.1.8/1.1.9.
+        /// The disk component intentionally uses the legacy first non-empty
+        /// Win32_DiskDrive.SerialNumber value to preserve existing bindings.
+        /// </summary>
         public static string GetHardwareId()
+        {
+            return ComputeHardwareId(GetLegacyDiskId());
+        }
+
+        /// <summary>
+        /// Returns the deterministic V2 hardware ID based on Win32_DiskDrive WHERE Index=0.
+        /// This value is an observation signal only and must not be treated as the
+        /// contractual license identity unless a server-side migration explicitly decides so.
+        /// </summary>
+        public static string? GetStableHardwareId()
+        {
+            var stableDiskId = GetStableDiskId();
+            return IsMissingWmiValue(stableDiskId) ? null : ComputeHardwareId(stableDiskId);
+        }
+
+        public static HardwareIdMigrationInfo GetHardwareIdMigrationInfo()
+        {
+            var legacyHardwareId = GetHardwareId();
+            var stableHardwareId = GetStableHardwareId();
+
+            return new HardwareIdMigrationInfo
+            {
+                LegacyHardwareId = legacyHardwareId,
+                StableHardwareId = stableHardwareId
+            };
+        }
+
+        private static string ComputeHardwareId(string diskId)
         {
             var cpuId = GetCpuId();
             var mbId = GetMotherboardId();
             var biosId = GetBiosId();
-            var diskId = GetDiskId();
             var machineName = Environment.MachineName;
             
             // Alignement strict sur l'algorithme YOUR_APP_NAME (5 composants)
@@ -45,15 +77,14 @@ namespace SoftLicence.SDK
             return wmiPropertyReader("Win32_BIOS", "SerialNumber", null);
         }
 
-        private static string GetDiskId()
+        private static string GetLegacyDiskId()
         {
-            var indexZeroDisk = wmiPropertyReader("Win32_DiskDrive", "SerialNumber", "Index=0");
-            if (!IsMissingWmiValue(indexZeroDisk))
-            {
-                return indexZeroDisk;
-            }
-
             return wmiPropertyReader("Win32_DiskDrive", "SerialNumber", null);
+        }
+
+        private static string GetStableDiskId()
+        {
+            return wmiPropertyReader("Win32_DiskDrive", "SerialNumber", "Index=0");
         }
 
         /// <summary>
@@ -67,7 +98,7 @@ namespace SoftLicence.SDK
                 ["FP_CPU"] = ComputeComponentHash(GetCpuId()),
                 ["FP_MB"] = ComputeComponentHash(GetMotherboardId()),
                 ["FP_BIOS"] = ComputeComponentHash(GetBiosId()),
-                ["FP_DISK"] = ComputeComponentHash(GetDiskId()),
+                ["FP_DISK"] = ComputeComponentHash(GetLegacyDiskId()),
                 ["FP_HOST"] = ComputeComponentHash(Environment.MachineName)
             };
         }

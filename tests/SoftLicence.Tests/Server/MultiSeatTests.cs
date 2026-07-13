@@ -110,6 +110,129 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
     }
 
     [Fact]
+    public async Task Activate_WithHardwareIdV2_ShouldCollectObservationWithoutChangingSeatIdentity()
+    {
+        var client = _factory.CreateClient();
+        string licenseKey;
+        Guid licenseId;
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var lic = await CreateLicenseAsync(scope.ServiceProvider, 1);
+            licenseKey = lic.LicenseKey;
+            licenseId = lic.Id;
+        }
+
+        var response = await client.PostAsJsonAsync("/api/activation", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "HW-LEGACY",
+            HardwareIdV2 = "HW-STABLE-V2",
+            HardwareIdV2Differs = true,
+            HardwareIdAlgorithm = "legacy-wmi-first-disk",
+            HardwareIdV2Algorithm = "v2-wmi-disk-index-0",
+            SdkVersion = "1.1.11",
+            BuildHash = "BUILD-123",
+            AppName = "MultiApp",
+            AppVersion = "2.3.4"
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        using var verifyScope = _factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var license = await verifyDb.Licenses.Include(l => l.Seats).SingleAsync(l => l.Id == licenseId);
+        Assert.Equal("HW-LEGACY", license.HardwareId);
+        Assert.Single(license.Seats, s => s.IsActive);
+        Assert.Contains(license.Seats, s => s.IsActive && s.HardwareId == "HW-LEGACY");
+        Assert.DoesNotContain(license.Seats, s => s.HardwareId == "HW-STABLE-V2");
+
+        var observation = await verifyDb.LicenseHistories.SingleAsync(h =>
+            h.LicenseId == licenseId && h.Action == HistoryActions.HardwareIdV2Observed);
+        using var details = JsonDocument.Parse(observation.Details!);
+        var root = details.RootElement;
+        Assert.Equal("ACTIVATE", root.GetProperty("endpoint").GetString());
+        Assert.Equal("HW-LEGACY", root.GetProperty("legacyHardwareId").GetString());
+        Assert.Equal("HW-STABLE-V2", root.GetProperty("hardwareIdV2").GetString());
+        Assert.True(root.GetProperty("hardwareIdV2Differs").GetBoolean());
+        Assert.Equal("1.1.11", root.GetProperty("sdkVersion").GetString());
+        Assert.Equal("BUILD-123", root.GetProperty("buildHash").GetString());
+    }
+
+    [Fact]
+    public async Task CheckStatus_WithHardwareIdV2_ShouldNotUseV2ForSeatMatchOrQuota()
+    {
+        var client = _factory.CreateClient();
+        string licenseKey;
+        Guid licenseId;
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var lic = await CreateLicenseAsync(scope.ServiceProvider, 1);
+            licenseKey = lic.LicenseKey;
+            licenseId = lic.Id;
+
+            var setupDb = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            setupDb.LicenseSeats.Add(new LicenseSeat
+            {
+                LicenseId = licenseId,
+                HardwareId = "HW-LEGACY",
+                FirstActivatedAt = DateTime.UtcNow.AddDays(-1),
+                LastCheckInAt = DateTime.UtcNow.AddDays(-1),
+                IsActive = true
+            });
+            lic.HardwareId = "HW-LEGACY";
+            await setupDb.SaveChangesAsync();
+        }
+
+        var response = await client.PostAsJsonAsync("/api/activation/check", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "HW-OTHER",
+            HardwareIdV2 = "HW-LEGACY",
+            HardwareIdV2Differs = true,
+            AppName = "MultiApp",
+            AppVersion = "2.3.4",
+            SdkVersion = "1.1.11"
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using (var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync()))
+        {
+            var status = json.RootElement.TryGetProperty("status", out var statusProperty)
+                ? statusProperty.GetString()
+                : json.RootElement.GetProperty("Status").GetString();
+            Assert.Equal("HARDWARE_MISMATCH", status);
+        }
+
+        var duplicateResponse = await client.PostAsJsonAsync("/api/activation/check", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "HW-OTHER",
+            HardwareIdV2 = "HW-LEGACY",
+            HardwareIdV2Differs = true,
+            AppName = "MultiApp",
+            AppVersion = "2.3.4",
+            SdkVersion = "1.1.11"
+        });
+        Assert.Equal(HttpStatusCode.OK, duplicateResponse.StatusCode);
+
+        using var verifyScope = _factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var license = await verifyDb.Licenses.Include(l => l.Seats).SingleAsync(l => l.Id == licenseId);
+        Assert.Equal("HW-LEGACY", license.HardwareId);
+        Assert.Single(license.Seats, s => s.IsActive);
+        Assert.DoesNotContain(license.Seats, s => s.HardwareId == "HW-OTHER");
+
+        var observation = await verifyDb.LicenseHistories.SingleAsync(h =>
+            h.LicenseId == licenseId && h.Action == HistoryActions.HardwareIdV2Observed);
+        using var details = JsonDocument.Parse(observation.Details!);
+        Assert.Equal("CHECK", details.RootElement.GetProperty("endpoint").GetString());
+        Assert.Equal("HW-OTHER", details.RootElement.GetProperty("legacyHardwareId").GetString());
+        Assert.Equal("HW-LEGACY", details.RootElement.GetProperty("hardwareIdV2").GetString());
+    }
+
+    [Fact]
     public async Task UnlinkReactivateUnlink_ShouldNotKeepStaleLegacyHardwareId()
     {
         var client = _factory.CreateClient();

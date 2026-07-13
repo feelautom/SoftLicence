@@ -1,6 +1,14 @@
 # Changelog
 
-## SDK v1.1.10 — Unreleased
+## SDK v1.1.11 — Unreleased
+- fix(sdk): restore SDK 1.1.8/1.1.9 contractual HWID compatibility by making `HardwareInfo.GetHardwareId()` use the legacy first non-empty `Win32_DiskDrive.SerialNumber` selection again
+- feat(sdk): add explicit observation API `HardwareInfo.GetStableHardwareId()` and `GetHardwareIdMigrationInfo()` for the deterministic `Win32_DiskDrive WHERE Index=0` HWID
+- feat(sdk): send `HardwareIdV2` as a secondary observation field in activation, trial, and status payloads when it is available; `HardwareId` remains the only contractual identity
+- feat(server): collect HWID V2 observations in license history without changing seats, max-seat consumption, machine-change quota, or the contractual HWID
+- test(sdk/server): cover legacy HWID restoration, V2 calculation, multi-disk divergence, missing V2, payload serialization, and server-side non-mutation
+- note(sdk): SDK 1.1.11 does not migrate existing licenses to V2; server-side acceptance of old/new divergent HWIDs remains a separate design decision
+
+## SDK v1.1.10 — 2026-07-12
 - fix(sdk): stabilize disk fingerprint selection by reading `Win32_DiskDrive.SerialNumber` with `Index=0` before falling back to the legacy first non-empty disk serial
 - test(sdk): cover variable WMI disk order, multi-disk `Index=0` selection, legacy fallback, and `FP_DISK` alignment
 - note(sdk): this stabilizes future HWID calculation; accepting an old and new divergent HWID for already-activated licenses remains a separate server/license migration design

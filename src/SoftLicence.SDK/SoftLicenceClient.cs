@@ -6,6 +6,10 @@ namespace SoftLicence.SDK
 {
     public class SoftLicenceClient : ISoftLicenceClient
     {
+        private const string SdkVersion = "1.1.11";
+        private const string LegacyHardwareIdAlgorithm = "legacy-wmi-first-disk";
+        private const string StableHardwareIdAlgorithm = "v2-wmi-disk-index-0";
+
         private readonly string _serverUrl;
         private readonly string? _publicKeyXml;
         private readonly HttpClient _httpClient;
@@ -21,20 +25,25 @@ namespace SoftLicence.SDK
         {
             try
             {
-                var hwId = HardwareInfo.GetHardwareId();
+                var migrationInfo = HardwareInfo.GetHardwareIdMigrationInfo();
                 Dictionary<string, string>? fingerprints = null;
                 try { fingerprints = HardwareInfo.GetComponentFingerprints(); } catch { }
 
                 var payload = new Dictionary<string, object?>
                 {
                     ["LicenseKey"] = licenseKey,
-                    ["HardwareId"] = hwId,
+                    ["HardwareId"] = migrationInfo.LegacyHardwareId,
                     ["AppName"] = appName,
                     ["AppId"] = appId,
                     ["AppVersion"] = appVersion,
                     ["CustomerEmail"] = customerEmail,
                     ["CustomerName"] = customerName,
-                    ["ComponentFingerprints"] = fingerprints
+                    ["ComponentFingerprints"] = fingerprints,
+                    ["HardwareIdV2"] = migrationInfo.StableHardwareId,
+                    ["HardwareIdV2Differs"] = migrationInfo.HasStableHardwareId ? migrationInfo.HasDistinctHardwareIds : null,
+                    ["HardwareIdAlgorithm"] = LegacyHardwareIdAlgorithm,
+                    ["HardwareIdV2Algorithm"] = migrationInfo.HasStableHardwareId ? StableHardwareIdAlgorithm : null,
+                    ["SdkVersion"] = SdkVersion
                 }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
 
                 var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
@@ -67,20 +76,25 @@ namespace SoftLicence.SDK
         {
             try
             {
-                var hwId = HardwareInfo.GetHardwareId();
+                var migrationInfo = HardwareInfo.GetHardwareIdMigrationInfo();
                 Dictionary<string, string>? fingerprints = null;
                 try { fingerprints = HardwareInfo.GetComponentFingerprints(); } catch { }
 
                 var payload = new Dictionary<string, object?>
                 {
-                    ["HardwareId"] = hwId,
+                    ["HardwareId"] = migrationInfo.LegacyHardwareId,
                     ["AppName"] = appName,
                     ["AppId"] = appId,
                     ["TypeSlug"] = typeSlug,
                     ["AppVersion"] = appVersion,
                     ["CustomerEmail"] = customerEmail,
                     ["CustomerName"] = customerName,
-                    ["ComponentFingerprints"] = fingerprints
+                    ["ComponentFingerprints"] = fingerprints,
+                    ["HardwareIdV2"] = migrationInfo.StableHardwareId,
+                    ["HardwareIdV2Differs"] = migrationInfo.HasStableHardwareId ? migrationInfo.HasDistinctHardwareIds : null,
+                    ["HardwareIdAlgorithm"] = LegacyHardwareIdAlgorithm,
+                    ["HardwareIdV2Algorithm"] = migrationInfo.HasStableHardwareId ? StableHardwareIdAlgorithm : null,
+                    ["SdkVersion"] = SdkVersion
                 }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
 
                 var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
@@ -113,18 +127,23 @@ namespace SoftLicence.SDK
         {
             try
             {
-                var hwId = HardwareInfo.GetHardwareId();
+                var migrationInfo = HardwareInfo.GetHardwareIdMigrationInfo();
                 Dictionary<string, string>? fingerprints = null;
                 try { fingerprints = HardwareInfo.GetComponentFingerprints(); } catch { }
 
                 var payload = new Dictionary<string, object?>
                 {
                     ["LicenseKey"] = licenseKey,
-                    ["HardwareId"] = hwId,
+                    ["HardwareId"] = migrationInfo.LegacyHardwareId,
                     ["AppName"] = appName,
                     ["AppId"] = appId,
                     ["AppVersion"] = appVersion,
-                    ["ComponentFingerprints"] = fingerprints
+                    ["ComponentFingerprints"] = fingerprints,
+                    ["HardwareIdV2"] = migrationInfo.StableHardwareId,
+                    ["HardwareIdV2Differs"] = migrationInfo.HasStableHardwareId ? migrationInfo.HasDistinctHardwareIds : null,
+                    ["HardwareIdAlgorithm"] = LegacyHardwareIdAlgorithm,
+                    ["HardwareIdV2Algorithm"] = migrationInfo.HasStableHardwareId ? StableHardwareIdAlgorithm : null,
+                    ["SdkVersion"] = SdkVersion
                 }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
 
                 var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
@@ -193,7 +212,7 @@ namespace SoftLicence.SDK
                 throw new InvalidOperationException("Public key was not provided at construction. Pass publicKeyXml to the SoftLicenceClient constructor to use local validation.");
             }
 
-            if (string.IsNullOrEmpty(hardwareId)) 
+            if (string.IsNullOrEmpty(hardwareId))
             {
                 throw new ArgumentException("Le hardwareId est obligatoire pour ValidateLocal. Utilisez ValidateForCurrentMachine pour une validation automatique.", nameof(hardwareId));
             }

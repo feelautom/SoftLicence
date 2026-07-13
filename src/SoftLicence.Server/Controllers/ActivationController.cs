@@ -1,6 +1,7 @@
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -73,6 +74,12 @@ namespace SoftLicence.Server.Controllers
             public string? CustomerName { get; set; }
             public Dictionary<string, string>? ExtraParams { get; set; } // Paramètres additionnels mergés dans le payload signé
             public Dictionary<string, string>? ComponentFingerprints { get; set; }
+            public string? HardwareIdV2 { get; set; }
+            public bool? HardwareIdV2Differs { get; set; }
+            public string? HardwareIdAlgorithm { get; set; }
+            public string? HardwareIdV2Algorithm { get; set; }
+            public string? SdkVersion { get; set; }
+            public string? BuildHash { get; set; }
         }
 
         public class TrialRequest
@@ -85,6 +92,12 @@ namespace SoftLicence.Server.Controllers
             public string? CustomerEmail { get; set; }
             public string? CustomerName { get; set; }
             public Dictionary<string, string>? ComponentFingerprints { get; set; }
+            public string? HardwareIdV2 { get; set; }
+            public bool? HardwareIdV2Differs { get; set; }
+            public string? HardwareIdAlgorithm { get; set; }
+            public string? HardwareIdV2Algorithm { get; set; }
+            public string? SdkVersion { get; set; }
+            public string? BuildHash { get; set; }
         }
 
         private async Task<Product?> FindProductAsync(string name, string? id)
@@ -253,6 +266,74 @@ namespace SoftLicence.Server.Controllers
         private static bool EnforcesSingleUsePerHardwareId(LicenseType? type)
         {
             return type?.EnforceSingleUsePerHardwareId == true;
+        }
+
+        private static bool HasHardwareIdV2Observation(string? hardwareIdV2)
+        {
+            return !string.IsNullOrWhiteSpace(hardwareIdV2);
+        }
+
+        private void AddHardwareIdV2Observation(License license, Product product, string endpoint, string hardwareId, string? hardwareIdV2, bool? hardwareIdV2Differs, string? appVersion, string? sdkVersion, string? buildHash, string? hardwareIdAlgorithm, string? hardwareIdV2Algorithm)
+        {
+            if (!HasHardwareIdV2Observation(hardwareIdV2))
+            {
+                return;
+            }
+
+            var activeSeat = license.Seats?
+                .Where(s => s.IsActive && string.Equals(s.HardwareId, hardwareId, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(s => s.LastCheckInAt)
+                .FirstOrDefault();
+
+            var details = JsonSerializer.Serialize(new
+            {
+                endpoint,
+                productId = product.Id,
+                productName = product.Name,
+                licenseId = license.Id,
+                seatId = activeSeat?.Id,
+                legacyHardwareId = hardwareId,
+                hardwareIdV2 = hardwareIdV2!.Trim(),
+                hardwareIdV2Differs = hardwareIdV2Differs ?? !string.Equals(hardwareId, hardwareIdV2, StringComparison.OrdinalIgnoreCase),
+                appVersion,
+                sdkVersion,
+                buildHash,
+                hardwareIdAlgorithm,
+                hardwareIdV2Algorithm,
+                observedAtUtc = DateTime.UtcNow
+            });
+
+            _db.LicenseHistories.Add(new LicenseHistory
+            {
+                LicenseId = license.Id,
+                Action = HistoryActions.HardwareIdV2Observed,
+                Details = details,
+                PerformedBy = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown"
+            });
+        }
+
+        private void AddHardwareIdV2Observation(License license, Product product, string endpoint, ActivationRequest req)
+        {
+            AddHardwareIdV2Observation(license, product, endpoint, req.HardwareId, req.HardwareIdV2, req.HardwareIdV2Differs, req.AppVersion, req.SdkVersion, req.BuildHash, req.HardwareIdAlgorithm, req.HardwareIdV2Algorithm);
+        }
+
+        private void AddHardwareIdV2Observation(License license, Product product, string endpoint, TrialRequest req)
+        {
+            AddHardwareIdV2Observation(license, product, endpoint, req.HardwareId, req.HardwareIdV2, req.HardwareIdV2Differs, req.AppVersion, req.SdkVersion, req.BuildHash, req.HardwareIdAlgorithm, req.HardwareIdV2Algorithm);
+        }
+
+        private async Task<bool> HasRecentHardwareIdV2ObservationAsync(Guid licenseId, string legacyHardwareId, string hardwareIdV2)
+        {
+            var cutoff = DateTime.UtcNow.AddHours(-24);
+            var stableHardwareId = hardwareIdV2.Trim();
+
+            return await _db.LicenseHistories.AnyAsync(h =>
+                h.LicenseId == licenseId
+                && h.Action == HistoryActions.HardwareIdV2Observed
+                && h.Timestamp >= cutoff
+                && h.Details != null
+                && h.Details.Contains(legacyHardwareId)
+                && h.Details.Contains(stableHardwareId));
         }
 
         private static bool DisablesNewActivations(LicenseType? type)
@@ -456,6 +537,7 @@ namespace SoftLicence.Server.Controllers
                             IsActive = true
                         });
                     }
+                    AddHardwareIdV2Observation(existing, product, "TRIAL_EXISTING", req);
                     await _db.SaveChangesAsync();
 
                     var model = new LicenseModel
@@ -534,6 +616,7 @@ namespace SoftLicence.Server.Controllers
                 Details = string.Format(_localizer["Licenses_Action_Created"].Value, type.Name, 1),
                 PerformedBy = "System"
             });
+            AddHardwareIdV2Observation(license, product, "TRIAL_CREATE", req);
 
             await _db.SaveChangesAsync();
 
@@ -666,10 +749,12 @@ namespace SoftLicence.Server.Controllers
                             FirstActivatedAt = DateTime.UtcNow, LastCheckInAt = DateTime.UtcNow,
                             IsActive = true
                         });
+                        AddHardwareIdV2Observation(existing, product, "TRIAL_AUTO_EXISTING", req);
                         await _db.SaveChangesAsync();
                     }
                     else {
                         seat.LastCheckInAt = DateTime.UtcNow;
+                        AddHardwareIdV2Observation(existing, product, "TRIAL_AUTO_EXISTING", req);
                         await _db.SaveChangesAsync();
                     }
 
@@ -739,6 +824,7 @@ namespace SoftLicence.Server.Controllers
                     Details = string.Format(_localizer["Licenses_Action_Created"].Value, type.Name, 1),
                     PerformedBy = "System"
                 });
+                AddHardwareIdV2Observation(newLic, product, "TRIAL_AUTO_CREATE", req);
 
                 await _db.SaveChangesAsync();
 
@@ -782,6 +868,7 @@ namespace SoftLicence.Server.Controllers
             var license = await _db.Licenses
                 .Include(l => l.Product)
                 .Include(l => l.Type).ThenInclude(t => t!.CustomParams)
+                .Include(l => l.Seats)
                 .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && productIds.Contains(l.ProductId));
 
             if (license == null) 
@@ -1011,6 +1098,7 @@ namespace SoftLicence.Server.Controllers
             if (string.IsNullOrWhiteSpace(license.CustomerName) && !string.IsNullOrWhiteSpace(req.CustomerName))
                 license.CustomerName = req.CustomerName.Trim();
 
+            AddHardwareIdV2Observation(license, product, "ACTIVATE", req);
             await _db.SaveChangesAsync();
 
             // Enforcement : un HWID ne peut être actif que sur une seule licence par produit
@@ -1099,6 +1187,7 @@ namespace SoftLicence.Server.Controllers
                 .Include(l => l.Type)
                     .ThenInclude(t => t!.CustomParams)
                 .Include(l => l.Product)
+                .Include(l => l.Seats)
                 .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && checkProductIds.Contains(l.ProductId));
 
             if (license == null) return NotFound(_localizer["Api_LicenseNotFound"].Value);
@@ -1201,6 +1290,13 @@ namespace SoftLicence.Server.Controllers
                 {
                     _logger.LogWarning(ex, "Impossible de generer le fichier de licence frais lors du check pour '{LicenseKey}'", cleanKey);
                 }
+            }
+
+            if (HasHardwareIdV2Observation(req.HardwareIdV2)
+                && !await HasRecentHardwareIdV2ObservationAsync(license.Id, req.HardwareId, req.HardwareIdV2!))
+            {
+                AddHardwareIdV2Observation(license, product, "CHECK", req);
+                await _db.SaveChangesAsync();
             }
 
             return Ok(new { Status = status, LicenseFile = licenseFile, ErrorMessage = errorMessage });

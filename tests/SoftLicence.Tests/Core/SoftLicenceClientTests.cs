@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using SoftLicence.SDK;
 using Xunit;
 
@@ -52,6 +53,45 @@ public class SoftLicenceClientTests
 
         Assert.NotNull(capturedPayload);
         Assert.Contains("\"AppId\":\"APP-GUID-123\"", capturedPayload);
+    }
+
+    [Fact]
+    public async Task ActivateAsync_ShouldSendStableHardwareIdAsSecondaryObservationSignal()
+    {
+        using var readerOverride = HardwareInfo.UseWmiPropertyReaderForTests((className, propertyName, whereClause) =>
+            className switch
+            {
+                "Win32_Processor" => "CPU-1",
+                "Win32_BaseBoard" => "MB-1",
+                "Win32_BIOS" => "BIOS-1",
+                "Win32_DiskDrive" when whereClause == "Index=0" => "SYSTEM-DISK",
+                "Win32_DiskDrive" => "LEGACY-DISK",
+                _ => "UNKNOWN"
+            });
+
+        string? capturedPayload = null;
+        var handler = new MockHttpMessageHandler(request =>
+        {
+            capturedPayload = request.Content?.ReadAsStringAsync().Result;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"LicenseFile\":\"abc\"}", Encoding.UTF8, "application/json")
+            };
+        });
+
+        var client = CreateClient(handler);
+        await client.ActivateAsync("KEY-123", "TestApp");
+
+        Assert.NotNull(capturedPayload);
+        using var doc = JsonDocument.Parse(capturedPayload);
+        var root = doc.RootElement;
+
+        Assert.Equal(HardwareInfo.GetHardwareId(), root.GetProperty("HardwareId").GetString());
+        Assert.Equal(HardwareInfo.GetStableHardwareId(), root.GetProperty("HardwareIdV2").GetString());
+        Assert.True(root.GetProperty("HardwareIdV2Differs").GetBoolean());
+        Assert.Equal("legacy-wmi-first-disk", root.GetProperty("HardwareIdAlgorithm").GetString());
+        Assert.Equal("v2-wmi-disk-index-0", root.GetProperty("HardwareIdV2Algorithm").GetString());
+        Assert.Equal("1.1.11", root.GetProperty("SdkVersion").GetString());
     }
 
     [Fact]
@@ -179,6 +219,44 @@ public class SoftLicenceClientTests
         Assert.NotNull(capturedPayload);
         Assert.Contains("\"AppId\":\"APP-GUID-123\"", capturedPayload);
         Assert.Contains("\"AppVersion\":\"1.1.91\"", capturedPayload);
+    }
+
+    [Fact]
+    public async Task CheckStatusAsync_ShouldOmitStableHardwareId_WhenIndexZeroIsUnavailable()
+    {
+        using var _ = HardwareInfo.UseWmiPropertyReaderForTests((className, propertyName, whereClause) =>
+            className switch
+            {
+                "Win32_Processor" => "CPU-1",
+                "Win32_BaseBoard" => "MB-1",
+                "Win32_BIOS" => "BIOS-1",
+                "Win32_DiskDrive" when whereClause == "Index=0" => "",
+                "Win32_DiskDrive" => "LEGACY-DISK",
+                _ => "UNKNOWN"
+            });
+
+        string? capturedPayload = null;
+        var handler = new MockHttpMessageHandler(request =>
+        {
+            capturedPayload = request.Content?.ReadAsStringAsync().Result;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"Status\":\"VALID\"}", Encoding.UTF8, "application/json")
+            };
+        });
+
+        var client = CreateClient(handler);
+        await client.CheckStatusAsync("KEY-123", "TestApp");
+
+        Assert.NotNull(capturedPayload);
+        using var doc = JsonDocument.Parse(capturedPayload);
+        var root = doc.RootElement;
+
+        Assert.Equal(HardwareInfo.GetHardwareId(), root.GetProperty("HardwareId").GetString());
+        Assert.False(root.TryGetProperty("HardwareIdV2", out var hardwareIdV2Property));
+        Assert.False(root.TryGetProperty("HardwareIdV2Differs", out var hardwareIdV2DiffersProperty));
+        Assert.False(root.TryGetProperty("HardwareIdV2Algorithm", out var hardwareIdV2AlgorithmProperty));
+        Assert.Equal("1.1.11", root.GetProperty("SdkVersion").GetString());
     }
 
     [Fact]

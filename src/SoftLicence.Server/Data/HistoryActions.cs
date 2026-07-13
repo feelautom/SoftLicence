@@ -13,4 +13,5 @@ public static class HistoryActions
     public const string GlobalReset = "GLOBAL_RESET";
     public const string Renewed = "RENEWED";
     public const string AutoUnlinkedProductScope = "Auto-Unlinked (Product Scope)";
+    public const string HardwareIdV2Observed = "HWID_V2_OBSERVED";
 }
