@@ -332,12 +332,99 @@ public sealed class LlmTipFeedbackIntegrationTests : IClassFixture<WebApplicatio
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
-    private async Task SeedProductAndAnalyticsKeyAsync(string productName, string rawAnalyticsKey)
+    [Fact]
+    public async Task AdminDetailAndReviewStatus_WithGlobalKey_RequireAndEnforceExplicitProduct()
+    {
+        var tiaProductId = await SeedProductAndAnalyticsKeyAsync("TIAConnect", "llm-feedback-tia-key");
+        var otherProductId = await SeedProductAndAnalyticsKeyAsync("OtherProduct", "llm-feedback-other-key");
+        await SeedGlobalAnalyticsKeyAsync("llm-feedback-global-key");
+
+        var ingestionClient = _factory.CreateClient();
+        Assert.Equal(HttpStatusCode.OK, (await ingestionClient.PostAsJsonAsync("/api/llm-tips-feedback/tips", new
+        {
+            appName = "TIAConnect",
+            version = "2.2.798",
+            schemaVersion = "1",
+            anonymized = true,
+            contentHash = "global-product-selector-tip",
+            category = "hmi",
+            title = "Global selector regression tip",
+            description = "Anonymized product-scoped feedback.",
+            severity = "warning",
+            approved = false,
+            upvotes = 1
+        })).StatusCode);
+
+        var globalClient = _factory.CreateClient();
+        globalClient.DefaultRequestHeaders.Add("X-Analytics-Key", "llm-feedback-global-key");
+
+        var missingSelector = await globalClient.GetAsync(
+            "/api/llm-tips-feedback/admin/tips/global-product-selector-tip");
+        Assert.Equal(HttpStatusCode.BadRequest, missingSelector.StatusCode);
+        var missingBody = await missingSelector.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("PRODUCT_SELECTOR_REQUIRED", missingBody.GetProperty("errorCode").GetString());
+
+        var missingUpdateSelector = await globalClient.PatchAsJsonAsync(
+            "/api/llm-tips-feedback/admin/tips/review-status",
+            new { contentHash = "global-product-selector-tip", reviewStatus = "ignored" });
+        Assert.Equal(HttpStatusCode.BadRequest, missingUpdateSelector.StatusCode);
+
+        var detailById = await globalClient.GetAsync(
+            $"/api/llm-tips-feedback/admin/tips/global-product-selector-tip?productId={tiaProductId:D}");
+        Assert.Equal(HttpStatusCode.OK, detailById.StatusCode);
+
+        var detailByName = await globalClient.GetAsync(
+            "/api/llm-tips-feedback/admin/tips/global-product-selector-tip?productName=TIAConnect");
+        Assert.Equal(HttpStatusCode.OK, detailByName.StatusCode);
+
+        var wrongProduct = await globalClient.GetAsync(
+            $"/api/llm-tips-feedback/admin/tips/global-product-selector-tip?productId={otherProductId:D}");
+        Assert.Equal(HttpStatusCode.NotFound, wrongProduct.StatusCode);
+
+        var missingProduct = await globalClient.GetAsync(
+            $"/api/llm-tips-feedback/admin/tips/global-product-selector-tip?productId={Guid.NewGuid():D}");
+        Assert.Equal(HttpStatusCode.NotFound, missingProduct.StatusCode);
+        var missingProductBody = await missingProduct.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("PRODUCT_NOT_FOUND", missingProductBody.GetProperty("errorCode").GetString());
+
+        var update = await globalClient.PatchAsJsonAsync(
+            $"/api/llm-tips-feedback/admin/tips/review-status?productId={tiaProductId:D}",
+            new { contentHash = "global-product-selector-tip", reviewStatus = "needs-product-fix" });
+        Assert.Equal(HttpStatusCode.OK, update.StatusCode);
+
+        var updateWrongProduct = await globalClient.PatchAsJsonAsync(
+            $"/api/llm-tips-feedback/admin/tips/review-status?productId={otherProductId:D}",
+            new { contentHash = "global-product-selector-tip", reviewStatus = "ignored" });
+        Assert.Equal(HttpStatusCode.NotFound, updateWrongProduct.StatusCode);
+
+        var productClient = _factory.CreateClient();
+        productClient.DefaultRequestHeaders.Add("X-Analytics-Key", "llm-feedback-tia-key");
+        var productKeyWrongScope = await productClient.GetAsync(
+            $"/api/llm-tips-feedback/admin/tips/global-product-selector-tip?productId={otherProductId:D}");
+        Assert.Equal(HttpStatusCode.Forbidden, productKeyWrongScope.StatusCode);
+
+        var productKeyWrongUpdateScope = await productClient.PatchAsJsonAsync(
+            $"/api/llm-tips-feedback/admin/tips/review-status?productId={otherProductId:D}",
+            new { contentHash = "global-product-selector-tip", reviewStatus = "ignored" });
+        Assert.Equal(HttpStatusCode.Forbidden, productKeyWrongUpdateScope.StatusCode);
+
+        var finalDetail = await productClient.GetAsync(
+            "/api/llm-tips-feedback/admin/tips/global-product-selector-tip");
+        Assert.Equal(HttpStatusCode.OK, finalDetail.StatusCode);
+        var finalBody = await finalDetail.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("needs-product-fix", finalBody.GetProperty("reviewStatus").GetString());
+    }
+
+    private async Task<Guid> SeedProductAndAnalyticsKeyAsync(string productName, string rawAnalyticsKey)
     {
         using var scope = _factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
-        if (await db.Products.AnyAsync(p => p.Name == productName))
-            return;
+        var existingProductId = await db.Products
+            .Where(p => p.Name == productName)
+            .Select(p => (Guid?)p.Id)
+            .SingleOrDefaultAsync();
+        if (existingProductId.HasValue)
+            return existingProductId.Value;
 
         var productId = Guid.NewGuid();
         db.Products.Add(new Product
@@ -355,6 +442,24 @@ public sealed class LlmTipFeedbackIntegrationTests : IClassFixture<WebApplicatio
             Prefix = AnalyticsApiKeyAuthService.BuildPrefix(rawAnalyticsKey),
             KeyHash = AnalyticsApiKeyAuthService.ComputeKeyHash(rawAnalyticsKey),
             Scopes = AnalyticsApiKeyScopes.TelemetryRead
+        });
+        await db.SaveChangesAsync();
+        return productId;
+    }
+
+    private async Task SeedGlobalAnalyticsKeyAsync(string rawAnalyticsKey)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        db.AnalyticsApiKeys.Add(new AnalyticsApiKey
+        {
+            ProductId = null,
+            Name = "Global LLM feedback key",
+            Prefix = AnalyticsApiKeyAuthService.BuildPrefix(rawAnalyticsKey),
+            KeyHash = AnalyticsApiKeyAuthService.ComputeKeyHash(rawAnalyticsKey),
+            Scopes = $"{AnalyticsApiKeyScopes.TelemetryRead} {AnalyticsApiKeyScopes.MultiProductRead}",
+            ScopeKind = AnalyticsApiKeyScopeKinds.Global,
+            IsActive = true
         });
         await db.SaveChangesAsync();
     }

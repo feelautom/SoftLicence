@@ -677,11 +677,15 @@ public sealed class SoftLicenceMcpClientTests
         });
         var client = CreateClient(handler);
 
-        await client.GetLlmTipFeedbackDetailAsync("hash with spaces", CancellationToken.None);
+        await client.GetLlmTipFeedbackDetailAsync(
+            "hash with spaces",
+            productId: "808648bc-a4b9-4f71-bcb1-b7c7e67ca98e",
+            productName: null,
+            CancellationToken.None);
 
         Assert.NotNull(capturedRequest);
         Assert.Equal(
-            "https://softlicence.test/api/llm-tips-feedback/admin/tips/hash%20with%20spaces",
+            "https://softlicence.test/api/llm-tips-feedback/admin/tips/hash%20with%20spaces?productId=808648bc-a4b9-4f71-bcb1-b7c7e67ca98e",
             capturedRequest.RequestUri!.AbsoluteUri);
     }
 
@@ -737,12 +741,14 @@ public sealed class SoftLicenceMcpClientTests
             id: null,
             contentHash: "hash-review",
             reviewStatus: "needs-doc",
+            productId: null,
+            productName: "TIAConnect",
             CancellationToken.None);
 
         Assert.NotNull(capturedRequest);
         Assert.Equal(HttpMethod.Patch, capturedRequest.Method);
         Assert.Equal(
-            "https://softlicence.test/api/llm-tips-feedback/admin/tips/review-status",
+            "https://softlicence.test/api/llm-tips-feedback/admin/tips/review-status?productName=TIAConnect",
             capturedRequest.RequestUri!.AbsoluteUri);
         Assert.Contains("\"contentHash\":\"hash-review\"", capturedBody);
         Assert.Contains("\"reviewStatus\":\"needs-doc\"", capturedBody);
@@ -804,6 +810,54 @@ public sealed class SoftLicenceMcpClientTests
         Assert.Equal(
             "https://softlicence.test/api/analytics/licenses/freemium-abuse-risk?licenseType=TIA-CONNECT-FREEMIUM&days=7&fromUtc=2026-06-08T00%3A00%3A00Z&toUtc=2026-06-09T00%3A00%3A00Z&take=25",
             capturedRequest.RequestUri!.AbsoluteUri);
+    }
+
+    [Fact]
+    public async Task GetTelemetryOverviewAsync_WhenProductSelectorIsRequired_ReturnsAvailableProducts()
+    {
+        var requests = new List<string>();
+        var handler = new CapturingHandler(request =>
+        {
+            requests.Add(request.RequestUri!.AbsoluteUri);
+            if (request.RequestUri.AbsolutePath.EndsWith("/api/analytics/products", StringComparison.Ordinal))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(
+                        """{"productsReturned":1,"products":[{"productId":"808648bc-a4b9-4f71-bcb1-b7c7e67ca98e","name":"TIAConnect"}]}""",
+                        Encoding.UTF8,
+                        "application/json")
+                };
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                Content = new StringContent(
+                    """{"errorCode":"PRODUCT_SELECTOR_REQUIRED","message":"Global analytics keys must provide productId or productName for product-scoped endpoints."}""",
+                    Encoding.UTF8,
+                    "application/json")
+            };
+        });
+        var client = CreateClient(handler);
+
+        var result = await client.GetTelemetryOverviewAsync(
+            days: 1,
+            top: 5,
+            date: null,
+            fromUtc: null,
+            toUtc: null,
+            CancellationToken.None);
+
+        Assert.False(result.GetProperty("ok").GetBoolean());
+        Assert.Equal("PRODUCT_SELECTOR_REQUIRED", result.GetProperty("errorCode").GetString());
+        Assert.Contains("list_products", result.GetProperty("hint").GetString());
+        Assert.Equal(400, result.GetProperty("statusCode").GetInt32());
+        Assert.Equal(
+            "TIAConnect",
+            result.GetProperty("availableProducts").GetProperty("products")[0].GetProperty("name").GetString());
+        Assert.Equal(2, requests.Count);
+        Assert.Equal("https://softlicence.test/api/analytics/telemetry/overview?days=1&top=5", requests[0]);
+        Assert.Equal("https://softlicence.test/api/analytics/products", requests[1]);
     }
 
     [Fact]

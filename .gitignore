@@ -31,3 +31,9 @@ src/SoftLicence.Server/softlicence.db.pre-migration.bak
 
 # ASP.NET Data Protection keys (generated at runtime, never commit)
 src/SoftLicence.Server/Data/keys/
+
+# Local agent coordination state
+.codex/
+
+# Local build and release artifacts
+out/

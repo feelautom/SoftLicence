@@ -212,7 +212,7 @@ namespace SoftLicence.SDK
                 throw new InvalidOperationException("Public key was not provided at construction. Pass publicKeyXml to the SoftLicenceClient constructor to use local validation.");
             }
 
-            if (string.IsNullOrEmpty(hardwareId))
+            if (string.IsNullOrWhiteSpace(hardwareId))
             {
                 throw new ArgumentException("Le hardwareId est obligatoire pour ValidateLocal. Utilisez ValidateForCurrentMachine pour une validation automatique.", nameof(hardwareId));
             }

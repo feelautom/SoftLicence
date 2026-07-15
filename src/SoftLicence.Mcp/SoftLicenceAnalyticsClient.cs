@@ -729,11 +729,19 @@ public sealed class SoftLicenceAnalyticsClient
         }, cancellationToken);
     }
 
-    public async Task<JsonElement> GetLlmTipFeedbackDetailAsync(string idOrContentHash, CancellationToken cancellationToken)
+    public async Task<JsonElement> GetLlmTipFeedbackDetailAsync(
+        string idOrContentHash,
+        string? productId,
+        string? productName,
+        CancellationToken cancellationToken)
     {
         return await GetLlmTipFeedbackAsync(
             $"admin/tips/{Uri.EscapeDataString(idOrContentHash)}",
-            new Dictionary<string, string?>(),
+            new Dictionary<string, string?>
+            {
+                ["productId"] = productId,
+                ["productName"] = productName
+            },
             cancellationToken);
     }
 
@@ -767,9 +775,15 @@ public sealed class SoftLicenceAnalyticsClient
         string? id,
         string? contentHash,
         string reviewStatus,
+        string? productId,
+        string? productName,
         CancellationToken cancellationToken)
     {
-        var uri = BuildRootedUri("api/llm-tips-feedback/admin/tips/review-status", new Dictionary<string, string?>());
+        var uri = BuildRootedUri("api/llm-tips-feedback/admin/tips/review-status", new Dictionary<string, string?>
+        {
+            ["productId"] = productId,
+            ["productName"] = productName
+        });
         using var request = new HttpRequestMessage(HttpMethod.Patch, uri)
         {
             Content = JsonContent.Create(new
@@ -814,6 +828,13 @@ public sealed class SoftLicenceAnalyticsClient
         if (response.StatusCode == HttpStatusCode.Unauthorized)
             throw new InvalidOperationException("SoftLicence analytics API rejected SOFTLICENCE_API_KEY.");
 
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (TryGetProductSelectorError(errorBody, out var errorCode, out var message))
+                return await BuildProductSelectorErrorAsync(request, response, errorCode, message, errorBody, cancellationToken);
+        }
+
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
@@ -838,6 +859,109 @@ public sealed class SoftLicenceAnalyticsClient
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
         return document.RootElement.Clone();
+    }
+
+    private async Task<JsonElement> BuildProductSelectorErrorAsync(
+        HttpRequestMessage failedRequest,
+        HttpResponseMessage response,
+        string errorCode,
+        string message,
+        string errorBody,
+        CancellationToken cancellationToken)
+    {
+        var availableProducts = await TryFetchAvailableProductsAsync(cancellationToken);
+        var originalError = TryParseJsonElement(errorBody);
+
+        return JsonSerializer.SerializeToElement(new
+        {
+            ok = false,
+            errorCode,
+            message,
+            hint = "This SoftLicence analytics key is global or the product selector is invalid. Call list_products, then retry with an exact productName or productId.",
+            endpoint = failedRequest.RequestUri?.AbsolutePath,
+            statusCode = (int)response.StatusCode,
+            reasonPhrase = response.ReasonPhrase,
+            availableProducts,
+            originalError
+        }, JsonOptions);
+    }
+
+    private async Task<JsonElement?> TryFetchAvailableProductsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var uri = BuildRootedUri("api/analytics/products", new Dictionary<string, string?>());
+            using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+            request.Headers.Add("X-Analytics-Key", _options.GetApiKey());
+
+            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+                return null;
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            return document.RootElement.Clone();
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool TryGetProductSelectorError(string errorBody, out string errorCode, out string message)
+    {
+        errorCode = "";
+        message = "";
+
+        using var document = TryParseJsonDocument(errorBody);
+        if (document == null || document.RootElement.ValueKind != JsonValueKind.Object)
+            return false;
+
+        if (!document.RootElement.TryGetProperty("errorCode", out var codeElement))
+            return false;
+
+        errorCode = codeElement.GetString() ?? "";
+        if (!IsProductSelectorError(errorCode))
+            return false;
+
+        if (document.RootElement.TryGetProperty("message", out var messageElement))
+            message = messageElement.GetString() ?? "";
+
+        return true;
+    }
+
+    private static bool IsProductSelectorError(string errorCode)
+    {
+        return errorCode is
+            "PRODUCT_SELECTOR_REQUIRED" or
+            "PRODUCT_SELECTOR_AMBIGUOUS" or
+            "PRODUCT_NAME_AMBIGUOUS" or
+            "PRODUCT_NOT_FOUND";
+    }
+
+    private static JsonDocument? TryParseJsonDocument(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return null;
+
+        try
+        {
+            return JsonDocument.Parse(json);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static JsonElement? TryParseJsonElement(string json)
+    {
+        using var document = TryParseJsonDocument(json);
+        return document?.RootElement.Clone();
     }
 
     private static DateTime? ResolveExpiresAt(string? expiresAt, int? durationDays)

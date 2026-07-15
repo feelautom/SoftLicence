@@ -412,6 +412,7 @@ public sealed class LlmTipFeedbackServiceTests
         return new LlmTipFeedbackController(
             service,
             apiKeyAuth: null!,
+            dbFactory.Object,
             NullLogger<LlmTipFeedbackController>.Instance);
     }
 

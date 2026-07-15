@@ -57,6 +57,14 @@ Le serveur MCP envoie cette cle dans le header `X-Analytics-Key`.
 
 La configuration client doit pointer vers le dossier stable `D:/Apps/SoftLicence.Mcp/SoftLicence.Mcp.exe`, pas vers un dossier publie versionne comme `SoftLicence.Mcp-<hash>`.
 
+Avec une cle globale, les tools lies a un produit doivent recevoir un `productName`
+exact ou un `productId`. Utiliser `list_products` quand le nom exact n'est pas
+certain, par exemple `TIAConnect` et non `T-IA Connect`. Si un tool recoit une erreur
+de selection produit connue (`PRODUCT_SELECTOR_REQUIRED`, `PRODUCT_NOT_FOUND`,
+`PRODUCT_NAME_AMBIGUOUS`, `PRODUCT_SELECTOR_AMBIGUOUS`), le MCP retourne une reponse
+JSON d'erreur avec `availableProducts` pour permettre de relancer immediatement avec
+le bon selecteur.
+
 Exemple de configuration client MCP en mode developpement :
 
 ```json

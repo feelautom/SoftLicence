@@ -1,12 +1,50 @@
 # Changelog
 
-## SDK v1.1.11 — Unreleased
+## SDK v1.1.12 — 2026-07-15
+
+### Security and signed license contract
+- fix(sdk): stabilize the UTF-8 JSON representation used for RSA/SHA-256/PKCS#1 signing so the final license file is derived from the exact bytes that were signed
+- fix(sdk): preserve RSA signatures as raw Base64 in the final JSON, including `+`, `/`, and `=`, without JSON escaping or reserialization
+- fix(sdk): locate and replace only the root `Signature` property during generation; missing, duplicated, non-string, or ambiguous generation contracts fail closed
+- fix(sdk): reserve the exact `LicenseModel.Features` key `Signature` for the root cryptographic contract and reject it before mutating or signing the model
+- test(sdk): cover Unicode, emoji, quotes, backslashes, control characters, HTML-escapable characters, raw Base64 characters, property order, historical managed fixtures, exact-byte native reconstruction, and signed-data tampering
+
+### Hardware binding
+- fix(sdk): require a non-empty, non-whitespace current HWID when validating a hardware-bound license; omission now fails closed with `HardwareIdRequired`
+- fix(sdk): reject whitespace-only signed hardware bindings with `InvalidHardwareBinding` and preserve exact ordinal HWID comparison
+- feat(sdk): add `LicenseService.ValidateLicenseDetailed` and stable `LicenseValidationErrorCode` values while preserving the existing tuple-based `ValidateLicense` API and its binary/source signature
+- compatibility(sdk): preserve licenses explicitly issued without a signed hardware binding and introduce no fallback from the contractual legacy HWID to the stable/V2 observation value
+
+### Expiration
+- fix(sdk): keep the signed root `IsExpired` value as a cryptographic compatibility snapshot so RSA verification remains stable before and after expiration
+- fix(sdk): decide actual validity from `ExpirationDate` and current UTC time only after RSA succeeds; authentic expired licenses now report `Expired` instead of `InvalidSignature`
+- security(sdk): keep invalid signatures higher priority than expiration and reject absent, duplicated, or non-boolean root expiration snapshots
+- compatibility(sdk): preserve the historical boundary where the exact `ExpirationDate` instant is valid and expiration begins immediately afterward
+
+### HWID transition documentation
+- docs(sdk): clarify that `HardwareInfo.GetHardwareId()` remains the SDK 1.1.8/1.1.9-compatible contractual identity
+- docs(sdk): document `GetStableHardwareId()` and `GetHardwareIdMigrationInfo()` as observation-only V2 APIs, with no automatic migration, mismatch fallback, seat/quota change, or licensing bypass
+- docs(sdk): document the hardware-bound validation contract, detailed validation API, reserved `Signature` key, exact signed JSON representation, and raw Base64 transport
+
+### Repository and release tooling since 1.1.11
+- fix(release): make `Prepare-SdkRelease.ps1` handle empty JSON lists correctly under Windows PowerShell 5.1
+- fix(mcp): return product data on selector errors and support product selectors for LLM tip detail lookup; these server/MCP changes are not included in the SDK NuGet package
+- chore(repo): ignore local coordination state and package output folders; this does not change the SDK NuGet package
+
+### Compatibility notes
+- source and binary compatibility are preserved for the existing `LicenseService.ValidateLicense` and `SoftLicenceClient` APIs
+- applications that call low-level validation without a current HWID must now provide one for hardware-bound licenses; this is an intentional fail-closed behavioral change
+- generated license files must be treated as opaque signed values and must not be reformatted, reordered, normalized, or reserialized before exact-byte native validation
+- historical 1.1.11 licenses containing differently serialized Unicode/escaped JSON may require reissuance for exact-byte native validators; documented managed compatibility remains available
+
+## SDK v1.1.11 — 2026-07-13
 - fix(sdk): restore SDK 1.1.8/1.1.9 contractual HWID compatibility by making `HardwareInfo.GetHardwareId()` use the legacy first non-empty `Win32_DiskDrive.SerialNumber` selection again
 - feat(sdk): add explicit observation API `HardwareInfo.GetStableHardwareId()` and `GetHardwareIdMigrationInfo()` for the deterministic `Win32_DiskDrive WHERE Index=0` HWID
+- docs(sdk): document `LegacyHardwareId`, `StableHardwareId`, `HasStableHardwareId`, and `HasDistinctHardwareIds`; stable/V2 is nullable when disk `Index=0` cannot be determined
 - feat(sdk): send `HardwareIdV2` as a secondary observation field in activation, trial, and status payloads when it is available; `HardwareId` remains the only contractual identity
 - feat(server): collect HWID V2 observations in license history without changing seats, max-seat consumption, machine-change quota, or the contractual HWID
 - test(sdk/server): cover legacy HWID restoration, V2 calculation, multi-disk divergence, missing V2, payload serialization, and server-side non-mutation
-- note(sdk): SDK 1.1.11 does not migrate existing licenses to V2; server-side acceptance of old/new divergent HWIDs remains a separate design decision
+- note(sdk): SDK 1.1.11 does not migrate existing licenses to V2; V2 must not be used as a primary identity, fallback after a hardware mismatch, or licensing bypass before a validated server-side migration
 
 ## SDK v1.1.10 — 2026-07-12
 - fix(sdk): stabilize disk fingerprint selection by reading `Win32_DiskDrive.SerialNumber` with `Index=0` before falling back to the legacy first non-empty disk serial

@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using SoftLicence.Server.Models;
 using SoftLicence.Server.Services;
 using SoftLicence.Server.Data;
+using Microsoft.EntityFrameworkCore;
 
 namespace SoftLicence.Server.Controllers;
 
@@ -12,15 +13,18 @@ public sealed class LlmTipFeedbackController : ControllerBase
 {
     private readonly LlmTipFeedbackService _feedbackService;
     private readonly AnalyticsApiKeyAuthService _apiKeyAuth;
+    private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
     private readonly ILogger<LlmTipFeedbackController> _logger;
 
     public LlmTipFeedbackController(
         LlmTipFeedbackService feedbackService,
         AnalyticsApiKeyAuthService apiKeyAuth,
+        IDbContextFactory<LicenseDbContext> dbFactory,
         ILogger<LlmTipFeedbackController> logger)
     {
         _feedbackService = feedbackService;
         _apiKeyAuth = apiKeyAuth;
+        _dbFactory = dbFactory;
         _logger = logger;
     }
 
@@ -171,19 +175,18 @@ public sealed class LlmTipFeedbackController : ControllerBase
     public async Task<IActionResult> GetAdminTipDetail(
         [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
         string idOrContentHash,
+        [FromQuery] string? productId,
+        [FromQuery] string? productName,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
-        if (!auth.ProductId.HasValue)
-            return StatusCode(StatusCodes.Status403Forbidden, new
-            {
-                errorCode = "PRODUCT_SELECTOR_REQUIRED",
-                message = "This endpoint requires a product-scoped analytics key."
-            });
+        var resolvedProduct = await ResolveProductAsync(auth, productId, productName, cancellationToken);
+        if (resolvedProduct.Error != null)
+            return resolvedProduct.Error;
 
-        var result = await _feedbackService.GetTipDetailAsync(idOrContentHash, auth.ProductId.Value, cancellationToken);
+        var result = await _feedbackService.GetTipDetailAsync(idOrContentHash, resolvedProduct.ProductId, cancellationToken);
         return result == null ? NotFound() : Ok(result);
     }
 
@@ -246,25 +249,24 @@ public sealed class LlmTipFeedbackController : ControllerBase
     [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("AdminAPI")]
     public async Task<IActionResult> UpdateAdminReviewStatus(
         [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
+        [FromQuery] string? productId,
+        [FromQuery] string? productName,
         [FromBody] LlmTipFeedbackReviewStatusRequest request,
         CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
-        if (!auth.ProductId.HasValue)
-            return StatusCode(StatusCodes.Status403Forbidden, new
-            {
-                errorCode = "PRODUCT_SELECTOR_REQUIRED",
-                message = "This endpoint requires a product-scoped analytics key."
-            });
+        var resolvedProduct = await ResolveProductAsync(auth, productId, productName, cancellationToken);
+        if (resolvedProduct.Error != null)
+            return resolvedProduct.Error;
 
         try
         {
             var updated = await _feedbackService.UpdateReviewStatusAsync(
                 request.Id,
                 request.ContentHash,
-                auth.ProductId.Value,
+                resolvedProduct.ProductId,
                 request.ReviewStatus,
                 cancellationToken);
 
@@ -334,5 +336,76 @@ public sealed class LlmTipFeedbackController : ControllerBase
             return requestedProductId;
 
         return requestedProductId ?? auth.ProductId;
+    }
+
+    private async Task<ResolvedProduct> ResolveProductAsync(
+        AnalyticsApiKeyAuthResult auth,
+        string? productId,
+        string? productName,
+        CancellationToken cancellationToken)
+    {
+        var hasProductId = !string.IsNullOrWhiteSpace(productId);
+        var hasProductName = !string.IsNullOrWhiteSpace(productName);
+        if (hasProductId && hasProductName)
+            return ResolvedProduct.BadRequest("Provide either productId or productName, not both.", "PRODUCT_SELECTOR_AMBIGUOUS");
+
+        if (!hasProductId && !hasProductName)
+        {
+            if (auth.IsGlobal)
+            {
+                return ResolvedProduct.BadRequest(
+                    "Global analytics keys must provide productId or productName for product-scoped endpoints.",
+                    "PRODUCT_SELECTOR_REQUIRED");
+            }
+
+            if (!auth.ProductId.HasValue)
+                return ResolvedProduct.Forbid("The analytics key is not configured for a product.", "PRODUCT_SCOPE_INVALID");
+
+            return new ResolvedProduct(auth.ProductId.Value, null);
+        }
+
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        Product? requestedProduct;
+        if (hasProductId)
+        {
+            if (!Guid.TryParse(productId, out var parsedProductId))
+                return ResolvedProduct.BadRequest("productId must be a valid UUID.", "PRODUCT_ID_INVALID");
+
+            requestedProduct = await db.Products.AsNoTracking()
+                .FirstOrDefaultAsync(p => p.Id == parsedProductId, cancellationToken);
+        }
+        else
+        {
+            var normalizedProductName = productName!.Trim();
+            var matches = await db.Products.AsNoTracking()
+                .Where(p => p.Name.ToLower() == normalizedProductName.ToLower())
+                .Take(2)
+                .ToListAsync(cancellationToken);
+
+            if (matches.Count > 1)
+                return ResolvedProduct.BadRequest("productName matches multiple products. Use productId.", "PRODUCT_NAME_AMBIGUOUS");
+
+            requestedProduct = matches.SingleOrDefault();
+        }
+
+        if (requestedProduct == null)
+            return ResolvedProduct.NotFound("Requested product was not found.", "PRODUCT_NOT_FOUND");
+
+        if (!auth.IsGlobal && (!auth.ProductId.HasValue || requestedProduct.Id != auth.ProductId.Value))
+            return ResolvedProduct.Forbid("The analytics key is scoped to a different product.", "PRODUCT_SCOPE_FORBIDDEN");
+
+        return new ResolvedProduct(requestedProduct.Id, null);
+    }
+
+    private sealed record ResolvedProduct(Guid ProductId, IActionResult? Error)
+    {
+        public static ResolvedProduct BadRequest(string message, string code) =>
+            new(Guid.Empty, new BadRequestObjectResult(new { errorCode = code, message }));
+
+        public static ResolvedProduct NotFound(string message, string code) =>
+            new(Guid.Empty, new NotFoundObjectResult(new { errorCode = code, message }));
+
+        public static ResolvedProduct Forbid(string message, string code) =>
+            new(Guid.Empty, new ObjectResult(new { errorCode = code, message }) { StatusCode = StatusCodes.Status403Forbidden });
     }
 }

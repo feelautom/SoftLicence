@@ -161,6 +161,76 @@ public class LicenseServiceTests
     }
 
     [Fact]
+    public void ValidateLicenseDetailed_WithoutExpiration_ShouldRemainValidAtAnyControlledInstant()
+    {
+        var keys = LicenseService.GenerateKeys();
+        var licenseString = LicenseService.GenerateLicense(
+            new LicenseModel
+            {
+                LicenseKey = "NO-EXPIRATION",
+                ExpirationDate = null
+            },
+            keys.PrivateKey);
+
+        var result = LicenseService.ValidateLicenseDetailed(
+            licenseString,
+            keys.PublicKey,
+            currentHardwareId: null,
+            utcNow: DateTime.MaxValue);
+
+        Assert.True(result.IsValid);
+        Assert.Equal(LicenseValidationErrorCode.None, result.ErrorCode);
+    }
+
+    [Fact]
+    public void ValidateLicenseDetailed_WithFutureExpiration_ShouldRemainValid()
+    {
+        var keys = LicenseService.GenerateKeys();
+        var expiration = new DateTime(2099, 01, 01, 00, 00, 00, DateTimeKind.Utc);
+        var licenseString = LicenseService.GenerateLicense(
+            new LicenseModel
+            {
+                LicenseKey = "FUTURE-EXPIRATION",
+                ExpirationDate = expiration
+            },
+            keys.PrivateKey);
+
+        var result = LicenseService.ValidateLicenseDetailed(
+            licenseString,
+            keys.PublicKey,
+            currentHardwareId: null,
+            utcNow: expiration.AddTicks(-1));
+
+        Assert.True(result.IsValid);
+        Assert.Equal(LicenseValidationErrorCode.None, result.ErrorCode);
+    }
+
+    [Fact]
+    public void ValidateLicenseDetailed_WithHistoricallySignedTrueSnapshot_ShouldReturnExpired()
+    {
+        var keys = LicenseService.GenerateKeys();
+        var expiration = new DateTime(2000, 01, 01, 00, 00, 00, DateTimeKind.Utc);
+        var licenseString = LicenseService.GenerateLicense(
+            new LicenseModel
+            {
+                LicenseKey = "SIGNED-AS-EXPIRED",
+                ExpirationDate = expiration
+            },
+            keys.PrivateKey);
+        var finalJson = Encoding.UTF8.GetString(Convert.FromBase64String(licenseString));
+
+        var result = LicenseService.ValidateLicenseDetailed(
+            licenseString,
+            keys.PublicKey,
+            currentHardwareId: null,
+            utcNow: expiration.AddTicks(1));
+
+        Assert.Contains("\"IsExpired\":true", finalJson, StringComparison.Ordinal);
+        Assert.False(result.IsValid);
+        Assert.Equal(LicenseValidationErrorCode.Expired, result.ErrorCode);
+    }
+
+    [Fact]
     public void ValidateLicense_ShouldReturnInvalid_WhenHardwareMismatch()
     {
         // Arrange
@@ -178,6 +248,167 @@ public class LicenseServiceTests
         // Assert
         Assert.False(result.IsValid);
         Assert.Equal("Cette licence n'est pas valide pour cette machine.", result.ErrorMessage);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ValidateLicenseDetailed_BoundLicenseWithoutUsableCurrentHardwareId_ShouldFailClosed(string? currentHardwareId)
+    {
+        var keys = LicenseService.GenerateKeys();
+        var model = new LicenseModel
+        {
+            LicenseKey = "BOUND-HWID-REQUIRED",
+            HardwareId = "HW-BOUND"
+        };
+        var licenseString = LicenseService.GenerateLicense(model, keys.PrivateKey);
+
+        var detailed = LicenseService.ValidateLicenseDetailed(licenseString, keys.PublicKey, currentHardwareId);
+        var legacy = LicenseService.ValidateLicense(licenseString, keys.PublicKey, currentHardwareId);
+
+        Assert.False(detailed.IsValid);
+        Assert.Equal(LicenseValidationErrorCode.HardwareIdRequired, detailed.ErrorCode);
+        Assert.Equal("Un hardware ID courant est requis pour valider cette licence.", detailed.ErrorMessage);
+        Assert.Equal(detailed.IsValid, legacy.IsValid);
+        Assert.Equal(detailed.License!.LicenseKey, legacy.License!.LicenseKey);
+        Assert.Equal(detailed.ErrorMessage, legacy.ErrorMessage);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public void ValidateLicenseDetailed_UnboundLicenseWithoutCurrentHardwareId_ShouldRemainValid(string? signedHardwareId)
+    {
+        var keys = LicenseService.GenerateKeys();
+        var model = new LicenseModel
+        {
+            LicenseKey = "UNBOUND-COMPATIBILITY",
+            HardwareId = signedHardwareId!
+        };
+        var licenseString = LicenseService.GenerateLicense(model, keys.PrivateKey);
+
+        var result = LicenseService.ValidateLicenseDetailed(licenseString, keys.PublicKey);
+
+        Assert.True(result.IsValid);
+        Assert.Equal(LicenseValidationErrorCode.None, result.ErrorCode);
+    }
+
+    [Fact]
+    public void ValidateLicenseDetailed_UnboundLicense_ShouldIgnoreCurrentHardwareId()
+    {
+        var keys = LicenseService.GenerateKeys();
+        var model = new LicenseModel
+        {
+            LicenseKey = "UNBOUND-ANY-MACHINE",
+            HardwareId = string.Empty
+        };
+        var licenseString = LicenseService.GenerateLicense(model, keys.PrivateKey);
+
+        var whitespaceResult = LicenseService.ValidateLicenseDetailed(licenseString, keys.PublicKey, "   ");
+        var otherMachineResult = LicenseService.ValidateLicenseDetailed(licenseString, keys.PublicKey, "HW-OTHER");
+
+        Assert.True(whitespaceResult.IsValid);
+        Assert.True(otherMachineResult.IsValid);
+    }
+
+    [Fact]
+    public void ValidateLicenseDetailed_WhitespaceSignedHardwareId_ShouldRejectInvalidContract()
+    {
+        var keys = LicenseService.GenerateKeys();
+        var model = new LicenseModel
+        {
+            LicenseKey = "INVALID-WHITESPACE-BINDING",
+            HardwareId = "   "
+        };
+        var licenseString = LicenseService.GenerateLicense(model, keys.PrivateKey);
+
+        var result = LicenseService.ValidateLicenseDetailed(licenseString, keys.PublicKey, "   ");
+
+        Assert.False(result.IsValid);
+        Assert.Equal(LicenseValidationErrorCode.InvalidHardwareBinding, result.ErrorCode);
+    }
+
+    [Fact]
+    public void ValidateLicenseDetailed_HardwareIdComparison_ShouldRemainOrdinal()
+    {
+        var keys = LicenseService.GenerateKeys();
+        var model = new LicenseModel
+        {
+            LicenseKey = "ORDINAL-HWID",
+            HardwareId = "HW-CASE"
+        };
+        var licenseString = LicenseService.GenerateLicense(model, keys.PrivateKey);
+
+        var exact = LicenseService.ValidateLicenseDetailed(licenseString, keys.PublicKey, "HW-CASE");
+        var differentCase = LicenseService.ValidateLicenseDetailed(licenseString, keys.PublicKey, "hw-case");
+
+        Assert.True(exact.IsValid);
+        Assert.Equal(LicenseValidationErrorCode.None, exact.ErrorCode);
+        Assert.False(differentCase.IsValid);
+        Assert.Equal(LicenseValidationErrorCode.HardwareIdMismatch, differentCase.ErrorCode);
+    }
+
+    [Fact]
+    public void ValidateLicense_HistoricalSignature_ShouldRemainOptionalAndBinaryCompatible()
+    {
+        var method = typeof(LicenseService).GetMethod(
+            nameof(LicenseService.ValidateLicense),
+            new[] { typeof(string), typeof(string), typeof(string) });
+
+        Assert.NotNull(method);
+        var parameters = method.GetParameters();
+        Assert.Equal(3, parameters.Length);
+        Assert.True(parameters[2].IsOptional);
+        Assert.Null(parameters[2].DefaultValue);
+    }
+
+    [Fact]
+    public void ValidateLicenseDetailed_InvalidInput_ShouldReturnTypedErrorWithoutPayload()
+    {
+        const string invalidPayload = "not-a-license-payload";
+
+        var result = LicenseService.ValidateLicenseDetailed(invalidPayload, "not-used");
+
+        Assert.False(result.IsValid);
+        Assert.Equal(LicenseValidationErrorCode.InvalidFormat, result.ErrorCode);
+        Assert.Equal("Format de licence invalide.", result.ErrorMessage);
+        Assert.DoesNotContain(invalidPayload, result.ErrorMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ValidateLicenseDetailed_InvalidJson_ShouldNotExposeDecodedPayload()
+    {
+        const string sensitiveMarker = "SENSITIVE-JSON-MARKER";
+        var invalidJson = $"{{\"marker\":\"{sensitiveMarker}\"";
+        var licenseString = Convert.ToBase64String(Encoding.UTF8.GetBytes(invalidJson));
+
+        var result = LicenseService.ValidateLicenseDetailed(licenseString, "not-used");
+
+        Assert.False(result.IsValid);
+        Assert.Equal(LicenseValidationErrorCode.InvalidFormat, result.ErrorCode);
+        Assert.Equal("Format de licence invalide.", result.ErrorMessage);
+        Assert.DoesNotContain(sensitiveMarker, result.ErrorMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ValidateLicenseDetailed_CryptographicallyInvalidSignature_ShouldReturnInvalidSignature()
+    {
+        var keys = LicenseService.GenerateKeys();
+        var licenseString = LicenseService.GenerateLicense(
+            new LicenseModel { LicenseKey = "INVALID-SIGNATURE-BYTES" },
+            keys.PrivateKey);
+        var model = JsonSerializer.Deserialize<LicenseModel>(
+            Encoding.UTF8.GetString(Convert.FromBase64String(licenseString)))!;
+        model.Signature = Convert.ToBase64String(new byte[] { 1, 2, 3 });
+        var alteredLicense = Convert.ToBase64String(
+            Encoding.UTF8.GetBytes(JsonSerializer.Serialize(model)));
+
+        var result = LicenseService.ValidateLicenseDetailed(alteredLicense, keys.PublicKey);
+
+        Assert.False(result.IsValid);
+        Assert.Equal(LicenseValidationErrorCode.InvalidSignature, result.ErrorCode);
+        Assert.Equal("Signature invalide. La licence a été altérée.", result.ErrorMessage);
     }
 
     [Fact]

@@ -343,6 +343,38 @@ public class SoftLicenceClientTests
         Assert.Equal("LOCAL-TEST", result.License.LicenseKey);
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ValidateLocal_ShouldThrow_WhenHardwareIdIsMissingOrWhitespace(string? hardwareId)
+    {
+        var keys = LicenseService.GenerateKeys();
+        var client = new SoftLicenceClient(ServerUrl, keys.PublicKey);
+
+        var exception = Assert.Throws<ArgumentException>(() =>
+            client.ValidateLocal("not-used", hardwareId!));
+
+        Assert.Equal("hardwareId", exception.ParamName);
+    }
+
+    [Fact]
+    public void ValidateLocal_UnboundLicenseWithExplicitHardwareId_ShouldRemainValid()
+    {
+        var keys = LicenseService.GenerateKeys();
+        var model = new LicenseModel
+        {
+            LicenseKey = "LOCAL-UNBOUND",
+            HardwareId = string.Empty
+        };
+        var licenseString = LicenseService.GenerateLicense(model, keys.PrivateKey);
+        var client = new SoftLicenceClient(ServerUrl, keys.PublicKey);
+
+        var result = client.ValidateLocal(licenseString, "HW-CURRENT");
+
+        Assert.True(result.IsValid);
+    }
+
     [Fact]
     public async Task ValidateLocalAsync_ShouldValidateCorrectly()
     {

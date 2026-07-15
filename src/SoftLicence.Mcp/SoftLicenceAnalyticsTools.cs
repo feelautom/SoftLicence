@@ -791,12 +791,18 @@ public sealed class SoftLicenceAnalyticsTools
     [Description("Get anonymized detail for one centralized LLM Tips Feedback item by id or contentHash.")]
     public async Task<JsonElement> GetLlmTipFeedbackDetail(
         [Description("Tip UUID or contentHash returned by list_llm_tip_feedback.")] string idOrContentHash,
+        [Description("Optional product UUID. Global analytics keys must provide productId or productName.")] string? productId = null,
+        [Description("Optional exact product name. Global analytics keys must provide productId or productName.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(idOrContentHash))
             throw new ArgumentException("idOrContentHash is required.", nameof(idOrContentHash));
 
-        return await _client.GetLlmTipFeedbackDetailAsync(idOrContentHash.Trim(), cancellationToken);
+        return await _client.GetLlmTipFeedbackDetailAsync(
+            idOrContentHash.Trim(),
+            NormalizeOptional(productId),
+            NormalizeOptional(productName),
+            cancellationToken);
     }
 
     [McpServerTool]
@@ -832,6 +838,8 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Tip UUID. Optional when contentHash is provided.")] string? id = null,
         [Description("Tip contentHash. Optional when id is provided.")] string? contentHash = null,
         [Description("Allowed status: new, ignored, needs-product-fix, needs-doc, needs-mcp-guide, needs-regression-test, converted-to-bugtrace, fixed-in-product.")] string reviewStatus = "new",
+        [Description("Optional product UUID. Global analytics keys must provide productId or productName.")] string? productId = null,
+        [Description("Optional exact product name. Global analytics keys must provide productId or productName.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(id) && string.IsNullOrWhiteSpace(contentHash))
@@ -841,6 +849,8 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeOptional(id),
             NormalizeOptional(contentHash),
             NormalizeReviewStatus(reviewStatus) ?? "new",
+            NormalizeOptional(productId),
+            NormalizeOptional(productName),
             cancellationToken);
     }
 
