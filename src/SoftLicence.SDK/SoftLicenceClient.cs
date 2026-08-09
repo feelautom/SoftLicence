@@ -6,7 +6,9 @@ namespace SoftLicence.SDK
 {
     public class SoftLicenceClient : ISoftLicenceClient
     {
-        private const string SdkVersion = "1.1.11";
+        private const string SdkVersion = "1.1.13";
+        private const string ErrorCodeHeader = "X-SoftLicence-Error-Code";
+        private const string CorrelationIdHeader = "X-SoftLicence-Correlation-Id";
         private const string LegacyHardwareIdAlgorithm = "legacy-wmi-first-disk";
         private const string StableHardwareIdAlgorithm = "v2-wmi-disk-index-0";
 
@@ -52,6 +54,8 @@ namespace SoftLicence.SDK
                 if (response.IsSuccessStatusCode)
                 {
                     var body = await response.Content.ReadAsStringAsync();
+                    if (response.Headers.Contains(ErrorCodeHeader))
+                        return MapActivationFailure(response, body);
                     var licenseFile = ExtractLicenseFile(body);
                     return licenseFile != null
                         ? ActivationResult.Ok(licenseFile)
@@ -59,8 +63,7 @@ namespace SoftLicence.SDK
                 }
 
                 var errorBody = await response.Content.ReadAsStringAsync();
-                var errorCode = MapHttpErrorToActivationCode(response.StatusCode, errorBody);
-                return ActivationResult.Fail(errorCode, errorBody);
+                return MapActivationFailure(response, errorBody);
             }
             catch (HttpRequestException ex)
             {
@@ -103,6 +106,8 @@ namespace SoftLicence.SDK
                 if (response.IsSuccessStatusCode)
                 {
                     var body = await response.Content.ReadAsStringAsync();
+                    if (response.Headers.Contains(ErrorCodeHeader))
+                        return MapActivationFailure(response, body);
                     var licenseFile = ExtractLicenseFile(body);
                     return licenseFile != null
                         ? ActivationResult.Ok(licenseFile)
@@ -110,8 +115,7 @@ namespace SoftLicence.SDK
                 }
 
                 var errorBody = await response.Content.ReadAsStringAsync();
-                var errorCode = MapHttpErrorToActivationCode(response.StatusCode, errorBody);
-                return ActivationResult.Fail(errorCode, errorBody);
+                return MapActivationFailure(response, errorBody);
             }
             catch (HttpRequestException ex)
             {
@@ -162,7 +166,11 @@ namespace SoftLicence.SDK
                 if (!response.IsSuccessStatusCode)
                 {
                     var errorBody = await response.Content.ReadAsStringAsync();
-                    return LicenseStatusResult.Fail(StatusErrorCode.ServerError, errorBody);
+                    return LicenseStatusResult.Fail(
+                        StatusErrorCode.ServerError,
+                        ExtractPublicErrorMessage(errorBody),
+                        TryGetSingleHeader(response, ErrorCodeHeader),
+                        TryGetSingleHeader(response, CorrelationIdHeader));
                 }
 
                 var json = await response.Content.ReadAsStringAsync();
@@ -262,7 +270,10 @@ namespace SoftLicence.SDK
                     return DeactivationResult.Ok();
 
                 var errorBody = await response.Content.ReadAsStringAsync();
-                return DeactivationResult.Fail(errorBody);
+                return DeactivationResult.Fail(
+                    ExtractPublicErrorMessage(errorBody),
+                    TryGetSingleHeader(response, ErrorCodeHeader),
+                    TryGetSingleHeader(response, CorrelationIdHeader));
             }
             catch (HttpRequestException ex)
             {
@@ -336,7 +347,68 @@ namespace SoftLicence.SDK
             return null;
         }
 
-        private static ActivationErrorCode MapHttpErrorToActivationCode(HttpStatusCode statusCode, string body)
+        private static ActivationResult MapActivationFailure(HttpResponseMessage response, string body)
+        {
+            var correlationId = TryGetSingleHeader(response, CorrelationIdHeader);
+            var structuredCode = TryGetSingleHeader(response, ErrorCodeHeader);
+
+            if (response.Headers.Contains(ErrorCodeHeader))
+            {
+                var mappedCode = MapStructuredActivationCode(structuredCode ?? string.Empty);
+                return ActivationResult.Fail(mappedCode, ExtractPublicErrorMessage(body), structuredCode, correlationId);
+            }
+
+            return ActivationResult.FailLegacy(MapLegacyHttpErrorToActivationCode(response.StatusCode, body), body, correlationId);
+        }
+
+        private static string ExtractPublicErrorMessage(string body)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(body);
+                if (document.RootElement.TryGetProperty("message", out var message) ||
+                    document.RootElement.TryGetProperty("errorMessage", out message))
+                {
+                    return message.GetString() ?? body;
+                }
+            }
+            catch (JsonException)
+            {
+            }
+
+            return body;
+        }
+
+        /// <summary>
+        /// Maps canonical protocol values with ordinal semantics. Unknown values fail closed and never fall back to response text.
+        /// </summary>
+        private static ActivationErrorCode MapStructuredActivationCode(string code) => code switch
+        {
+            "INVALID_LICENSE_KEY" => ActivationErrorCode.InvalidKey,
+            "LICENSE_DISABLED" or "PARTNER_INVALID" or "BANNED" or "COMPONENT_BANNED" => ActivationErrorCode.LicenseDisabled,
+            "LICENSE_EXPIRED" => ActivationErrorCode.LicenseExpired,
+            "SEAT_LIMIT" or "MAX_DAILY_ACTIVATIONS_REACHED" => ActivationErrorCode.MaxActivationsReached,
+            "VERSION_NOT_ALLOWED" or "UPDATE_REQUIRED" => ActivationErrorCode.VersionNotAllowed,
+            "APP_UNKNOWN" => ActivationErrorCode.AppNotFound,
+            _ => ActivationErrorCode.ServerError
+        };
+
+        private static string? TryGetSingleHeader(HttpResponseMessage response, string headerName)
+        {
+            if (!response.Headers.TryGetValues(headerName, out var values))
+                return null;
+
+            var materializedValues = values.Take(2).ToArray();
+            return materializedValues.Length == 1 && !string.IsNullOrWhiteSpace(materializedValues[0])
+                ? materializedValues[0]
+                : null;
+        }
+
+        /// <summary>
+        /// Preserves compatibility with servers that predate the structured error contract.
+        /// Remove this bounded fallback after the documented legacy-server support window.
+        /// </summary>
+        private static ActivationErrorCode MapLegacyHttpErrorToActivationCode(HttpStatusCode statusCode, string body)
         {
             if ((int)statusCode >= 500)
                 return ActivationErrorCode.ServerError;

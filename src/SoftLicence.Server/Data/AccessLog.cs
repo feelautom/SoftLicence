@@ -30,5 +30,6 @@ namespace SoftLicence.Server.Data
         public string? ErrorDetails { get; set; } // Réponse d'erreur du serveur
         public bool IsSuccess { get; set; }
         public long DurationMs { get; set; }
+        public long ResponseSizeBytes { get; set; }
     }
 }

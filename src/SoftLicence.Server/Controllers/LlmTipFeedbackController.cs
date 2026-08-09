@@ -118,7 +118,8 @@ public sealed class LlmTipFeedbackController : ControllerBase
         [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
         [FromQuery] DateTime? fromUtc,
         [FromQuery] DateTime? toUtc,
-        [FromQuery] Guid? productId,
+        [FromQuery] string? productId,
+        [FromQuery] string? productName,
         [FromQuery] string? appVersion,
         [FromQuery] string? category,
         [FromQuery] string? severity,
@@ -133,21 +134,15 @@ public sealed class LlmTipFeedbackController : ControllerBase
         var auth = await AuthenticateAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
-        var resolvedProductId = ResolveProductId(auth, productId);
-        if (!resolvedProductId.HasValue)
-            return StatusCode(StatusCodes.Status403Forbidden, new
-            {
-                errorCode = "PRODUCT_SELECTOR_REQUIRED",
-                message = "Global analytics keys must provide productId for this endpoint."
-            });
-        if (!auth.IsGlobal && productId.HasValue && productId != auth.ProductId)
-            return Forbid();
+        var resolvedProduct = await ResolveProductAsync(auth, productId, productName, cancellationToken);
+        if (resolvedProduct.Error != null)
+            return resolvedProduct.Error;
 
         try
         {
             var result = await _feedbackService.ListAdminTipsAsync(new LlmTipFeedbackAdminQuery
             {
-                ProductId = resolvedProductId.Value,
+                ProductId = resolvedProduct.ProductId,
                 FromUtc = fromUtc,
                 ToUtc = toUtc,
                 AppVersion = appVersion,
@@ -196,7 +191,8 @@ public sealed class LlmTipFeedbackController : ControllerBase
         [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
         [FromQuery] DateTime? fromUtc,
         [FromQuery] DateTime? toUtc,
-        [FromQuery] Guid? productId,
+        [FromQuery] string? productId,
+        [FromQuery] string? productName,
         [FromQuery] string? appVersion,
         [FromQuery] string? category,
         [FromQuery] string? severity,
@@ -208,21 +204,15 @@ public sealed class LlmTipFeedbackController : ControllerBase
         var auth = await AuthenticateAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
-        var resolvedProductId = ResolveProductId(auth, productId);
-        if (!resolvedProductId.HasValue)
-            return StatusCode(StatusCodes.Status403Forbidden, new
-            {
-                errorCode = "PRODUCT_SELECTOR_REQUIRED",
-                message = "Global analytics keys must provide productId for this endpoint."
-            });
-        if (!auth.IsGlobal && productId.HasValue && productId != auth.ProductId)
-            return Forbid();
+        var resolvedProduct = await ResolveProductAsync(auth, productId, productName, cancellationToken);
+        if (resolvedProduct.Error != null)
+            return resolvedProduct.Error;
 
         try
         {
             var result = await _feedbackService.GetAdminOverviewAsync(new LlmTipFeedbackAdminQuery
             {
-                ProductId = resolvedProductId.Value,
+                ProductId = resolvedProduct.ProductId,
                 FromUtc = fromUtc,
                 ToUtc = toUtc,
                 AppVersion = appVersion,
@@ -328,14 +318,6 @@ public sealed class LlmTipFeedbackController : ControllerBase
             AnalyticsApiKeyScopes.TelemetryRead,
             HttpContext.Connection.RemoteIpAddress?.ToString(),
             cancellationToken);
-    }
-
-    private static Guid? ResolveProductId(AnalyticsApiKeyAuthResult auth, Guid? requestedProductId)
-    {
-        if (auth.IsGlobal)
-            return requestedProductId;
-
-        return requestedProductId ?? auth.ProductId;
     }
 
     private async Task<ResolvedProduct> ResolveProductAsync(

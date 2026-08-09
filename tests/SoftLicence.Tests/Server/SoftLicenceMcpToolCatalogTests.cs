@@ -59,6 +59,40 @@ public sealed class SoftLicenceMcpToolCatalogTests
         Assert.Contains(toolMethods, method => ToSnakeCase(method.Name) == "get_customer_license_timeline");
     }
 
+    [Fact]
+    public void OversizedResultTools_ExposeInfoAndChunkReads()
+    {
+        var toolMethods = typeof(SoftLicenceAnalyticsTools)
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+            .Where(method => method.GetCustomAttribute<McpServerToolAttribute>() is not null)
+            .ToArray();
+
+        Assert.Contains(toolMethods, method => ToSnakeCase(method.Name) == "get_mcp_result_artifact_info");
+        Assert.Contains(toolMethods, method => ToSnakeCase(method.Name) == "get_mcp_result_artifact_chunk");
+    }
+
+    [Fact]
+    public void CustomerLicenseTimelineTool_DescribesAutomaticNinetyDaySegmentation()
+    {
+        var method = typeof(SoftLicenceAnalyticsTools).GetMethod(nameof(SoftLicenceAnalyticsTools.GetCustomerLicenseTimeline));
+        Assert.NotNull(method);
+
+        foreach (var parameterName in new[] { "fromUtc", "toUtc" })
+        {
+            var parameter = Assert.Single(method.GetParameters(), value => value.Name == parameterName);
+            var description = parameter.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>();
+
+            Assert.NotNull(description);
+            Assert.Contains("90 days", description.Description, StringComparison.Ordinal);
+            Assert.Contains("automatically split", description.Description, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var daysParameter = Assert.Single(method.GetParameters(), value => value.Name == "days");
+        var daysDescription = daysParameter.GetCustomAttribute<System.ComponentModel.DescriptionAttribute>();
+        Assert.NotNull(daysDescription);
+        Assert.Contains("90", daysDescription.Description, StringComparison.Ordinal);
+    }
+
     private static string ToSnakeCase(string value)
     {
         var chars = new List<char>(value.Length + 8);

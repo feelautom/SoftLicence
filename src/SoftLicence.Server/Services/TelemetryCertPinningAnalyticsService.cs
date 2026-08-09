@@ -78,6 +78,29 @@ public sealed class TelemetryCertPinningAnalyticsService
             })
             .ToListAsync(cancellationToken);
 
+        var dailyAlerts = await db.TelemetryCertPinningDailyAlerts.AsNoTracking()
+            .Where(a => productScopeIds.Contains(a.ProductId)
+                && a.AlertType == CertPinningDailyAlertService.AlertType
+                && a.LastSeenUtc >= since)
+            .OrderByDescending(a => a.LastSeenUtc)
+            .Select(a => new TelemetryCertPinningDailyAlertSummary
+            {
+                ParisDate = a.ParisDate,
+                HardwareId = a.HardwareId,
+                OccurrenceCount = a.OccurrenceCount,
+                ClientSuppressedCount = a.ClientSuppressedCount,
+                FirstSeenUtc = a.FirstSeenUtc,
+                LastSeenUtc = a.LastSeenUtc,
+                FirstHost = a.FirstHost,
+                LastHost = a.LastHost,
+                LastVersion = a.LastVersion,
+                LastFailureReason = a.LastFailureReason,
+                LastCertificateIssuer = a.LastCertificateIssuer,
+                NotificationAttempted = a.NotificationClaimedAtUtc.HasValue || a.NotificationSentAtUtc.HasValue,
+                NotificationSent = a.NotificationSentAtUtc.HasValue
+            })
+            .ToListAsync(cancellationToken);
+
         var eventCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var hostCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var reasonCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -125,10 +148,15 @@ public sealed class TelemetryCertPinningAnalyticsService
                 .Select(r => r.HardwareId)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .Count(),
+            DailyAlertGroups = dailyAlerts.Count,
+            DailyNotificationsSent = dailyAlerts.Count(a => a.NotificationSent),
+            DailyOccurrencesTracked = dailyAlerts.Sum(a => a.OccurrenceCount),
+            DailyClientSuppressedTracked = dailyAlerts.Sum(a => a.ClientSuppressedCount),
             EventNames = ToTopCounts(eventCounts, top),
             Hosts = ToTopCounts(hostCounts, top),
             FailureReasons = ToTopCounts(reasonCounts, top),
-            Versions = ToTopCounts(versionCounts, top)
+            Versions = ToTopCounts(versionCounts, top),
+            RecentDailyAlerts = dailyAlerts.Take(top).ToList()
         };
 
         _cache.Set(cacheKey, response, CacheTtl);

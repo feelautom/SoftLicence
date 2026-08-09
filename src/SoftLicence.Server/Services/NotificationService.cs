@@ -18,10 +18,14 @@ public class NotificationService
         public const string SecurityZombieDetected = "Security.ZombieDetected";
         public const string SecurityHwidReuseDetected = "Security.HwidReuseDetected";
         public const string SecurityAuthFailure = "Security.AuthFailure";
+        public const string SecurityEvidenceObserved = "Security.EvidenceObserved";
         public const string LicenseCreated = "License.Created";
         public const string LicenseActivated = "License.Activated";
         public const string LicenseRevoked = "License.Revoked";
         public const string SystemStartup = "System.Startup";
+        public const string TelemetryRejected = "Telemetry.Rejected";
+        public const string ActivationIncident = "Activation.Incident";
+        public const string ActivationRecovered = "Activation.Recovered";
     }
 
     public static readonly Dictionary<string, string> AvailableTriggers = new()
@@ -30,10 +34,14 @@ public class NotificationService
         { Triggers.SecurityZombieDetected, "🧟 Zombie Détecté (Fraude)" },
         { Triggers.SecurityHwidReuseDetected, "🚨 HWID réutilisé (Multi-compte)" },
         { Triggers.SecurityAuthFailure, "⚠️ Echec Authentification (Admin)" },
+        { Triggers.SecurityEvidenceObserved, "⚠️ Preuve sécurité observée" },
         { Triggers.LicenseCreated, "✨ Nouvelle Licence Créée" },
         { Triggers.LicenseActivated, "✅ Licence Activée" },
         { Triggers.LicenseRevoked, "🚫 Licence Révoquée" },
-        { Triggers.SystemStartup, "🚀 Démarrage Serveur" }
+        { Triggers.SystemStartup, "🚀 Démarrage Serveur" },
+        { Triggers.TelemetryRejected, "⚠️ Télémétrie rejetée" },
+        { Triggers.ActivationIncident, "⚠️ Incident activation" },
+        { Triggers.ActivationRecovered, "✅ Activation rétablie" }
     };
 
     public NotificationService(IDbContextFactory<LicenseDbContext> dbFactory, ILogger<NotificationService> logger, IHttpClientFactory httpFactory)
@@ -55,10 +63,14 @@ public class NotificationService
         Triggers.SecurityZombieDetected => "zombie",
         Triggers.SecurityHwidReuseDetected => "warning",
         Triggers.SecurityAuthFailure => "warning",
+        Triggers.SecurityEvidenceObserved => "warning",
         Triggers.LicenseCreated => "sparkles",
         Triggers.LicenseActivated => "white_check_mark",
         Triggers.LicenseRevoked => "no_entry_sign",
         Triggers.SystemStartup => "rocket",
+        Triggers.TelemetryRejected => "warning",
+        Triggers.ActivationIncident => "warning",
+        Triggers.ActivationRecovered => "white_check_mark",
         _ => "bell"
     };
 
@@ -103,7 +115,9 @@ public class NotificationService
                         
                         query["title"] = title;
                         query["tags"] = GetEmojiForTrigger(trigger);
-                        if (trigger.StartsWith("Security")) query["priority"] = "4";
+                        if (trigger.StartsWith("Security", StringComparison.Ordinal)
+                            || trigger.StartsWith("Activation.", StringComparison.Ordinal)
+                            || trigger.StartsWith("Telemetry.", StringComparison.Ordinal)) query["priority"] = "4";
                         
                         uriBuilder.Query = query.ToString();
                         

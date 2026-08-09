@@ -282,6 +282,7 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
         var properties = GetProperty(startup, "properties");
         Assert.Equal("Pass", GetString(properties, "OverallStatus"));
         Assert.Throws<KeyNotFoundException>(() => GetProperty(properties, "LicenseKey"));
+        Assert.Equal("absent", GetString(GetProperty(startup, "diagnostic"), "state"));
     }
 
     [Fact]
@@ -315,6 +316,124 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
         var record = Assert.Single(GetArray(json, "records"));
         Assert.Equal("8A96631C...", GetString(record, "hardwareId"));
         Assert.Equal("NativeExtractionFailed", GetString(record, "eventName"));
+    }
+
+    [Fact]
+    public async Task TelemetryRawSample_Diagnostic_ReturnsBoundedSanitizedDetails()
+    {
+        await SeedTelemetryAsync();
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var productId = await db.Products
+                .Where(p => p.Name == "T-IA Connect")
+                .Select(p => p.Id)
+                .SingleAsync();
+            AddDiagnostic(
+                db,
+                productId,
+                "HW-DIAGNOSTIC-DETAIL",
+                "NetworkDiagnostic",
+                73,
+                new[]
+                {
+                    new TelemetryDiagnosticResult
+                    {
+                        ModuleName = "PLC reachability",
+                        Success = false,
+                        Severity = "Warning",
+                        Message = "at 12:34:56 token=secret-value user@example.test https://private.example/x 10.20.30.40 2001:db8::1 C:\\Users\\Franck\\secret.txt"
+                    }
+                },
+                new[]
+                {
+                    new TelemetryDiagnosticPort { Name = "TIA Portal", ExternalPort = 443, Protocol = "TCP" }
+                });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
+        var response = await client.GetAsync("/api/analytics/telemetry/raw-sample?hardwareId=HW-DIAGNOSTIC-DETAIL&type=Diagnostic&take=10");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("secret-value", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("user@example.test", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("private.example", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("10.20.30.40", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("2001:db8::1", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Franck", body, StringComparison.OrdinalIgnoreCase);
+
+        using var document = JsonDocument.Parse(body);
+        var record = Assert.Single(GetArray(document.RootElement, "records"));
+        Assert.Equal(73, GetInt(record, "diagnosticScore"));
+        var diagnostic = GetProperty(record, "diagnostic");
+        Assert.Equal("available", GetString(diagnostic, "state"));
+        Assert.Equal(1, GetInt(diagnostic, "resultsTotal"));
+        Assert.Equal(1, GetInt(diagnostic, "portsTotal"));
+        var result = Assert.Single(GetArray(diagnostic, "results"));
+        Assert.Equal("PLC reachability", GetString(result, "moduleName"));
+        Assert.Contains("[REDACTED]", GetString(result, "message"), StringComparison.Ordinal);
+        Assert.Contains("12:34:56", GetString(result, "message"), StringComparison.Ordinal);
+        var port = Assert.Single(GetArray(diagnostic, "ports"));
+        Assert.Equal(443, GetInt(port, "externalPort"));
+        Assert.Equal("TCP", GetString(port, "protocol"));
+    }
+
+    [Fact]
+    public async Task TelemetryRawSample_Diagnostic_ReportsTruncationAndLegacyEmptyState()
+    {
+        await SeedTelemetryAsync();
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var productId = await db.Products
+                .Where(p => p.Name == "T-IA Connect")
+                .Select(p => p.Id)
+                .SingleAsync();
+            AddDiagnostic(
+                db,
+                productId,
+                "HW-DIAGNOSTIC-BOUNDS",
+                "LargeDiagnostic",
+                40,
+                Enumerable.Range(1, 22).Select(index => new TelemetryDiagnosticResult
+                {
+                    ModuleName = $"Module {index}",
+                    Success = index % 2 == 0,
+                    Severity = "Info",
+                    Message = new string('x', 300)
+                }),
+                Enumerable.Range(1, 22).Select(index => new TelemetryDiagnosticPort
+                {
+                    Name = $"Port {index}",
+                    ExternalPort = 1000 + index,
+                    Protocol = "TCP"
+                }));
+            AddDiagnostic(db, productId, "HW-DIAGNOSTIC-BOUNDS", "LegacyDiagnostic", 10, [], []);
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
+        var response = await client.GetAsync("/api/analytics/telemetry/raw-sample?hardwareId=HW-DIAGNOSTIC-BOUNDS&type=Diagnostic&take=10");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        var records = GetArray(json, "records");
+        var large = Assert.Single(records, record => GetString(record, "eventName") == "LargeDiagnostic");
+        var largeDiagnostic = GetProperty(large, "diagnostic");
+        Assert.Equal("truncated", GetString(largeDiagnostic, "state"));
+        Assert.Equal(22, GetInt(largeDiagnostic, "resultsTotal"));
+        Assert.Equal(20, GetInt(largeDiagnostic, "resultsReturned"));
+        Assert.Equal(22, GetInt(largeDiagnostic, "portsTotal"));
+        Assert.Equal(20, GetInt(largeDiagnostic, "portsReturned"));
+        Assert.True(GetBool(GetArray(largeDiagnostic, "results")[0], "messageTruncated"));
+        Assert.Equal(256, GetString(GetArray(largeDiagnostic, "results")[0], "message")!.Length);
+
+        var legacy = Assert.Single(records, record => GetString(record, "eventName") == "LegacyDiagnostic");
+        Assert.Equal("legacy-empty", GetString(GetProperty(legacy, "diagnostic"), "state"));
     }
 
     [Fact]
@@ -710,6 +829,401 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
     }
 
     [Fact]
+    public async Task SecurityBans_WhenBinaryHashIsStoredLowercase_FindsItCaseInsensitively()
+    {
+        await SeedTelemetryAsync();
+        const string patchedHash = "ca641f9d52d992cb49d39d1911c42c225ffa7665c3329a0b3f128b9558cbc8db";
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var productId = await db.Products
+                .Where(p => p.Name == "T-IA Connect")
+                .Select(p => p.Id)
+                .SingleAsync();
+
+            db.BannedComponents.Add(new BannedComponent
+            {
+                ProductId = productId,
+                ComponentType = "FP_EXE",
+                ComponentHash = patchedHash,
+                Reason = "BinaryPatched: hash mismatch for v2.1.839"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
+
+        var response = await client.GetAsync(
+            $"/api/analytics/security/bans?componentHash={patchedHash}&componentType=FP_EXE&includeInactive=true");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        Assert.Equal(1, GetInt(json, "recordsMatched"));
+        var ban = Assert.Single(GetArray(json, "bans"));
+        Assert.Equal("component", GetString(ban, "targetType"));
+        Assert.Equal("FP_EXE", GetString(ban, "componentType"));
+        Assert.Equal(patchedHash, GetString(ban, "componentHash"));
+    }
+
+    [Fact]
+    public async Task SecurityBans_WhenSearchingBinaryFingerprint_ReturnsExactEnvironment()
+    {
+        await SeedTelemetryAsync();
+        const string patchedHash = "ca641f9d52d992cb49d39d1911c42c225ffa7665c3329a0b3f128b9558cbc8db";
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var productId = await db.Products.Where(p => p.Name == "T-IA Connect").Select(p => p.Id).SingleAsync();
+            AddEvent(db, productId, "HW-EXACT-FP", "Startup_AppStarted", "2.1.839",
+                $$"""{"FP_EXE":"{{patchedHash}}"}""", DateTime.UtcNow);
+            db.BannedComponents.Add(new BannedComponent
+            {
+                ProductId = productId,
+                ComponentType = "FP_EXE",
+                ComponentHash = patchedHash,
+                Reason = "BinaryPatched | category=integrity | ticket=TKT-999615 | securityCase=sec-binary | createdBy=Codex"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
+        var response = await client.GetAsync($"/api/analytics/security/bans?componentHash={patchedHash}&componentType=FP_EXE&includeSourceEvents=true");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        Assert.Contains(GetArray(json, "resolvedHardwareIds"), h => h.GetString() == "HW-EXACT-FP");
+        var ban = Assert.Single(GetArray(json, "bans"));
+        Assert.Equal("TKT-999615", GetString(ban, "auditTicketRef"));
+        Assert.Equal("sec-binary", GetString(ban, "auditSecurityCaseId"));
+        Assert.Equal("Codex", GetString(ban, "auditActor"));
+        Assert.Equal("integrity", GetString(ban, "auditCategory"));
+        Assert.True(GetBool(ban, "sourceEventAvailable"));
+    }
+
+    [Fact]
+    public async Task SecurityBans_WithTelemetryOnlyScope_IsUnauthorized()
+    {
+        await SeedTelemetryAsync();
+        const string telemetryOnlyKey = "sla_telemetry_only_security_denied";
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var productId = await db.Products.Where(p => p.Name == "T-IA Connect").Select(p => p.Id).SingleAsync();
+            db.AnalyticsApiKeys.Add(new AnalyticsApiKey
+            {
+                ProductId = productId,
+                Name = "Telemetry only",
+                Prefix = AnalyticsApiKeyAuthService.BuildPrefix(telemetryOnlyKey),
+                KeyHash = AnalyticsApiKeyAuthService.ComputeKeyHash(telemetryOnlyKey),
+                Scopes = AnalyticsApiKeyScopes.TelemetryRead
+            });
+            await db.SaveChangesAsync();
+        }
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", telemetryOnlyKey);
+
+        var response = await client.GetAsync("/api/analytics/security/bans?hardwareId=HW-A");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task SecurityBans_WhenHardwareTelemetryContainsBinaryFingerprint_ReturnsComponentBan()
+    {
+        await SeedTelemetryAsync();
+        const string patchedHash = "ca641f9d52d992cb49d39d1911c42c225ffa7665c3329a0b3f128b9558cbc8db";
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var productId = await db.Products
+                .Where(p => p.Name == "T-IA Connect")
+                .Select(p => p.Id)
+                .SingleAsync();
+
+            AddEvent(db, productId, "HW-PATCHED-BINARY", "Startup_AppStarted", "2.1.839",
+                $$"""{"FP_EXE":"{{patchedHash}}","OverallStatus":"Fail"}""",
+                DateTime.UtcNow.AddMinutes(-1));
+            db.BannedComponents.Add(new BannedComponent
+            {
+                ProductId = productId,
+                ComponentType = "FP_EXE",
+                ComponentHash = patchedHash,
+                Reason = "BinaryPatched: hash mismatch for v2.1.839"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
+
+        var response = await client.GetAsync(
+            "/api/analytics/security/bans?hardwareId=HW-PATCHED-BINARY&includeInactive=true&take=10");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        var ban = Assert.Single(GetArray(json, "bans"));
+        Assert.Equal("component", GetString(ban, "targetType"));
+        Assert.Equal("FP_EXE", GetString(ban, "componentType"));
+        Assert.Equal(patchedHash, GetString(ban, "componentHash"));
+        Assert.Equal("strong", GetString(ban, "componentMatchStrength"));
+    }
+
+    [Fact]
+    public async Task SecurityCanaryAlerts_AggregatesRepeatCountsAndFirstLastSeen()
+    {
+        await SeedTelemetryAsync();
+        var firstSeen = DateTime.UtcNow.AddMinutes(-20);
+        var lastSeen = DateTime.UtcNow.AddMinutes(-2);
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var productId = await db.Products
+                .Where(p => p.Name == "T-IA Connect")
+                .Select(p => p.Id)
+                .SingleAsync();
+
+            db.CanaryAlerts.Add(new CanaryAlert
+            {
+                ProductId = productId,
+                HardwareId = "HW-CANARY",
+                MachineName = "SECURITY-BOX",
+                UserName = "analyst",
+                ClientIp = "203.0.113.10",
+                AppVersion = "2.1.839",
+                Trigger = "IntegrityCheck_Startup",
+                Details = "FAIL:4_Authenticode=TiaPortalApi.Core.dll",
+                Severity = 3,
+                ReceivedAt = firstSeen,
+                RepeatCount = 4,
+                LastSeenAt = lastSeen,
+                BinaryFingerprintsJson = "{\"FP_EXE\":\"patched-hash\"}"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
+
+        var response = await client.GetAsync(
+            "/api/analytics/security/canary-alerts?hardwareId=HW-CANARY&take=10");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        var alert = Assert.Single(GetArray(json, "alerts"));
+        Assert.Equal(5, GetInt(alert, "pingCount"));
+        Assert.Equal(4, GetInt(alert, "repeatCount"));
+        Assert.Equal("IntegrityCheck_Startup", GetString(alert, "trigger"));
+        Assert.Equal("HW-CANARY", GetString(alert, "hardwareId"));
+        Assert.Equal(firstSeen, GetProperty(alert, "firstSeenUtc").GetDateTime(), TimeSpan.FromSeconds(1));
+        Assert.Equal(lastSeen, GetProperty(alert, "lastSeenUtc").GetDateTime(), TimeSpan.FromSeconds(1));
+        Assert.False(alert.TryGetProperty("binaryFingerprintsJson", out _));
+        Assert.False(alert.TryGetProperty("processPath", out _));
+        Assert.False(alert.TryGetProperty("baseDirectory", out _));
+        Assert.False(alert.TryGetProperty("details", out _));
+    }
+
+    [Fact]
+    public async Task SecurityCanaryAlerts_IncludesAggregatedBinaryPatchedIncidentAndAuthorizedEvidenceDetails()
+    {
+        await SeedTelemetryAsync();
+        var firstSeen = DateTime.UtcNow.AddMinutes(-20);
+        var lastSeen = DateTime.UtcNow.AddMinutes(-2);
+        var hashA = new string('A', 64);
+        var hashB = new string('B', 64);
+        Guid incidentId;
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var productId = await db.Products
+                .Where(p => p.Name == "T-IA Connect")
+                .Select(p => p.Id)
+                .SingleAsync();
+            var incident = new SecurityIncident
+            {
+                ProductId = productId,
+                HardwareId = "HW-SERVER-BINARY",
+                Family = SecurityIncidentService.BinaryPatchedFamily,
+                Severity = 3,
+                WindowStartUtc = firstSeen.Date,
+                WindowEndUtc = firstSeen.Date.AddDays(1),
+                FirstSeenUtc = firstSeen,
+                LastSeenUtc = lastSeen,
+                OccurrenceCount = 10,
+                Version = "2.1.839",
+                ClientIp = "203.0.113.77",
+                IsHardwareBanned = true,
+                InitialNotificationSentAtUtc = firstSeen,
+                Evidence =
+                [
+                    new SecurityIncidentEvidence
+                    {
+                        ComponentType = "FP_EXE",
+                        ComponentHash = hashA,
+                        FirstSeenUtc = firstSeen,
+                        LastSeenUtc = lastSeen,
+                        OccurrenceCount = 6
+                    },
+                    new SecurityIncidentEvidence
+                    {
+                        ComponentType = "FP_EXE",
+                        ComponentHash = hashB,
+                        FirstSeenUtc = firstSeen.AddMinutes(1),
+                        LastSeenUtc = lastSeen,
+                        OccurrenceCount = 4
+                    }
+                ]
+            };
+            db.SecurityIncidents.Add(incident);
+            db.BannedHardwareIds.Add(new BannedHardwareId
+            {
+                ProductId = productId,
+                HardwareId = "hw-server-binary",
+                Reason = "BinaryPatched: test",
+                BanCategory = BannedHardwareId.Categories.Piracy
+            });
+            db.BannedComponents.AddRange(
+                new BannedComponent
+                {
+                    ProductId = productId,
+                    ComponentType = "FP_EXE",
+                    ComponentHash = hashA.ToLowerInvariant(),
+                    Reason = "BinaryPatched: test A"
+                },
+                new BannedComponent
+                {
+                    ProductId = productId,
+                    ComponentType = "FP_EXE",
+                    ComponentHash = hashB,
+                    Reason = "BinaryPatched: test B"
+                });
+            await db.SaveChangesAsync();
+            incidentId = incident.Id;
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
+        var from = Uri.EscapeDataString(firstSeen.AddMinutes(-1).ToString("O"));
+        var to = Uri.EscapeDataString(lastSeen.AddMinutes(1).ToString("O"));
+        var response = await client.GetAsync(
+            $"/api/analytics/security/canary-alerts?hardwareId=hw-server&trigger=binarypatched&severity=3&version=2.1.839&clientIp=203.0.113.77&fromUtc={from}&toUtc={to}&take=10");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        var alert = Assert.Single(GetArray(json, "alerts"));
+        Assert.Equal("server_incident", GetString(alert, "sourceKind"));
+        Assert.Equal("BinaryPatched", GetString(alert, "trigger"));
+        Assert.Equal(10, GetInt(alert, "repeatCount"));
+        Assert.Equal(10, GetInt(alert, "pingCount"));
+        Assert.Equal(2, GetInt(alert, "evidenceCount"));
+        Assert.True(GetBool(alert, "isHardwareBanned"));
+        Assert.Equal("Banned", GetString(alert, "serverAction"));
+        Assert.Equal(firstSeen, GetProperty(alert, "firstSeenUtc").GetDateTime(), TimeSpan.FromSeconds(1));
+        Assert.Equal(lastSeen, GetProperty(alert, "lastSeenUtc").GetDateTime(), TimeSpan.FromSeconds(1));
+
+        var detailsResponse = await client.GetAsync($"/api/analytics/security/canary-alerts/{incidentId:D}");
+        Assert.Equal(HttpStatusCode.OK, detailsResponse.StatusCode);
+        var details = await ReadJsonAsync(detailsResponse);
+        Assert.Equal("server_incident", GetString(details, "sourceKind"));
+        Assert.Equal(2, GetArray(details, "evidence").Length);
+        Assert.Equal(2, GetArray(details, "componentBans").Length);
+        Assert.Single(GetArray(details, "hardwareBans"));
+        Assert.Equal("Banned", GetString(details, "serverAction"));
+    }
+
+    [Fact]
+    public async Task SecurityCanaryAlerts_ObservationIncident_ReportsObservedInListAndDetails()
+    {
+        await SeedTelemetryAsync();
+        Guid incidentId;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var productId = await db.Products.Where(product => product.Name == "T-IA Connect")
+                .Select(product => product.Id).SingleAsync();
+            var incident = new SecurityIncident
+            {
+                ProductId = productId,
+                HardwareId = SecurityIncidentService.PublicTelemetryAggregateIdentity,
+                Family = SecurityIncidentService.ApprovedBinaryMismatchFamily,
+                Severity = 3,
+                WindowStartUtc = DateTime.UtcNow.Date,
+                WindowEndUtc = DateTime.UtcNow.Date.AddDays(1),
+                FirstSeenUtc = DateTime.UtcNow.AddMinutes(-2),
+                LastSeenUtc = DateTime.UtcNow,
+                OccurrenceCount = 2,
+                IsHardwareBanned = false
+            };
+            db.SecurityIncidents.Add(incident);
+            await db.SaveChangesAsync();
+            incidentId = incident.Id;
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
+        var listResponse = await client.GetAsync(
+            $"/api/analytics/security/canary-alerts?trigger={SecurityIncidentService.ApprovedBinaryMismatchFamily}");
+        Assert.Equal(HttpStatusCode.OK, listResponse.StatusCode);
+        var list = await ReadJsonAsync(listResponse);
+        var alert = Assert.Single(GetArray(list, "alerts"));
+        Assert.Equal("Observed", GetString(alert, "serverAction"));
+        Assert.False(GetBool(alert, "isHardwareBanned"));
+
+        var detailsResponse = await client.GetAsync($"/api/analytics/security/canary-alerts/{incidentId:D}");
+        Assert.Equal(HttpStatusCode.OK, detailsResponse.StatusCode);
+        var details = await ReadJsonAsync(detailsResponse);
+        Assert.Equal("Observed", GetString(details, "serverAction"));
+    }
+
+    [Fact]
+    public async Task SecurityCanaryAlertDetails_RequiresAnalyticsKeyAndReturnsAuthorizedDetails()
+    {
+        await SeedTelemetryAsync();
+        Guid alertId;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var productId = await db.Products
+                .Where(p => p.Name == "T-IA Connect")
+                .Select(p => p.Id)
+                .SingleAsync();
+            var alert = new CanaryAlert
+            {
+                ProductId = productId,
+                HardwareId = "HW-CANARY-DETAIL",
+                MachineName = "SECURITY-BOX",
+                Trigger = "IntegrityCheck_Startup",
+                Severity = 3,
+                Details = "Authenticode mismatch",
+                BinaryFingerprintsJson = "{\"FP_EXE\":\"patched-hash\"}",
+                ProcessPath = "C:\\Program Files\\T-IA Connect\\TiaPortalApi.exe"
+            };
+            db.CanaryAlerts.Add(alert);
+            await db.SaveChangesAsync();
+            alertId = alert.Id;
+        }
+
+        var anonymousClient = _factory.CreateClient();
+        var unauthorized = await anonymousClient.GetAsync($"/api/analytics/security/canary-alerts/{alertId:D}");
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
+
+        var authorizedClient = _factory.CreateClient();
+        authorizedClient.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
+        var response = await authorizedClient.GetAsync($"/api/analytics/security/canary-alerts/{alertId:D}");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        Assert.Equal("HW-CANARY-DETAIL", GetString(json, "hardwareId"));
+        Assert.Contains("patched-hash", GetString(json, "binaryFingerprintsJson"));
+        Assert.Contains("TiaPortalApi.exe", GetString(json, "processPath"));
+    }
+
+    [Fact]
     public async Task SecurityBanDetails_WhenComponentHashExistsInTelemetry_ReturnsSourceEvent()
     {
         await SeedTelemetryAsync();
@@ -756,6 +1270,211 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
         Assert.Equal("HW-BINARY-PATCHED", GetString(source, "hardwareId"));
         Assert.Equal("Startup_AppStarted", GetString(source, "eventName"));
         Assert.Contains(GetArray(source, "propertyKeys"), k => k.GetString() == "FP_EXE");
+    }
+
+    [Fact]
+    public async Task SecurityBanDetails_WithGlobalKeyAndProductName_ReturnsRequestedProductBan()
+    {
+        await SeedTelemetryAsync();
+        const string globalKey = "global-security-ban-detail-key";
+        await SeedGlobalAnalyticsKeyAsync(globalKey);
+        Guid banId;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var productId = await db.Products
+                .Where(p => p.Name == "T-IA Connect")
+                .Select(p => p.Id)
+                .SingleAsync();
+            var ban = new BannedComponent
+            {
+                ProductId = productId,
+                ComponentType = "FP_EXE",
+                ComponentHash = "global-key-hash",
+                Reason = "Security test"
+            };
+            db.BannedComponents.Add(ban);
+            await db.SaveChangesAsync();
+            banId = ban.Id;
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", globalKey);
+        var response = await client.GetAsync(
+            $"/api/analytics/security/bans/{banId:D}?productName=T-IA%20Connect");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        Assert.Equal(banId, GetProperty(json, "ban").GetProperty("banId").GetGuid());
+    }
+
+    [Fact]
+    public async Task BanComponent_WithProductScopedAdminSecret_CannotTargetAnotherProduct()
+    {
+        await SeedTelemetryAsync();
+        Guid productAId;
+        Guid productBId;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            productAId = await db.Products.Where(p => p.Name == "T-IA Connect").Select(p => p.Id).SingleAsync();
+            productBId = await db.Products.Where(p => p.Name == "Other Product").Select(p => p.Id).SingleAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Admin-Secret", "analytics-secret-a");
+        var otherProductHash = new string('c', 64);
+        var scopedProductHash = new string('d', 64);
+        var forbidden = await client.PostAsJsonAsync("/api/admin/banned-components", new
+        {
+            componentType = "FP_EXE",
+            componentHash = otherProductHash,
+            reason = "Security test",
+            productId = productBId
+        });
+        Assert.Equal(HttpStatusCode.Unauthorized, forbidden.StatusCode);
+
+        var accepted = await client.PostAsJsonAsync("/api/admin/banned-components", new
+        {
+            componentType = "FP_EXE",
+            componentHash = scopedProductHash,
+            reason = "Security test"
+        });
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        var acceptedJson = await ReadJsonAsync(accepted);
+        var binaryImpact = GetProperty(acceptedJson, "impact");
+        Assert.False(GetProperty(binaryImpact, "impactAvailable").GetBoolean());
+        Assert.Contains("release-scoped", GetProperty(binaryImpact, "impactUnavailableReason").GetString());
+
+        using var verificationScope = _factory.Services.CreateScope();
+        var verificationDb = verificationScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var stored = await verificationDb.BannedComponents.SingleAsync(b => b.ComponentHash == scopedProductHash);
+        Assert.Equal(productAId, stored.ProductId);
+
+        verificationDb.BannedComponents.Add(new BannedComponent
+        {
+            ProductId = productBId,
+            ComponentType = "FP_EXE",
+            ComponentHash = otherProductHash,
+            Reason = "must remain hidden"
+        });
+        verificationDb.BannedComponents.Add(new BannedComponent
+        {
+            ProductId = null,
+            ComponentType = "FP_CORE",
+            ComponentHash = new string('f', 64),
+            Reason = "global ban applies to every product"
+        });
+        await verificationDb.SaveChangesAsync();
+
+        var scopedList = await client.GetAsync("/api/admin/banned-components");
+        Assert.Equal(HttpStatusCode.OK, scopedList.StatusCode);
+        var scopedRows = (await ReadJsonAsync(scopedList)).EnumerateArray().ToArray();
+        Assert.Equal(2, scopedRows.Length);
+        Assert.Contains(scopedRows, row => GetProperty(row, "productId").ValueKind == JsonValueKind.Null);
+        Assert.Contains(scopedRows, row => GetProperty(row, "productId").ValueKind == JsonValueKind.String
+            && GetProperty(row, "productId").GetGuid() == productAId);
+        Assert.DoesNotContain(scopedRows, row => GetProperty(row, "productId").ValueKind == JsonValueKind.String
+            && GetProperty(row, "productId").GetGuid() == productBId);
+    }
+
+    [Fact]
+    public async Task HardwareComponentBan_ReturnsImpactAndDoesNotCreateEnforceableBan()
+    {
+        await SeedTelemetryAsync();
+        var sharedDiskHash = new string('e', 64);
+        Guid productId;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            productId = await db.Products.Where(p => p.Name == "T-IA Connect").Select(p => p.Id).SingleAsync();
+            for (var index = 0; index < 3; index++)
+            {
+                db.HardwareFingerprints.Add(new HardwareFingerprint
+                {
+                    HardwareId = $"ABCDEF01234567{index:X2}",
+                    CpuHash = "shared-vm-cpu-hash",
+                    BiosHash = "shared-vm-bios-hash",
+                    DiskHash = index == 0
+                        ? string.Concat(sharedDiskHash.Select((character, position) => position % 2 == 0
+                            ? char.ToUpperInvariant(character)
+                            : character))
+                        : sharedDiskHash
+                });
+            }
+            db.TelemetryRecords.Add(new TelemetryRecord
+            {
+                ProductId = productId,
+                HardwareId = "ABCDEF0123456700",
+                AppName = "T-IA Connect",
+                EventName = "Startup",
+                Type = TelemetryType.Event
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Admin-Secret", "admin-secret");
+
+        var preview = await client.GetAsync(
+            $"/api/admin/banned-components/impact?componentType=FP_DISK&componentHash={sharedDiskHash}");
+        Assert.Equal(HttpStatusCode.OK, preview.StatusCode);
+        var previewJson = await ReadJsonAsync(preview);
+        Assert.Equal(3, GetProperty(previewJson, "distinctHardwareIds").GetInt32());
+        Assert.True(GetProperty(previewJson, "isGenericOrShared").GetBoolean());
+        Assert.False(GetProperty(previewJson, "isEnforceable").GetBoolean());
+
+        var scopedPreview = await client.GetAsync(
+            $"/api/admin/banned-components/impact?componentType=FP_DISK&componentHash={sharedDiskHash}&productId={productId:D}");
+        Assert.Equal(HttpStatusCode.OK, scopedPreview.StatusCode);
+        var scopedPreviewJson = await ReadJsonAsync(scopedPreview);
+        Assert.Equal(1, GetProperty(scopedPreviewJson, "distinctHardwareIds").GetInt32());
+
+        var response = await client.PostAsJsonAsync("/api/admin/banned-components", new
+        {
+            componentType = "FP_DISK",
+            componentHash = sharedDiskHash,
+            reason = "must be refused"
+        });
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        var responseJson = await ReadJsonAsync(response);
+        Assert.Equal("hardware_component_not_enforceable", GetProperty(responseJson, "errorCode").GetString());
+        Assert.Equal(3, GetProperty(GetProperty(responseJson, "impact"), "distinctHardwareIds").GetInt32());
+
+        using var verificationScope = _factory.Services.CreateScope();
+        var verificationDb = verificationScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        Assert.False(await verificationDb.BannedComponents.AnyAsync(b => b.ComponentHash == sharedDiskHash));
+    }
+
+    [Fact]
+    public async Task UnbanComponent_WithProductScopedAdminSecret_CannotMutateAnotherProduct()
+    {
+        await SeedTelemetryAsync();
+        Guid banId;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var productBId = await db.Products.Where(p => p.Name == "Other Product").Select(p => p.Id).SingleAsync();
+            var ban = new BannedComponent
+            {
+                ProductId = productBId,
+                ComponentType = "FP_EXE",
+                ComponentHash = "protected-other-product-hash",
+                Reason = "Security test"
+            };
+            db.BannedComponents.Add(ban);
+            await db.SaveChangesAsync();
+            banId = ban.Id;
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Admin-Secret", "analytics-secret-a");
+        var response = await client.DeleteAsync($"/api/admin/banned-components/{banId:D}?auditReason=test");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        using var verificationScope = _factory.Services.CreateScope();
+        var verificationDb = verificationScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        Assert.True((await verificationDb.BannedComponents.SingleAsync(b => b.Id == banId)).IsActive);
     }
 
     [Fact]
@@ -933,6 +1652,7 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
         Assert.False(string.IsNullOrWhiteSpace(rawKey));
         Assert.StartsWith("sla_", rawKey, StringComparison.Ordinal);
         Assert.Equal(AnalyticsApiKeyScopeKinds.Global, GetString(json, "scopeKind"));
+        Assert.Contains(AnalyticsApiKeyScopes.SecurityRead, GetString(json, "scopes"));
         Assert.Contains(AnalyticsApiKeyScopes.MultiProductRead, GetString(json, "scopes"));
 
         using var scope = _factory.Services.CreateScope();
@@ -941,6 +1661,7 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
 
         Assert.Null(storedKey.ProductId);
         Assert.Equal("Codex MCP Global", storedKey.Name);
+        Assert.Contains(AnalyticsApiKeyScopes.SecurityRead, storedKey.Scopes);
         Assert.Equal(AnalyticsApiKeyAuthService.BuildPrefix(rawKey!), storedKey.Prefix);
         Assert.Equal(AnalyticsApiKeyAuthService.ComputeKeyHash(rawKey!), storedKey.KeyHash);
     }
@@ -1157,7 +1878,7 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
             Name = "MCP analytics test key",
             Prefix = AnalyticsApiKeyAuthService.BuildPrefix(ValidAnalyticsKey),
             KeyHash = AnalyticsApiKeyAuthService.ComputeKeyHash(ValidAnalyticsKey),
-            Scopes = AnalyticsApiKeyScopes.TelemetryRead,
+            Scopes = $"{AnalyticsApiKeyScopes.TelemetryRead} {AnalyticsApiKeyScopes.SecurityRead}",
             IsActive = true
         });
 
@@ -1191,7 +1912,7 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
             Name = "Global analytics test key",
             Prefix = AnalyticsApiKeyAuthService.BuildPrefix(rawKey),
             KeyHash = AnalyticsApiKeyAuthService.ComputeKeyHash(rawKey),
-            Scopes = $"{AnalyticsApiKeyScopes.TelemetryRead} {AnalyticsApiKeyScopes.MultiProductRead}",
+            Scopes = $"{AnalyticsApiKeyScopes.TelemetryRead} {AnalyticsApiKeyScopes.SecurityRead} {AnalyticsApiKeyScopes.MultiProductRead}",
             ScopeKind = AnalyticsApiKeyScopeKinds.Global,
             IsActive = true
         });
@@ -1252,7 +1973,7 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
             Name = "MCP analytics test key",
             Prefix = AnalyticsApiKeyAuthService.BuildPrefix(ValidAnalyticsKey),
             KeyHash = AnalyticsApiKeyAuthService.ComputeKeyHash(ValidAnalyticsKey),
-            Scopes = AnalyticsApiKeyScopes.TelemetryRead,
+            Scopes = $"{AnalyticsApiKeyScopes.TelemetryRead} {AnalyticsApiKeyScopes.SecurityRead}",
             IsActive = true
         });
 
@@ -1351,6 +2072,33 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
                 ErrorType = errorType,
                 Message = "hidden message",
                 StackTrace = "hidden stack"
+            }
+        });
+    }
+
+    private static void AddDiagnostic(
+        LicenseDbContext db,
+        Guid productId,
+        string hardwareId,
+        string eventName,
+        int score,
+        IEnumerable<TelemetryDiagnosticResult> results,
+        IEnumerable<TelemetryDiagnosticPort> ports)
+    {
+        db.TelemetryRecords.Add(new TelemetryRecord
+        {
+            ProductId = productId,
+            Timestamp = DateTime.UtcNow,
+            HardwareId = hardwareId,
+            AppName = "TIAConnect",
+            Version = "2.1.900",
+            EventName = eventName,
+            Type = TelemetryType.Diagnostic,
+            DiagnosticData = new TelemetryDiagnostic
+            {
+                Score = score,
+                Results = results.ToList(),
+                Ports = ports.ToList()
             }
         });
     }

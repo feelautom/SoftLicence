@@ -1,5 +1,21 @@
 # Changelog
 
+## SDK v1.1.13 — 2026-08-09
+
+### Structured server errors
+- feat(sdk): expose stable structured activation and trial error codes while preserving the historical human-readable messages
+- fix(api): keep the deprecated `errorMessage` response property as a contract-version-1 alias of the canonical `message` property
+- compatibility(sdk): retain the legacy text fallback for servers that do not send the structured error header; malformed or unknown structured codes fail closed as `ServerError`
+
+### Consumer integration
+- docs(sdk): add the canonical 1.1.13 integration guide for T-IA Connect, YOUR_APP_NAME, and other SDK consumers
+- docs(sdk): document package and embedded-DLL adoption, error mappings, diagnostics, regression checks, and the deprecation path for the legacy alias
+- compatibility(sdk): leave contractual HWID behavior unchanged; HWID V2 remains observation-only and does not affect activation authority, seats, quotas, or fallback behavior
+
+### Release tooling
+- chore(ci): use `actions/setup-dotnet@v6` in the public release workflow
+- fix(release): run the self-contained public suite during SDK preparation and publication; PostgreSQL 17 contract tests and private deployment-file checks remain separate environment-backed validations
+
 ## SDK v1.1.12 — 2026-07-15
 
 ### Security and signed license contract

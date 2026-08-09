@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.ComponentModel.DataAnnotations;
 
 namespace SoftLicence.Server.Data;
@@ -22,8 +23,8 @@ public class BannedHardwareId
     public string Reason { get; set; } = string.Empty;
 
     /// <summary>
-    /// Ban category: quota_abuse, outdated_version, debugger, piracy, manual.
-    /// Null treated as "manual" for backwards compatibility.
+    /// Ban category: quota_abuse, outdated_version, debugger, piracy, manual,
+    /// or dev_canary_quarantine. Null is treated as manual for historical rows.
     /// </summary>
     [MaxLength(50)]
     public string? BanCategory { get; set; }
@@ -42,7 +43,16 @@ public class BannedHardwareId
         public const string Manual = "manual";
         public const string DevCanaryQuarantine = "dev_canary_quarantine";
 
-        public static readonly string[] Permanent = { Debugger, Piracy };
-        public static readonly string[] AutoUnbannable = { QuotaAbuse, OutdatedVersion };
+        public static readonly FrozenSet<string> Permanent =
+            new[] { Debugger, Piracy }.ToFrozenSet(StringComparer.Ordinal);
+        public static readonly FrozenSet<string> AutoUnbannable =
+            new[] { QuotaAbuse, OutdatedVersion }.ToFrozenSet(StringComparer.Ordinal);
+
+        public static bool IsKnown(string? category) => category is
+            QuotaAbuse or OutdatedVersion or Debugger or Piracy or Manual or DevCanaryQuarantine;
+
+        public static bool IsPermanent(string? category) => category is Debugger or Piracy;
+
+        public static bool IsAutoUnbannable(string? category) => category is QuotaAbuse or OutdatedVersion;
     }
 }

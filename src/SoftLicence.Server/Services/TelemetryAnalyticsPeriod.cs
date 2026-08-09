@@ -9,7 +9,7 @@ public sealed record TelemetryAnalyticsPeriod(
     string Mode)
 {
     private const int DefaultDays = 7;
-    private const int MaxDays = 30;
+    public const int MaxDays = 30;
 
     public static TelemetryAnalyticsPeriod Resolve(int days, string? date, string? fromUtc, string? toUtc)
     {

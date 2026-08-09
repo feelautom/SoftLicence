@@ -1381,11 +1381,8 @@
         if (componentType is "FP_EXE" or "FP_DLL" or "FP_CORE")
             return "strong";
 
-        if (componentType == "MB" && matchedTypes.SetEquals(new[] { "MB" }))
-            return "weak";
-
         return componentType is "DISK" or "BIOS" or "CPU" or "HOST" or "MB"
-            ? "medium"
+            ? "weak"
             : "unknown";
     }
 
@@ -1681,13 +1678,6 @@
             if (revokedHistory.Any())
                 securityFlags.Add($"Licence révoquée délibérément : {string.Join(" / ", revokedHistory.Select(h => $"{h.Action} le {TZ.ToLocal(h.Timestamp):dd/MM/yyyy} ({h.Details ?? "sans motif"})"))}");
         }
-        if (propSummary.TryGetValue("IsVM", out var vmVals) && vmVals.Any(v => v.Equals("True", StringComparison.OrdinalIgnoreCase)))
-        {
-            if (propSummary.TryGetValue("VMPlatform", out var vmPlatVals))
-                securityFlags.Add($"Machine virtuelle détectée ({string.Join(", ", vmPlatVals.Distinct().Take(2))}) — contexte compatible reverse engineering");
-            else
-                securityFlags.Add("Machine virtuelle détectée — contexte compatible reverse engineering");
-        }
         if (license.CustomerEmail != null && (license.CustomerEmail.Contains("privaterelay.appleid.com") || license.CustomerEmail.Contains("relay.firefox.com")))
             securityFlags.Add($"Email de relais anonymisé ({license.CustomerEmail}) — identité volontairement masquée");
 
@@ -1702,11 +1692,11 @@
         sb.AppendLine("RÈGLES D'ANALYSE ABSOLUES — à respecter impérativement :");
         sb.AppendLine("- Si la licence est marquée RÉVOQUÉE/INACTIVE et que des tentatives d'activation sont présentes dans les événements → c'est une FRAUDE CONFIRMÉE ou une tentative de contournement. NE PAS diagnostiquer comme 'problème technique'. NE PAS recommander d'aide support.");
         sb.AppendLine("- Si des IPs bannies ou des threat scores élevés sont présents → traiter comme un profil hostile, pas comme un utilisateur légitime en difficulté.");
-        sb.AppendLine("- Si une VM est détectée combinée à une licence révoquée → indiquer explicitement le risque de reverse engineering / piratage.");
+        sb.AppendLine("- Une VM, même sans TIA Portal ou combinée à une licence inactive, est un signal environnemental faible et ne prouve jamais à elle seule du reverse engineering ou du piratage.");
         sb.AppendLine("- Si l'email est un relais anonyme (privaterelay.appleid.com, relay.firefox.com) → signaler comme élément de dissimulation d'identité.");
         sb.AppendLine();
         sb.AppendLine("Fournis une analyse structurée avec ces 7 sections :");
-        sb.AppendLine("1. **Évaluation sécurité** : catégorise le profil — Utilisateur légitime / Suspect / Fraudeur confirmé / Attaquant. Justifie avec les signaux de sécurité (historique licence, bans IP, threat scores, VM, email anonyme, tentatives post-révocation).");
+        sb.AppendLine("1. **Évaluation sécurité** : catégorise le profil — Utilisateur légitime / Suspect / Fraudeur confirmé / Attaquant. Justifie avec les signaux de sécurité directs (historique licence, bans IP, threat scores, preuves d’intégrité et tentatives post-révocation), sans promouvoir la présence d’une VM en preuve.");
         sb.AppendLine("2. **Classification du profil** (uniquement si utilisateur légitime) : intégrateur technique, développeur API, agent MCP/automatisé, utilisateur final, testeur.");
         sb.AppendLine("3. **Potentiel commercial** (uniquement si utilisateur légitime) : score Faible/Moyen/Élevé/Très élevé avec signaux positifs et négatifs.");
         sb.AppendLine("4. **Résumé comportemental** : profil d'utilisation réel — usage normal, exploitation de faille, contournement de licence, reconnaissance du système.");

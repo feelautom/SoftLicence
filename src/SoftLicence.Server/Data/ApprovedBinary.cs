@@ -3,10 +3,10 @@ using System.ComponentModel.DataAnnotations;
 namespace SoftLicence.Server.Data;
 
 /// <summary>
-/// Stores approved binary hashes (FP_EXE, FP_DLL, FP_CORE) per product+version.
-/// On first telemetry reception, the hash is stored as baseline (Source = "auto").
-/// Mismatches on subsequent events trigger an immediate ban.
-/// Admins can override hashes manually (Source = "admin").
+/// Stores authoritative binary hashes (FP_EXE, FP_DLL, FP_CORE) per product+version.
+/// Client telemetry is evidence only and must never create or promote a baseline.
+/// Runtime-authoritative baselines are registered only by the authenticated release API.
+/// Root-admin rows remain manual administrative state and are not Runtime-eligible.
 /// </summary>
 public class ApprovedBinary
 {
@@ -16,6 +16,13 @@ public class ApprovedBinary
     [Required]
     public Guid ProductId { get; set; }
     public Product? Product { get; set; }
+
+    /// <summary>
+    /// Release registration owning this row. Null identifies legacy or manual administrative state,
+    /// which is intentionally not runtime-authoritative.
+    /// </summary>
+    public Guid? ApprovedBinaryRegistrationId { get; set; }
+    public ApprovedBinaryRegistration? Registration { get; set; }
 
     /// <summary>Application version string (e.g. "2.1.781")</summary>
     [Required]
@@ -34,9 +41,9 @@ public class ApprovedBinary
 
     public DateTime ApprovedAt { get; set; } = DateTime.UtcNow;
 
-    /// <summary>"auto" = baseline from first trusted client, "admin" = manually set</summary>
+    /// <summary>Authoritative origin: "release" or "admin". Legacy "auto" rows are untrusted.</summary>
     [MaxLength(16)]
-    public string Source { get; set; } = "auto";
+    public string Source { get; set; } = "admin";
 
     [MaxLength(128)]
     public string? ApprovedBy { get; set; }

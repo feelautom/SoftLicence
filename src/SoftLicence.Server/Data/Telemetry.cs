@@ -91,6 +91,36 @@ public class TelemetryFloodSuppressionCounter
     public string? LastPayloadHash { get; set; }
 }
 
+public sealed class TelemetryCertPinningDailyAlert
+{
+    [Key]
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public Guid ProductId { get; set; }
+    public Product? Product { get; set; }
+
+    [Required]
+    public string HardwareId { get; set; } = string.Empty;
+
+    [Required]
+    public string AlertType { get; set; } = string.Empty;
+
+    public DateOnly ParisDate { get; set; }
+
+    public long OccurrenceCount { get; set; }
+    public long ClientSuppressedCount { get; set; }
+    public DateTime FirstSeenUtc { get; set; }
+    public DateTime LastSeenUtc { get; set; }
+    public string? FirstHost { get; set; }
+    public string? LastHost { get; set; }
+    public string? LastVersion { get; set; }
+    public string? LastFailureReason { get; set; }
+    public string? LastCertificateIssuer { get; set; }
+    public Guid? NotificationClaimId { get; set; }
+    public DateTime? NotificationClaimedAtUtc { get; set; }
+    public DateTime? NotificationSentAtUtc { get; set; }
+}
+
 public class TelemetryEvent
 {
     [Key]

@@ -1,6 +1,9 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using SoftLicence.Server.Data;
 using System.Collections.Concurrent;
+using System.Data;
+using System.Net;
 using System.Security.Cryptography;
 using Npgsql;
 
@@ -14,9 +17,10 @@ public class SecurityService
     private readonly IConfiguration _config;
     private static readonly ConcurrentDictionary<string, (int Score, DateTime LastHit)> _threatScores = new();
     private static readonly ConcurrentDictionary<string, DateTime> _bannedCache = new();
-    private static readonly ConcurrentDictionary<string, DateTime> _zombieNotifyCache = new();
-    private static readonly ConcurrentDictionary<string, DateTime> _bannedHwidCache = new();
-    private static readonly TimeSpan HwidCacheTtl = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan ZombieNotificationCooldown = TimeSpan.FromHours(24);
+    private const long HardwareBanLockSalt = 999095;
+    private const string ZombieWarningFamily = "zombie_warning";
+    private const string ZombieCriticalFamily = "zombie_critical";
 
     public SecurityService(IDbContextFactory<LicenseDbContext> dbFactory, ILogger<SecurityService> logger, NotificationService notifier, IConfiguration config)
     {
@@ -51,9 +55,53 @@ public class SecurityService
         return allowedIps.Contains(ip);
     }
 
+    /// <summary>
+    /// Checks whether an exact IP address is protected from punitive security enforcement.
+    /// This policy never grants authentication or authorization.
+    /// </summary>
+    public bool IsProtectedInfrastructureIp(string ip)
+    {
+        if (!TryParseCanonicalIpAddress(ip, out var candidate))
+            return false;
+
+        var configuredIps = _config["SecuritySettings:ProtectedInfrastructureIps"];
+        if (string.IsNullOrWhiteSpace(configuredIps))
+            return false;
+
+        foreach (var configuredIp in configuredIps.Split(
+                     ',',
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (TryParseCanonicalIpAddress(configuredIp, out var configuredAddress)
+                && candidate.Equals(configuredAddress))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryParseCanonicalIpAddress(string value, out IPAddress address)
+    {
+        if (!IPAddress.TryParse(value, out var parsed))
+        {
+            address = IPAddress.None;
+            return false;
+        }
+
+        address = parsed.IsIPv4MappedToIPv6 ? parsed.MapToIPv4() : parsed;
+        return true;
+    }
+
     public async Task<bool> IsBannedAsync(string ip)
     {
-        if (IsWhitelisted(ip)) return false;
+        if (IsWhitelisted(ip) || IsProtectedInfrastructureIp(ip))
+        {
+            _bannedCache.TryRemove(ip, out _);
+            _threatScores.TryRemove(ip, out _);
+            return false;
+        }
 
         if (_bannedCache.TryGetValue(ip, out var expiry))
         {
@@ -81,6 +129,9 @@ public class SecurityService
 
     public async Task<int> GetBanCountAsync(string ip)
     {
+        if (IsWhitelisted(ip) || IsProtectedInfrastructureIp(ip))
+            return 0;
+
         using var db = await _dbFactory.CreateDbContextAsync();
         var ban = await db.BannedIps.AsNoTracking().FirstOrDefaultAsync(b => b.IpAddress == ip);
         return ban?.BanCount ?? 0;
@@ -90,8 +141,20 @@ public class SecurityService
     {
         if (ip == "127.0.0.1" || ip == "::1" || ip == "Unknown") return;
 
-        // Immunité : les IPs whitelisted ne sont jamais scorées
+        // Immunité : les IPs whitelisted ne sont jamais scorées.
         if (IsWhitelisted(ip)) return;
+
+        // Infrastructure protection is deliberately distinct from admin authentication.
+        // Requests remain rejected and audited, but cannot punish or ban our own services.
+        if (IsProtectedInfrastructureIp(ip))
+        {
+            _logger.LogWarning(
+                "Threat enforcement skipped for protected infrastructure IP {IP}: {Reason}",
+                ip,
+                reason);
+            _threatScores.TryRemove(ip, out _);
+            return;
+        }
 
         var now = DateTime.UtcNow;
 
@@ -151,6 +214,9 @@ public class SecurityService
 
     public int GetThreatScore(string ip)
     {
+        if (IsWhitelisted(ip) || IsProtectedInfrastructureIp(ip))
+            return 0;
+
         if (_threatScores.TryGetValue(ip, out var entry))
             return entry.Score;
         return 0;
@@ -159,6 +225,16 @@ public class SecurityService
     public async Task BanIpAsync(string ip, string reason)
     {
         if (IsWhitelisted(ip)) return;
+        if (IsProtectedInfrastructureIp(ip))
+        {
+            _logger.LogCritical(
+                "IP ban suppressed for protected infrastructure IP {IP}: {Reason}",
+                ip,
+                reason);
+            _bannedCache.TryRemove(ip, out _);
+            _threatScores.TryRemove(ip, out _);
+            return;
+        }
 
         using var db = await _dbFactory.CreateDbContextAsync();
         var existing = await db.BannedIps.FirstOrDefaultAsync(b => b.IpAddress == ip);
@@ -279,72 +355,90 @@ public class SecurityService
     public async Task<bool> IsHardwareIdBannedAsync(string hardwareId, Guid? productId = null)
     {
         if (string.IsNullOrEmpty(hardwareId)) return false;
+        var canonicalHardwareId = CanonicalizeHardwareId(hardwareId);
+        var now = DateTime.UtcNow;
 
-        var cacheKey = productId.HasValue ? $"{hardwareId}:{productId}" : hardwareId;
-
-        if (_bannedHwidCache.TryGetValue(cacheKey, out var cachedAt))
-        {
-            if (DateTime.UtcNow - cachedAt < HwidCacheTtl) return true;
-            _bannedHwidCache.TryRemove(cacheKey, out _);
-        }
-
-        using var db = await _dbFactory.CreateDbContextAsync();
-        var ban = await db.BannedHardwareIds.FirstOrDefaultAsync(b =>
-            b.HardwareId == hardwareId && b.IsActive &&
+        await using var db = await _dbFactory.CreateDbContextAsync();
+        var hasLiveBan = await db.BannedHardwareIds.AsNoTracking().AnyAsync(b =>
+            b.HardwareId.ToUpper() == canonicalHardwareId && b.IsActive &&
+            (b.ProductId == null || !productId.HasValue || b.ProductId == productId) &&
+            (b.ExpiresAt == null || b.ExpiresAt > now));
+        if (hasLiveBan) return true;
+        var hasExpiredActiveBan = await db.BannedHardwareIds.AsNoTracking().AnyAsync(b =>
+            b.HardwareId.ToUpper() == canonicalHardwareId && b.IsActive &&
             (b.ProductId == null || !productId.HasValue || b.ProductId == productId));
+        if (!hasExpiredActiveBan) return false;
 
-        if (ban != null)
-        {
-            if (ban.ExpiresAt == null || ban.ExpiresAt > DateTime.UtcNow)
-            {
-                _bannedHwidCache[cacheKey] = DateTime.UtcNow;
-                return true;
-            }
-
-            ban.IsActive = false;
-            await db.SaveChangesAsync();
-        }
-
+        await using var mutationDb = await _dbFactory.CreateDbContextAsync();
+        await using var transaction = await BeginHardwareBanMutationAsync(mutationDb, canonicalHardwareId);
+        var current = await mutationDb.BannedHardwareIds.Where(candidate =>
+                candidate.HardwareId.ToUpper() == canonicalHardwareId && candidate.IsActive &&
+                (candidate.ProductId == null || !productId.HasValue || candidate.ProductId == productId))
+            .ToListAsync();
+        now = DateTime.UtcNow;
+        if (current.Any(candidate => candidate.ExpiresAt == null || candidate.ExpiresAt > now)) return true;
+        foreach (var expired in current) expired.IsActive = false;
+        await mutationDb.SaveChangesAsync();
+        if (transaction != null) await transaction.CommitAsync();
         return false;
     }
 
     public async Task<Data.BannedHardwareId?> GetActiveHardwareBanAsync(string hardwareId, Guid? productId = null)
     {
         if (string.IsNullOrEmpty(hardwareId)) return null;
+        var canonicalHardwareId = CanonicalizeHardwareId(hardwareId);
+        var now = DateTime.UtcNow;
 
-        using var db = await _dbFactory.CreateDbContextAsync();
-        var ban = await db.BannedHardwareIds
-            .Where(b => b.HardwareId == hardwareId && b.IsActive
-                && (b.ProductId == null || !productId.HasValue || b.ProductId == productId))
+        await using var db = await _dbFactory.CreateDbContextAsync();
+        var ban = await db.BannedHardwareIds.AsNoTracking()
+            .Where(b => b.HardwareId.ToUpper() == canonicalHardwareId && b.IsActive
+                && (b.ProductId == null || !productId.HasValue || b.ProductId == productId)
+                && (b.ExpiresAt == null || b.ExpiresAt > now))
             .OrderByDescending(b => b.BannedAt)
             .FirstOrDefaultAsync();
 
-        if (ban == null)
-            return null;
+        if (ban != null) return ban;
+        var hasExpiredActiveBan = await db.BannedHardwareIds.AsNoTracking().AnyAsync(b =>
+            b.HardwareId.ToUpper() == canonicalHardwareId && b.IsActive
+            && (b.ProductId == null || !productId.HasValue || b.ProductId == productId));
+        if (!hasExpiredActiveBan) return null;
 
-        if (ban.ExpiresAt == null || ban.ExpiresAt > DateTime.UtcNow)
-            return ban;
-
-        ban.IsActive = false;
-        await db.SaveChangesAsync();
-
-        var cacheKey = productId.HasValue ? $"{hardwareId}:{productId}" : hardwareId;
-        _bannedHwidCache.TryRemove(cacheKey, out _);
+        await using var mutationDb = await _dbFactory.CreateDbContextAsync();
+        await using var transaction = await BeginHardwareBanMutationAsync(mutationDb, canonicalHardwareId);
+        var current = await mutationDb.BannedHardwareIds.Where(candidate =>
+                candidate.HardwareId.ToUpper() == canonicalHardwareId && candidate.IsActive
+                && (candidate.ProductId == null || !productId.HasValue || candidate.ProductId == productId))
+            .OrderByDescending(candidate => candidate.BannedAt)
+            .ToListAsync();
+        now = DateTime.UtcNow;
+        var renewed = current.FirstOrDefault(candidate =>
+            candidate.ExpiresAt == null || candidate.ExpiresAt > now);
+        if (renewed != null) return renewed;
+        foreach (var expired in current) expired.IsActive = false;
+        await mutationDb.SaveChangesAsync();
+        if (transaction != null) await transaction.CommitAsync();
         return null;
     }
 
     public async Task BanHardwareIdAsync(string hardwareId, string reason, Guid? productId = null, DateTime? expiresAt = null, Guid? piracySuspectId = null, string? banCategory = null, bool silent = false)
     {
         if (string.IsNullOrEmpty(hardwareId)) return;
+        hardwareId = CanonicalizeHardwareId(hardwareId);
+        banCategory ??= Data.BannedHardwareId.Categories.Manual;
+        if (!Data.BannedHardwareId.Categories.IsKnown(banCategory))
+            throw new ArgumentException(
+                "ban_category_invalid: banCategory must be an exact known category identifier.",
+                nameof(banCategory));
 
         using var db = await _dbFactory.CreateDbContextAsync();
+        await using var transaction = await BeginHardwareBanMutationAsync(db, hardwareId);
 
         // Check if HWID is whitelisted/greylisted (immune to auto-ban)
         bool isProtected = false;
         if (reason.StartsWith("Auto-ban:"))
         {
             var listType = await db.HardwareFingerprints.AsNoTracking()
-                .Where(f => f.HardwareId == hardwareId)
+                .Where(f => f.HardwareId.ToUpper() == hardwareId)
                 .Select(f => f.ListType)
                 .FirstOrDefaultAsync();
             if (listType == "white" || listType == "grey")
@@ -352,17 +446,18 @@ public class SecurityService
         }
 
         var existing = await db.BannedHardwareIds.FirstOrDefaultAsync(b =>
-            b.HardwareId == hardwareId &&
-            (b.ProductId == null || b.ProductId == productId));
+            b.HardwareId.ToUpper() == hardwareId &&
+            b.ProductId == productId);
 
         if (existing != null)
         {
             // Record the entry but set inactive if protected (keep history)
             existing.IsActive = !isProtected;
+            existing.HardwareId = hardwareId;
             existing.Reason = isProtected ? $"[PROTECTED:{reason}]" : reason;
             existing.BannedAt = DateTime.UtcNow;
             existing.ExpiresAt = expiresAt;
-            if (banCategory != null) existing.BanCategory = banCategory;
+            existing.BanCategory = banCategory;
             if (piracySuspectId.HasValue) existing.PiracySuspectId = piracySuspectId;
         }
         else
@@ -381,15 +476,13 @@ public class SecurityService
         }
 
         await db.SaveChangesAsync();
+        if (transaction != null) await transaction.CommitAsync();
 
         if (isProtected)
         {
             _logger.LogInformation("HWID {HardwareId} protected (whitelist/greylist) - entry saved inactive: {Reason}", hardwareId, reason);
             return;
         }
-
-        var cacheKey = productId.HasValue ? $"{hardwareId}:{productId}" : hardwareId;
-        _bannedHwidCache[cacheKey] = DateTime.UtcNow;
 
         _logger.LogCritical("HARDWARE ID BANNI{Silent} : {HardwareId} pour {Reason}",
             silent ? " [SILENT]" : "", hardwareId, reason);
@@ -399,107 +492,128 @@ public class SecurityService
                 $"HWID: {hardwareId}\nRaison: {reason}");
     }
 
-    public async Task UnbanHardwareIdAsync(Guid banId)
+    public async Task<bool> UnbanHardwareIdAsync(Guid banId, string? auditReason = null)
     {
+        string? hardwareId;
+        await using (var lookupDb = await _dbFactory.CreateDbContextAsync())
+        {
+            hardwareId = await lookupDb.BannedHardwareIds.AsNoTracking()
+                .Where(candidate => candidate.Id == banId)
+                .Select(candidate => candidate.HardwareId)
+                .SingleOrDefaultAsync();
+        }
+        if (hardwareId == null) return false;
+
         using var db = await _dbFactory.CreateDbContextAsync();
+        await using var transaction = await BeginHardwareBanMutationAsync(db, hardwareId);
         var ban = await db.BannedHardwareIds.FindAsync(banId);
-        if (ban == null) return;
+        if (ban == null) return false;
+        if (!ban.IsActive) return true;
 
         ban.IsActive = false;
+        AppendUnbanAudit(ban, auditReason);
         await db.SaveChangesAsync();
-
-        // Evict from cache
-        var cacheKey = ban.ProductId.HasValue ? $"{ban.HardwareId}:{ban.ProductId}" : ban.HardwareId;
-        _bannedHwidCache.TryRemove(cacheKey, out _);
+        if (transaction != null) await transaction.CommitAsync();
 
         _logger.LogInformation("HARDWARE ID DEBANNI : {HardwareId}", ban.HardwareId);
-    }
-
-    /// <summary>
-    /// Auto-unban a HWID that was auto-banned for version violation, if they updated.
-    /// Only unbans entries whose Reason starts with "Auto-ban:".
-    /// Also unbans associated components.
-    /// </summary>
-    public async Task<bool> AutoUnbanByHwidAsync(string hardwareId, Guid productId)
-    {
-        if (string.IsNullOrEmpty(hardwareId)) return false;
-
-        using var db = await _dbFactory.CreateDbContextAsync();
-        var bans = await db.BannedHardwareIds
-            .Where(b => b.HardwareId == hardwareId && b.IsActive && b.ProductId == productId
-                && b.Reason.StartsWith("Auto-ban:"))
-            .ToListAsync();
-
-        if (bans.Count == 0) return false;
-
-        foreach (var ban in bans)
-        {
-            // Never auto-unban permanent categories
-            if (Data.BannedHardwareId.Categories.Permanent.Contains(ban.BanCategory))
-                continue;
-            ban.IsActive = false;
-        }
-
-        // Also unban components linked to this auto-ban
-        var componentBans = await db.BannedComponents
-            .Where(b => b.IsActive && b.ProductId == productId
-                && b.Reason.StartsWith("Auto-ban:") && b.Reason.Contains(hardwareId))
-            .ToListAsync();
-        foreach (var cb in componentBans)
-        {
-            cb.IsActive = false;
-            var compCacheKey = $"comp:{cb.ComponentType}:{cb.ComponentHash}:{cb.ProductId}";
-            _bannedComponentCache.TryRemove(compCacheKey, out _);
-        }
-
-        await db.SaveChangesAsync();
-
-        // Evict HWID from cache
-        var cacheKey = $"{hardwareId}:{productId}";
-        _bannedHwidCache.TryRemove(cacheKey, out _);
-
-        _logger.LogWarning("AUTO-UNBAN: {HardwareId} (updated to compliant version). {BanCount} bans + {CompCount} components lifted.",
-            hardwareId, bans.Count, componentBans.Count);
-
-        _notifier.Notify(NotificationService.Triggers.SecurityIpBanned,
-            "AUTO-UNBAN VERSION",
-            $"HWID: {hardwareId}\nMis à jour vers version conforme.\n{bans.Count} ban(s) + {componentBans.Count} composant(s) levés.");
-
         return true;
     }
 
     /// <summary>
-    /// At paid license activation, auto-unban if the ban category allows it.
-    /// Returns (canProceed, permanentBan) — if permanentBan is true, activation must be refused.
+    /// Auto-unban a HWID that was auto-banned for version violation, if they updated.
+    /// Only unbans version-enforcement entries with the exact outdated_version category
+    /// and the automatic-ban reason marker. Any other applicable active ban fails closed.
     /// </summary>
-    public async Task<(bool canProceed, bool permanentBan)> TryAutoUnbanForPaidLicenseAsync(string hardwareId, Guid productId)
+    public async Task<bool> AutoUnbanByHwidAsync(string hardwareId, Guid productId)
     {
-        if (string.IsNullOrEmpty(hardwareId)) return (true, false);
+        if (string.IsNullOrEmpty(hardwareId)) return false;
+        hardwareId = CanonicalizeHardwareId(hardwareId);
 
         using var db = await _dbFactory.CreateDbContextAsync();
-        var activeBans = await db.BannedHardwareIds
-            .Where(b => b.HardwareId == hardwareId && b.IsActive
-                && (b.ProductId == null || b.ProductId == productId))
+        await using var transaction = await BeginHardwareBanMutationAsync(db, hardwareId);
+        var bans = await db.BannedHardwareIds
+            .Where(b => b.HardwareId.ToUpper() == hardwareId && b.IsActive
+                && (b.ProductId == null || b.ProductId == productId)
+                && (b.ExpiresAt == null || b.ExpiresAt > DateTime.UtcNow))
             .ToListAsync();
 
-        if (activeBans.Count == 0) return (true, false);
+        if (bans.Count == 0) return false;
+
+        var allEligible = bans.All(ban =>
+            string.Equals(
+                ban.BanCategory,
+                Data.BannedHardwareId.Categories.OutdatedVersion,
+                StringComparison.Ordinal)
+            && ban.Reason.StartsWith("Auto-ban:", StringComparison.Ordinal));
+        if (!allEligible)
+        {
+            _logger.LogInformation(
+                "Version auto-unban blocked for {HardwareId}: at least one applicable ban is not exact outdated_version authority.",
+                hardwareId);
+            return false;
+        }
+
+        foreach (var ban in bans) ban.IsActive = false;
+
+        await db.SaveChangesAsync();
+        if (transaction != null) await transaction.CommitAsync();
+
+        _logger.LogWarning("AUTO-UNBAN: {HardwareId} (updated to compliant version). {BanCount} hardware ban(s) lifted.",
+            hardwareId, bans.Count);
+
+        _notifier.Notify(NotificationService.Triggers.SecurityIpBanned,
+            "AUTO-UNBAN VERSION",
+            $"HWID: {hardwareId}\nMis à jour vers version conforme.\n{bans.Count} ban(s) HWID levé(s). Les bans composants restent sous autorité opérateur.");
+
+        return true;
+    }
+
+    public sealed record DeferredNotification(string Trigger, string Title, string Message);
+
+    public sealed record PaidAutoUnbanDecision(
+        bool CanProceed,
+        bool PermanentBan,
+        DeferredNotification? Notification);
+
+    /// <summary>
+    /// Stages an eligible paid-license auto-unban in the caller's activation transaction.
+    /// The caller owns SaveChanges, commit/rollback, and deferred notification delivery.
+    /// </summary>
+    public async Task<PaidAutoUnbanDecision> TryAutoUnbanForPaidLicenseAsync(
+        LicenseDbContext db,
+        string hardwareId,
+        Guid productId)
+    {
+        if (string.IsNullOrEmpty(hardwareId)) return new(true, false, null);
+        hardwareId = CanonicalizeHardwareId(hardwareId);
+
+        await AcquireHardwareBanMutationAsync(db, hardwareId);
+        var activeBans = await db.BannedHardwareIds
+            .Where(b => b.HardwareId.ToUpper() == hardwareId && b.IsActive
+                && (b.ProductId == null || b.ProductId == productId)
+                && (b.ExpiresAt == null || b.ExpiresAt > DateTime.UtcNow))
+            .ToListAsync();
+
+        if (activeBans.Count == 0) return new(true, false, null);
 
         // Check if any ban is permanent (debugger, piracy)
         var hasPermanent = activeBans.Any(b =>
-            Data.BannedHardwareId.Categories.Permanent.Contains(b.BanCategory));
+            Data.BannedHardwareId.Categories.IsPermanent(b.BanCategory));
         if (hasPermanent)
         {
             _logger.LogWarning("Paid activation blocked for {HardwareId}: permanent ban ({Categories})",
-                hardwareId, string.Join(", ", activeBans.Where(b => Data.BannedHardwareId.Categories.Permanent.Contains(b.BanCategory)).Select(b => b.BanCategory)));
-            return (false, true);
+                hardwareId, string.Join(", ", activeBans.Where(b => Data.BannedHardwareId.Categories.IsPermanent(b.BanCategory)).Select(b => b.BanCategory)));
+            return new(false, true, null);
         }
 
-        // Check if any ban is manual (admin decides)
-        var hasManual = activeBans.Any(b => b.BanCategory == Data.BannedHardwareId.Categories.Manual || b.BanCategory == null);
-        if (hasManual)
+        var hasIneligible = activeBans.Any(b =>
+            !Data.BannedHardwareId.Categories.IsAutoUnbannable(b.BanCategory));
+        if (hasIneligible)
         {
-            _logger.LogInformation("Paid activation blocked for {HardwareId}: manual ban requires admin review", hardwareId);
-            return (false, false);
+            _logger.LogInformation(
+                "Paid activation blocked for {HardwareId}: at least one category is outside the exact auto-unban allowlist.",
+                hardwareId);
+            return new(false, false, null);
         }
 
         // All remaining bans are auto-unbannable (quota_abuse, outdated_version)
@@ -507,19 +621,10 @@ public class SecurityService
         {
             ban.IsActive = false;
         }
-        await db.SaveChangesAsync();
-
-        // Evict from cache
-        var cacheKey = productId != Guid.Empty ? $"{hardwareId}:{productId}" : hardwareId;
-        _bannedHwidCache.TryRemove(cacheKey, out _);
-        _bannedHwidCache.TryRemove(hardwareId, out _);
-
-        _logger.LogWarning("AUTO-UNBAN PAID LICENSE: {HardwareId} - {Count} ban(s) lifted ({Categories})",
-            hardwareId, activeBans.Count, string.Join(", ", activeBans.Select(b => b.BanCategory)));
 
         var categories = activeBans
             .Select(b => b.BanCategory ?? Data.BannedHardwareId.Categories.Manual)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Distinct(StringComparer.Ordinal)
             .ToList();
         var isOutdatedOnly = categories.Count == 1
             && categories[0] == Data.BannedHardwareId.Categories.OutdatedVersion;
@@ -530,12 +635,53 @@ public class SecurityService
             ? "Déblocage d'un ban version obsolète sur licence payante valide."
             : "Activation licence payante valide.";
 
-        _notifier.Notify(NotificationService.Triggers.SecurityIpBanned,
+        var notification = new DeferredNotification(
+            NotificationService.Triggers.SecurityIpBanned,
             title,
             $"HWID: {hardwareId}\n{reason}\n{activeBans.Count} ban(s) levé(s) (catégories: {string.Join(", ", categories)}).");
 
-        return (true, false);
+        return new(true, false, notification);
     }
+
+    private static async Task<IDbContextTransaction?> BeginHardwareBanMutationAsync(
+        LicenseDbContext db,
+        string hardwareId)
+    {
+        if (!db.Database.IsRelational()) return null;
+
+        var transaction = await db.Database.BeginTransactionAsync(
+            db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable);
+        try
+        {
+            await AcquireHardwareBanMutationAsync(db, hardwareId);
+            return transaction;
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+            await transaction.DisposeAsync();
+            throw;
+        }
+    }
+
+    private static async Task AcquireHardwareBanMutationAsync(
+        LicenseDbContext db,
+        string hardwareId)
+    {
+        if (!db.Database.IsRelational()) return;
+        if (db.Database.CurrentTransaction == null)
+            throw new InvalidOperationException(
+                "The hardware-ban authority lock requires the caller's active transaction.");
+        if (!db.Database.IsNpgsql()) return;
+
+        var lockKey = $"hardware-ban-v1|{CanonicalizeHardwareId(hardwareId)}";
+        await db.Database.ExecuteSqlRawAsync(
+            "SET LOCAL lock_timeout = '5000ms'; SET LOCAL statement_timeout = '30000ms';");
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, {HardwareBanLockSalt}))");
+    }
+
+    private static string CanonicalizeHardwareId(string hardwareId) => hardwareId.ToUpperInvariant();
 
     public async Task<List<Data.BannedHardwareId>> GetBannedHardwareIdsAsync()
     {
@@ -546,10 +692,17 @@ public class SecurityService
             .ToListAsync();
     }
 
-    public async Task CheckForZombieAsync(string hardwareId, string currentIp)
+    public async Task CheckForZombieAsync(
+        string hardwareId,
+        string currentIp,
+        string endpoint = "CHECK",
+        string resultStatus = "OK")
     {
-        if (string.IsNullOrEmpty(hardwareId) || hardwareId == "Unknown") return;
+        // Contractual SDK HWIDs are exactly 16 uppercase ASCII hexadecimal characters.
+        // Legacy display values such as "8A96631C..." must never become security identities.
+        if (!IsCanonicalHardwareId(hardwareId)) return;
         if (IsWhitelisted(currentIp)) return;
+        if (!IsAuthoritativeSuccessfulLicenseAccess(endpoint, resultStatus)) return;
 
         using var db = await _dbFactory.CreateDbContextAsync();
 
@@ -560,29 +713,31 @@ public class SecurityService
             .FirstOrDefaultAsync();
         if (listType == "white" || listType == "grey") return;
 
-        // 1. Analyse : Combien d'IP différentes pour ce HardwareID depuis 24h ?
+        // Zombie detection protects only an active paid multi-seat entitlement. A process
+        // without such a licence cannot share licence capacity and belongs to another signal.
+        var activeLicense = await db.Licenses
+            .Include(l => l.Type)
+            .Include(l => l.Product)
+            .FirstOrDefaultAsync(l => l.IsActive
+                && l.Type != null
+                && !l.Type.IsFree
+                && l.Type.DefaultMaxSeats > 1
+                && (l.HardwareId == hardwareId || l.Seats.Any(s => s.HardwareId == hardwareId)));
+
+        if (activeLicense == null) return;
+
+        var now = DateTime.UtcNow;
         var recentIps = await db.AccessLogs
-            .Where(l => l.HardwareId == hardwareId && l.Timestamp > DateTime.UtcNow.AddHours(-24))
+            .Where(l => l.HardwareId == hardwareId
+                && l.Timestamp > now.AddHours(-24)
+                && (l.Endpoint == "CHECK" || l.Endpoint == "ACTIVATE")
+                && (l.ResultStatus == "OK" || l.ResultStatus == "CREATED"))
             .Select(l => l.ClientIp)
             .Distinct()
             .ToListAsync();
 
-        // Si l'IP actuelle n'est pas encore en base (car loggée après), on l'ajoute virtuellement pour le compte
-        if (!recentIps.Contains(currentIp) && currentIp != "Unknown" && currentIp != "127.0.0.1")
-        {
+        if (IsCountablePublicIp(currentIp) && !recentIps.Contains(currentIp, StringComparer.Ordinal))
             recentIps.Add(currentIp);
-        }
-
-        // EXEMPTION : Les licences freemium/trial (1 siège) ne sont pas concernées par le zombie
-        // Le zombie ne protège que les licences payantes multi-sièges (partage de HWID patché)
-        var activeLicense = await db.Licenses
-            .Include(l => l.Type)
-            .FirstOrDefaultAsync(l => l.IsActive && (l.HardwareId == hardwareId || l.Seats.Any(s => s.HardwareId == hardwareId)));
-
-        if (activeLicense?.Type != null && activeLicense.Type.DefaultMaxSeats <= 1)
-        {
-            return; // Freemium/Trial : pas de zombie detection
-        }
 
         // 2. Comptage intelligent : on compte les sous-réseaux /24 distincts au lieu des IPs brutes
         // Un VPN rotatif génère beaucoup d'IPs mais dans très peu de sous-réseaux
@@ -596,28 +751,17 @@ public class SecurityService
             .Distinct()
             .Count();
 
-        // Anti-flood : On ne notifie que si aucune alerte n'a été envoyée pour ce HWID dans les 6 dernières heures
-        var shouldNotify = true;
-        if (_zombieNotifyCache.TryGetValue(hardwareId, out var lastNotify))
-        {
-            if (DateTime.UtcNow - lastNotify < TimeSpan.FromHours(6))
-            {
-                shouldNotify = false;
-            }
-        }
-
         // PALIER 1 — ALERTE : Plus de 5 sous-réseaux /24 distincts en 24h → notification de surveillance
-        // (beaucoup d'IPs dans peu de sous-réseaux = VPN rotatif = faux positif)
         if (distinctSubnets > 5 && distinctSubnets <= 8)
         {
             _logger.LogWarning("ZOMBIE WARNING : HardwareID {Hwid} seen on {Count} IPs across {Subnets} subnets (surveillance)", hardwareId, recentIps.Count, distinctSubnets);
 
-            if (shouldNotify)
+            if (await TryReserveZombieNotificationAsync(
+                activeLicense.ProductId, hardwareId, ZombieWarningFamily, 3, now, recentIps))
             {
-                _zombieNotifyCache[hardwareId] = DateTime.UtcNow;
                 _notifier.Notify(NotificationService.Triggers.SecurityZombieDetected,
                     "⚠️ ZOMBIE WARNING (Surveillance)",
-                    $"HardwareID: {hardwareId}\nIPs: {recentIps.Count} ({distinctSubnets} sous-réseaux)\nSeuil d'alerte atteint — pas de révocation. Surveillance en cours.");
+                    BuildZombieMessage(hardwareId, recentIps, distinctSubnets, activeLicense, false));
             }
         }
 
@@ -626,15 +770,151 @@ public class SecurityService
         {
             _logger.LogCritical("ZOMBIE DETECTED : HardwareID {Hwid} seen on {Count} IPs across {Subnets} subnets!", hardwareId, recentIps.Count, distinctSubnets);
 
-            if (shouldNotify)
+            if (await TryReserveZombieNotificationAsync(
+                activeLicense.ProductId, hardwareId, ZombieCriticalFamily, 4, now, recentIps))
             {
-                _zombieNotifyCache[hardwareId] = DateTime.UtcNow;
-                var licInfo = activeLicense != null ? $"\nLicence: {activeLicense.LicenseKey}" : "\nAucune licence active";
                 _notifier.Notify(NotificationService.Triggers.SecurityZombieDetected,
                     "🧟 ZOMBIE DETECTED (Action manuelle requise)",
-                    $"HardwareID: {hardwareId}\nIPs: {recentIps.Count} ({distinctSubnets} sous-réseaux){licInfo}");
+                    BuildZombieMessage(hardwareId, recentIps, distinctSubnets, activeLicense, true));
             }
         }
+    }
+
+    internal static bool IsCanonicalHardwareId(string? hardwareId) =>
+        hardwareId is { Length: 16 }
+        && hardwareId.All(c => c is >= '0' and <= '9' or >= 'A' and <= 'F');
+
+    internal static bool IsAuthoritativeSuccessfulLicenseAccess(string endpoint, string resultStatus) =>
+        (endpoint == "CHECK" || endpoint == "ACTIVATE")
+        && (resultStatus == "OK" || resultStatus == "CREATED");
+
+    private static bool IsCountablePublicIp(string ip) =>
+        ip != "Unknown"
+        && ip != "127.0.0.1"
+        && System.Net.IPAddress.TryParse(ip, out _);
+
+    private static string BuildZombieMessage(
+        string hardwareId,
+        IReadOnlyCollection<string> recentIps,
+        int distinctSubnets,
+        License activeLicense,
+        bool critical)
+    {
+        return $"HardwareID: {hardwareId}\n"
+            + $"Produit: {activeLicense.Product?.Name ?? activeLicense.ProductId.ToString("D")}\n"
+            + "Licence: active, payante, multi-sièges\n"
+            + $"Source: AccessLogs, fenêtre glissante 24 h\n"
+            + $"IPs: {recentIps.Count} ({distinctSubnets} sous-réseaux)\n"
+            + "Détails contributeurs: preuves internes de l’incident SecurityIncidents\n"
+            + (critical ? "Seuil critique confirmé — vérification manuelle requise." : "Seuil de surveillance confirmé — aucune révocation automatique.");
+    }
+
+    private async Task<bool> TryReserveZombieNotificationAsync(
+        Guid productId,
+        string hardwareId,
+        string family,
+        int severity,
+        DateTime observedAt,
+        IReadOnlyCollection<string> recentIps)
+    {
+        const int maxAttempts = 3;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                await using var db = await _dbFactory.CreateDbContextAsync();
+                await using var transaction = db.Database.IsRelational()
+                    ? await db.Database.BeginTransactionAsync(
+                        db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable)
+                    : null;
+
+                if (db.Database.IsNpgsql())
+                {
+                    var lockKey = $"zombie-notification-v1|{productId:D}|{hardwareId}";
+                    await db.Database.ExecuteSqlInterpolatedAsync(
+                        $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, 999883))");
+                }
+
+                var latest = await db.SecurityIncidents
+                    .Where(row => row.ProductId == productId
+                        && row.HardwareId == hardwareId
+                        && (row.Family == ZombieWarningFamily || row.Family == ZombieCriticalFamily)
+                        && row.InitialNotificationSentAtUtc != null)
+                    .OrderByDescending(row => row.InitialNotificationSentAtUtc)
+                    .FirstOrDefaultAsync();
+
+                if (latest?.InitialNotificationSentAtUtc is DateTime lastNotification
+                    && observedAt - lastNotification < ZombieNotificationCooldown
+                    && latest.Severity >= severity)
+                {
+                    if (transaction != null) await transaction.CommitAsync();
+                    return false;
+                }
+
+                var incident = new SecurityIncident
+                {
+                    ProductId = productId,
+                    HardwareId = hardwareId,
+                    Family = family,
+                    Severity = severity,
+                    WindowStartUtc = observedAt,
+                    WindowEndUtc = observedAt.AddHours(24),
+                    FirstSeenUtc = observedAt,
+                    LastSeenUtc = observedAt,
+                    OccurrenceCount = 1,
+                    IsHardwareBanned = false,
+                    InitialNotificationSentAtUtc = observedAt
+                };
+                foreach (var evidence in BuildZombieEvidence(recentIps, observedAt))
+                    incident.Evidence.Add(evidence);
+                db.SecurityIncidents.Add(incident);
+                await db.SaveChangesAsync();
+                if (transaction != null) await transaction.CommitAsync();
+                return true;
+            }
+            catch (Exception exception) when (attempt < maxAttempts && IsZombieReservationConflict(exception))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(10 * attempt));
+            }
+        }
+
+        throw new InvalidOperationException("Zombie notification reservation retry loop exhausted unexpectedly.");
+    }
+
+    private static IEnumerable<SecurityIncidentEvidence> BuildZombieEvidence(
+        IEnumerable<string> recentIps,
+        DateTime observedAt)
+    {
+        var ips = recentIps
+            .Where(ip => System.Net.IPAddress.TryParse(ip, out _))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(value => value, StringComparer.Ordinal)
+            .Take(100);
+        foreach (var ip in ips)
+        {
+            yield return new SecurityIncidentEvidence
+            {
+                ComponentType = "IP",
+                ComponentHash = ip,
+                FirstSeenUtc = observedAt,
+                LastSeenUtc = observedAt,
+                OccurrenceCount = 1
+            };
+        }
+    }
+
+    private static bool IsZombieReservationConflict(Exception exception)
+    {
+        var postgres = EnumerateExceptionChain(exception).OfType<PostgresException>().FirstOrDefault();
+        return postgres?.SqlState is PostgresErrorCodes.SerializationFailure
+            or PostgresErrorCodes.DeadlockDetected
+            or PostgresErrorCodes.UniqueViolation;
+    }
+
+    private static IEnumerable<Exception> EnumerateExceptionChain(Exception exception)
+    {
+        for (var current = exception; current != null; current = current.InnerException)
+            yield return current;
     }
 
     // --- COMPONENT FINGERPRINT BLACKLIST ---
@@ -658,6 +938,24 @@ public class SecurityService
         };
     }
 
+    /// <summary>
+    /// Only signed release-binary fingerprints are safe global enforcement targets.
+    /// Hardware component values are correlation hints: virtual machines and cloned
+    /// images can legitimately expose the same CPU, motherboard, BIOS, disk or host value.
+    /// </summary>
+    public static bool IsEnforceableComponentType(string? componentType)
+    {
+        if (string.IsNullOrWhiteSpace(componentType)) return false;
+        return NormalizeComponentType(componentType) is "FP_EXE" or "FP_DLL" or "FP_CORE";
+    }
+
+    public static bool TryNormalizeComponentHash(string? componentHash, out string normalizedHash)
+    {
+        normalizedHash = componentHash?.Trim().ToLowerInvariant() ?? string.Empty;
+        return normalizedHash.Length == 64
+            && normalizedHash.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+    }
+
     public async Task<(bool IsBanned, string ComponentType, string Reason)> IsComponentBannedAsync(Dictionary<string, string> fingerprints, Guid? productId = null)
     {
         if (fingerprints == null || fingerprints.Count == 0)
@@ -665,11 +963,6 @@ public class SecurityService
 
         var componentMap = new Dictionary<string, string>
         {
-            ["FP_CPU"] = "CPU",
-            ["FP_MB"] = "MB",
-            ["FP_BIOS"] = "BIOS",
-            ["FP_DISK"] = "DISK",
-            ["FP_HOST"] = "HOST",
             ["FP_EXE"] = "FP_EXE",
             ["FP_DLL"] = "FP_DLL",
             ["FP_CORE"] = "FP_CORE"
@@ -678,8 +971,10 @@ public class SecurityService
         // Check cache first
         foreach (var (key, type) in componentMap)
         {
-            if (!fingerprints.TryGetValue(key, out var hash) || string.IsNullOrEmpty(hash)) continue;
-            var cacheKey = $"comp:{type}:{hash}:{productId}";
+            var hash = fingerprints.FirstOrDefault(pair =>
+                string.Equals(pair.Key, key, StringComparison.OrdinalIgnoreCase)).Value;
+            if (!TryNormalizeComponentHash(hash, out var normalizedHash)) continue;
+            var cacheKey = $"comp:{type}:{normalizedHash}:{productId}";
             if (_bannedComponentCache.TryGetValue(cacheKey, out var cachedAt) && DateTime.UtcNow - cachedAt < ComponentCacheTtl)
                 return (true, type, "Cached ban");
         }
@@ -688,17 +983,23 @@ public class SecurityService
 
         foreach (var (key, type) in componentMap)
         {
-            if (!fingerprints.TryGetValue(key, out var hash) || string.IsNullOrEmpty(hash)) continue;
+            var hash = fingerprints.FirstOrDefault(pair =>
+                string.Equals(pair.Key, key, StringComparison.OrdinalIgnoreCase)).Value;
+            if (!TryNormalizeComponentHash(hash, out var normalizedHash)) continue;
 
-            var ban = await db.BannedComponents.FirstOrDefaultAsync(b =>
-                b.ComponentType == type && b.ComponentHash == hash && b.IsActive &&
-                (b.ProductId == null || b.ProductId == productId));
+            var candidates = await db.BannedComponents.Where(b =>
+                    b.ComponentType == type && b.IsActive &&
+                    (b.ProductId == null || b.ProductId == productId))
+                .ToListAsync();
+            var ban = candidates.FirstOrDefault(candidate =>
+                TryNormalizeComponentHash(candidate.ComponentHash, out var candidateHash)
+                && string.Equals(candidateHash, normalizedHash, StringComparison.Ordinal));
 
             if (ban != null)
             {
                 if (ban.ExpiresAt == null || ban.ExpiresAt > DateTime.UtcNow)
                 {
-                    var cacheKey = $"comp:{type}:{hash}:{productId}";
+                    var cacheKey = $"comp:{type}:{normalizedHash}:{productId}";
                     _bannedComponentCache[cacheKey] = DateTime.UtcNow;
                     return (true, type, ban.Reason);
                 }
@@ -713,15 +1014,30 @@ public class SecurityService
 
     public async Task BanComponentAsync(string componentType, string componentHash, string reason, Guid? productId = null, DateTime? expiresAt = null, bool silent = false)
     {
-        if (string.IsNullOrEmpty(componentType) || string.IsNullOrEmpty(componentHash)) return;
+        if (string.IsNullOrWhiteSpace(componentType))
+            throw new ArgumentException("component_type_invalid: componentType is required.", nameof(componentType));
 
         componentType = NormalizeComponentType(componentType);
 
+        if (!TryNormalizeComponentHash(componentHash, out var normalizedHash))
+            throw new ArgumentException(
+                "component_hash_invalid: componentHash must be exactly 64 ASCII hexadecimal characters.",
+                nameof(componentHash));
+        componentHash = normalizedHash;
+
+        if (!IsEnforceableComponentType(componentType))
+            throw new InvalidOperationException(
+                "hardware_component_not_enforceable: CPU, MB, BIOS, DISK and HOST fingerprints are correlation-only and cannot be globally banned.");
+
         using var db = await _dbFactory.CreateDbContextAsync();
 
-        var existing = await db.BannedComponents.FirstOrDefaultAsync(b =>
-            b.ComponentType == componentType && b.ComponentHash == componentHash &&
-            (b.ProductId == null || b.ProductId == productId));
+        var existingCandidates = await db.BannedComponents.Where(b =>
+                b.ComponentType == componentType &&
+                b.ProductId == productId)
+            .ToListAsync();
+        var existing = existingCandidates.FirstOrDefault(candidate =>
+            TryNormalizeComponentHash(candidate.ComponentHash, out var candidateHash)
+            && string.Equals(candidateHash, componentHash, StringComparison.Ordinal));
 
         if (existing != null)
         {
@@ -755,27 +1071,64 @@ public class SecurityService
                 $"Type: {componentType}\nHash: {componentHash}\nReason: {reason}");
     }
 
-    public async Task UnbanComponentAsync(Guid banId)
+    public async Task<bool> UnbanComponentAsync(Guid banId, string? auditReason = null)
     {
         using var db = await _dbFactory.CreateDbContextAsync();
         var ban = await db.BannedComponents.FindAsync(banId);
-        if (ban == null) return;
+        if (ban == null) return false;
 
         ban.IsActive = false;
+        AppendUnbanAudit(ban, auditReason);
         await db.SaveChangesAsync();
 
         var cacheKey = $"comp:{ban.ComponentType}:{ban.ComponentHash}:{ban.ProductId}";
         _bannedComponentCache.TryRemove(cacheKey, out _);
 
         _logger.LogInformation("COMPONENT UNBANNED: {Type}={Hash}", ban.ComponentType, ban.ComponentHash);
+        return true;
     }
 
-    public async Task<List<BannedComponent>> GetBannedComponentsAsync()
+    private static void AppendUnbanAudit(object ban, string? auditReason)
+    {
+        if (string.IsNullOrWhiteSpace(auditReason)) return;
+
+        const int maxReasonLength = 500;
+        var entry = $"unban={DateTime.UtcNow:O} | {auditReason.Trim()}";
+        string current;
+        switch (ban)
+        {
+            case BannedHardwareId hardware:
+                current = hardware.Reason;
+                hardware.Reason = JoinBoundedAuditReason(current, entry, maxReasonLength);
+                break;
+            case BannedComponent component:
+                current = component.Reason;
+                component.Reason = JoinBoundedAuditReason(current, entry, maxReasonLength);
+                break;
+        }
+    }
+
+    private static string JoinBoundedAuditReason(string? current, string entry, int maxLength)
+    {
+        if (entry.Length >= maxLength) return entry[..maxLength];
+        if (string.IsNullOrWhiteSpace(current)) return entry;
+
+        const string separator = " | ";
+        var availableForOriginal = maxLength - entry.Length - separator.Length;
+        var original = current.Trim();
+        if (original.Length > availableForOriginal)
+            original = original[..availableForOriginal];
+        return $"{original}{separator}{entry}";
+    }
+
+    public async Task<List<BannedComponent>> GetBannedComponentsAsync(Guid? scopedProductId = null)
     {
         using var db = await _dbFactory.CreateDbContextAsync();
         return await db.BannedComponents
             .Include(b => b.Product)
-            .Where(b => b.IsActive)
+            .Where(b => b.IsActive && (!scopedProductId.HasValue
+                || b.ProductId == null
+                || b.ProductId == scopedProductId))
             .OrderByDescending(b => b.BannedAt)
             .ToListAsync();
     }

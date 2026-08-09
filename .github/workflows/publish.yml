@@ -15,6 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Reject tracked administrator secrets
+        shell: pwsh
+        run: ./scripts/Test-TrackedSecrets.ps1
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v6
         with:
@@ -27,7 +31,9 @@ jobs:
         run: dotnet restore tests/SoftLicence.Tests/SoftLicence.Tests.csproj
 
       - name: Run tests
-        run: dotnet test tests/SoftLicence.Tests/ --no-restore --verbosity normal
+        # PostgreSQL contract tests require a dedicated PostgreSQL 17 database and
+        # are validated separately from this self-contained public release job.
+        run: dotnet test tests/SoftLicence.Tests/ --no-restore --verbosity normal --filter "FullyQualifiedName!~PostgreSql&Category!=PrivateRepository"
 
       - name: Build solution
         run: dotnet build src/SoftLicence.sln -c Release --no-restore
@@ -35,10 +41,14 @@ jobs:
       - name: Determine SDK package version
         id: sdk_version
         shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          $eventName = "${{ github.event_name }}"
-          $refName = "${{ github.ref_name }}"
-          $releaseTag = "${{ github.event.release.tag_name }}"
+          $eventName = $env:EVENT_NAME
+          $refName = $env:REF_NAME
+          $releaseTag = $env:RELEASE_TAG
 
           if ($eventName -eq "release") {
               if ([string]::IsNullOrWhiteSpace($releaseTag)) {
@@ -65,8 +75,10 @@ jobs:
       - name: Verify NuGet version is not already published
         if: github.event_name == 'release'
         shell: pwsh
+        env:
+          SDK_VERSION: ${{ steps.sdk_version.outputs.version }}
         run: |
-          $version = "${{ steps.sdk_version.outputs.version }}"
+          $version = $env:SDK_VERSION
           $index = Invoke-RestMethod "https://api.nuget.org/v3-flatcontainer/softlicence.sdk/index.json"
           if ($index.versions -contains $version) {
               throw "SoftLicence.SDK $version is already published on NuGet. NuGet packages are immutable."
@@ -78,6 +90,7 @@ jobs:
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           $headers = @{
               Authorization = "Bearer $env:GITHUB_TOKEN"
@@ -85,7 +98,7 @@ jobs:
               "X-GitHub-Api-Version" = "2022-11-28"
           }
 
-          $repo = "${{ github.repository }}"
+          $repo = $env:REPOSITORY
           $pullRequests = Invoke-RestMethod "https://api.github.com/repos/$repo/pulls?state=open&per_page=100" -Headers $headers
           if ($pullRequests.Count -gt 0) {
               $summary = ($pullRequests | ForEach-Object { "#$($_.number) $($_.title) - $($_.html_url)" }) -join "; "
@@ -95,12 +108,17 @@ jobs:
           Write-Host "No open pull request blocks the SDK release."
 
       - name: Pack SDK
-        run: dotnet pack src/SoftLicence.SDK/SoftLicence.SDK.csproj -c Release -o out -p:PackageVersion=${{ steps.sdk_version.outputs.version }} -p:ContinuousIntegrationBuild=true
+        shell: pwsh
+        env:
+          SDK_VERSION: ${{ steps.sdk_version.outputs.version }}
+        run: dotnet pack src/SoftLicence.SDK/SoftLicence.SDK.csproj -c Release -o out -p:PackageVersion=$env:SDK_VERSION -p:ContinuousIntegrationBuild=true
 
       - name: Verify package version and scan package metadata
         shell: pwsh
+        env:
+          SDK_VERSION: ${{ steps.sdk_version.outputs.version }}
         run: |
-          $version = "${{ steps.sdk_version.outputs.version }}"
+          $version = $env:SDK_VERSION
           $expectedName = "SoftLicence.SDK.$version.nupkg"
           $packages = @(Get-ChildItem -Path out -Filter *.nupkg)
 
@@ -160,9 +178,11 @@ jobs:
       - name: Push NuGet package
         if: github.event_name == 'release'
         shell: pwsh
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
           $packages = Get-ChildItem -Path out -Filter *.nupkg
           foreach ($pkg in $packages) {
               Write-Host "Pushing $($pkg.FullName)..."
-              dotnet nuget push $pkg.FullName --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+              dotnet nuget push $pkg.FullName --api-key $env:NUGET_API_KEY --source https://api.nuget.org/v3/index.json --skip-duplicate
           }

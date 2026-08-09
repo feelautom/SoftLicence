@@ -27,6 +27,7 @@ public sealed class SecurityBanAuditAnalyticsService
         string? emailFragment,
         string? licenseFragment,
         bool includeInactive,
+        bool includeSourceEvents,
         int take = DefaultTake,
         CancellationToken cancellationToken = default)
     {
@@ -36,7 +37,7 @@ public sealed class SecurityBanAuditAnalyticsService
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
         var productScopeIds = await ProductScopeResolver.ResolveProductScopeIdsAsync(db, productId, cancellationToken);
         var candidateHwids = await ResolveCandidateHardwareIdsAsync(db, productScopeIds, criteria, cancellationToken);
-        var candidateHashes = await ResolveCandidateComponentHashesAsync(db, productId, criteria, candidateHwids, cancellationToken);
+        var candidateHashes = await ResolveCandidateComponentHashesAsync(db, productScopeIds, criteria, candidateHwids, cancellationToken);
 
         var items = new List<SecurityBanAuditItem>();
         items.AddRange(await QueryHardwareBansAsync(db, productScopeIds, criteria, candidateHwids, includeInactive, cancellationToken));
@@ -50,6 +51,11 @@ public sealed class SecurityBanAuditAnalyticsService
             .ToList();
 
         var returned = ordered.Take(take).ToList();
+        foreach (var item in includeSourceEvents ? returned : [])
+        {
+            var source = await FindSourceEventAsync(db, productScopeIds, item, cancellationToken);
+            ApplySourceSummary(item, source);
+        }
         return new SecurityBanAuditResponse
         {
             Query = new SecurityBanAuditQuery
@@ -61,10 +67,12 @@ public sealed class SecurityBanAuditAnalyticsService
                 HasEmailFragment = criteria.EmailFragment != null,
                 HasLicenseFragment = criteria.LicenseFragment != null,
                 IncludeInactive = includeInactive,
+                IncludeSourceEvents = includeSourceEvents,
                 Take = take
             },
             RecordsMatched = ordered.Count,
             RecordsReturned = returned.Count,
+            ResolvedHardwareIds = candidateHwids.OrderBy(h => h, StringComparer.OrdinalIgnoreCase).Take(MaxTake).ToList(),
             Bans = returned
         };
     }
@@ -175,7 +183,12 @@ public sealed class SecurityBanAuditAnalyticsService
             query = query.Where(b => b.ComponentType == criteria.ComponentType);
 
         if (candidateHashes.Count > 0)
-            query = query.Where(b => candidateHashes.Contains(b.ComponentHash));
+        {
+            var normalizedCandidateHashes = candidateHashes
+                .Select(hash => hash.ToUpperInvariant())
+                .ToList();
+            query = query.Where(b => normalizedCandidateHashes.Contains(b.ComponentHash.ToUpper()));
+        }
         else if (criteria.ComponentHash != null)
             query = query.Where(b => b.ComponentHash.ToUpper().Contains(criteria.ComponentHash));
         else if (criteria.HardwareId != null || criteria.ClientIp != null || criteria.EmailFragment != null || criteria.LicenseFragment != null)
@@ -245,12 +258,54 @@ public sealed class SecurityBanAuditAnalyticsService
                 hwids.Add(resolved.HardwareId);
         }
 
+        if (criteria.ComponentHash != null)
+        {
+            var hash = criteria.ComponentHash;
+            var fromTelemetry = await db.TelemetryRecords.AsNoTracking()
+                .Where(r => r.ProductId.HasValue
+                    && productScopeIds.Contains(r.ProductId.Value)
+                    && r.EventData != null
+                    && r.EventData.PropertiesJson != null
+                    && r.EventData.PropertiesJson.ToUpper().Contains(hash))
+                .Select(r => r.HardwareId)
+                .Distinct()
+                .Take(MaxTake)
+                .ToListAsync(cancellationToken);
+            foreach (var hwid in fromTelemetry) hwids.Add(hwid);
+
+            var fromCanary = await db.CanaryAlerts.AsNoTracking()
+                .Where(a => a.ProductId.HasValue
+                    && productScopeIds.Contains(a.ProductId.Value)
+                    && a.BinaryFingerprintsJson != null
+                    && a.BinaryFingerprintsJson.ToUpper().Contains(hash))
+                .Select(a => a.HardwareId)
+                .Distinct()
+                .Take(MaxTake)
+                .ToListAsync(cancellationToken);
+            foreach (var hwid in fromCanary) hwids.Add(hwid);
+
+            if (criteria.ComponentType is not ("FP_EXE" or "FP_DLL" or "FP_CORE"))
+            {
+                var fromHardware = await db.HardwareFingerprints.AsNoTracking()
+                    .Where(f => (f.CpuHash != null && f.CpuHash.ToUpper().Contains(hash))
+                        || (f.MotherboardHash != null && f.MotherboardHash.ToUpper().Contains(hash))
+                        || (f.BiosHash != null && f.BiosHash.ToUpper().Contains(hash))
+                        || (f.DiskHash != null && f.DiskHash.ToUpper().Contains(hash))
+                        || (f.HostHash != null && f.HostHash.ToUpper().Contains(hash)))
+                    .Select(f => f.HardwareId)
+                    .Distinct()
+                    .Take(MaxTake)
+                    .ToListAsync(cancellationToken);
+                foreach (var hwid in fromHardware) hwids.Add(hwid);
+            }
+        }
+
         return hwids;
     }
 
     private static async Task<HashSet<string>> ResolveCandidateComponentHashesAsync(
         LicenseDbContext db,
-        Guid productId,
+        List<Guid> productScopeIds,
         SearchCriteria criteria,
         HashSet<string> candidateHwids,
         CancellationToken cancellationToken)
@@ -276,7 +331,47 @@ public sealed class SecurityBanAuditAnalyticsService
             AddHash(hashes, fingerprint.HostHash);
         }
 
+        // Binary fingerprints are not part of HardwareFingerprint. They are reported by
+        // startup/integrity telemetry and Canary alerts, so include both bounded sources
+        // when resolving all bans related to a HWID.
+        var telemetryRows = await db.TelemetryRecords.AsNoTracking()
+            .Include(r => r.EventData)
+            .Where(r => r.ProductId.HasValue
+                && productScopeIds.Contains(r.ProductId.Value)
+                && candidateHwids.Contains(r.HardwareId)
+                && r.EventData != null
+                && r.EventData.PropertiesJson != null)
+            .OrderByDescending(r => r.Timestamp)
+            .Take(MaxTake * 5)
+            .ToListAsync(cancellationToken);
+
+        foreach (var row in telemetryRows)
+            AddBinaryFingerprintHashes(hashes, row.EventData?.PropertiesJson);
+
+        var canaryRows = await db.CanaryAlerts.AsNoTracking()
+            .Where(a => a.ProductId.HasValue
+                && productScopeIds.Contains(a.ProductId.Value)
+                && candidateHwids.Contains(a.HardwareId)
+                && a.BinaryFingerprintsJson != null)
+            .OrderByDescending(a => a.LastSeenAt ?? a.ReceivedAt)
+            .Take(MaxTake * 5)
+            .Select(a => a.BinaryFingerprintsJson)
+            .ToListAsync(cancellationToken);
+
+        foreach (var fingerprintsJson in canaryRows)
+            AddBinaryFingerprintHashes(hashes, fingerprintsJson);
+
         return hashes;
+    }
+
+    private static void AddBinaryFingerprintHashes(HashSet<string> hashes, string? propertiesJson)
+    {
+        var properties = TelemetrySchemaRegistry.ParseProperties(propertiesJson);
+        foreach (var key in new[] { "FP_EXE", "FP_DLL", "FP_CORE" })
+        {
+            if (properties.TryGetValue(key, out var value))
+                AddHash(hashes, value);
+        }
     }
 
     private static async Task<SecurityBanSourceEvent> FindSourceEventAsync(
@@ -381,7 +476,7 @@ public sealed class SecurityBanAuditAnalyticsService
 
     private static SecurityBanAuditItem MapHardwareBan(BannedHardwareId ban, string matchType)
     {
-        return new SecurityBanAuditItem
+        var item = new SecurityBanAuditItem
         {
             BanId = ban.Id,
             TargetType = "hardware_id",
@@ -395,11 +490,13 @@ public sealed class SecurityBanAuditAnalyticsService
             Reason = ban.Reason,
             MatchType = matchType
         };
+        ApplyAuditMetadata(item);
+        return item;
     }
 
     private static SecurityBanAuditItem MapComponentBan(BannedComponent ban, string matchType)
     {
-        return new SecurityBanAuditItem
+        var item = new SecurityBanAuditItem
         {
             BanId = ban.Id,
             TargetType = "component",
@@ -418,6 +515,23 @@ public sealed class SecurityBanAuditAnalyticsService
             Reason = ban.Reason,
             MatchType = matchType
         };
+        ApplyAuditMetadata(item);
+        return item;
+    }
+
+    private static void ApplyAuditMetadata(SecurityBanAuditItem item)
+    {
+        foreach (var part in item.Reason.Split('|', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        {
+            var separator = part.IndexOf('=');
+            if (separator <= 0 || separator == part.Length - 1) continue;
+            var key = part[..separator].Trim();
+            var value = part[(separator + 1)..].Trim();
+            if (key.Equals("ticket", StringComparison.OrdinalIgnoreCase)) item.AuditTicketRef = value;
+            else if (key.Equals("securityCase", StringComparison.OrdinalIgnoreCase)) item.AuditSecurityCaseId = value;
+            else if (key.Equals("createdBy", StringComparison.OrdinalIgnoreCase)) item.AuditActor = value;
+            else if (key.Equals("category", StringComparison.OrdinalIgnoreCase)) item.AuditCategory = value;
+        }
     }
 
     private static string GetComponentMatchStrength(string? componentType)
@@ -425,8 +539,7 @@ public sealed class SecurityBanAuditAnalyticsService
         return NormalizeComponentType(componentType) switch
         {
             "FP_EXE" or "FP_DLL" or "FP_CORE" => "strong",
-            "DISK" or "BIOS" or "CPU" or "HOST" => "medium",
-            "MB" => "weak",
+            "DISK" or "BIOS" or "CPU" or "HOST" or "MB" => "weak",
             _ => "unknown"
         };
     }
@@ -438,17 +551,17 @@ public sealed class SecurityBanAuditAnalyticsService
             "FP_EXE" => "Binary executable fingerprint match",
             "FP_DLL" => "Binary library fingerprint match",
             "FP_CORE" => "Binary core fingerprint match",
-            "DISK" => "Disk fingerprint match",
-            "BIOS" => "BIOS fingerprint match",
-            "CPU" => "CPU fingerprint match",
-            "HOST" => "Host fingerprint match",
-            "MB" => "Motherboard fingerprint only; weak correlation, especially on virtual machines",
+            "DISK" => "Disk fingerprint match; weak correlation-only signal and never independently enforceable",
+            "BIOS" => "BIOS fingerprint match; weak correlation-only signal and never independently enforceable",
+            "CPU" => "CPU fingerprint match; weak correlation-only signal and never independently enforceable",
+            "HOST" => "Host fingerprint match; weak correlation-only signal and never independently enforceable",
+            "MB" => "Motherboard fingerprint match; weak correlation-only signal and never independently enforceable",
             _ => "Component fingerprint match"
         };
     }
 
     private static bool IsWeakComponentCorrelation(string? componentType) =>
-        string.Equals(NormalizeComponentType(componentType), "MB", StringComparison.OrdinalIgnoreCase);
+        NormalizeComponentType(componentType) is "CPU" or "MB" or "BIOS" or "DISK" or "HOST";
 
     private static SearchCriteria NormalizeCriteria(
         string? hardwareId,

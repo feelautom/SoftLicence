@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Globalization;
 using SoftLicence.Server.Data;
 using SoftLicence.Server.Services;
 
@@ -34,6 +35,7 @@ public sealed class AnalyticsController : ControllerBase
     private readonly LicenseHardwareVerifierAnalyticsService _licenseHardwareVerifierAnalytics;
     private readonly FreemiumAbuseRiskAnalyticsService _freemiumAbuseRiskAnalytics;
     private readonly SecurityBanAuditAnalyticsService _securityBanAuditAnalytics;
+    private readonly SecurityCanaryAnalyticsService _securityCanaryAnalytics;
     private readonly AnalyticsApiKeyAuthService _apiKeyAuth;
     private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
 
@@ -62,6 +64,7 @@ public sealed class AnalyticsController : ControllerBase
         LicenseHardwareVerifierAnalyticsService licenseHardwareVerifierAnalytics,
         FreemiumAbuseRiskAnalyticsService freemiumAbuseRiskAnalytics,
         SecurityBanAuditAnalyticsService securityBanAuditAnalytics,
+        SecurityCanaryAnalyticsService securityCanaryAnalytics,
         AnalyticsApiKeyAuthService apiKeyAuth,
         IDbContextFactory<LicenseDbContext> dbFactory)
     {
@@ -89,6 +92,7 @@ public sealed class AnalyticsController : ControllerBase
         _licenseHardwareVerifierAnalytics = licenseHardwareVerifierAnalytics;
         _freemiumAbuseRiskAnalytics = freemiumAbuseRiskAnalytics;
         _securityBanAuditAnalytics = securityBanAuditAnalytics;
+        _securityCanaryAnalytics = securityCanaryAnalytics;
         _apiKeyAuth = apiKeyAuth;
         _dbFactory = dbFactory;
     }
@@ -120,13 +124,28 @@ public sealed class AnalyticsController : ControllerBase
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
+        TelemetryAnalyticsPeriod period;
+        try
+        {
+            period = TelemetryAnalyticsPeriod.Resolve(days, date, fromUtc, toUtc);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new
+            {
+                errorCode = "INVALID_TELEMETRY_PERIOD",
+                message = ex.Message,
+                maxDays = TelemetryAnalyticsPeriod.MaxDays,
+                hint = "Use a UTC range of at most 30 days. For longer investigations, split the range into contiguous chunks and merge the timelines."
+            });
+        }
+
         try
         {
             var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
             if (product.Error != null)
                 return product.Error;
 
-            var period = TelemetryAnalyticsPeriod.Resolve(days, date, fromUtc, toUtc);
             var result = await _customerLicenseTimelineAnalytics.GetTimelineForProductIdAsync(
                 product.ProductId,
                 email,
@@ -148,7 +167,11 @@ public sealed class AnalyticsController : ControllerBase
         }
         catch (ArgumentException ex)
         {
-            return BadRequest(ex.Message);
+            return BadRequest(new
+            {
+                errorCode = "INVALID_ANALYTICS_REQUEST",
+                message = ex.Message
+            });
         }
     }
 
@@ -731,6 +754,67 @@ public sealed class AnalyticsController : ControllerBase
         });
     }
 
+    [HttpGet("security/canary-alerts")]
+    public async Task<IActionResult> ListSecurityCanaryAlerts(
+        [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
+        [FromQuery] string? fromUtc = null,
+        [FromQuery] string? toUtc = null,
+        [FromQuery] string? trigger = null,
+        [FromQuery] int? severity = null,
+        [FromQuery] string? hardwareId = null,
+        [FromQuery] string? machine = null,
+        [FromQuery] string? user = null,
+        [FromQuery] string? clientIp = null,
+        [FromQuery] string? version = null,
+        [FromQuery] bool? isBanned = null,
+        [FromQuery] int take = 50,
+        [FromQuery] int offset = 0,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        var auth = await AuthenticateSecurityAnalyticsAsync(analyticsKey, cancellationToken);
+        if (auth == null)
+            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
+        if (!TryParseOptionalUtc(fromUtc, out var parsedFrom) || !TryParseOptionalUtc(toUtc, out var parsedTo))
+            return BadRequest(new { errorCode = "INVALID_UTC_RANGE", message = "fromUtc and toUtc must be ISO 8601 timestamps." });
+        if (parsedFrom.HasValue && parsedTo.HasValue && parsedFrom > parsedTo)
+            return BadRequest(new { errorCode = "INVALID_UTC_RANGE", message = "fromUtc must be before toUtc." });
+        if (severity is < 1 or > 3)
+            return BadRequest(new { errorCode = "INVALID_SEVERITY", message = "severity must be 1, 2, or 3." });
+
+        var result = await _securityCanaryAnalytics.ListForProductIdAsync(
+            product.ProductId, parsedFrom, parsedTo, trigger, severity, hardwareId, machine, user,
+            clientIp, version, isBanned, take, offset, cancellationToken);
+        return Ok(result);
+    }
+
+    [HttpGet("security/canary-alerts/{alertId:guid}")]
+    public async Task<IActionResult> GetSecurityCanaryAlertDetails(
+        [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
+        Guid alertId,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        var auth = await AuthenticateSecurityAnalyticsAsync(analyticsKey, cancellationToken);
+        if (auth == null)
+            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
+        var result = await _securityCanaryAnalytics.GetDetailsForProductIdAsync(
+            product.ProductId, alertId, cancellationToken);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     [HttpGet("security/bans")]
     public async Task<IActionResult> ListSecurityBans(
         [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
@@ -741,12 +825,13 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] string? emailFragment,
         [FromQuery] string? licenseFragment,
         [FromQuery] bool includeInactive = false,
+        [FromQuery] bool includeSourceEvents = false,
         [FromQuery] int take = 25,
         [FromQuery] string? productId = null,
         [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
-        var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
+        var auth = await AuthenticateSecurityAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
@@ -763,6 +848,7 @@ public sealed class AnalyticsController : ControllerBase
             emailFragment,
             licenseFragment,
             includeInactive,
+            includeSourceEvents,
             take,
             cancellationToken);
 
@@ -773,21 +859,20 @@ public sealed class AnalyticsController : ControllerBase
     public async Task<IActionResult> GetSecurityBanDetails(
         [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
         Guid banId,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
-        var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
+        var auth = await AuthenticateSecurityAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
-        if (!auth.ProductId.HasValue)
-            return StatusCode(StatusCodes.Status403Forbidden, new
-            {
-                errorCode = "PRODUCT_SELECTOR_REQUIRED",
-                message = "This endpoint requires a product-scoped analytics key."
-            });
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
 
         var result = await _securityBanAuditAnalytics.GetBanDetailsForProductIdAsync(
-            auth.ProductId.Value,
+            product.ProductId,
             banId,
             cancellationToken);
 
@@ -798,21 +883,20 @@ public sealed class AnalyticsController : ControllerBase
     public async Task<IActionResult> GetSecurityBanSourceEvent(
         [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
         Guid banId,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
-        var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
+        var auth = await AuthenticateSecurityAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
             return Unauthorized("Missing or invalid X-Analytics-Key header.");
 
-        if (!auth.ProductId.HasValue)
-            return StatusCode(StatusCodes.Status403Forbidden, new
-            {
-                errorCode = "PRODUCT_SELECTOR_REQUIRED",
-                message = "This endpoint requires a product-scoped analytics key."
-            });
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
 
         var result = await _securityBanAuditAnalytics.GetBanSourceEventForProductIdAsync(
-            auth.ProductId.Value,
+            product.ProductId,
             banId,
             cancellationToken);
 
@@ -1213,6 +1297,17 @@ public sealed class AnalyticsController : ControllerBase
         }
     }
 
+    private static bool TryParseOptionalUtc(string? value, out DateTime? parsed)
+    {
+        parsed = null;
+        if (string.IsNullOrWhiteSpace(value))
+            return true;
+        if (!DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var timestamp))
+            return false;
+        parsed = timestamp;
+        return true;
+    }
+
     private async Task<AnalyticsApiKeyAuthResult?> AuthenticateAnalyticsAsync(
         string? analyticsKey,
         CancellationToken cancellationToken)
@@ -1220,6 +1315,17 @@ public sealed class AnalyticsController : ControllerBase
         return await _apiKeyAuth.ValidateAsync(
             analyticsKey ?? "",
             AnalyticsApiKeyScopes.TelemetryRead,
+            HttpContext.Connection.RemoteIpAddress?.ToString(),
+            cancellationToken);
+    }
+
+    private async Task<AnalyticsApiKeyAuthResult?> AuthenticateSecurityAnalyticsAsync(
+        string? analyticsKey,
+        CancellationToken cancellationToken)
+    {
+        return await _apiKeyAuth.ValidateAsync(
+            analyticsKey ?? "",
+            AnalyticsApiKeyScopes.SecurityRead,
             HttpContext.Connection.RemoteIpAddress?.ToString(),
             cancellationToken);
     }

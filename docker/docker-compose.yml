@@ -10,7 +10,7 @@ services:
     environment:
       - POSTGRES_DB=db_softlicence
       - POSTGRES_USER=developer
-      - POSTGRES_PASSWORD=${DB_PASSWORD:-CHANGE_ME_DB_PASSWORD}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:?DB_PASSWORD is required}
     volumes:
       - softlicence-db-data:/var/lib/postgresql/data
     healthcheck:
@@ -27,6 +27,76 @@ services:
           cpus: "0.75"
           memory: 1024M
 
+  migrator:
+    image: softlicence-server
+    networks:
+      - softlicence
+    depends_on:
+      licencedb:
+        condition: service_healthy
+    environment:
+      - Database__MigrationOnly=true
+      - ConnectionStrings__MigrationConnection=Host=licencedb;Database=db_softlicence;Username=developer;Password=${DB_PASSWORD:?DB_PASSWORD is required}
+      - CanaryAck__PrivateKeyPem=${CanaryAck__PrivateKeyPem:-}
+      - RuntimeEnrollment__Mode=${RuntimeEnrollment__Mode:-off}
+      - RuntimeEnrollment__KeyRegistryVersion=${RuntimeEnrollment__KeyRegistryVersion:-1}
+      - RuntimeEnrollment__Issuer=${RuntimeEnrollment__Issuer:-}
+      - RuntimeEnrollment__ConfirmAudience=${RuntimeEnrollment__ConfirmAudience:-}
+      - RuntimeEnrollment__CanaryAudience=${RuntimeEnrollment__CanaryAudience:-}
+      - RuntimeEnrollment__CanaryTriggers__0=${RuntimeEnrollment__CanaryTriggers__0:-}
+      - RuntimeEnrollment__CanaryTriggers__1=${RuntimeEnrollment__CanaryTriggers__1:-}
+      - RuntimeEnrollment__CanaryTriggers__2=${RuntimeEnrollment__CanaryTriggers__2:-}
+      - RuntimeEnrollment__CanaryTriggers__3=${RuntimeEnrollment__CanaryTriggers__3:-}
+      - RuntimeEnrollment__CanaryTriggers__4=${RuntimeEnrollment__CanaryTriggers__4:-}
+      - RuntimeEnrollment__CanaryTriggers__5=${RuntimeEnrollment__CanaryTriggers__5:-}
+      - RuntimeEnrollment__CanaryTriggers__6=${RuntimeEnrollment__CanaryTriggers__6:-}
+      - RuntimeEnrollment__CanaryTriggers__7=${RuntimeEnrollment__CanaryTriggers__7:-}
+      - RuntimeEnrollment__CanaryTriggers__8=${RuntimeEnrollment__CanaryTriggers__8:-}
+      - RuntimeEnrollment__CanaryTriggers__9=${RuntimeEnrollment__CanaryTriggers__9:-}
+      - RuntimeEnrollment__CanaryTriggers__10=${RuntimeEnrollment__CanaryTriggers__10:-}
+      - RuntimeEnrollment__CanaryTriggers__11=${RuntimeEnrollment__CanaryTriggers__11:-}
+      - RuntimeEnrollment__CanaryTriggers__12=${RuntimeEnrollment__CanaryTriggers__12:-}
+      - RuntimeEnrollment__CanaryTriggers__13=${RuntimeEnrollment__CanaryTriggers__13:-}
+      - RuntimeEnrollment__CanaryTriggers__14=${RuntimeEnrollment__CanaryTriggers__14:-}
+      - RuntimeEnrollment__IpPseudonymKeyBase64=${RuntimeEnrollment__IpPseudonymKeyBase64:-}
+      - RuntimeEnrollment__CapabilitySigning__ActiveKeyId=${RuntimeEnrollment__CapabilitySigning__ActiveKeyId:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__0__KeyId=${RuntimeEnrollment__CapabilitySigning__Keys__0__KeyId:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__0__Role=${RuntimeEnrollment__CapabilitySigning__Keys__0__Role:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__0__PublicKeyPem=${RuntimeEnrollment__CapabilitySigning__Keys__0__PublicKeyPem:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__0__PrivateKeyPem=${RuntimeEnrollment__CapabilitySigning__Keys__0__PrivateKeyPem:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__0__RetainUntilUtc=${RuntimeEnrollment__CapabilitySigning__Keys__0__RetainUntilUtc:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__1__KeyId=${RuntimeEnrollment__CapabilitySigning__Keys__1__KeyId:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__1__Role=${RuntimeEnrollment__CapabilitySigning__Keys__1__Role:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__1__PublicKeyPem=${RuntimeEnrollment__CapabilitySigning__Keys__1__PublicKeyPem:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__1__PrivateKeyPem=${RuntimeEnrollment__CapabilitySigning__Keys__1__PrivateKeyPem:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__1__RetainUntilUtc=${RuntimeEnrollment__CapabilitySigning__Keys__1__RetainUntilUtc:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__2__KeyId=${RuntimeEnrollment__CapabilitySigning__Keys__2__KeyId:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__2__Role=${RuntimeEnrollment__CapabilitySigning__Keys__2__Role:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__2__PublicKeyPem=${RuntimeEnrollment__CapabilitySigning__Keys__2__PublicKeyPem:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__2__PrivateKeyPem=${RuntimeEnrollment__CapabilitySigning__Keys__2__PrivateKeyPem:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__2__RetainUntilUtc=${RuntimeEnrollment__CapabilitySigning__Keys__2__RetainUntilUtc:-}
+      - RuntimeEnrollment__Encryption__ActiveKeyId=${RuntimeEnrollment__Encryption__ActiveKeyId:-}
+      - RuntimeEnrollment__Encryption__Keys__0__KeyId=${RuntimeEnrollment__Encryption__Keys__0__KeyId:-}
+      - RuntimeEnrollment__Encryption__Keys__0__KeyBase64=${RuntimeEnrollment__Encryption__Keys__0__KeyBase64:-}
+      - RuntimeEnrollment__Products__0__ProductId=${RuntimeEnrollment__Products__0__ProductId:-}
+      - RuntimeEnrollment__Products__0__Capabilities__0__Audience=${RuntimeEnrollment__Products__0__Capabilities__0__Audience:-}
+      - RuntimeEnrollment__Products__0__Capabilities__0__Scopes__0=${RuntimeEnrollment__Products__0__Capabilities__0__Scopes__0:-}
+      - RuntimeEnrollment__Products__0__Capabilities__0__Scopes__1=${RuntimeEnrollment__Products__0__Capabilities__0__Scopes__1:-}
+      - DistributionS2S__RequireHttps=${DistributionS2S__RequireHttps:-true}
+      - DistributionS2S__ClockSkewSeconds=${DistributionS2S__ClockSkewSeconds:-60}
+      - DistributionS2S__NonceRetentionHours=${DistributionS2S__NonceRetentionHours:-24}
+      - DistributionS2S__Clients__0__ClientId=${DistributionS2S__Clients__0__ClientId:-}
+      - DistributionS2S__Clients__0__KeyId=${DistributionS2S__Clients__0__KeyId:-}
+      - DistributionS2S__Clients__0__PublicKeyPem=${DistributionS2S__Clients__0__PublicKeyPem:-}
+      - DistributionS2S__Clients__0__Enabled=${DistributionS2S__Clients__0__Enabled:-true}
+      - DistributionS2S__Clients__0__AllowRuntimeRecovery=${DistributionS2S__Clients__0__AllowRuntimeRecovery:-false}
+      - DistributionS2S__Clients__0__AllowRuntimeUpgrade=${DistributionS2S__Clients__0__AllowRuntimeUpgrade:-false}
+      - DistributionS2S__Clients__0__AllowLicenseBootstrap=${DistributionS2S__Clients__0__AllowLicenseBootstrap:-false}
+      - DistributionS2S__Clients__0__ProductIds__0=${DistributionS2S__Clients__0__ProductIds__0:-}
+      - DistributionS2S__Clients__0__AllowedCidrs__0=${DistributionS2S__Clients__0__AllowedCidrs__0:-}
+      - DistributionS2S__Clients__0__AllowedCidrs__1=${DistributionS2S__Clients__0__AllowedCidrs__1:-}
+    restart: "no"
+
   server:
     image: softlicence-server
     networks:
@@ -35,6 +105,8 @@ services:
     depends_on:
       licencedb:
         condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
     volumes:
       - softlicence-data:/app/data
       - softlicence-config:/app/config
@@ -43,16 +115,83 @@ services:
       - ASPNETCORE_FORWARDEDHEADERS_ENABLED=true
       - RCLONE_CONFIG=/app/config/rclone.conf
       - DB_TYPE=PostgreSQL
-      - ConnectionStrings__DefaultConnection=Host=licencedb;Database=db_softlicence;Username=developer;Password=${DB_PASSWORD:-CHANGE_ME_DB_PASSWORD}
+      - ConnectionStrings__DefaultConnection=Host=licencedb;Database=db_softlicence;Username=softlicence_app;Password=${APP_DB_PASSWORD:?APP_DB_PASSWORD is required}
+      - RuntimeEnrollment__Mode=${RuntimeEnrollment__Mode:-off}
+      - RuntimeEnrollment__KeyRegistryVersion=${RuntimeEnrollment__KeyRegistryVersion:-1}
+      - RuntimeEnrollment__Issuer=${RuntimeEnrollment__Issuer:-}
+      - RuntimeEnrollment__ConfirmAudience=${RuntimeEnrollment__ConfirmAudience:-}
+      - RuntimeEnrollment__CanaryAudience=${RuntimeEnrollment__CanaryAudience:-}
+      - RuntimeEnrollment__CanaryTriggers__0=${RuntimeEnrollment__CanaryTriggers__0:-}
+      - RuntimeEnrollment__CanaryTriggers__1=${RuntimeEnrollment__CanaryTriggers__1:-}
+      - RuntimeEnrollment__CanaryTriggers__2=${RuntimeEnrollment__CanaryTriggers__2:-}
+      - RuntimeEnrollment__CanaryTriggers__3=${RuntimeEnrollment__CanaryTriggers__3:-}
+      - RuntimeEnrollment__CanaryTriggers__4=${RuntimeEnrollment__CanaryTriggers__4:-}
+      - RuntimeEnrollment__CanaryTriggers__5=${RuntimeEnrollment__CanaryTriggers__5:-}
+      - RuntimeEnrollment__CanaryTriggers__6=${RuntimeEnrollment__CanaryTriggers__6:-}
+      - RuntimeEnrollment__CanaryTriggers__7=${RuntimeEnrollment__CanaryTriggers__7:-}
+      - RuntimeEnrollment__CanaryTriggers__8=${RuntimeEnrollment__CanaryTriggers__8:-}
+      - RuntimeEnrollment__CanaryTriggers__9=${RuntimeEnrollment__CanaryTriggers__9:-}
+      - RuntimeEnrollment__CanaryTriggers__10=${RuntimeEnrollment__CanaryTriggers__10:-}
+      - RuntimeEnrollment__CanaryTriggers__11=${RuntimeEnrollment__CanaryTriggers__11:-}
+      - RuntimeEnrollment__CanaryTriggers__12=${RuntimeEnrollment__CanaryTriggers__12:-}
+      - RuntimeEnrollment__CanaryTriggers__13=${RuntimeEnrollment__CanaryTriggers__13:-}
+      - RuntimeEnrollment__CanaryTriggers__14=${RuntimeEnrollment__CanaryTriggers__14:-}
+      - RuntimeEnrollment__IpPseudonymKeyBase64=${RuntimeEnrollment__IpPseudonymKeyBase64:-}
+      - RuntimeEnrollment__CapabilitySigning__ActiveKeyId=${RuntimeEnrollment__CapabilitySigning__ActiveKeyId:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__0__KeyId=${RuntimeEnrollment__CapabilitySigning__Keys__0__KeyId:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__0__Role=${RuntimeEnrollment__CapabilitySigning__Keys__0__Role:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__0__PublicKeyPem=${RuntimeEnrollment__CapabilitySigning__Keys__0__PublicKeyPem:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__0__PrivateKeyPem=${RuntimeEnrollment__CapabilitySigning__Keys__0__PrivateKeyPem:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__0__RetainUntilUtc=${RuntimeEnrollment__CapabilitySigning__Keys__0__RetainUntilUtc:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__1__KeyId=${RuntimeEnrollment__CapabilitySigning__Keys__1__KeyId:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__1__Role=${RuntimeEnrollment__CapabilitySigning__Keys__1__Role:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__1__PublicKeyPem=${RuntimeEnrollment__CapabilitySigning__Keys__1__PublicKeyPem:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__1__PrivateKeyPem=${RuntimeEnrollment__CapabilitySigning__Keys__1__PrivateKeyPem:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__1__RetainUntilUtc=${RuntimeEnrollment__CapabilitySigning__Keys__1__RetainUntilUtc:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__2__KeyId=${RuntimeEnrollment__CapabilitySigning__Keys__2__KeyId:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__2__Role=${RuntimeEnrollment__CapabilitySigning__Keys__2__Role:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__2__PublicKeyPem=${RuntimeEnrollment__CapabilitySigning__Keys__2__PublicKeyPem:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__2__PrivateKeyPem=${RuntimeEnrollment__CapabilitySigning__Keys__2__PrivateKeyPem:-}
+      - RuntimeEnrollment__CapabilitySigning__Keys__2__RetainUntilUtc=${RuntimeEnrollment__CapabilitySigning__Keys__2__RetainUntilUtc:-}
+      - RuntimeEnrollment__Encryption__ActiveKeyId=${RuntimeEnrollment__Encryption__ActiveKeyId:-}
+      - RuntimeEnrollment__Encryption__Keys__0__KeyId=${RuntimeEnrollment__Encryption__Keys__0__KeyId:-}
+      - RuntimeEnrollment__Encryption__Keys__0__KeyBase64=${RuntimeEnrollment__Encryption__Keys__0__KeyBase64:-}
+      - RuntimeEnrollment__Products__0__ProductId=${RuntimeEnrollment__Products__0__ProductId:-}
+      - RuntimeEnrollment__Products__0__Capabilities__0__Audience=${RuntimeEnrollment__Products__0__Capabilities__0__Audience:-}
+      - RuntimeEnrollment__Products__0__Capabilities__0__Scopes__0=${RuntimeEnrollment__Products__0__Capabilities__0__Scopes__0:-}
+      - RuntimeEnrollment__Products__0__Capabilities__0__Scopes__1=${RuntimeEnrollment__Products__0__Capabilities__0__Scopes__1:-}
+      - DistributionS2S__RequireHttps=${DistributionS2S__RequireHttps:-true}
+      - DistributionS2S__ClockSkewSeconds=${DistributionS2S__ClockSkewSeconds:-60}
+      - DistributionS2S__NonceRetentionHours=${DistributionS2S__NonceRetentionHours:-24}
+      - DistributionS2S__Clients__0__ClientId=${DistributionS2S__Clients__0__ClientId:-}
+      - DistributionS2S__Clients__0__KeyId=${DistributionS2S__Clients__0__KeyId:-}
+      - DistributionS2S__Clients__0__PublicKeyPem=${DistributionS2S__Clients__0__PublicKeyPem:-}
+      - DistributionS2S__Clients__0__Enabled=${DistributionS2S__Clients__0__Enabled:-true}
+      - DistributionS2S__Clients__0__AllowRuntimeRecovery=${DistributionS2S__Clients__0__AllowRuntimeRecovery:-false}
+      - DistributionS2S__Clients__0__AllowRuntimeUpgrade=${DistributionS2S__Clients__0__AllowRuntimeUpgrade:-false}
+      - DistributionS2S__Clients__0__AllowLicenseBootstrap=${DistributionS2S__Clients__0__AllowLicenseBootstrap:-false}
+      - DistributionS2S__Clients__0__ProductIds__0=${DistributionS2S__Clients__0__ProductIds__0:-}
+      - DistributionS2S__Clients__0__AllowedCidrs__0=${DistributionS2S__Clients__0__AllowedCidrs__0:-}
+      - DistributionS2S__Clients__0__AllowedCidrs__1=${DistributionS2S__Clients__0__AllowedCidrs__1:-}
+      - CanaryAck__PrivateKeyPem=${CanaryAck__PrivateKeyPem:-}
       - RetentionSettings__CleanupEnabled=true
       - RetentionSettings__AuditLogsDays=${RetentionSettings__AuditLogsDays:-30}
-      - RetentionSettings__TelemetryDays=${RetentionSettings__TelemetryDays:-90}
+      - RetentionSettings__TelemetryDays=${RetentionSettings__TelemetryDays:-0}
       - RetentionSettings__CleanupIntervalHours=${RetentionSettings__CleanupIntervalHours:-24}
+      - RetentionSettings__AccessLogBatchSize=${RetentionSettings__AccessLogBatchSize:-1000}
+      - RetentionSettings__AccessLogMaxBatchesPerRun=${RetentionSettings__AccessLogMaxBatchesPerRun:-100}
+      - RetentionSettings__AccessLogBatchDelayMilliseconds=${RetentionSettings__AccessLogBatchDelayMilliseconds:-100}
+      - RetentionSettings__AccessLogRunBudgetSeconds=${RetentionSettings__AccessLogRunBudgetSeconds:-300}
+      - RetentionSettings__AccessLogStatementTimeoutSeconds=${RetentionSettings__AccessLogStatementTimeoutSeconds:-30}
+      - RetentionSettings__AccessLogLockTimeoutMilliseconds=${RetentionSettings__AccessLogLockTimeoutMilliseconds:-1000}
+      - RetentionSettings__AccessLogPartitionHorizonDays=${RetentionSettings__AccessLogPartitionHorizonDays:-45}
       - AdminSettings__Username=${AdminSettings__Username:-admin}
       - AdminSettings__Password=${AdminSettings__Password:-CHANGE_ME_ADMIN_PASSWORD}
       - AdminSettings__ApiSecret=${AdminSettings__ApiSecret:-CHANGE_ME_RANDOM_SECRET}
       - AdminSettings__LoginPath=${AdminSettings__LoginPath:-CHANGE_ME_LOGIN_PATH}
       - AdminSettings__AllowedIps=${AdminSettings__AllowedIps:-}
+      - SecuritySettings__ProtectedInfrastructureIps=${SecuritySettings__ProtectedInfrastructureIps:?SecuritySettings__ProtectedInfrastructureIps is required}
+      - PrivateValidationTestReset__AllowedLicenseIds=${PrivateValidationTestReset__AllowedLicenseIds:-}
       - SmtpSettings__Host
       - SmtpSettings__Port
       - SmtpSettings__Username

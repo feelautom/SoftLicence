@@ -3,7 +3,9 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using SoftLicence.Server.Data;
@@ -12,14 +14,20 @@ using Xunit;
 
 namespace SoftLicence.Tests.Server;
 
-public sealed class LlmTipFeedbackIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
+public sealed class LlmTipFeedbackIntegrationTests : IClassFixture<WebApplicationFactory<Program>>, IDisposable
 {
     private readonly WebApplicationFactory<Program> _factory;
-    private readonly string _dbName = Guid.NewGuid().ToString();
+    private readonly SqliteConnection _connection;
+    private readonly ServiceProvider _sqliteServices;
     private readonly FakeBugTraceProxyService _fakeBugTrace = new();
 
     public LlmTipFeedbackIntegrationTests(WebApplicationFactory<Program> factory)
     {
+        _connection = new SqliteConnection("Data Source=:memory:");
+        _connection.Open();
+        _sqliteServices = new ServiceCollection()
+            .AddEntityFrameworkSqlite()
+            .BuildServiceProvider();
         _factory = factory.WithWebHostBuilder(builder =>
         {
             builder.UseSetting("IsIntegrationTest", "true");
@@ -27,11 +35,25 @@ public sealed class LlmTipFeedbackIntegrationTests : IClassFixture<WebApplicatio
             {
                 services.RemoveAll<DbContextOptions<LicenseDbContext>>();
                 services.RemoveAll<IDbContextFactory<LicenseDbContext>>();
+                services.RemoveAll<IDatabaseProvider>();
                 services.RemoveAll<IBugTraceProxyService>();
-                services.AddDbContextFactory<LicenseDbContext>(options => options.UseInMemoryDatabase(_dbName));
+                services.AddDbContextFactory<LicenseDbContext>(options => options
+                    .UseSqlite(_connection)
+                    .UseInternalServiceProvider(_sqliteServices));
                 services.AddSingleton<IBugTraceProxyService>(_fakeBugTrace);
             });
         });
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        db.Database.EnsureCreated();
+    }
+
+    public void Dispose()
+    {
+        _factory.Dispose();
+        _sqliteServices.Dispose();
+        _connection.Dispose();
     }
 
     [Fact]
@@ -413,6 +435,78 @@ public sealed class LlmTipFeedbackIntegrationTests : IClassFixture<WebApplicatio
         Assert.Equal(HttpStatusCode.OK, finalDetail.StatusCode);
         var finalBody = await finalDetail.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("needs-product-fix", finalBody.GetProperty("reviewStatus").GetString());
+    }
+
+    [Fact]
+    public async Task AdminListAndStats_WithGlobalKey_ResolveExactProductNameAndEnforceScope()
+    {
+        var tiaProductId = await SeedProductAndAnalyticsKeyAsync("TIAConnect", "llm-feedback-list-tia-key");
+        var otherProductId = await SeedProductAndAnalyticsKeyAsync("OtherProduct", "llm-feedback-list-other-key");
+        await SeedGlobalAnalyticsKeyAsync("llm-feedback-list-global-key");
+
+        var ingestionClient = _factory.CreateClient();
+        Assert.Equal(HttpStatusCode.OK, (await ingestionClient.PostAsJsonAsync("/api/llm-tips-feedback/tips", new
+        {
+            appName = "TIAConnect",
+            version = "2.2.802",
+            schemaVersion = "1",
+            anonymized = true,
+            contentHash = "global-list-product-selector-tip",
+            category = "general",
+            title = "Global list selector regression tip",
+            description = "Anonymized product-scoped feedback.",
+            severity = "info",
+            approved = false,
+            upvotes = 0
+        })).StatusCode);
+
+        var globalClient = _factory.CreateClient();
+        globalClient.DefaultRequestHeaders.Add("X-Analytics-Key", "llm-feedback-list-global-key");
+
+        foreach (var endpoint in new[] { "admin/tips", "admin/stats" })
+        {
+            var missing = await globalClient.GetAsync($"/api/llm-tips-feedback/{endpoint}");
+            Assert.Equal(HttpStatusCode.BadRequest, missing.StatusCode);
+            var missingBody = await missing.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal("PRODUCT_SELECTOR_REQUIRED", missingBody.GetProperty("errorCode").GetString());
+
+            var byName = await globalClient.GetAsync($"/api/llm-tips-feedback/{endpoint}?productName=%20tiaconnect%20");
+            Assert.Equal(HttpStatusCode.OK, byName.StatusCode);
+
+            var byId = await globalClient.GetAsync($"/api/llm-tips-feedback/{endpoint}?productId={tiaProductId:D}");
+            Assert.Equal(HttpStatusCode.OK, byId.StatusCode);
+
+            var ambiguous = await globalClient.GetAsync($"/api/llm-tips-feedback/{endpoint}?productId={tiaProductId:D}&productName=TIAConnect");
+            Assert.Equal(HttpStatusCode.BadRequest, ambiguous.StatusCode);
+            var ambiguousBody = await ambiguous.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal("PRODUCT_SELECTOR_AMBIGUOUS", ambiguousBody.GetProperty("errorCode").GetString());
+
+            var invalidId = await globalClient.GetAsync($"/api/llm-tips-feedback/{endpoint}?productId=not-a-uuid");
+            Assert.Equal(HttpStatusCode.BadRequest, invalidId.StatusCode);
+            var invalidIdBody = await invalidId.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Equal("PRODUCT_ID_INVALID", invalidIdBody.GetProperty("errorCode").GetString());
+
+            var unknownName = await globalClient.GetAsync($"/api/llm-tips-feedback/{endpoint}?productName=UnknownProduct");
+            Assert.Equal(HttpStatusCode.NotFound, unknownName.StatusCode);
+
+            var wrongScope = await globalClient.GetAsync($"/api/llm-tips-feedback/{endpoint}?productId={otherProductId:D}");
+            Assert.Equal(HttpStatusCode.OK, wrongScope.StatusCode);
+        }
+
+        var listByName = await globalClient.GetAsync("/api/llm-tips-feedback/admin/tips?productName=TIAConnect&search=global-list-product-selector-tip");
+        var listBody = await listByName.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(1, listBody.GetProperty("total").GetInt32());
+
+        var productClient = _factory.CreateClient();
+        productClient.DefaultRequestHeaders.Add("X-Analytics-Key", "llm-feedback-list-tia-key");
+        foreach (var endpoint in new[] { "admin/tips", "admin/stats" })
+        {
+            var wrongScope = await productClient.GetAsync($"/api/llm-tips-feedback/{endpoint}?productId={otherProductId:D}");
+            Assert.Equal(HttpStatusCode.Forbidden, wrongScope.StatusCode);
+
+            var configuredScope = await productClient.GetAsync($"/api/llm-tips-feedback/{endpoint}");
+            Assert.Equal(HttpStatusCode.OK, configuredScope.StatusCode);
+        }
     }
 
     private async Task<Guid> SeedProductAndAnalyticsKeyAsync(string productName, string rawAnalyticsKey)

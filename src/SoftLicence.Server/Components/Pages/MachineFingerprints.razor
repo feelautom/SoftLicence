@@ -54,7 +54,7 @@
             else
             {
                 <table class="table table-sm table-striped mb-0">
-                    <thead><tr><th>Type</th><th>Hash</th><th>Product</th><th>Reason</th><th>Banned</th><th></th></tr></thead>
+                    <thead><tr><th>Type</th><th>Hash</th><th>Product</th><th>Policy</th><th>Reason</th><th>Banned</th><th></th></tr></thead>
                     <tbody>
                         @foreach (var b in bannedComponents)
                         {
@@ -62,6 +62,16 @@
                                 <td><span class="badge bg-secondary">@b.ComponentType</span></td>
                                 <td class="font-monospace small">@b.ComponentHash[..16]...</td>
                                 <td>@(b.Product?.Name ?? "Global")</td>
+                                <td>
+                                    @if (SecurityService.IsEnforceableComponentType(b.ComponentType))
+                                    {
+                                        <span class="badge bg-danger">Enforced</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-secondary">Ignored / correlation only</span>
+                                    }
+                                </td>
                                 <td>@b.Reason</td>
                                 <td>@b.BannedAt.ToString("yyyy-MM-dd")</td>
                                 <td><button class="btn btn-sm btn-outline-danger" @onclick="() => UnbanComponent(b.Id)">Unban</button></td>
@@ -262,7 +272,7 @@
             <th>Last Seen</th>
             <th>Cluster</th>
             <th>Note</th>
-            <th></th>
+            <th>Policy</th>
         </tr>
     </thead>
     <tbody>
@@ -342,25 +352,7 @@
                         </span>
                     }
                 </td>
-                <td>
-                    @if (banTarget == fp.Id)
-                    {
-                        <select class="form-select form-select-sm d-inline-block" style="width:auto" @bind="banComponentType">
-                            <option value="">--</option>
-                            <option value="CPU">CPU</option>
-                            <option value="MB">MB</option>
-                            <option value="BIOS">BIOS</option>
-                            <option value="DISK">DISK</option>
-                            <option value="HOST">HOST</option>
-                        </select>
-                        <button class="btn btn-sm btn-danger" @onclick="() => BanFromFingerprint(fp)" disabled="@(string.IsNullOrEmpty(banComponentType))">Ban</button>
-                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => banTarget = null">X</button>
-                    }
-                    else
-                    {
-                        <button class="btn btn-sm btn-outline-danger" @onclick="() => banTarget = fp.Id">Ban</button>
-                    }
-                </td>
+                <td><span class="badge bg-secondary" title="Hardware fingerprints are correlation-only and cannot enforce a global ban.">Correlation only</span></td>
             </tr>
         }
     </tbody>
@@ -378,8 +370,6 @@
     private List<ClusterInfo> clusters = new();
     private List<BannedComponent> bannedComponents = new();
     private FingerprintStats? stats;
-    private Guid? banTarget;
-    private string banComponentType = "";
     private Guid? editingNoteId;
     private string editingNoteValue = "";
     private Guid? editingLabelClusterId;
@@ -423,28 +413,6 @@
     {
         await SecuritySvc.UnbanComponentAsync(id);
         bannedComponents = await SecuritySvc.GetBannedComponentsAsync();
-    }
-
-    private async Task BanFromFingerprint(HardwareFingerprint fp)
-    {
-        var hash = banComponentType switch
-        {
-            "CPU" => fp.CpuHash,
-            "MB" => fp.MotherboardHash,
-            "BIOS" => fp.BiosHash,
-            "DISK" => fp.DiskHash,
-            "HOST" => fp.HostHash,
-            _ => null
-        };
-
-        if (!string.IsNullOrEmpty(hash))
-        {
-            await SecuritySvc.BanComponentAsync(banComponentType, hash, $"Banned from fingerprint UI (HWID: {fp.HardwareId})");
-            bannedComponents = await SecuritySvc.GetBannedComponentsAsync();
-        }
-
-        banTarget = null;
-        banComponentType = "";
     }
 
     private void StartEditNote(HardwareFingerprint fp)

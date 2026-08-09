@@ -113,7 +113,7 @@
             {
                 <div class="text-center py-5 text-muted">
                     <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="mb-3 opacity-25"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-                    <p class="mb-0">Aucun hash approuvé.<br><span class="small">Les baselines sont créées automatiquement dès le premier ping de chaque version.</span></p>
+                    <p class="mb-0">Aucun hash approuvé.<br><span class="small">Enregistrez une baseline complète via le pipeline de release authentifié ou l'administration root.</span></p>
                 </div>
             }
             else
@@ -164,9 +164,17 @@
                                                 <small class="text-muted ms-1">@entry.ApprovedBy</small>
                                             }
                                         }
+                                        else if (entry.Source == "release")
+                                        {
+                                            <span class="badge bg-success" style="font-size:0.6rem">RELEASE</span>
+                                            @if (!string.IsNullOrEmpty(entry.ApprovedBy))
+                                            {
+                                                <small class="text-muted ms-1">@entry.ApprovedBy</small>
+                                            }
+                                        }
                                         else
                                         {
-                                            <span class="badge bg-secondary" style="font-size:0.6rem">AUTO</span>
+                                            <span class="badge bg-danger" style="font-size:0.6rem">NON FIABLE</span>
                                         }
                                     </td>
                                     <td class="small text-muted text-nowrap">@TZ.ToLocal(entry.ApprovedAt).ToString("dd/MM/yyyy HH:mm")</td>
@@ -178,7 +186,7 @@
                                         </button>
                                         <button class="btn btn-sm btn-outline-danger px-2 py-0"
                                                 @onclick="() => DeleteEntry(entry.Id)"
-                                                title="Supprimer (la prochaine version cliente recréera la baseline)">
+                                                title="Supprimer (la version restera bloquée jusqu'à un nouvel enregistrement autoritatif)">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="m19 6-.867 12.142A2 2 0 0 1 16.138 20H7.862a2 2 0 0 1-1.995-1.858L5 6m5 0V4a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v2"/></svg>
                                         </button>
                                     </td>
@@ -256,8 +264,13 @@
     private async Task AddManual()
     {
         if (!Guid.TryParse(addProductId, out var pid)) return;
-        var hash = addHash.Trim().ToLowerInvariant();
-        var version = addVersion.Trim();
+        var hash = SoftLicence.Server.Services.ApprovedBinaryService.NormalizeSha256(addHash);
+        var version = SoftLicence.Server.Services.ApprovedBinaryService.NormalizeVersion(addVersion);
+        if (hash == null || version == null)
+        {
+            Toast.ShowError("Version invalide ou hash SHA-256 attendu sur exactement 64 caractères hexadécimaux.");
+            return;
+        }
 
         await using var db = await DbFactory.CreateDbContextAsync();
 
@@ -267,6 +280,11 @@
 
         if (existing != null)
         {
+            if (existing.ApprovedBinaryRegistrationId.HasValue)
+            {
+                Toast.ShowError("Cette version appartient à un enregistrement release immuable. Utilisez une nouvelle version.");
+                return;
+            }
             existing.Hash = hash;
             existing.Source = "admin";
             existing.ApprovedAt = DateTime.UtcNow;
@@ -305,11 +323,22 @@
     private async Task SaveEdit()
     {
         if (!editingId.HasValue) return;
-        var hash = editHash.Trim().ToLowerInvariant();
+        var hash = SoftLicence.Server.Services.ApprovedBinaryService.NormalizeSha256(editHash);
+        if (hash == null)
+        {
+            Toast.ShowError("Hash SHA-256 invalide : 64 caractères hexadécimaux requis.");
+            return;
+        }
 
         await using var db = await DbFactory.CreateDbContextAsync();
         var entry = await db.ApprovedBinaries.FindAsync(editingId.Value);
         if (entry == null) return;
+
+        if (entry.ApprovedBinaryRegistrationId.HasValue)
+        {
+            Toast.ShowError("Un artefact release enregistré est immuable.");
+            return;
+        }
 
         entry.Hash = hash;
         entry.Source = "admin";
@@ -329,10 +358,16 @@
         var entry = await db.ApprovedBinaries.FindAsync(id);
         if (entry == null) return;
 
+        if (entry.ApprovedBinaryRegistrationId.HasValue)
+        {
+            Toast.ShowError("Un artefact release enregistré ne peut pas être supprimé depuis l'administration manuelle.");
+            return;
+        }
+
         db.ApprovedBinaries.Remove(entry);
         await db.SaveChangesAsync();
 
-        Toast.ShowSuccess("Entrée supprimée — la prochaine réception recréera la baseline automatiquement");
+        Toast.ShowSuccess("Entrée supprimée — la version reste non approuvée jusqu'à un nouvel enregistrement autoritatif");
         await LoadData();
     }
 }

@@ -168,10 +168,32 @@ public sealed class TelemetryCertPinningSummaryResponse
     public int Recoveries { get; set; }
     public int SuppressedFailures { get; set; }
     public int UniqueDevices { get; set; }
+    public int DailyAlertGroups { get; set; }
+    public int DailyNotificationsSent { get; set; }
+    public long DailyOccurrencesTracked { get; set; }
+    public long DailyClientSuppressedTracked { get; set; }
     public List<TelemetryToolCount> EventNames { get; set; } = new();
     public List<TelemetryToolCount> Hosts { get; set; } = new();
     public List<TelemetryToolCount> FailureReasons { get; set; } = new();
     public List<TelemetryToolCount> Versions { get; set; } = new();
+    public List<TelemetryCertPinningDailyAlertSummary> RecentDailyAlerts { get; set; } = new();
+}
+
+public sealed class TelemetryCertPinningDailyAlertSummary
+{
+    public DateOnly ParisDate { get; set; }
+    public string HardwareId { get; set; } = "";
+    public long OccurrenceCount { get; set; }
+    public long ClientSuppressedCount { get; set; }
+    public DateTime FirstSeenUtc { get; set; }
+    public DateTime LastSeenUtc { get; set; }
+    public string? FirstHost { get; set; }
+    public string? LastHost { get; set; }
+    public string? LastVersion { get; set; }
+    public string? LastFailureReason { get; set; }
+    public string? LastCertificateIssuer { get; set; }
+    public bool NotificationAttempted { get; set; }
+    public bool NotificationSent { get; set; }
 }
 
 public sealed class TelemetryActivationFunnelResponse
@@ -514,6 +536,7 @@ public sealed class SecurityBanAuditResponse
     public SecurityBanAuditQuery Query { get; set; } = new();
     public int RecordsMatched { get; set; }
     public int RecordsReturned { get; set; }
+    public List<string> ResolvedHardwareIds { get; set; } = new();
     public List<SecurityBanAuditItem> Bans { get; set; } = new();
 }
 
@@ -526,6 +549,7 @@ public sealed class SecurityBanAuditQuery
     public bool HasEmailFragment { get; set; }
     public bool HasLicenseFragment { get; set; }
     public bool IncludeInactive { get; set; }
+    public bool IncludeSourceEvents { get; set; }
     public int Take { get; set; }
 }
 
@@ -548,6 +572,10 @@ public sealed class SecurityBanAuditItem
     public bool IsWeakComponentCorrelation { get; set; }
     public string? BanCategory { get; set; }
     public string Reason { get; set; } = "";
+    public string? AuditTicketRef { get; set; }
+    public string? AuditSecurityCaseId { get; set; }
+    public string? AuditActor { get; set; }
+    public string? AuditCategory { get; set; }
     public string MatchType { get; set; } = "";
     public bool SourceEventAvailable { get; set; }
     public string SourceEventStatus { get; set; } = "not_checked";
@@ -643,6 +671,35 @@ public sealed class TelemetryRawSampleRecord
     public Dictionary<string, string> Properties { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public string? ErrorType { get; set; }
     public int? DiagnosticScore { get; set; }
+    public TelemetryRawSampleDiagnostic Diagnostic { get; set; } = new();
+}
+
+public sealed class TelemetryRawSampleDiagnostic
+{
+    public string State { get; set; } = "absent";
+    public int? Score { get; set; }
+    public int ResultsTotal { get; set; }
+    public int ResultsReturned { get; set; }
+    public int PortsTotal { get; set; }
+    public int PortsReturned { get; set; }
+    public List<TelemetryRawSampleDiagnosticResult> Results { get; set; } = new();
+    public List<TelemetryRawSampleDiagnosticPort> Ports { get; set; } = new();
+}
+
+public sealed class TelemetryRawSampleDiagnosticResult
+{
+    public string? ModuleName { get; set; }
+    public bool Success { get; set; }
+    public string? Severity { get; set; }
+    public string? Message { get; set; }
+    public bool MessageTruncated { get; set; }
+}
+
+public sealed class TelemetryRawSampleDiagnosticPort
+{
+    public string? Name { get; set; }
+    public int ExternalPort { get; set; }
+    public string? Protocol { get; set; }
 }
 
 public sealed class TelemetryInsightsResponse

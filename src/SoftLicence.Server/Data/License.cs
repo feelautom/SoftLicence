@@ -41,6 +41,10 @@ namespace SoftLicence.Server.Data
 
         public string? PartnerCode { get; set; } // Reseller/wholesale code (ex: AARONLIU-4M0Q)
 
+        public Guid? ProvisioningRequestId { get; set; }
+        public LicenseProvisioningRequest? ProvisioningRequest { get; set; }
+        public int? ProvisioningSequence { get; set; }
+
         public int MaxSeats { get; set; } = 1; // Nombre de postes autorisés
         public ICollection<LicenseSeat> Seats { get; set; } = new List<LicenseSeat>();
         public ICollection<LicenseHistory> History { get; set; } = new List<LicenseHistory>();

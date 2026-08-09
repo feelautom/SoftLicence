@@ -14,6 +14,9 @@
 
 ## 📚 Documentation
 
+- [**Public Documentation Index**](docs-public/README.md): Versioned SDK integration guides and public operational documentation.
+- [**SoftLicence.SDK 1.1.13 Integration Guide**](docs-public/sdk-1.1.13-error-contract-integration.md): Structured errors, backward compatibility, correlation IDs, consumer checklist, and HWID invariants.
+
 - [**Protection Guide**](docs/PROTECTION_GUIDE.md): Step-by-step integration.
 - [**Client Documentation**](docs/CLIENT.md): Technical operation.
 - [**Server Documentation**](docs/SERVER.md): Deployment and API.

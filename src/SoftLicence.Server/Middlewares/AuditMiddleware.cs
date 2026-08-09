@@ -1,11 +1,24 @@
 using Microsoft.EntityFrameworkCore;
 using SoftLicence.Server.Data;
 using System.Diagnostics;
+using System.Text;
+using System.Text.RegularExpressions;
 
 namespace SoftLicence.Server.Middlewares
 {
     public class AuditMiddleware
     {
+        private const int MaximumErrorDetailsBytes = 8 * 1024;
+        private const string TruncationMarker = "\n[TRUNCATED]";
+        private static readonly Regex SensitiveJsonValuePattern = new(
+            "(?i)(\\\"(?:licenseKey|licenseFile|token|secret|password|authorization|capability|subjectRef|email|customerEmail|customerName|hardwareId)\\\"\\s*:\\s*)\\\"(?:\\\\.|[^\\\"])*\\\"",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        private static readonly Regex EmailPattern = new(
+            "(?i)(?<![a-z0-9.!#$%&'*+/=?^_`{|}~-])[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\\.[a-z]{2,}",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        private static readonly Regex BearerPattern = new(
+            "(?i)\\bBearer\\s+[A-Za-z0-9._~+/-]+=*",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
         private readonly RequestDelegate _next;
         private readonly ILogger<AuditMiddleware> _logger;
         private readonly IServiceScopeFactory _scopeFactory;
@@ -19,7 +32,12 @@ namespace SoftLicence.Server.Middlewares
 
         public async Task InvokeAsync(HttpContext context, IDbContextFactory<LicenseDbContext> dbFactory, Services.SecurityService security, Services.GeoIpService geoIp, IConfiguration config, Services.AuditNotifier auditNotifier)
         {
-            var path = context.Request.Path.ToString().ToLower();
+            var path = context.Request.Path.ToString().ToLowerInvariant();
+            var redactSensitivePayload = IsActivationApiPath(path)
+                || IsDistributionS2SPath(path)
+                || IsRuntimeEnrollmentPath(path)
+                || IsTelemetryApiPath(path)
+                || IsTargetedLicenseResolutionPath(path);
 
             // EXCLUSIONS SYSTEME : Blazor, fichiers statiques, et navigation admin (pages UI)
             // On logue uniquement les appels API (/api/*) et les accès suspects, pas le browsing admin
@@ -45,32 +63,16 @@ namespace SoftLicence.Server.Middlewares
             }
 
             // --- DEBUT SECURITE & AUDIT ---
-            
-            // 1. IP (Recherche approfondie anti-spoofing)
-            string clientIp = "Unknown";
-            var forwarded = context.Request.Headers["X-Forwarded-For"].FirstOrDefault();
-            var realIp = context.Request.Headers["X-Real-IP"].FirstOrDefault();
-            
-            if (!string.IsNullOrEmpty(forwarded)) {
-                var parts = forwarded.Split(',');
-                foreach(var p in parts) {
-                    var clean = p.Trim();
-                    if (clean != "127.0.0.1" && clean != "::1") { clientIp = clean; break; }
-                }
-            }
-            if (clientIp == "Unknown" && !string.IsNullOrEmpty(realIp) && realIp != "127.0.0.1") clientIp = realIp;
-            if (clientIp == "Unknown") clientIp = context.Connection.RemoteIpAddress?.ToString() ?? "Unknown";
+
+            // ForwardedHeaders has already accepted only configured trusted proxies.
+            // Never parse raw forwarding headers again here.
+            var clientIp = context.Connection.RemoteIpAddress?.ToString() ?? "Unknown";
 
             // 1. VÉRIFICATION BAN (PRIORITÉ ABSOLUE)
-            // Exceptions : télémétrie et canary ping restent accessibles même pour les IPs bannies
+            // Exception : la télémétrie reste accessible même pour les IPs bannies
             // - Télémétrie : on veut continuer à recevoir les données de nos clients légitimes
-            // - Health ping (/api/health/ping) : c'est l'endpoint que T-IA Connect utilise pour envoyer
-            //   ses canary events, même depuis une machine patchée ou bannie. Le bloquer rendrait
-            //   le serveur aveugle sur l'activité de l'attaquant. Le HealthController gère lui-même
-            //   la logique "already banned" (incrément du compteur de répétition, sans re-ban).
             bool isTelemetryPath = path.StartsWith("/api/telemetry");
-            bool isHealthPingPath = path == "/api/health/ping";
-            if (!isTelemetryPath && !isHealthPingPath && await security.IsBannedAsync(clientIp))
+            if (!isTelemetryPath && await security.IsBannedAsync(clientIp))
             {
                 context.Response.StatusCode = 403;
                 await context.Response.WriteAsync("Access Denied (Banned)");
@@ -86,11 +88,11 @@ namespace SoftLicence.Server.Middlewares
             {
                 // Délai progressif : 5s de base + 1s par tranche de 10 points au dessus de 100
                 int delaySec = 5 + ((currentScore - 100) / 10);
-                await Task.Delay(TimeSpan.FromSeconds(Math.Min(delaySec, 15))); 
+                await Task.Delay(TimeSpan.FromSeconds(Math.Min(delaySec, 15)));
             }
 
             // 2. Détection proactive de scan (Dictionnaire étendu)
-            var suspiciousPatterns = new[] { 
+            var suspiciousPatterns = new[] {
                 // Scripts & Frameworks (qu'on n'utilise pas)
                 ".php", ".aspx", ".asp", ".jsp", ".cgi", "wordpress", "wp-admin", "wp-content", "wp-includes", "wp-CHANGE_ME_LOGIN_PATH", "xmlrpc",
                 // Configuration & Secrets
@@ -100,20 +102,20 @@ namespace SoftLicence.Server.Middlewares
                 // Backdoors & Exploits connus
                 "shell", "cmd", "eval", "invoker", "wlwmanifest", "autodiscover", "well-known"
             };
-            
+
             bool isScan = suspiciousPatterns.Any(p => path.Contains(p));
 
             // Si c'est un scan et que l'IP n'est PAS whitelisted, on bloque
             if (isScan && !security.IsWhitelisted(clientIp))
             {
                 context.Response.StatusCode = 404;
-                
+
                 // TOLÉRANCE ZÉRO pour les multirécidivistes (5+ bans) : Ban instantané
                 // Sinon, punition géométrique : Points = Base(20) * (BanCount * 2)
                 int scanPts = banCount >= 5 ? 200 : (20 * Math.Max(1, banCount * 2));
-                
+
                 await security.ReportThreatAsync(clientIp, scanPts, $"Proactive scan detection: {path} (Ban history: x{banCount})");
-                
+
                 // GeoIP : Capturé AVANT le Task.Run car le service est Scoped
                 var geo = await geoIp.GetGeoInfoAsync(clientIp);
                 var userAgent = context.Request.Headers["User-Agent"].ToString();
@@ -122,7 +124,10 @@ namespace SoftLicence.Server.Middlewares
 
                 _ = Task.Run(async () => {
                     try {
-                        using var db = await dbFactory.CreateDbContextAsync();
+                        using var scope = _scopeFactory.CreateScope();
+                        var scopedDbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<LicenseDbContext>>();
+                        var scopedNotifier = scope.ServiceProvider.GetRequiredService<Services.AuditNotifier>();
+                        using var db = await scopedDbFactory.CreateDbContextAsync();
                         db.AccessLogs.Add(new AccessLog {
                             Timestamp = DateTime.UtcNow, ClientIp = clientIp, Method = method,
                             Path = path, StatusCode = 404, ResultStatus = "BOT_SCAN", AppName = "SECURITY_SHIELD",
@@ -130,11 +135,19 @@ namespace SoftLicence.Server.Middlewares
                             CountryCode = geo.CountryCode, Isp = geo.Isp, UserAgent = userAgent
                         });
                         await db.SaveChangesAsync();
-                        auditNotifier.NotifyNewLog();
+                        scopedNotifier.NotifyNewLog();
                     } catch { /* Background logging failure */ }
                 });
 
                 await context.Response.WriteAsync("Not Found");
+                return;
+            }
+
+            // Preserve admission controls above, then avoid duplicating authenticated canary
+            // IP, headers, body, HWID, user-agent or signed ACK in generic AccessLogs.
+            if (IsCanaryEvidencePath(path))
+            {
+                await _next(context);
                 return;
             }
 
@@ -146,7 +159,11 @@ namespace SoftLicence.Server.Middlewares
             // --- CAPTURE DU CORPS DE LA REQUÊTE ---
             string requestBodyContent = "";
             try {
-                if (context.Request.ContentLength > 0)
+                if (redactSensitivePayload)
+                {
+                    requestBodyContent = "[REDACTED]";
+                }
+                else if (context.Request.ContentLength > 0)
                 {
                     context.Request.Body.Position = 0;
                     using var reader = new StreamReader(context.Request.Body, leaveOpen: true);
@@ -162,10 +179,12 @@ namespace SoftLicence.Server.Middlewares
 
             var sw = Stopwatch.StartNew();
             var originalBodyStream = context.Response.Body;
-            using var responseBody = new MemoryStream();
-            context.Response.Body = responseBody;
+            using var responseCapture = new BoundedResponseCaptureStream(
+                originalBodyStream,
+                MaximumErrorDetailsBytes + Encoding.UTF8.GetMaxByteCount(1));
+            context.Response.Body = responseCapture;
             var requestAbortedByClient = false;
-            
+
             try
             {
                 await _next(context);
@@ -185,22 +204,10 @@ namespace SoftLicence.Server.Middlewares
                 }
                 else
                 {
-                
-                // --- CAPTURE DU MESSAGE DE RÉPONSE (RECU/ENVOYÉ) ---
-                string responseContent = "";
-                try {
-                    responseBody.Seek(0, SeekOrigin.Begin);
-                    responseContent = await new StreamReader(responseBody).ReadToEndAsync();
-                    responseBody.Seek(0, SeekOrigin.Begin);
-                } catch { /* Ignore capture failure */ }
-
-                // Restauration du stream original pour le client
-                responseBody.Seek(0, SeekOrigin.Begin);
-                await responseBody.CopyToAsync(originalBodyStream);
                 context.Response.Body = originalBodyStream;
 
                 // --- CAPTURE DES DONNÉES ---
-                
+
                 // 1. IP (Recherche approfondie anti-spoofing) - Déjà capturée en début de méthode
                 // var remoteIp = context.Connection.RemoteIpAddress?.ToString(); // Inutilisé
 
@@ -210,13 +217,33 @@ namespace SoftLicence.Server.Middlewares
                 var statusCode = context.Response.StatusCode;
                 var duration = sw.ElapsedMilliseconds;
                 var userAgent = context.Request.Headers["User-Agent"].ToString();
+                var responseSizeBytes = responseCapture.BytesWritten;
+                string? responseContent = null;
+                if (statusCode < 200 || statusCode >= 300)
+                {
+                    responseContent = SanitizeErrorDetails(
+                        responseCapture.GetCapturedText(),
+                        redactSensitivePayload,
+                        responseCapture.IsCaptureTruncated);
+                }
 
                 // 3. Infos Métier (Items)
                 var appName = context.Items[LogKeys.AppName]?.ToString() ?? "";
                 var licenseKey = context.Items[LogKeys.LicenseKey]?.ToString() ?? "";
                 var hardwareId = context.Items[LogKeys.HardwareId]?.ToString() ?? "";
+                var hardwareIdForSecurityChecks = hardwareId;
                 var endpoint = context.Items[LogKeys.Endpoint]?.ToString() ?? "HTTP_REQUEST";
                 var resultStatusOverride = context.Items[LogKeys.ResultStatusOverride]?.ToString();
+
+                // Distribution v2 requests contain a short-lived bearer entitlement and raw
+                // installation evidence. Keep only HTTP metadata for these internal routes,
+                // even if a downstream component accidentally populates structured log items.
+                if (IsDistributionS2SPath(path) || IsRuntimeEnrollmentPath(path) || IsTelemetryApiPath(path)
+                    || IsTargetedLicenseResolutionPath(path))
+                {
+                    licenseKey = "";
+                    hardwareId = "";
+                }
 
                 // Auth check (nécessaire pour le tri PORTAL_ENTRY vs ADMIN_PORTAL)
                 var isAuthenticated = context.User.Identity?.IsAuthenticated == true;
@@ -257,6 +284,7 @@ namespace SoftLicence.Server.Middlewares
                         {
                             var scopedSecurity = scope.ServiceProvider.GetRequiredService<Services.SecurityService>();
                             var scopedDbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<LicenseDbContext>>();
+                            var scopedNotifier = scope.ServiceProvider.GetRequiredService<Services.AuditNotifier>();
 
                             // Scoring de menace (uniquement pour les visiteurs non-authentifiés)
                             if (!isAuthenticated && !scopedSecurity.IsWhitelisted(clientIp))
@@ -284,8 +312,8 @@ namespace SoftLicence.Server.Middlewares
                                             await scopedSecurity.ReportThreatAsync(clientIp, basePts * multiplier, $"404 on {requestPath} (Multiplier: x{multiplier})");
                                         }
                                     }
-                                    
-                                    if (statusCode == 401 || statusCode == 403) 
+
+                                    if (statusCode == 401 || statusCode == 403)
                                     {
                                         await scopedSecurity.ReportThreatAsync(clientIp, 50 * multiplier, $"Auth failure on {requestPath} (Multiplier: x{multiplier})");
                                     }
@@ -293,9 +321,18 @@ namespace SoftLicence.Server.Middlewares
                             }
 
                             // ZOMBIE DETECTION (Anti-Fraude) - Immunité pour la whitelist
-                            if (!string.IsNullOrEmpty(hardwareId) && hardwareId != "Unknown" && !scopedSecurity.IsWhitelisted(clientIp))
+                            if (!string.IsNullOrEmpty(hardwareIdForSecurityChecks)
+                                && hardwareIdForSecurityChecks != "Unknown"
+                                && !scopedSecurity.IsWhitelisted(clientIp))
                             {
-                                await scopedSecurity.CheckForZombieAsync(hardwareId, clientIp);
+                                var effectiveResultStatus = string.IsNullOrWhiteSpace(resultStatusOverride)
+                                    ? GetStatusLabel(statusCode)
+                                    : resultStatusOverride;
+                                await scopedSecurity.CheckForZombieAsync(
+                                    hardwareIdForSecurityChecks,
+                                    clientIp,
+                                    endpoint,
+                                    effectiveResultStatus);
                             }
 
                             using (var db = await scopedDbFactory.CreateDbContextAsync())
@@ -314,6 +351,7 @@ namespace SoftLicence.Server.Middlewares
                                         : resultStatusOverride,
                                     RequestBody = requestBodyContent,
                                     ErrorDetails = responseContent,
+                                    ResponseSizeBytes = responseSizeBytes,
                                     UserAgent = userAgent,
                                     CountryCode = geo.CountryCode,
                                     Isp = geo.Isp,
@@ -327,7 +365,7 @@ namespace SoftLicence.Server.Middlewares
 
                                 db.AccessLogs.Add(log);
                                 await db.SaveChangesAsync();
-                                auditNotifier.NotifyNewLog();
+                                scopedNotifier.NotifyNewLog();
                             }
                         }
                     }
@@ -351,6 +389,169 @@ namespace SoftLicence.Server.Middlewares
             500 => "INTERNAL_ERROR",
             _ => $"HTTP_{code}"
         };
+
+        private static string SanitizeErrorDetails(string body, bool forceRedaction) =>
+            SanitizeErrorDetails(body, forceRedaction, captureTruncated: false);
+
+        private static string SanitizeErrorDetails(string body, bool forceRedaction, bool captureTruncated)
+        {
+            if (forceRedaction || captureTruncated || string.IsNullOrWhiteSpace(body))
+                return "[REDACTED]";
+
+            try
+            {
+                using var document = System.Text.Json.JsonDocument.Parse(body);
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                return "[REDACTED]";
+            }
+
+            var sanitized = SensitiveJsonValuePattern.Replace(body, "$1\"[REDACTED]\"");
+            sanitized = BearerPattern.Replace(sanitized, "Bearer [REDACTED]");
+            sanitized = EmailPattern.Replace(sanitized, "[REDACTED_EMAIL]");
+            return TruncateUtf8(sanitized, MaximumErrorDetailsBytes);
+        }
+
+        private static string TruncateUtf8(string value, int maximumBytes)
+        {
+            if (Encoding.UTF8.GetByteCount(value) <= maximumBytes)
+                return value;
+
+            var markerBytes = Encoding.UTF8.GetByteCount(TruncationMarker);
+            var availableBytes = maximumBytes - markerBytes;
+            var builder = new StringBuilder(Math.Min(value.Length, availableBytes));
+            var byteCount = 0;
+            foreach (var rune in value.EnumerateRunes())
+            {
+                var runeBytes = rune.Utf8SequenceLength;
+                if (byteCount + runeBytes > availableBytes)
+                    break;
+                builder.Append(rune.ToString());
+                byteCount += runeBytes;
+            }
+            return builder.Append(TruncationMarker).ToString();
+        }
+
+        private sealed class BoundedResponseCaptureStream : Stream
+        {
+            private readonly Stream _inner;
+            private readonly MemoryStream _capture;
+            private readonly int _captureLimit;
+
+            public BoundedResponseCaptureStream(Stream inner, int captureLimit)
+            {
+                _inner = inner;
+                _captureLimit = captureLimit;
+                _capture = new MemoryStream(captureLimit);
+            }
+
+            public long BytesWritten { get; private set; }
+            public bool IsCaptureTruncated { get; private set; }
+            public override bool CanRead => false;
+            public override bool CanSeek => false;
+            public override bool CanWrite => _inner.CanWrite;
+            public override long Length => BytesWritten;
+            public override long Position { get => BytesWritten; set => throw new NotSupportedException(); }
+            public override void Flush() => _inner.Flush();
+            public override Task FlushAsync(CancellationToken cancellationToken) => _inner.FlushAsync(cancellationToken);
+            public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+
+            public override void Write(byte[] buffer, int offset, int count)
+            {
+                Capture(buffer.AsSpan(offset, count));
+                _inner.Write(buffer, offset, count);
+                BytesWritten += count;
+            }
+
+            public override async Task WriteAsync(
+                byte[] buffer,
+                int offset,
+                int count,
+                CancellationToken cancellationToken)
+            {
+                Capture(buffer.AsSpan(offset, count));
+                await _inner.WriteAsync(buffer.AsMemory(offset, count), cancellationToken);
+                BytesWritten += count;
+            }
+
+            public override async ValueTask WriteAsync(
+                ReadOnlyMemory<byte> buffer,
+                CancellationToken cancellationToken = default)
+            {
+                Capture(buffer.Span);
+                await _inner.WriteAsync(buffer, cancellationToken);
+                BytesWritten += buffer.Length;
+            }
+
+            public string GetCapturedText() => Encoding.UTF8.GetString(_capture.GetBuffer(), 0, checked((int)_capture.Length));
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing)
+                    _capture.Dispose();
+                base.Dispose(disposing);
+            }
+
+            private void Capture(ReadOnlySpan<byte> buffer)
+            {
+                var remaining = _captureLimit - checked((int)_capture.Length);
+                if (remaining <= 0)
+                {
+                    if (!buffer.IsEmpty) IsCaptureTruncated = true;
+                    return;
+                }
+                var captured = Math.Min(remaining, buffer.Length);
+                _capture.Write(buffer[..captured]);
+                if (captured < buffer.Length) IsCaptureTruncated = true;
+            }
+        }
+
+        private static bool IsActivationApiPath(string path)
+        {
+            const string activationPath = "/api/activation";
+            return path.Equals(activationPath, StringComparison.OrdinalIgnoreCase)
+                || path.StartsWith(activationPath + "/", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsTargetedLicenseResolutionPath(string path)
+        {
+            var normalizedPath = path.EndsWith("/", StringComparison.Ordinal) ? path[..^1] : path;
+            return normalizedPath.Equals("/api/admin/licenses/resolve", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsDistributionS2SPath(string path)
+        {
+            var normalizedPath = path.EndsWith("/", StringComparison.Ordinal) ? path[..^1] : path;
+            return normalizedPath.Equals("/api/internal/v1/distribution-entitlements/issue", StringComparison.OrdinalIgnoreCase)
+                || normalizedPath.Equals("/api/internal/v1/distribution-installation-bindings/finalize", StringComparison.OrdinalIgnoreCase)
+                || normalizedPath.Equals("/api/internal/v1/distribution-installation-bindings/invalidate", StringComparison.OrdinalIgnoreCase)
+                || normalizedPath.Equals("/api/internal/v1/distribution-license-bootstraps/issue", StringComparison.OrdinalIgnoreCase)
+                || normalizedPath.Equals("/api/internal/v1/distribution-license-bootstraps/remint", StringComparison.OrdinalIgnoreCase)
+                || normalizedPath.Equals("/api/internal/v1/distribution-license-bootstraps/recover", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsRuntimeEnrollmentPath(string path)
+        {
+            return path.Equals("/api/internal/v1/runtime-enrollments", StringComparison.OrdinalIgnoreCase)
+                || path.StartsWith("/api/internal/v1/runtime-enrollments/", StringComparison.OrdinalIgnoreCase)
+                || path.Equals("/api/v1/runtime-enrollments", StringComparison.OrdinalIgnoreCase)
+                || path.StartsWith("/api/v1/runtime-enrollments/", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsTelemetryApiPath(string path)
+        {
+            const string telemetryPath = "/api/telemetry";
+            return path.Equals(telemetryPath, StringComparison.OrdinalIgnoreCase)
+                || path.StartsWith(telemetryPath + "/", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsCanaryEvidencePath(string path)
+        {
+            return path.Equals("/api/health/ping", StringComparison.Ordinal);
+        }
 
         private static bool IsClientAbort(BadHttpRequestException ex)
         {

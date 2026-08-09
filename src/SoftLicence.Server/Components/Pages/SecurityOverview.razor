@@ -97,6 +97,13 @@
                     <option value="active">Actif / Ban en cours</option>
                     <option value="inactive">Levé / Expiré</option>
                 </select>
+                <select class="form-select form-select-sm" style="width:125px" @bind="filterSeverity" @bind:after="ApplyFilter">
+                    <option value="">Toutes sévérités</option>
+                    <option value="3">Critique</option>
+                    <option value="2">Avertissement</option>
+                    <option value="1">Information</option>
+                </select>
+                <input class="form-control form-control-sm" style="width:130px" placeholder="Version..." @bind="filterVersion" @bind:after="ApplyFilter" />
                 <span class="text-muted small ms-auto">@filtered.Count événement(s)</span>
             </div>
         </div>
@@ -123,6 +130,7 @@
                         <thead>
                             <tr class="text-muted small border-secondary">
                                 <th>Date</th>
+                                <th>Détections</th>
                                 <th>Type</th>
                                 <th>HWID</th>
                                 <th>Produit</th>
@@ -137,6 +145,15 @@
                             {
                                 <tr>
                                     <td class="small text-muted text-nowrap">@TZ.ToLocal(ev.EventTime).ToString("dd/MM HH:mm")</td>
+                                    <td class="small text-center">
+                                        <span class="badge bg-secondary">@ev.OccurrenceCount</span>
+                                        @if (ev.FirstSeenUtc != ev.EventTime)
+                                        {
+                                            <div class="text-muted" style="font-size:0.65rem" title="Première détection UTC">
+                                                depuis @TZ.ToLocal(ev.FirstSeenUtc).ToString("dd/MM HH:mm")
+                                            </div>
+                                        }
+                                    </td>
                                     <td>@RenderTypeBadge(ev)</td>
                                     <td>
                                         @if (!string.IsNullOrEmpty(ev.HardwareId))
@@ -154,9 +171,16 @@
                                         }
                                         else { <span class="text-muted small">—</span> }
                                     </td>
-                                    <td class="small" style="max-width:300px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis" title="@ev.Summary">
+                                    <td class="small" style="max-width:360px" title="@($"{ev.Summary}\n{ev.Detail}")">
                                         @ev.Summary
-                                        @if (!string.IsNullOrEmpty(ev.Detail))
+                                        @if (ev.EventType == "BinaryPatch" && ev.ComponentCount > 0 && !string.IsNullOrEmpty(ev.Detail))
+                                        {
+                                            <details class="text-muted" style="font-size:0.7rem">
+                                                <summary>Voir @ev.ComponentCount empreinte(s)</summary>
+                                                <code class="text-break" style="white-space:normal">@ev.Detail</code>
+                                            </details>
+                                        }
+                                        else if (!string.IsNullOrEmpty(ev.Detail))
                                         {
                                             <br/><span class="text-muted" style="font-size:0.7rem">@ev.Detail</span>
                                         }
@@ -213,6 +237,8 @@
     private string filterProduct = "";
     private string filterText = "";
     private string filterStatus = "";
+    private string filterSeverity = "";
+    private string filterVersion = "";
 
     private record SecurityEvent(
         string EventType,
@@ -226,7 +252,11 @@
         int Severity,
         bool IsActive,
         Guid SourceId,
-        Guid? LicenseId
+        Guid? LicenseId,
+        DateTime FirstSeenUtc,
+        int OccurrenceCount,
+        string? Version,
+        int ComponentCount
     );
 
     protected override async Task OnInitializedAsync()
@@ -292,7 +322,60 @@
                 Severity: c.Severity,
                 IsActive: true,
                 SourceId: c.Id,
-                LicenseId: seatsByHwid.TryGetValue(c.HardwareId, out var lid) ? lid : null
+                LicenseId: seatsByHwid.TryGetValue(c.HardwareId, out var lid) ? lid : null,
+                FirstSeenUtc: DateTime.SpecifyKind(c.ReceivedAt, DateTimeKind.Utc),
+                OccurrenceCount: c.RepeatCount + 1,
+                Version: c.AppVersion,
+                ComponentCount: 0
+            ));
+        }
+
+        // -- Server-side aggregated incidents (BinaryPatched and future families)
+        var incidents = await db.SecurityIncidents.AsNoTracking()
+            .Include(i => i.Product)
+            .Include(i => i.Evidence)
+            .Where(i => i.LastSeenUtc >= since)
+            .OrderByDescending(i => i.LastSeenUtc)
+            .Take(1000)
+            .ToListAsync();
+
+        var incidentHwids = incidents.Select(i => i.HardwareId).Distinct().ToList();
+        var incidentSeatsByHwid = await GetLicenseIdsByHwidAsync(db, incidentHwids);
+        var normalizedIncidentHwids = incidentHwids.Select(h => h.ToUpperInvariant()).ToList();
+        var activelyBannedIncidentHwids = normalizedIncidentHwids.Count == 0
+            ? new HashSet<string>(StringComparer.Ordinal)
+            : (await db.BannedHardwareIds.AsNoTracking()
+                .Where(b => b.IsActive
+                    && (b.ExpiresAt == null || b.ExpiresAt > DateTime.UtcNow)
+                    && normalizedIncidentHwids.Contains(b.HardwareId.ToUpper()))
+                .Select(b => b.HardwareId)
+                .ToListAsync())
+                .Select(h => h.ToUpperInvariant())
+                .ToHashSet(StringComparer.Ordinal);
+
+        foreach (var incident in incidents)
+        {
+            var hashDetails = string.Join(", ", incident.Evidence
+                .OrderBy(e => e.ComponentType)
+                .ThenBy(e => e.ComponentHash)
+                .Select(e => $"{e.ComponentType}:{e.ComponentHash}"));
+            events.Add(new SecurityEvent(
+                EventType: "BinaryPatch",
+                EventTime: DateTime.SpecifyKind(incident.LastSeenUtc, DateTimeKind.Utc),
+                HardwareId: incident.HardwareId,
+                ProductName: incident.Product?.Name,
+                ProductId: incident.ProductId,
+                Summary: $"{incident.Family} — {incident.OccurrenceCount} détection(s), {incident.Evidence.Count} empreinte(s)",
+                Detail: hashDetails,
+                ClientIp: incident.ClientIp,
+                Severity: incident.Severity,
+                IsActive: activelyBannedIncidentHwids.Contains(incident.HardwareId.ToUpperInvariant()),
+                SourceId: incident.Id,
+                LicenseId: incidentSeatsByHwid.TryGetValue(incident.HardwareId, out var lid) ? lid : null,
+                FirstSeenUtc: DateTime.SpecifyKind(incident.FirstSeenUtc, DateTimeKind.Utc),
+                OccurrenceCount: incident.OccurrenceCount,
+                Version: incident.Version,
+                ComponentCount: incident.Evidence.Count
             ));
         }
 
@@ -303,6 +386,10 @@
             .OrderByDescending(b => b.BannedAt)
             .Take(500)
             .ToListAsync();
+
+        hwidBans = hwidBans
+            .Where(b => !b.Reason.StartsWith("BinaryPatched:", StringComparison.OrdinalIgnoreCase))
+            .ToList();
 
         var banHwids = hwidBans.Select(b => b.HardwareId).Distinct().ToList();
         var banSeatsByHwid = await GetLicenseIdsByHwidAsync(db, banHwids);
@@ -322,7 +409,11 @@
                 Severity: 3,
                 IsActive: b.IsActive,
                 SourceId: b.Id,
-                LicenseId: banSeatsByHwid.TryGetValue(b.HardwareId, out var lid) ? lid : null
+                LicenseId: banSeatsByHwid.TryGetValue(b.HardwareId, out var lid) ? lid : null,
+                FirstSeenUtc: DateTime.SpecifyKind(b.BannedAt, DateTimeKind.Utc),
+                OccurrenceCount: 1,
+                Version: null,
+                ComponentCount: 0
             ));
         }
 
@@ -333,6 +424,10 @@
             .OrderByDescending(b => b.BannedAt)
             .Take(500)
             .ToListAsync();
+
+        compBans = compBans
+            .Where(b => !b.Reason.StartsWith("BinaryPatched:", StringComparison.OrdinalIgnoreCase))
+            .ToList();
 
         foreach (var b in compBans)
         {
@@ -348,7 +443,11 @@
                 Severity: 2,
                 IsActive: b.IsActive,
                 SourceId: b.Id,
-                LicenseId: null
+                LicenseId: null,
+                FirstSeenUtc: DateTime.SpecifyKind(b.BannedAt, DateTimeKind.Utc),
+                OccurrenceCount: 1,
+                Version: null,
+                ComponentCount: 1
             ));
         }
 
@@ -382,6 +481,15 @@
         else if (filterStatus == "inactive")
             q = q.Where(e => !e.IsActive);
 
+        if (int.TryParse(filterSeverity, out var severity))
+            q = q.Where(e => e.Severity == severity);
+
+        if (!string.IsNullOrWhiteSpace(filterVersion))
+        {
+            var version = filterVersion.Trim();
+            q = q.Where(e => e.Version != null && e.Version.Contains(version, StringComparison.OrdinalIgnoreCase));
+        }
+
         filtered = q.Take(500).ToList();
     }
 
@@ -393,13 +501,14 @@
 
     private static async Task<Dictionary<string, Guid>> GetLicenseIdsByHwidAsync(LicenseDbContext db, List<string> hwids)
     {
-        if (hwids.Count == 0) return new();
+        if (hwids.Count == 0) return new(StringComparer.OrdinalIgnoreCase);
+        var normalizedHwids = hwids.Select(h => h.ToUpperInvariant()).Distinct().ToList();
         var seats = await db.LicenseSeats.AsNoTracking()
-            .Where(s => hwids.Contains(s.HardwareId) && s.IsActive)
+            .Where(s => normalizedHwids.Contains(s.HardwareId.ToUpper()) && s.IsActive)
             .Select(s => new { s.HardwareId, s.LicenseId })
             .ToListAsync();
         return seats.GroupBy(s => s.HardwareId)
-            .ToDictionary(g => g.Key, g => g.First().LicenseId);
+            .ToDictionary(g => g.Key, g => g.First().LicenseId, StringComparer.OrdinalIgnoreCase);
     }
 
     private async Task UnbanHwid(Guid banId)

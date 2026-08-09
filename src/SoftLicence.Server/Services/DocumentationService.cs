@@ -1610,6 +1610,7 @@ public class DocumentationService
         | `Security.ZombieDetected` | Zombie license detected (>5 IPs/24h) |
         | `Security.HwidReuseDetected` | Same hardware ID reused across multiple accounts/licenses |
         | `Security.AuthFailure` | Authentication failure on admin endpoints |
+        | `Security.EvidenceObserved` | Non-authoritative public ApprovedBinaries evidence observed; no automatic ApprovedBinaries sanction |
         | `License.Created` | A new license has been created |
         | `License.Activated` | A license has been activated on a device |
         | `System.Startup` | Server has started |
@@ -1702,7 +1703,7 @@ public class DocumentationService
             "CleanupEnabled": false,
             "CleanupIntervalHours": 24,
             "AuditLogsDays": 30,
-            "TelemetryDays": 90
+            "TelemetryDays": 0
           },
           "BackupSettings": {
             "Enabled": false,
@@ -1787,7 +1788,7 @@ public class DocumentationService
         | Data | Default Retention | Config Key |
         |------|-------------------|------------|
         | Audit logs (AccessLog) | 30 days | `RetentionSettings:AuditLogsDays` |
-        | Telemetry records | 90 days | `RetentionSettings:TelemetryDays` |
+        | Telemetry records | Unlimited (`0`) | `RetentionSettings:TelemetryDays` |
 
         Cleanup runs as a background `HostedService`:
         - Initial delay: 30 seconds after startup

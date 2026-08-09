@@ -27,6 +27,19 @@ public sealed class CustomerLicenseTimelineAnalyticsServiceTests
     }
 
     [Fact]
+    public void Resolve_WhenExplicitRangeExceedsThirtyDays_ReturnsActionableValidationError()
+    {
+        var exception = Assert.Throws<ArgumentException>(() => TelemetryAnalyticsPeriod.Resolve(
+            days: 30,
+            date: null,
+            fromUtc: "2026-05-11T00:00:00Z",
+            toUtc: "2026-06-20T00:00:00Z"));
+
+        Assert.Equal("Explicit telemetry windows are limited to 30 days.", exception.Message);
+        Assert.Equal(30, TelemetryAnalyticsPeriod.MaxDays);
+    }
+
+    [Fact]
     public async Task GetTimelineForProductIdAsync_ByEmail_ReturnsGenericMultiHardwareTimelineAndServerUnlinkVerdict()
     {
         var productId = await SeedGenericMultiHardwareCaseAsync();

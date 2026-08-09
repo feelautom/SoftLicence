@@ -49,6 +49,24 @@ public sealed class TelemetryCertPinningAnalyticsServiceTests
             AddEvent(db, productId, "HW-B", "2.1.900", "Mcp_ToolCall",
                 """{"Tool":"list_blocks"}""");
 
+            db.TelemetryCertPinningDailyAlerts.Add(new TelemetryCertPinningDailyAlert
+            {
+                ProductId = productId,
+                HardwareId = "HW-A",
+                AlertType = CertPinningDailyAlertService.AlertType,
+                ParisDate = DateOnly.FromDateTime(DateTime.UtcNow),
+                OccurrenceCount = 4,
+                ClientSuppressedCount = 9,
+                FirstSeenUtc = DateTime.UtcNow.AddHours(-2),
+                LastSeenUtc = DateTime.UtcNow,
+                FirstHost = "api.t-ia-connect.com",
+                LastHost = "softlicence.EXAMPLE.COM",
+                LastVersion = "2.1.857",
+                LastFailureReason = "PinMismatch",
+                LastCertificateIssuer = "CN=Enterprise Forward Trust",
+                NotificationSentAtUtc = DateTime.UtcNow.AddHours(-2)
+            });
+
             await db.SaveChangesAsync();
         }
 
@@ -64,6 +82,17 @@ public sealed class TelemetryCertPinningAnalyticsServiceTests
         Assert.Equal(1, summary.Recoveries);
         Assert.Equal(3, summary.SuppressedFailures);
         Assert.Equal(2, summary.UniqueDevices);
+        Assert.Equal(1, summary.DailyAlertGroups);
+        Assert.Equal(1, summary.DailyNotificationsSent);
+        Assert.Equal(4, summary.DailyOccurrencesTracked);
+        Assert.Equal(9, summary.DailyClientSuppressedTracked);
+        var daily = Assert.Single(summary.RecentDailyAlerts);
+        Assert.Equal("HW-A", daily.HardwareId);
+        Assert.Equal("softlicence.EXAMPLE.COM", daily.LastHost);
+        Assert.Equal("PinMismatch", daily.LastFailureReason);
+        Assert.Equal("CN=Enterprise Forward Trust", daily.LastCertificateIssuer);
+        Assert.True(daily.NotificationAttempted);
+        Assert.True(daily.NotificationSent);
         Assert.Contains(summary.EventNames, e => e.Name == "CertPinningFailed" && e.Count == 2);
         Assert.Contains(summary.Hosts, h => h.Name == "api.t-ia-connect.com" && h.Count == 3);
         Assert.Contains(summary.FailureReasons, r => r.Name == "PinMismatch" && r.Count == 2);

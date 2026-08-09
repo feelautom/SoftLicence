@@ -27,6 +27,7 @@
     <ProjectReference Include="..\..\src\SoftLicence.SDK\SoftLicence.SDK.csproj" />
     <ProjectReference Include="..\..\src\SoftLicence.Server\SoftLicence.Server.csproj" />
     <ProjectReference Include="..\..\src\SoftLicence.Mcp\SoftLicence.Mcp.csproj" />
+    <ProjectReference Include="..\Compatibility\BackupProcessHelper\BackupProcessHelper.csproj" />
   </ItemGroup>
 
 </Project>

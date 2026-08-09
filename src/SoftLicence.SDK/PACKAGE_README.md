@@ -4,6 +4,16 @@ The official SDK for integrating **SoftLicence** protection into your .NET appli
 
 SoftLicence provides an industrial-grade licensing solution using RSA-4096 cryptography and hardware fingerprinting (HWID).
 
+## Structured server errors in SDK 1.1.13
+
+Canonical integration guide: `docs-public/sdk-1.1.13-error-contract-integration.md` in the SoftLicence repository.
+
+Activation and trial failures now prefer the server's canonical `X-SoftLicence-Error-Code` value and expose its opaque support correlation through `ActivationResult.CorrelationId`. Unknown structured values fail closed as `ServerError`; localized text parsing is used only with legacy servers that do not send the structured code header. `ActivationResult.UsedLegacyErrorFallback` can be measured without logging response bodies.
+
+This release does not change HWID authority: legacy and V2 values continue to be sent together, and V2 remains observation-only.
+
+Structured JSON responses keep the deprecated `errorMessage` property as an alias of the canonical `message` property for contract-version-1 compatibility. Applications embedding the SDK DLL must update both their package reference and embedded resource path when adopting 1.1.13.
+
 ## 🚀 Key Features
 
 - **RSA-4096 Signing**: Ensure your license files are tamper-proof.

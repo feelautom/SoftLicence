@@ -91,7 +91,7 @@ public class SoftLicenceClientTests
         Assert.True(root.GetProperty("HardwareIdV2Differs").GetBoolean());
         Assert.Equal("legacy-wmi-first-disk", root.GetProperty("HardwareIdAlgorithm").GetString());
         Assert.Equal("v2-wmi-disk-index-0", root.GetProperty("HardwareIdV2Algorithm").GetString());
-        Assert.Equal("1.1.11", root.GetProperty("SdkVersion").GetString());
+        Assert.Equal("1.1.13", root.GetProperty("SdkVersion").GetString());
     }
 
     [Fact]
@@ -109,6 +109,93 @@ public class SoftLicenceClientTests
         Assert.False(result.Success);
         Assert.NotEqual(ActivationErrorCode.None, result.ErrorCode);
         Assert.NotNull(result.ErrorMessage);
+        Assert.True(result.UsedLegacyErrorFallback);
+    }
+
+    [Fact]
+    public async Task ActivateAsync_ShouldMapStructuredCodeExactly_RegardlessOfLocalizedMessage()
+    {
+        var handler = new MockHttpMessageHandler(_ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                Content = new StringContent("{\"message\":\"Cette traduction ne contient aucun mot-clé historique.\"}", Encoding.UTF8, "application/json")
+            };
+            response.Headers.Add("X-SoftLicence-Error-Code", "LICENSE_EXPIRED");
+            response.Headers.Add("X-SoftLicence-Correlation-Id", "corr-safe-123");
+            return response;
+        });
+
+        var result = await CreateClient(handler).ActivateAsync("KEY-123", "TestApp");
+
+        Assert.Equal(ActivationErrorCode.LicenseExpired, result.ErrorCode);
+        Assert.Equal("LICENSE_EXPIRED", result.ServerErrorCode);
+        Assert.Equal("corr-safe-123", result.CorrelationId);
+        Assert.Equal("Cette traduction ne contient aucun mot-clé historique.", result.ErrorMessage);
+        Assert.False(result.UsedLegacyErrorFallback);
+    }
+
+    [Theory]
+    [InlineData("license_expired")]
+    [InlineData("UNKNOWN_FUTURE_CODE")]
+    public async Task ActivateAsync_ShouldFailClosed_WhenStructuredCodeIsNotCanonical(string serverCode)
+    {
+        var handler = new MockHttpMessageHandler(_ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                Content = new StringContent("expired", Encoding.UTF8, "text/plain")
+            };
+            response.Headers.Add("X-SoftLicence-Error-Code", serverCode);
+            return response;
+        });
+
+        var result = await CreateClient(handler).ActivateAsync("KEY-123", "TestApp");
+
+        Assert.Equal(ActivationErrorCode.ServerError, result.ErrorCode);
+        Assert.Equal(serverCode, result.ServerErrorCode);
+        Assert.False(result.UsedLegacyErrorFallback);
+    }
+
+    [Fact]
+    public async Task ActivateAsync_ShouldFailClosed_WhenStructuredCodeHeaderIsDuplicated()
+    {
+        var handler = new MockHttpMessageHandler(_ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                Content = new StringContent("expired", Encoding.UTF8, "text/plain")
+            };
+            response.Headers.TryAddWithoutValidation("X-SoftLicence-Error-Code", new[] { "LICENSE_EXPIRED", "INVALID_LICENSE_KEY" });
+            return response;
+        });
+
+        var result = await CreateClient(handler).ActivateAsync("KEY-123", "TestApp");
+
+        Assert.Equal(ActivationErrorCode.ServerError, result.ErrorCode);
+        Assert.Null(result.ServerErrorCode);
+        Assert.False(result.UsedLegacyErrorFallback);
+    }
+
+    [Fact]
+    public async Task ActivateAsync_ShouldHonorStructuredFailureReturnedWithLegacyHttp200()
+    {
+        var handler = new MockHttpMessageHandler(_ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"isSuccess\":false,\"errorCode\":\"BANNED\",\"message\":\"Access denied by server\",\"correlationId\":\"opaque\",\"contractVersion\":1}", Encoding.UTF8, "application/json")
+            };
+            response.Headers.Add("X-SoftLicence-Error-Code", "BANNED");
+            response.Headers.Add("X-SoftLicence-Correlation-Id", "opaque");
+            return response;
+        });
+
+        var result = await CreateClient(handler).ActivateAsync("KEY-123", "TestApp");
+
+        Assert.False(result.Success);
+        Assert.Equal(ActivationErrorCode.LicenseDisabled, result.ErrorCode);
+        Assert.Equal("opaque", result.CorrelationId);
     }
 
     [Fact]
@@ -256,7 +343,7 @@ public class SoftLicenceClientTests
         Assert.False(root.TryGetProperty("HardwareIdV2", out var hardwareIdV2Property));
         Assert.False(root.TryGetProperty("HardwareIdV2Differs", out var hardwareIdV2DiffersProperty));
         Assert.False(root.TryGetProperty("HardwareIdV2Algorithm", out var hardwareIdV2AlgorithmProperty));
-        Assert.Equal("1.1.11", root.GetProperty("SdkVersion").GetString());
+        Assert.Equal("1.1.13", root.GetProperty("SdkVersion").GetString());
     }
 
     [Fact]

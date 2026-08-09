@@ -308,7 +308,12 @@
             currentStats = await Backup.GetCurrentDatabaseStatsAsync();
 
             // Téléchargement temporaire
-            restoreTempPath = Path.Combine(Path.GetTempPath(), $"restore_{Guid.NewGuid():N}.sql");
+            var extension = Path.GetExtension(file.Name);
+            if (!extension.Equals(".sql", StringComparison.OrdinalIgnoreCase)
+                && !extension.Equals(".dump", StringComparison.OrdinalIgnoreCase)
+                && !extension.Equals(".backup", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Format de sauvegarde non pris en charge.");
+            restoreTempPath = Path.Combine(Path.GetTempPath(), $"restore_{Guid.NewGuid():N}{extension}");
             Log("Téléchargement du dump SQL...");
             await Backup.DownloadBackupAsync(file.Path, restoreTempPath);
 

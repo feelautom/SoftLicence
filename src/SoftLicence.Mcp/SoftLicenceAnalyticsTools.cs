@@ -8,10 +8,12 @@ namespace SoftLicence.Mcp;
 public sealed class SoftLicenceAnalyticsTools
 {
     private readonly SoftLicenceAnalyticsClient _client;
+    private readonly McpResultStore _resultStore;
 
-    public SoftLicenceAnalyticsTools(SoftLicenceAnalyticsClient client)
+    public SoftLicenceAnalyticsTools(SoftLicenceAnalyticsClient client, McpResultStore resultStore)
     {
         _client = client;
+        _resultStore = resultStore;
     }
 
     [McpServerTool]
@@ -26,6 +28,24 @@ public sealed class SoftLicenceAnalyticsTools
     public async Task<JsonElement> ListProducts(CancellationToken cancellationToken = default)
     {
         return await _client.ListProductsAsync(cancellationToken);
+    }
+
+    [McpServerTool]
+    [Description("Get metadata for a complete oversized MCP result artifact. Artifact IDs are opaque values returned by other SoftLicence MCP tools.")]
+    public JsonElement GetMcpResultArtifactInfo(
+        [Description("Opaque artifactId returned by an oversized SoftLicence MCP response.")] string artifactId)
+    {
+        return _resultStore.GetInfo(artifactId);
+    }
+
+    [McpServerTool]
+    [Description("Read a bounded text chunk from a complete oversized MCP JSON result. Concatenate chunks in offset order to reconstruct the exact original JSON without truncation.")]
+    public JsonElement GetMcpResultArtifactChunk(
+        [Description("Opaque artifactId returned by an oversized SoftLicence MCP response.")] string artifactId,
+        [Description("UTF-16 character offset. Start with 0 and then use nextOffset until hasMore is false.")] int offset = 0,
+        [Description("Chunk size from artifact metadata. Omit it or pass 0 to use the default; pass the exact value from metadata to use a fixed chunk size.")] int length = 0)
+    {
+        return _resultStore.GetChunk(artifactId, offset, length == 0 ? null : length);
     }
 
     [McpServerTool]
@@ -290,10 +310,10 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("HardwareId to inspect. Full IDs are exact; 6+ character hex fragments can match partial HWIDs. Optional.")] string? hardwareId = null,
         [Description("License UUID. Optional.")] string? licenseId = null,
         [Description("License-key fragment or first segment, minimum 6 non-separator characters. Full license keys are never returned. Optional.")] string? licenseFragment = null,
-        [Description("Time window in days. Clamped from 1 to 30. Ignored when date or fromUtc/toUtc is provided.")] int days = 30,
+        [Description("Time window in days. Accepted from 1 to 90; windows above 30 days are automatically split into safe server segments. Ignored when date or fromUtc/toUtc is provided.")] int days = 30,
         [Description("Explicit UTC calendar day in YYYY-MM-DD format. Optional.")] string? date = null,
-        [Description("Explicit UTC range start. Must be provided with toUtc. Optional.")] string? fromUtc = null,
-        [Description("Explicit UTC range end. Must be provided with fromUtc. Optional.")] string? toUtc = null,
+        [Description("Explicit UTC range start. Must be provided with toUtc. Ranges up to 90 days are automatically split into safe server segments. Optional.")] string? fromUtc = null,
+        [Description("Explicit UTC range end. Must be provided with fromUtc. Ranges up to 90 days are automatically split into safe server segments. Optional.")] string? toUtc = null,
         [Description("Maximum number of timeline items returned. Clamped from 1 to 500.")] int takeTimeline = 150,
         [Description("Timeline offset for pagination. Minimum 0.")] int offset = 0,
         [Description("Include activation/update HTTP access logs when available.")] bool includeAccessLogs = true,
@@ -320,7 +340,7 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeOptional(hardwareId),
             NormalizeOptional(licenseId),
             NormalizeOptional(licenseFragment),
-            ClampDays(days),
+            Math.Max(1, days),
             NormalizeOptional(date),
             NormalizeOptional(fromUtc),
             NormalizeOptional(toUtc),
@@ -449,8 +469,8 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("License type slug or name. Default: TIA-CONNECT-FREEMIUM.")] string? licenseType = "TIA-CONNECT-FREEMIUM",
         [Description("License status filter: active, expired, revoked, expired_or_revoked, or all. Default: active.")] string? status = "active",
         [Description("Telemetry window in days. Clamped from 1 to 30.")] int telemetryDays = 7,
-        [Description("Minimum activation age in days. Optional. Example: 7.")] int? activationAgeMinDays = null,
-        [Description("Maximum activation age in days. Optional. Example: 30.")] int? activationAgeMaxDays = null,
+        [Description("Minimum activation age in days. Use 0 for no minimum. Example: 7.")] int activationAgeMinDays = 0,
+        [Description("Maximum activation age in days. Use 0 for no maximum. Example: 30.")] int activationAgeMaxDays = 0,
         [Description("Include up to 10 recent redacted event samples per ranked machine. Default: false.")] bool includeSamples = false,
         [Description("Maximum number of ranked machines returned. Clamped from 1 to 100.")] int take = 50,
         [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
@@ -476,8 +496,8 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Optional comma-separated license type slugs or names. Empty means all paid/non-Freemium types. Use get_license_types to discover slugs.")] string? licenseTypes = null,
         [Description("License status filter: active, expired, revoked, expired_or_revoked, or all. Default: active.")] string? status = "active",
         [Description("Telemetry window in days. Clamped from 1 to 30.")] int telemetryDays = 7,
-        [Description("Minimum activation age in days. Optional. Example: 30.")] int? activationAgeMinDays = null,
-        [Description("Maximum activation age in days. Optional. Example: 365.")] int? activationAgeMaxDays = null,
+        [Description("Minimum activation age in days. Use 0 for no minimum. Example: 30.")] int activationAgeMinDays = 0,
+        [Description("Maximum activation age in days. Use 0 for no maximum. Example: 365.")] int activationAgeMaxDays = 0,
         [Description("Include up to 10 recent redacted event samples per ranked machine. Default: false.")] bool includeSamples = false,
         [Description("Maximum number of ranked machines returned. Clamped from 1 to 100.")] int take = 50,
         [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
@@ -518,7 +538,7 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Maximum number of recent licenses returned. Clamped from 1 to 100. Default: 10.")] int take = 10,
         [Description("License type group: paid, freemium, or all. Default: paid.")] string? licenseType = "paid",
         [Description("License status filter: active, expired, revoked, not_activated, expired_or_revoked, or all. Default: active.")] string? status = "active",
-        [Description("Maximum activation/onboarding age in days. Optional.")] int? activationAgeMaxDays = null,
+        [Description("Maximum activation/onboarding age in days. Use 0 for no maximum.")] int activationAgeMaxDays = 0,
         [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
         [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
         CancellationToken cancellationToken = default)
@@ -539,9 +559,9 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Maximum number of licenses returned. Clamped from 1 to 100. Default: 50.")] int take = 50,
         [Description("License type group: paid, freemium, trial, subscription, or all. Default: paid.")] string? licenseType = "paid",
         [Description("License status filter: active, expired, revoked, not_activated, expired_or_revoked, or all. Default: active.")] string? status = "active",
-        [Description("Maximum activation/onboarding age in days. Optional.")] int? activationAgeMaxDays = null,
+        [Description("Maximum activation/onboarding age in days. Use 0 for no maximum.")] int activationAgeMaxDays = 0,
         [Description("Recent activity window in days. Clamped from 1 to 90. Default: 14.")] int activityWindowDays = 14,
-        [Description("Minimum score across usage/conversion/retention. Clamped from 0 to 100. Optional.")] double? minScore = null,
+        [Description("Minimum score across usage/conversion/retention. Clamped from 0 to 100. Use 0 for no minimum.")] double minScore = 0,
         [Description("Include inactive licenses in addition to the status filter. Default: false.")] bool includeInactive = false,
         [Description("Sort field: score, conversionPotential, retentionConfidence, or recentActivity. Default: score.")] string? sortBy = "score",
         [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
@@ -554,7 +574,7 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeOnboardingStatus(status),
             NormalizeAge(activationAgeMaxDays),
             Math.Clamp(activityWindowDays, 1, 90),
-            minScore.HasValue ? Math.Clamp(minScore.Value, 0, 100) : null,
+            minScore > 0 ? Math.Clamp(minScore, 0, 100) : null,
             includeInactive,
             NormalizeUsageSort(sortBy),
             cancellationToken,
@@ -610,6 +630,51 @@ public sealed class SoftLicenceAnalyticsTools
             cancellationToken,
             NormalizeOptional(productId),
             NormalizeOptional(productName));
+    }
+
+    [McpServerTool]
+    [Description("List and aggregate the unified SoftLicence security feed: client Canary alerts plus server-side incidents such as BinaryPatched, with repeat counts, first/last detection, machine context, evidence counts and ban status. Results are bounded and require an authorized analytics key.")]
+    public async Task<JsonElement> ListSecurityCanaryAlerts(
+        [Description("Explicit UTC range start. Optional.")] string? fromUtc = null,
+        [Description("Explicit UTC range end. Optional.")] string? toUtc = null,
+        [Description("Trigger filter, for example IntegrityCheck_Startup or RuntimeCheck_Debugger.")] string? trigger = null,
+        [Description("Severity filter: 0=all, 1=Info, 2=Warning, 3=Critical.")] int severity = 0,
+        [Description("HardwareId exact value or fragment.")] string? hardwareId = null,
+        [Description("Machine-name fragment.")] string? machine = null,
+        [Description("Windows user-name fragment.")] string? user = null,
+        [Description("Exact client IP.")] string? clientIp = null,
+        [Description("Exact app version.")] string? version = null,
+        [Description("Filter alerts by active hardware-ban state: empty string for any, 'true' for banned only, 'false' for not banned.")] string isBanFilter = "",
+        [Description("Maximum groups returned. Clamped from 1 to 200.")] int take = 50,
+        [Description("Pagination offset. Minimum 0.")] int offset = 0,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (severity != 0 && severity is < 1 or > 3)
+            throw new ArgumentException("severity must be 0 (all), 1, 2, or 3.", nameof(severity));
+
+        bool? isBanned = isBanFilter.ToLowerInvariant() switch { "true" => true, "false" => false, _ => null };
+        return await _client.ListSecurityCanaryAlertsAsync(
+            NormalizeOptional(fromUtc), NormalizeOptional(toUtc), NormalizeOptional(trigger), severity == 0 ? null : severity,
+            NormalizeOptional(hardwareId), NormalizeOptional(machine), NormalizeOptional(user),
+            NormalizeOptional(clientIp), NormalizeOptional(version), isBanned,
+            Math.Clamp(take, 1, 200), Math.Max(0, offset),
+            NormalizeOptional(productId), NormalizeOptional(productName), cancellationToken);
+    }
+
+    [McpServerTool]
+    [Description("Get full authorized details for one unified security item, including Canary context or server-incident evidence and associated hardware/component bans.")]
+    public async Task<JsonElement> GetSecurityCanaryAlertDetails(
+        [Description("Unified security item UUID returned by list_security_canary_alerts.")] string alertId,
+        [Description("Optional product UUID. Required with a global analytics key.")] string? productId = null,
+        [Description("Optional exact product name. Required with a global analytics key when productId is omitted.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Guid.TryParse(NormalizeOptional(alertId), out var parsed))
+            throw new ArgumentException("alertId must be a valid UUID.", nameof(alertId));
+        return await _client.GetSecurityCanaryAlertDetailsAsync(
+            parsed, NormalizeOptional(productId), NormalizeOptional(productName), cancellationToken);
     }
 
     [McpServerTool]
@@ -670,27 +735,78 @@ public sealed class SoftLicenceAnalyticsTools
     }
 
     [McpServerTool]
+    [Description("List the unified security blacklist overview for HWID and component/fingerprint bans, including active and historical entries.")]
+    public async Task<JsonElement> ListSecurityBlacklistOverview(
+        [Description("HardwareId or fragment.")] string? hardwareId = null,
+        [Description("Component hash or fragment.")] string? componentHash = null,
+        [Description("Component type such as FP_EXE, FP_DLL, FP_CORE, CPU, MB, BIOS, DISK, HOST.")] string? componentType = null,
+        [Description("Include inactive, expired and lifted entries.")] bool includeInactive = true,
+        [Description("Maximum rows. Clamped from 1 to 100.")] int take = 100,
+        [Description("Optional product UUID.")] string? productId = null,
+        [Description("Optional exact product name.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        return await _client.ListSecurityBansAsync(
+            NormalizeOptional(hardwareId), NormalizeOptional(componentHash), NormalizeOptional(componentType),
+            clientIp: null, emailFragment: null, licenseFragment: null, includeInactive,
+            Math.Clamp(take, 1, 100), cancellationToken,
+            NormalizeOptional(productId), NormalizeOptional(productName), includeSourceEvents: true);
+    }
+
+    [McpServerTool]
+    [Description("Build a bounded read-only security case snapshot combining Canary alerts with HWID and component blacklists. Provide at least one lookup field.")]
+    public async Task<JsonElement> GetSecurityCaseSnapshot(
+        [Description("Optional BugTrace ticket reference, for example TKT-999610.")] string? ticketRef = null,
+        [Description("Optional stable security-case identifier.")] string? securityCaseId = null,
+        [Description("HardwareId or fragment to correlate across Canary and ban records.")] string? hardwareId = null,
+        [Description("Component hash or fragment.")] string? componentHash = null,
+        [Description("Component type such as FP_EXE, FP_DLL, FP_CORE, CPU, MB, BIOS, DISK, or HOST.")] string? componentType = null,
+        [Description("Exact client IP.")] string? clientIp = null,
+        [Description("Customer email fragment. The returned snapshot does not expose the full license key.")] string? emailFragment = null,
+        [Description("License-key fragment. Never provide a full license key unless operationally required.")] string? licenseFragment = null,
+        [Description("Include historical inactive bans.")] bool includeInactive = true,
+        [Description("Maximum rows per section. Clamped from 1 to 100.")] int take = 50,
+        [Description("Optional product UUID.")] string? productId = null,
+        [Description("Optional exact product name.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(ticketRef) && string.IsNullOrWhiteSpace(securityCaseId))
+            EnsureSecurityBanLookup(hardwareId, componentHash, componentType, clientIp, emailFragment, licenseFragment);
+        return await _client.GetSecurityCaseSnapshotAsync(
+            NormalizeOptional(ticketRef), NormalizeOptional(securityCaseId), NormalizeOptional(hardwareId), NormalizeOptional(componentHash),
+            NormalizeOptional(componentType), NormalizeOptional(clientIp), NormalizeOptional(emailFragment),
+            NormalizeOptional(licenseFragment), includeInactive, Math.Clamp(take, 1, 100),
+            NormalizeOptional(productId), NormalizeOptional(productName), cancellationToken);
+    }
+
+    [McpServerTool]
     [Description("Get read-only details for a security ban by ban id, including source-event status when available.")]
     public async Task<JsonElement> GetSecurityBanDetails(
         [Description("Ban UUID returned by list_security_bans/get_security_ban_status.")] string banId,
+        [Description("Optional product UUID. Required with a global analytics key.")] string? productId = null,
+        [Description("Optional exact product name. Required with a global analytics key when productId is omitted.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         if (!Guid.TryParse(NormalizeOptional(banId), out var parsed))
             throw new ArgumentException("banId must be a valid UUID.", nameof(banId));
 
-        return await _client.GetSecurityBanDetailsAsync(parsed, cancellationToken);
+        return await _client.GetSecurityBanDetailsAsync(
+            parsed, cancellationToken, NormalizeOptional(productId), NormalizeOptional(productName));
     }
 
     [McpServerTool]
     [Description("Get the source telemetry event for a security ban when SoftLicence can infer one from persisted telemetry.")]
     public async Task<JsonElement> GetSecurityBanSourceEvent(
         [Description("Ban UUID returned by list_security_bans/get_security_ban_status.")] string banId,
+        [Description("Optional product UUID. Required with a global analytics key.")] string? productId = null,
+        [Description("Optional exact product name. Required with a global analytics key when productId is omitted.")] string? productName = null,
         CancellationToken cancellationToken = default)
     {
         if (!Guid.TryParse(NormalizeOptional(banId), out var parsed))
             throw new ArgumentException("banId must be a valid UUID.", nameof(banId));
 
-        return await _client.GetSecurityBanSourceEventAsync(parsed, cancellationToken);
+        return await _client.GetSecurityBanSourceEventAsync(
+            parsed, cancellationToken, NormalizeOptional(productId), NormalizeOptional(productName));
     }
 
     [McpServerTool]
@@ -707,9 +823,11 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Ban reason. Required and stored in audit history.")] string reason,
         [Description("Ban category: manual, piracy, debugger, outdated_version, quota_abuse, dev_canary_quarantine.")] string? category = "manual",
         [Description("Optional product UUID. Omit to ban for all products.")] string? productId = null,
+        [Description("Optional exact product name used only for post-mutation verification with a global analytics key.")] string? productName = null,
         [Description("Optional UTC expiration timestamp. Use either expiresAt or durationDays, not both.")] string? expiresAt = null,
-        [Description("Optional duration in days for a temporary ban. Use either expiresAt or durationDays, not both.")] int? durationDays = null,
+        [Description("Optional duration in days for a temporary ban. Use either expiresAt or durationDays, not both. Use 0 for permanent.")] int durationDays = 0,
         [Description("Optional BugTrace ticket reference for audit, for example TKT-999381.")] string? ticketRef = null,
+        [Description("Optional stable security-case identifier.")] string? securityCaseId = null,
         [Description("Optional actor name for audit.")] string? createdBy = "Codex MCP",
         [Description("Optional compact audit note. Do not include secrets.")] string? auditNote = null,
         CancellationToken cancellationToken = default)
@@ -718,7 +836,7 @@ public sealed class SoftLicenceAnalyticsTools
             throw new ArgumentException("hardwareId is required.", nameof(hardwareId));
         if (string.IsNullOrWhiteSpace(reason))
             throw new ArgumentException("reason is required.", nameof(reason));
-        if (!string.IsNullOrWhiteSpace(expiresAt) && durationDays.HasValue)
+        if (!string.IsNullOrWhiteSpace(expiresAt) && durationDays > 0)
             throw new ArgumentException("Use either expiresAt or durationDays, not both.");
 
         return await _client.CreateSecurityHardwareBanAsync(
@@ -726,9 +844,11 @@ public sealed class SoftLicenceAnalyticsTools
             reason.Trim(),
             NormalizeHardwareBanCategory(category),
             NormalizeOptional(productId),
+            NormalizeOptional(productName),
             NormalizeOptional(expiresAt),
-            durationDays.HasValue ? Math.Clamp(durationDays.Value, 1, 3650) : null,
+            durationDays > 0 ? Math.Clamp(durationDays, 1, 3650) : null,
             NormalizeOptional(ticketRef),
+            NormalizeOptional(securityCaseId),
             NormalizeOptional(createdBy),
             NormalizeOptional(auditNote),
             cancellationToken);
@@ -738,19 +858,85 @@ public sealed class SoftLicenceAnalyticsTools
     [Description("Deactivate a SoftLicence hardware-id ban by banId through the admin API. Requires SOFTLICENCE_ADMIN_SECRET, separate from the read-only analytics key. Returns mutation result plus post-mutation verification.")]
     public async Task<JsonElement> UnbanSecurityHardwareBan(
         [Description("Ban UUID returned by list_security_bans/get_security_ban_status.")] string banId,
+        [Description("Explicit operator reason for lifting the ban. Required.")] string reason,
+        [Description("Optional product UUID. Required with a global analytics key for post-mutation verification.")] string? productId = null,
+        [Description("Optional exact product name. Required with a global analytics key when productId is omitted.")] string? productName = null,
         [Description("Optional BugTrace ticket reference for audit, for example TKT-999381.")] string? ticketRef = null,
+        [Description("Optional stable security-case identifier.")] string? securityCaseId = null,
         [Description("Optional actor name for audit.")] string? createdBy = "Codex MCP",
         [Description("Optional compact audit note. Do not include secrets.")] string? auditNote = null,
         CancellationToken cancellationToken = default)
     {
         if (!Guid.TryParse(NormalizeOptional(banId), out var parsed))
             throw new ArgumentException("banId must be a valid UUID.", nameof(banId));
+        if (string.IsNullOrWhiteSpace(reason))
+            throw new ArgumentException("reason is required.", nameof(reason));
 
         return await _client.UnbanSecurityHardwareBanAsync(
             parsed,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName),
+            reason.Trim(),
             NormalizeOptional(ticketRef),
+            NormalizeOptional(securityCaseId),
             NormalizeOptional(createdBy),
             NormalizeOptional(auditNote),
+            cancellationToken);
+    }
+
+    [McpServerTool]
+    [Description("Create or reactivate an enforceable SoftLicence release-binary fingerprint ban through the admin API. Only FP_EXE, FP_DLL and FP_CORE are enforceable. Hardware fingerprints are correlation-only; the server refuses them and returns impact/cardinality details. Requires SOFTLICENCE_ADMIN_SECRET and returns post-mutation verification.")]
+    public async Task<JsonElement> CreateSecurityComponentBan(
+        [Description("Enforceable component type: FP_EXE, FP_DLL or FP_CORE. CPU, MB, BIOS, DISK and HOST are correlation-only and cannot be globally banned.")] string componentType,
+        [Description("Exact component hash.")] string componentHash,
+        [Description("Audit reason. Required.")] string reason,
+        [Description("Optional audit category, for example integrity, piracy, debugger, or manual.")] string? category = "integrity",
+        [Description("Optional product UUID.")] string? productId = null,
+        [Description("Optional exact product name used only for post-mutation verification with a global analytics key.")] string? productName = null,
+        [Description("Optional UTC expiration timestamp. Use either expiresAt or durationDays.")] string? expiresAt = null,
+        [Description("Optional duration in days. Use either expiresAt or durationDays. Use 0 for permanent.")] int durationDays = 0,
+        [Description("Optional BugTrace ticket reference.")] string? ticketRef = null,
+        [Description("Optional stable security-case identifier.")] string? securityCaseId = null,
+        [Description("Optional actor name.")] string? createdBy = "Codex MCP",
+        [Description("Optional compact audit note. Do not include secrets.")] string? auditNote = null,
+        CancellationToken cancellationToken = default)
+    {
+        var type = NormalizeComponentType(componentType);
+        var hash = NormalizeOptional(componentHash)?.ToLowerInvariant();
+        if (hash == null) throw new ArgumentException("componentHash is required.", nameof(componentHash));
+        if (hash.Length != 64 || hash.Any(character => character is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
+            throw new ArgumentException("componentHash must be exactly 64 ASCII hexadecimal characters.", nameof(componentHash));
+        if (string.IsNullOrWhiteSpace(reason)) throw new ArgumentException("reason is required.", nameof(reason));
+        if (!string.IsNullOrWhiteSpace(expiresAt) && durationDays > 0)
+            throw new ArgumentException("Use either expiresAt or durationDays, not both.");
+
+        return await _client.CreateSecurityComponentBanAsync(
+            type, hash, reason.Trim(), NormalizeOptional(category), NormalizeOptional(productId), NormalizeOptional(productName), NormalizeOptional(expiresAt),
+            durationDays > 0 ? Math.Clamp(durationDays, 1, 3650) : null,
+            NormalizeOptional(ticketRef), NormalizeOptional(securityCaseId), NormalizeOptional(createdBy), NormalizeOptional(auditNote),
+            cancellationToken);
+    }
+
+    [McpServerTool]
+    [Description("Deactivate a SoftLicence component/fingerprint ban by id. Requires SOFTLICENCE_ADMIN_SECRET and returns post-mutation verification.")]
+    public async Task<JsonElement> UnbanSecurityComponentBan(
+        [Description("Ban UUID.")] string banId,
+        [Description("Explicit operator reason for lifting the ban. Required.")] string reason,
+        [Description("Optional product UUID. Required with a global analytics key.")] string? productId = null,
+        [Description("Optional exact product name.")] string? productName = null,
+        [Description("Optional BugTrace ticket reference.")] string? ticketRef = null,
+        [Description("Optional stable security-case identifier.")] string? securityCaseId = null,
+        [Description("Optional actor name.")] string? createdBy = "Codex MCP",
+        [Description("Optional compact audit note.")] string? auditNote = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Guid.TryParse(NormalizeOptional(banId), out var parsed))
+            throw new ArgumentException("banId must be a valid UUID.", nameof(banId));
+        if (string.IsNullOrWhiteSpace(reason))
+            throw new ArgumentException("reason is required.", nameof(reason));
+        return await _client.UnbanSecurityComponentBanAsync(
+            parsed, NormalizeOptional(productId), NormalizeOptional(productName),
+            reason.Trim(), NormalizeOptional(ticketRef), NormalizeOptional(securityCaseId), NormalizeOptional(createdBy), NormalizeOptional(auditNote),
             cancellationToken);
     }
 
@@ -759,7 +945,8 @@ public sealed class SoftLicenceAnalyticsTools
     public async Task<JsonElement> ListLlmTipFeedback(
         [Description("Explicit UTC range start. Optional.")] string? fromUtc = null,
         [Description("Explicit UTC range end. Optional.")] string? toUtc = null,
-        [Description("Optional product UUID. Must match the configured analytics key product when provided.")] string? productId = null,
+        [Description("Optional product UUID. Global analytics keys must provide productId or productName.")] string? productId = null,
+        [Description("Optional exact product name. Global analytics keys must provide productId or productName.")] string? productName = null,
         [Description("App version filter, for example 2.2.501. Optional.")] string? appVersion = null,
         [Description("Tip category filter. Optional.")] string? category = null,
         [Description("Tip severity filter. Optional.")] string? severity = null,
@@ -775,6 +962,7 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeOptional(fromUtc),
             NormalizeOptional(toUtc),
             NormalizeOptional(productId),
+            NormalizeOptional(productName),
             NormalizeOptional(appVersion),
             NormalizeOptional(category),
             NormalizeOptional(severity),
@@ -811,7 +999,8 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Time window in days. Clamped from 1 to 365. Ignored when fromUtc/toUtc is provided.")] int days = 30,
         [Description("Explicit UTC range start. Optional.")] string? fromUtc = null,
         [Description("Explicit UTC range end. Optional.")] string? toUtc = null,
-        [Description("Optional product UUID. Must match the configured analytics key product when provided.")] string? productId = null,
+        [Description("Optional product UUID. Global analytics keys must provide productId or productName.")] string? productId = null,
+        [Description("Optional exact product name. Global analytics keys must provide productId or productName.")] string? productName = null,
         [Description("App version filter, for example 2.2.501. Optional.")] string? appVersion = null,
         [Description("Tip category filter. Optional.")] string? category = null,
         [Description("Tip severity filter. Optional.")] string? severity = null,
@@ -824,6 +1013,7 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeOptional(fromUtc),
             NormalizeOptional(toUtc),
             NormalizeOptional(productId),
+            NormalizeOptional(productName),
             NormalizeOptional(appVersion),
             NormalizeOptional(category),
             NormalizeOptional(severity),
@@ -901,6 +1091,21 @@ public sealed class SoftLicenceAnalyticsTools
             "dev_canary_quarantine" or "devcanaryquarantine" => "dev_canary_quarantine",
             null => "manual",
             _ => throw new ArgumentException("Unsupported hardware ban category. Use get_security_hardware_ban_categories.")
+        };
+    }
+
+    private static string NormalizeComponentType(string value)
+    {
+        var normalized = NormalizeOptional(value)?.ToUpperInvariant();
+        return normalized switch
+        {
+            "FP_CPU" => "CPU",
+            "FP_MB" => "MB",
+            "FP_BIOS" => "BIOS",
+            "FP_DISK" => "DISK",
+            "FP_HOST" => "HOST",
+            "CPU" or "MB" or "BIOS" or "DISK" or "HOST" or "FP_EXE" or "FP_DLL" or "FP_CORE" => normalized,
+            _ => throw new ArgumentException("Unsupported componentType.", nameof(value))
         };
     }
 
@@ -1038,8 +1243,8 @@ public sealed class SoftLicenceAnalyticsTools
         };
     }
 
-    private static int? NormalizeAge(int? days)
+    private static int? NormalizeAge(int days)
     {
-        return days.HasValue ? Math.Clamp(days.Value, 0, 3650) : null;
+        return days > 0 ? Math.Clamp(days, 0, 3650) : null;
     }
 }

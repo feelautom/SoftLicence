@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Net.Http.Json;
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.EntityFrameworkCore;
@@ -11,6 +12,7 @@ namespace SoftLicence.Server.Services;
 
 public class TelemetryService
 {
+    private const int MaxPersistentCertPinningHardwareIdLength = 256;
     private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
     private readonly ILogger<TelemetryService> _logger;
     private readonly GeoIpService _geoIp;
@@ -19,7 +21,11 @@ public class TelemetryService
     private readonly SecurityService _security;
     private readonly SettingsService _settings;
     private readonly CertPinningBugTraceAlertService? _certPinningBugTraceAlerts;
+    private readonly CertPinningDailyAlertService? _certPinningDailyAlerts;
     private readonly FreemiumAbuseBugTraceAlertService? _freemiumAbuseBugTraceAlerts;
+    private readonly ActivationIncidentService? _activationIncidents;
+    private readonly SecurityIncidentService? _securityIncidents;
+    private readonly ApprovedBinaryService _approvedBinaries;
     private static readonly ConcurrentDictionary<string, DateTime> _certPinningAlertCache = new();
     private static readonly TimeSpan CertPinningAlertCooldown = TimeSpan.FromMinutes(15);
     private const string DefaultCertPinningAlertUrl = "https://ntfy.websitedev.fr/vps-check-tia-pinned-certs";
@@ -36,7 +42,11 @@ public class TelemetryService
         SecurityService security,
         SettingsService settings,
         CertPinningBugTraceAlertService? certPinningBugTraceAlerts = null,
-        FreemiumAbuseBugTraceAlertService? freemiumAbuseBugTraceAlerts = null)
+        FreemiumAbuseBugTraceAlertService? freemiumAbuseBugTraceAlerts = null,
+        ActivationIncidentService? activationIncidents = null,
+        SecurityIncidentService? securityIncidents = null,
+        ApprovedBinaryService? approvedBinaries = null,
+        CertPinningDailyAlertService? certPinningDailyAlerts = null)
     {
         _dbFactory = dbFactory;
         _logger = logger;
@@ -46,7 +56,13 @@ public class TelemetryService
         _security = security;
         _settings = settings;
         _certPinningBugTraceAlerts = certPinningBugTraceAlerts;
+        _certPinningDailyAlerts = certPinningDailyAlerts;
         _freemiumAbuseBugTraceAlerts = freemiumAbuseBugTraceAlerts;
+        _activationIncidents = activationIncidents;
+        _securityIncidents = securityIncidents;
+        _approvedBinaries = approvedBinaries ?? new ApprovedBinaryService(
+            dbFactory,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<ApprovedBinaryService>.Instance);
     }
 
     public async Task SaveEventAsync(TelemetryEventRequest req, string? ip = null)
@@ -54,7 +70,8 @@ public class TelemetryService
         using var db = await _dbFactory.CreateDbContextAsync();
         var productId = await GetProductIdAsync(db, req.AppName);
         var geo = ip != null ? await _geoIp.GetGeoInfoAsync(ip) : null;
-        var propertiesJson = req.Properties != null ? JsonSerializer.Serialize(req.Properties) : null;
+        var propertiesJson = SerializeTelemetryProperties(req.Properties);
+        var receivedAtUtc = DateTime.UtcNow;
 
         if (!await ShouldStoreTelemetryAsync(
             db,
@@ -73,7 +90,7 @@ public class TelemetryService
 
         var record = new TelemetryRecord
         {
-            Timestamp = DateTime.UtcNow,
+            Timestamp = receivedAtUtc,
             HardwareId = req.HardwareId,
             ClientIp = ip,
             Isp = geo?.Isp,
@@ -92,7 +109,19 @@ public class TelemetryService
         db.TelemetryRecords.Add(record);
         await db.SaveChangesAsync();
 
-        MaybeAlertCertPinningFailure(req, ip, geo?.Isp);
+        if (_activationIncidents != null)
+        {
+            try
+            {
+                await _activationIncidents.ProcessAsync(productId, req, ip, geo);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Activation incident processing failed for event {EventName}", req.EventName);
+            }
+        }
+
+        MaybeAlertCertPinningFailure(productId, req, ip, geo?.Isp, receivedAtUtc);
         MaybeCreateCertPinningBugTraceTicket(productId, req, ip, geo?.Isp);
         MaybeCreateFreemiumAbuseBugTraceTicket(productId, req);
 
@@ -149,86 +178,87 @@ public class TelemetryService
             }
         }
 
-        // Binary hash integrity check (FP_EXE, FP_DLL, FP_CORE) — baseline auto + ban on mismatch
-        if (fingerprints != null && fingerprints.Count > 0 && productId.HasValue && !string.IsNullOrEmpty(req.Version))
+        // The ApprovedBinaries verdict from public telemetry is observation-only and cannot
+        // mutate licensing authority or durable ban state. Orthogonal uninstall and minimum-
+        // version policies below remain unchanged and may still update their own state.
+        if (isStartup && productId.HasValue && !string.IsNullOrEmpty(req.Version))
         {
             try
             {
-                var binaryKeys = fingerprints.Keys
-                    .Where(k => k == "FP_EXE" || k == "FP_DLL" || k == "FP_CORE")
-                    .ToList();
+                var verdict = await _approvedBinaries.EvaluateTelemetryEvidenceAsync(
+                    productId.Value,
+                    req.Version,
+                    req.Properties);
 
-                if (binaryKeys.Count > 0)
+                ApprovedBinaryObservationKind? observationKind = null;
+                IReadOnlyDictionary<string, string>? observedBinaries = null;
+                // Machine keys and enum-like values are exact, ordinal protocol tokens.
+                // Casing/whitespace variants remain untrusted evidence, matching FP_EXE/FP_DLL/FP_CORE.
+                if (req.Properties?.TryGetValue("FP_STATUS", out var fingerprintStatus) == true
+                    && string.Equals(fingerprintStatus, "native-unavailable", StringComparison.Ordinal))
                 {
-                    var approved = await db.ApprovedBinaries.AsNoTracking()
-                        .Where(b => b.ProductId == productId.Value && b.Version == req.Version && binaryKeys.Contains(b.Key))
-                        .ToListAsync();
-
-                    var approvedMap = approved.ToDictionary(b => b.Key, b => b.Hash);
-                    var mismatchedBinaries = new Dictionary<string, string>();
+                    observationKind = ApprovedBinaryObservationKind.CaptureUnavailable;
+                }
+                else if (verdict.Verdict == ApprovedBinaryVerdict.Mismatch)
+                {
+                    observationKind = ApprovedBinaryObservationKind.Mismatch;
+                    observedBinaries = verdict.Mismatches;
                     var mismatchDetails = new List<string>();
-
-                    foreach (var key in binaryKeys)
+                    foreach (var (key, reportedHash) in verdict.Mismatches)
                     {
-                        var reportedHash = fingerprints[key];
-                        if (approvedMap.TryGetValue(key, out var approvedHash))
-                        {
-                            if (!string.Equals(reportedHash, approvedHash, StringComparison.OrdinalIgnoreCase))
-                            {
-                                var mismatchDetail = $"{key}: expected={ShortHash(approvedHash)} got={ShortHash(reportedHash)}";
-                                mismatchedBinaries[key] = reportedHash;
-                                mismatchDetails.Add(mismatchDetail);
-                                _logger.LogWarning("Binary hash mismatch for {HardwareId} v{Version}: {Detail}", req.HardwareId, req.Version, mismatchDetail);
-                            }
-                        }
-                        else
-                        {
-                            // No baseline for this key+version — store as auto-approved reference
-                            db.ApprovedBinaries.Add(new ApprovedBinary
-                            {
-                                ProductId = productId.Value,
-                                Version = req.Version,
-                                Key = key,
-                                Hash = reportedHash,
-                                Source = "auto",
-                                ApprovedAt = DateTime.UtcNow
-                            });
-                        }
+                        var mismatchDetail = $"{key}: got={ShortHash(reportedHash)}";
+                        mismatchDetails.Add(mismatchDetail);
                     }
+                    _logger.LogWarning(
+                        "Public ApprovedBinaries mismatch observed for product {ProductId} version {Version}: {Detail}; no automatic sanction",
+                        productId.Value,
+                        req.Version,
+                        string.Join("; ", mismatchDetails));
+                }
+                else if (verdict.Verdict == ApprovedBinaryVerdict.BaselineMissing)
+                {
+                    observationKind = ApprovedBinaryObservationKind.BaselineMissing;
+                    _logger.LogWarning(
+                        "Approved binary baseline missing or non-authoritative for product {ProductId} version {Version}",
+                        productId.Value,
+                        req.Version);
+                }
+                else if (verdict.Verdict == ApprovedBinaryVerdict.EvidenceInvalidOrUntrusted)
+                {
+                    observationKind = string.Equals(verdict.ErrorCode, "required_key_missing", StringComparison.Ordinal)
+                        ? ApprovedBinaryObservationKind.EvidenceMissing
+                        : ApprovedBinaryObservationKind.EvidenceInvalid;
+                    _logger.LogWarning(
+                        "Public ApprovedBinaries evidence rejected for product {ProductId} version {Version}; reason={Reason}; no automatic sanction",
+                        productId.Value,
+                        req.Version,
+                        verdict.ErrorCode);
+                }
 
-                    await db.SaveChangesAsync();
-
-                    if (mismatchedBinaries.Count > 0)
+                if (observationKind.HasValue && _securityIncidents != null)
+                {
+                    try
                     {
-                        var mismatchDetail = string.Join("; ", mismatchDetails);
-                        var banReason = $"BinaryPatched: hash mismatch for v{req.Version} ({mismatchDetail})";
-
-                        // Silent mode if the binary hash is already in BannedComponents (known cracked binary).
-                        // The ban still happens (idempotent) but no notification is sent — avoids
-                        // spamming the admin when the same cracker retries with the same patched binary.
-                        bool knownCrackedBinary = false;
-                        foreach (var (key, hash) in mismatchedBinaries)
-                        {
-                            if (await db.BannedComponents.AsNoTracking()
-                                .AnyAsync(b => b.ComponentType == key
-                                            && b.ComponentHash == hash
-                                            && b.ProductId == productId.Value
-                                            && b.IsActive))
-                            {
-                                knownCrackedBinary = true;
-                                break;
-                            }
-                        }
-
-                        await BanBinaryPatchAsync(req.HardwareId, banReason, productId.Value, mismatchedBinaries, knownCrackedBinary);
-                        _logger.LogWarning("Auto-banned {HardwareId} for binary patch{Silent}: {Detail}",
-                            req.HardwareId, knownCrackedBinary ? " [silent — known cracked binary]" : "", mismatchDetail);
+                        await _securityIncidents.RecordApprovedBinaryObservationAsync(
+                            productId.Value,
+                            observationKind.Value,
+                            observedBinaries);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex,
+                            "ApprovedBinaries public observation aggregation failed for product {ProductId} version {Version}; no sanction was applied",
+                            productId.Value,
+                            req.Version);
                     }
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogDebug(ex, "Failed to check binary hashes for {HardwareId}", req.HardwareId);
+                _logger.LogDebug(ex,
+                    "Failed to evaluate public ApprovedBinaries evidence for product {ProductId} version {Version}",
+                    productId.Value,
+                    req.Version);
             }
         }
 
@@ -321,9 +351,10 @@ public class TelemetryService
         if (productId.HasValue)
         {
             var hwShort = req.HardwareId.Length > 8 ? req.HardwareId[..8] : req.HardwareId;
+            var sanitizedWebhookRequest = CreateSanitizedEventRequest(req);
             FireProductWebhooks(productId.Value, "Telemetry.Event",
                 $"Event: {req.EventName}",
-                $"{req.AppName} v{req.Version} — {hwShort}", req);
+                $"{req.AppName} v{req.Version} — {hwShort}", sanitizedWebhookRequest);
         }
     }
 
@@ -569,14 +600,34 @@ public class TelemetryService
         });
     }
 
-    private void MaybeAlertCertPinningFailure(TelemetryEventRequest req, string? ip, string? isp)
+    private void MaybeAlertCertPinningFailure(
+        Guid? productId,
+        TelemetryEventRequest req,
+        string? ip,
+        string? isp,
+        DateTime observedAtUtc)
     {
         if (!string.Equals(req.EventName, "CertPinningFailed", StringComparison.OrdinalIgnoreCase))
             return;
 
         var host = TryGetProperty(req, "Host") ?? "unknown-host";
+        if (productId.HasValue
+            && _certPinningDailyAlerts != null
+            && !string.IsNullOrEmpty(req.HardwareId)
+            && req.HardwareId.Length <= MaxPersistentCertPinningHardwareIdLength)
+        {
+            _ = Task.Run(() => ProcessPersistentCertPinningAlertAsync(
+                productId.Value,
+                req,
+                ip,
+                isp,
+                host,
+                observedAtUtc));
+            return;
+        }
+
         var cacheKey = $"{req.HardwareId}|{req.Version}|{host}";
-        var now = DateTime.UtcNow;
+        var now = observedAtUtc;
 
         if (_certPinningAlertCache.TryGetValue(cacheKey, out var lastAlert)
             && now - lastAlert < CertPinningAlertCooldown)
@@ -590,41 +641,7 @@ public class TelemetryService
         {
             try
             {
-                var alertUrl = await _settings.GetSettingAsync("TelemetryCertPinningNtfyUrl", DefaultCertPinningAlertUrl)
-                    ?? DefaultCertPinningAlertUrl;
-
-                if (string.IsNullOrWhiteSpace(alertUrl))
-                    return;
-
-                var client = _httpFactory.CreateClient();
-                var os = TryGetProperty(req, "OS") ?? "unknown OS";
-                var culture = TryGetProperty(req, "Culture") ?? "unknown culture";
-                var source = TryGetProperty(req, "RequestSource") ?? "unknown source";
-                var fingerprints = TryGetProperty(req, "Fingerprints");
-                var fingerprintLine = string.IsNullOrWhiteSpace(fingerprints)
-                    ? string.Empty
-                    : $"{Environment.NewLine}Fingerprints: {TrimForAlert(fingerprints, 500)}";
-
-                var message =
-                    $"CertPinningFailed detected{Environment.NewLine}" +
-                    $"App: {req.AppName} {req.Version ?? "unknown"}{Environment.NewLine}" +
-                    $"HWID: {req.HardwareId}{Environment.NewLine}" +
-                    $"IP: {ip ?? "unknown"}{Environment.NewLine}" +
-                    $"ISP: {isp ?? "unknown"}{Environment.NewLine}" +
-                    $"Host: {host}{Environment.NewLine}" +
-                    $"OS: {os}{Environment.NewLine}" +
-                    $"Culture: {culture}{Environment.NewLine}" +
-                    $"Source: {source}" +
-                    fingerprintLine;
-
-                var uriBuilder = new UriBuilder(alertUrl);
-                var query = System.Web.HttpUtility.ParseQueryString(uriBuilder.Query);
-                query["title"] = $"TIA pinned cert alert - {req.Version ?? "unknown"}";
-                query["tags"] = "warning,lock";
-                query["priority"] = "5";
-                uriBuilder.Query = query.ToString();
-
-                await client.PostAsync(uriBuilder.ToString(), new StringContent(message));
+                await SendCertPinningNtfyAsync(req, ip, isp, host);
             }
             catch (Exception ex)
             {
@@ -632,6 +649,102 @@ public class TelemetryService
             }
         });
     }
+
+    private async Task ProcessPersistentCertPinningAlertAsync(
+        Guid productId,
+        TelemetryEventRequest req,
+        string? ip,
+        string? isp,
+        string host,
+        DateTime observedAtUtc)
+    {
+        CertPinningDailyAlertClaim? claim = null;
+        try
+        {
+            claim = await _certPinningDailyAlerts!.RecordAndClaimAsync(
+                productId,
+                req.HardwareId,
+                host,
+                req.Version,
+                ParseNonNegativeInt(TryGetProperty(req, "SuppressedCount")),
+                observedAtUtc,
+                failureReason: TryGetProperty(req, "FailureReason"),
+                certificateIssuer: TryGetProperty(req, "CertificateIssuer"));
+            if (!claim.ShouldNotify || !claim.ClaimId.HasValue)
+                return;
+
+            if (await SendCertPinningNtfyAsync(req, ip, isp, host))
+            {
+                await _certPinningDailyAlerts.MarkNotificationSentAsync(
+                    claim.AggregateId,
+                    claim.ClaimId.Value,
+                    DateTime.UtcNow);
+            }
+            else
+                _logger.LogWarning(
+                    "CertPinningFailed daily notification attempt failed for aggregate {AggregateId}; no automatic retry will be sent today",
+                    claim.AggregateId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to process persistent CertPinningFailed ntfy alert; a claimed notification is not retried automatically");
+        }
+    }
+
+    private async Task<bool> SendCertPinningNtfyAsync(
+        TelemetryEventRequest req,
+        string? ip,
+        string? isp,
+        string host)
+    {
+        var alertUrl = await _settings.GetSettingAsync("TelemetryCertPinningNtfyUrl", DefaultCertPinningAlertUrl)
+            ?? DefaultCertPinningAlertUrl;
+        if (string.IsNullOrWhiteSpace(alertUrl))
+            return true;
+
+        var client = _httpFactory.CreateClient();
+        var os = TryGetProperty(req, "OS") ?? "unknown OS";
+        var culture = TryGetProperty(req, "Culture") ?? "unknown culture";
+        var source = TryGetProperty(req, "RequestSource") ?? "unknown source";
+        var fingerprints = TryGetProperty(req, "Fingerprints");
+        var fingerprintLine = string.IsNullOrWhiteSpace(fingerprints)
+            ? string.Empty
+            : $"{Environment.NewLine}Fingerprints: {TrimForAlert(fingerprints, 500)}";
+        var message =
+            $"CertPinningFailed detected{Environment.NewLine}" +
+            $"App: {req.AppName} {req.Version ?? "unknown"}{Environment.NewLine}" +
+            $"HWID: {req.HardwareId}{Environment.NewLine}" +
+            $"IP: {ip ?? "unknown"}{Environment.NewLine}" +
+            $"ISP: {isp ?? "unknown"}{Environment.NewLine}" +
+            $"Host: {host}{Environment.NewLine}" +
+            $"OS: {os}{Environment.NewLine}" +
+            $"Culture: {culture}{Environment.NewLine}" +
+            $"Source: {source}" +
+            fingerprintLine;
+
+        var uriBuilder = new UriBuilder(alertUrl);
+        var query = System.Web.HttpUtility.ParseQueryString(uriBuilder.Query);
+        query["title"] = $"TIA pinned cert alert - {req.Version ?? "unknown"}";
+        query["tags"] = "warning,lock";
+        query["priority"] = "3";
+        uriBuilder.Query = query.ToString();
+
+        using var response = await client.PostAsync(uriBuilder.ToString(), new StringContent(message));
+        if (response.IsSuccessStatusCode)
+            return true;
+
+        _logger.LogWarning(
+            "CertPinningFailed ntfy returned HTTP {StatusCode}",
+            (int)response.StatusCode);
+        return false;
+    }
+
+    private static int ParseNonNegativeInt(string? raw) =>
+        int.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out var value) && value > 0
+            ? value
+            : 0;
 
     private void MaybeCreateCertPinningBugTraceTicket(Guid? productId, TelemetryEventRequest req, string? ip, string? isp)
     {
@@ -826,20 +939,6 @@ public class TelemetryService
         return Convert.ToHexString(bytes);
     }
 
-    private async Task BanBinaryPatchAsync(string hardwareId, string banReason, Guid productId, Dictionary<string, string> mismatchedBinaries, bool silent)
-    {
-        await _security.BanHardwareIdAsync(hardwareId, banReason, productId, banCategory: Data.BannedHardwareId.Categories.Piracy, silent: silent);
-        _logger.LogWarning("Auto-banned HWID {HardwareId}{Silent}: {Reason}", hardwareId, silent ? " [silent]" : "", banReason);
-
-        foreach (var (key, hash) in mismatchedBinaries)
-        {
-            await _security.BanComponentAsync(key, hash, banReason, productId, silent: silent);
-        }
-
-        _logger.LogWarning("Auto-banned {Count} binary fingerprint(s) for HWID {HardwareId}{Silent}",
-            mismatchedBinaries.Count, hardwareId, silent ? " [silent]" : "");
-    }
-
     private async Task BanHardwareIdOnlyAsync(string hardwareId, string banReason, Guid productId, string banCategory = Data.BannedHardwareId.Categories.OutdatedVersion)
     {
         await _security.BanHardwareIdAsync(hardwareId, banReason, productId, banCategory: banCategory);
@@ -855,6 +954,44 @@ public class TelemetryService
 
     private static string ShortHash(string hash) =>
         hash.Length <= 12 ? hash : hash[..12] + "...";
+
+    private static string? SerializeTelemetryProperties(IReadOnlyDictionary<string, string>? properties)
+    {
+        if (properties == null)
+            return null;
+
+        return JsonSerializer.Serialize(SanitizeTelemetryProperties(properties));
+    }
+
+    private static TelemetryEventRequest CreateSanitizedEventRequest(TelemetryEventRequest request) => new()
+    {
+        Timestamp = request.Timestamp,
+        HardwareId = request.HardwareId,
+        AppName = request.AppName,
+        Version = request.Version,
+        EventName = request.EventName,
+        Properties = request.Properties == null ? null : SanitizeTelemetryProperties(request.Properties)
+    };
+
+    private static Dictionary<string, string> SanitizeTelemetryProperties(
+        IReadOnlyDictionary<string, string> properties)
+    {
+        var persisted = properties.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        foreach (var key in persisted.Keys.ToArray())
+        {
+            // Redaction is intentionally broader than validation: non-canonical key casing
+            // remains invalid for authority decisions, but its malformed value is still not retained.
+            if (key is null || !(key.Equals("FP_EXE", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("FP_DLL", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("FP_CORE", StringComparison.OrdinalIgnoreCase)))
+                continue;
+
+            var value = persisted[key];
+            persisted[key] = ApprovedBinaryService.NormalizeSha256(value) ?? "[invalid]";
+        }
+
+        return persisted;
+    }
 
     private static readonly string[] FreeSlugs = { "FREEMIUM", "TRIAL", "FREE", "STUDENT" };
 

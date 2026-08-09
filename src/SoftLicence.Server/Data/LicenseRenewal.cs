@@ -20,4 +20,8 @@ public class LicenseRenewal
     public DateTime RenewalDate { get; set; } = DateTime.UtcNow;
 
     public int DaysAdded { get; set; }
+
+    public DateTime? ResultingExpirationDate { get; set; }
+
+    public string? ResultingReference { get; set; }
 }

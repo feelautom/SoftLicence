@@ -200,6 +200,19 @@ public class FingerprintService
         return !_genericHashes.Contains(a);
     }
 
+    private async Task<int> GetPositiveSettingAsync(string key, int defaultValue)
+    {
+        var raw = await _settings.GetSettingAsync(
+            key, defaultValue.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        return int.TryParse(
+            raw,
+            System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var value) && value > 0
+                ? value
+                : defaultValue;
+    }
+
     public static bool IsGenericHash(string? hash)
         => !string.IsNullOrEmpty(hash) && _genericHashes.Contains(hash);
 
@@ -424,6 +437,126 @@ public class FingerprintService
         }).ToList();
     }
 
+    public async Task<ComponentFingerprintImpact> GetComponentImpactAsync(
+        string componentType,
+        string componentHash,
+        Guid? productId = null)
+    {
+        var normalizedType = NormalizeComponentType(componentType);
+        if (!SecurityService.TryNormalizeComponentHash(componentHash, out var normalizedHash))
+            throw new ArgumentException(
+                "component_hash_invalid: componentHash must be exactly 64 ASCII hexadecimal characters.",
+                nameof(componentHash));
+        using var db = await _dbFactory.CreateDbContextAsync();
+
+        var query = db.HardwareFingerprints.AsNoTracking();
+        query = normalizedType switch
+        {
+            "CPU" => query.Where(f => f.CpuHash != null && f.CpuHash.ToLower() == normalizedHash),
+            "MB" => query.Where(f => f.MotherboardHash != null && f.MotherboardHash.ToLower() == normalizedHash),
+            "BIOS" => query.Where(f => f.BiosHash != null && f.BiosHash.ToLower() == normalizedHash),
+            "DISK" => query.Where(f => f.DiskHash != null && f.DiskHash.ToLower() == normalizedHash),
+            "HOST" => query.Where(f => f.HostHash != null && f.HostHash.ToLower() == normalizedHash),
+            _ => query.Where(_ => false)
+        };
+
+        var matches = await query
+            .Select(f => new { f.HardwareId, f.FirstSeenAt, f.LastSeenAt })
+            .ToListAsync();
+
+        if (productId.HasValue && matches.Count > 0)
+        {
+            var candidateHardwareIds = matches.Select(match => match.HardwareId).ToList();
+            var productHardwareIds = (await db.TelemetryRecords.AsNoTracking()
+                    .Where(record => record.ProductId == productId
+                        && candidateHardwareIds.Contains(record.HardwareId))
+                    .Select(record => record.HardwareId)
+                    .ToListAsync())
+                .Concat(await db.Licenses.AsNoTracking()
+                    .Where(license => license.ProductId == productId
+                        && license.HardwareId != null
+                        && candidateHardwareIds.Contains(license.HardwareId))
+                    .Select(license => license.HardwareId!)
+                    .ToListAsync())
+                .Concat(await db.LicenseSeats.AsNoTracking()
+                    .Where(seat => seat.License != null
+                        && seat.License.ProductId == productId
+                        && candidateHardwareIds.Contains(seat.HardwareId))
+                    .Select(seat => seat.HardwareId)
+                    .ToListAsync())
+                .ToHashSet(StringComparer.Ordinal);
+            matches = matches.Where(match => productHardwareIds.Contains(match.HardwareId)).ToList();
+        }
+
+        var hardwareIds = matches.Select(f => f.HardwareId)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        var directLicenses = await db.Licenses.AsNoTracking()
+            .Where(license => (!productId.HasValue || license.ProductId == productId)
+                && license.HardwareId != null
+                && hardwareIds.Contains(license.HardwareId))
+            .Select(license => new { license.Id, license.CustomerEmail })
+            .ToListAsync();
+        var seatLicenses = await db.LicenseSeats.AsNoTracking()
+            .Where(seat => hardwareIds.Contains(seat.HardwareId)
+                && (!productId.HasValue || (seat.License != null && seat.License.ProductId == productId)))
+            .Select(seat => new { seat.LicenseId, CustomerEmail = seat.License != null ? seat.License.CustomerEmail : null })
+            .ToListAsync();
+
+        var licenseIds = directLicenses.Select(license => license.Id)
+            .Concat(seatLicenses.Select(license => license.LicenseId))
+            .Distinct()
+            .ToList();
+        var accountCount = directLicenses.Select(license => license.CustomerEmail)
+            .Concat(seatLicenses.Select(license => license.CustomerEmail))
+            .Where(email => !string.IsNullOrWhiteSpace(email))
+            .Select(email => email!.Trim().ToUpperInvariant())
+            .Distinct(StringComparer.Ordinal)
+            .Count();
+
+        var clientIps = await db.TelemetryRecords.AsNoTracking()
+            .Where(record => hardwareIds.Contains(record.HardwareId)
+                && (!productId.HasValue || record.ProductId == productId)
+                && record.ClientIp != null)
+            .Select(record => record.ClientIp!)
+            .Distinct()
+            .ToListAsync();
+        var genericThreshold = await GetPositiveSettingAsync("FingerprintGenericCardinalityThreshold", 3);
+        var isHardwareComponent = normalizedType is "CPU" or "MB" or "BIOS" or "DISK" or "HOST";
+
+        return new ComponentFingerprintImpact
+        {
+            ComponentType = normalizedType,
+            ComponentHash = normalizedHash,
+            DistinctHardwareIds = hardwareIds.Count,
+            DistinctLicenses = licenseIds.Count,
+            DistinctAccounts = accountCount,
+            DistinctClientIps = clientIps.Count,
+            FirstSeenAt = matches.Count == 0 ? null : matches.Min(match => match.FirstSeenAt),
+            LastSeenAt = matches.Count == 0 ? null : matches.Max(match => match.LastSeenAt),
+            GenericCardinalityThreshold = genericThreshold,
+            ImpactAvailable = isHardwareComponent,
+            ImpactUnavailableReason = isHardwareComponent
+                ? null
+                : "Binary fingerprint impact is release-scoped and is not represented by HardwareFingerprints.",
+            IsGenericOrShared = isHardwareComponent
+                && (IsGenericHash(normalizedHash) || hardwareIds.Count >= genericThreshold),
+            IsEnforceable = SecurityService.IsEnforceableComponentType(normalizedType)
+        };
+    }
+
+    private static string NormalizeComponentType(string componentType) =>
+        componentType.Trim().ToUpperInvariant() switch
+        {
+            "FP_CPU" => "CPU",
+            "FP_MB" => "MB",
+            "FP_BIOS" => "BIOS",
+            "FP_DISK" => "DISK",
+            "FP_HOST" => "HOST",
+            var normalized => normalized
+        };
+
     public async Task<FingerprintStats> GetStatsAsync()
     {
         using var db = await _dbFactory.CreateDbContextAsync();
@@ -498,6 +631,23 @@ public class FingerprintStats
     public int NewToday { get; set; }
     public int Whitelisted { get; set; }
     public int Greylisted { get; set; }
+}
+
+public sealed class ComponentFingerprintImpact
+{
+    public string ComponentType { get; set; } = string.Empty;
+    public string ComponentHash { get; set; } = string.Empty;
+    public int DistinctHardwareIds { get; set; }
+    public int DistinctLicenses { get; set; }
+    public int DistinctAccounts { get; set; }
+    public int DistinctClientIps { get; set; }
+    public DateTime? FirstSeenAt { get; set; }
+    public DateTime? LastSeenAt { get; set; }
+    public int GenericCardinalityThreshold { get; set; }
+    public bool ImpactAvailable { get; set; }
+    public string? ImpactUnavailableReason { get; set; }
+    public bool IsGenericOrShared { get; set; }
+    public bool IsEnforceable { get; set; }
 }
 
 public class RelatedHwid

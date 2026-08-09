@@ -11,6 +11,19 @@ using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
+if (builder.Configuration.GetValue<bool>("Database:RuntimeKeyRegistryOperator:Enabled"))
+{
+    await SoftLicence.Server.Services.RuntimeEnrollmentKeyRegistryOperatorRunner.RunAsync(
+        builder.Configuration);
+    return;
+}
+
+if (builder.Configuration.GetValue<bool>("Database:MigrationOnly"))
+{
+    await DatabaseMigrationRunner.RunAsync(builder.Configuration);
+    return;
+}
+
 // Réseaux privés exemptés du rate limiting (Docker, loopback)
 static bool IsPrivateNetwork(IPAddress? ip)
 {
@@ -41,6 +54,12 @@ builder.Services.AddRateLimiter(options =>
         context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
         context.HttpContext.Response.ContentType = "application/json";
         context.HttpContext.Response.Headers.RetryAfter = retryAfterSeconds.ToString();
+        if (context.HttpContext.Request.Path.StartsWithSegments("/api/v1/runtime-enrollments")
+            || context.HttpContext.Request.Path.StartsWithSegments("/api/internal/v1/runtime-enrollments"))
+        {
+            context.HttpContext.Response.Headers.CacheControl = "no-store, max-age=0";
+            context.HttpContext.Response.Headers.Pragma = "no-cache";
+        }
 
         await context.HttpContext.Response.WriteAsJsonAsync(
             new { error = "rate_limited", retryAfterSeconds },
@@ -65,6 +84,32 @@ builder.Services.AddRateLimiter(options =>
             {
                 PermitLimit = key == "__unlimited__" ? 10000 : 100,
                 Window = TimeSpan.FromMinutes(1)
+            }));
+
+    // Distribution v2 S2S: private callers remain bounded; authentication has
+    // its own nonce replay protection in addition to this transport throttle.
+    options.AddPolicy("DistributionS2SAPI", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 120,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst
+            }));
+
+    // Runtime enrollment proof endpoints: deliberately bounded even for private
+    // callers because every accepted request performs asymmetric cryptography.
+    options.AddPolicy("RuntimeEnrollmentPublicAPI", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 60,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst
             }));
 
     // Politique pour la documentation LLM (Modérée) — IPs privées exemptées
@@ -113,7 +158,24 @@ builder.Services.AddDataProtection()
 builder.Services.AddLocalization(options => options.ResourcesPath = "Resources");
 
 // Services API
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    .ConfigureApiBehaviorOptions(options =>
+    {
+        options.InvalidModelStateResponseFactory = context =>
+            context.HttpContext.Request.Path.StartsWithSegments("/api/telemetry")
+                ? new Microsoft.AspNetCore.Mvc.BadRequestObjectResult(new
+                {
+                    errorCode = "TELEMETRY_MODEL_VALIDATION_FAILED",
+                    correlationId = context.HttpContext.TraceIdentifier,
+                    invalidFields = context.ModelState
+                        .Where(x => x.Value?.Errors.Count > 0)
+                        .Select(x => x.Key)
+                        .OrderBy(x => x, StringComparer.Ordinal)
+                        .ToArray()
+                })
+                : new Microsoft.AspNetCore.Mvc.BadRequestObjectResult(
+                    new Microsoft.AspNetCore.Mvc.ValidationProblemDetails(context.ModelState));
+    });
 builder.Services.AddOpenApi();
 
 // Auth Services
@@ -146,20 +208,67 @@ builder.Services.AddCascadingAuthenticationState();
 
 // Services Blazor (Admin UI)
 builder.Services.AddRazorComponents()
-    .AddInteractiveServerComponents(options => 
+    .AddInteractiveServerComponents(options =>
     {
         options.DetailedErrors = true;
     });
 
 builder.Services.AddSingleton<SoftLicence.Server.Services.DocumentationService>(); // Documentation LLM
 builder.Services.AddScoped<SoftLicence.Server.Services.ToastService>();
-builder.Services.AddSingleton<SoftLicence.Server.Services.SettingsService>(); 
+builder.Services.AddSingleton<SoftLicence.Server.Services.SettingsService>();
 builder.Services.AddScoped<SoftLicence.Server.Services.AuthService>(); // Service d'autorisation custom
 builder.Services.AddScoped<SoftLicence.Server.Services.TimeZoneService>(); // Gestion Fuseau Horaire
 builder.Services.AddScoped<SoftLicence.Server.Services.SecurityService>(); // Défense Active
+builder.Services.AddScoped<SoftLicence.Server.Services.AdminSecretAuthenticationService>(); // Auth API admin globale/produit
+builder.Services.AddScoped<SoftLicence.Server.Services.IPrivateValidationTestResetService,
+    SoftLicence.Server.Services.PrivateValidationTestResetService>();
+builder.Services.AddScoped<SoftLicence.Server.Services.ApprovedBinaryService>(); // Baselines binaires autoritatives
+builder.Services.AddSingleton<Microsoft.Extensions.Options.IValidateOptions<SoftLicence.Server.Services.DistributionS2SOptions>,
+    SoftLicence.Server.Services.DistributionS2SOptionsValidator>();
+builder.Services.AddOptions<SoftLicence.Server.Services.DistributionS2SOptions>()
+    .Bind(builder.Configuration.GetSection("DistributionS2S"))
+    .ValidateOnStart();
+builder.Services.AddScoped<SoftLicence.Server.Services.IDistributionS2SAuthenticationService,
+    SoftLicence.Server.Services.DistributionS2SAuthenticationService>();
+builder.Services.AddScoped<SoftLicence.Server.Services.IDistributionInstallationBindingService,
+    SoftLicence.Server.Services.DistributionInstallationBindingService>();
+builder.Services.AddSingleton<Microsoft.Extensions.Options.IValidateOptions<SoftLicence.Server.Services.RuntimeEnrollmentOptions>,
+    SoftLicence.Server.Services.RuntimeEnrollmentOptionsValidator>();
+builder.Services.AddOptions<SoftLicence.Server.Services.RuntimeEnrollmentOptions>()
+    .Bind(builder.Configuration.GetSection("RuntimeEnrollment"))
+    .PostConfigure(SoftLicence.Server.Services.RuntimeEnrollmentOptionsConfiguration.RemoveEmptySigningKeyPlaceholders)
+    .ValidateOnStart();
+builder.Services.AddSingleton<Microsoft.Extensions.Options.IValidateOptions<SoftLicence.Server.Services.CanaryAckOptions>,
+    SoftLicence.Server.Services.CanaryAckOptionsValidator>();
+builder.Services.AddOptions<SoftLicence.Server.Services.CanaryAckOptions>()
+    .Bind(builder.Configuration.GetSection("CanaryAck"));
+builder.Services.AddSingleton<SoftLicence.Server.Services.ICanaryAckKeyring,
+    SoftLicence.Server.Services.CanaryAckKeyring>();
+builder.Services.AddSingleton<SoftLicence.Server.Services.ICanaryAckKeyRegistryService,
+    SoftLicence.Server.Services.CanaryAckKeyRegistryService>();
+builder.Services.AddHostedService<SoftLicence.Server.Services.CanaryAckKeyRegistryStartupValidator>();
+builder.Services.AddSingleton<SoftLicence.Server.Services.IRuntimeEnrollmentAuthorityService,
+    SoftLicence.Server.Services.RuntimeEnrollmentAuthorityService>();
+builder.Services.AddSingleton<SoftLicence.Server.Services.IRuntimeEnrollmentCryptoService,
+    SoftLicence.Server.Services.RuntimeEnrollmentCryptoService>();
+builder.Services.AddScoped<SoftLicence.Server.Services.IRuntimeEnrollmentService,
+    SoftLicence.Server.Services.RuntimeEnrollmentService>();
+builder.Services.AddScoped<SoftLicence.Server.Services.IDistributionLicenseBootstrapService,
+    SoftLicence.Server.Services.DistributionLicenseBootstrapService>();
+builder.Services.AddHostedService<SoftLicence.Server.Services.RuntimeEnrollmentStartupValidator>();
+builder.Services.AddSingleton<SoftLicence.Server.Services.IRuntimeEnrollmentKeyRegistryService,
+    SoftLicence.Server.Services.RuntimeEnrollmentKeyRegistryService>();
+builder.Services.AddHostedService<SoftLicence.Server.Services.RuntimeEnrollmentKeyRegistryStartupValidator>();
+builder.Services.AddHostedService<SoftLicence.Server.Services.RuntimeEnrollmentCleanupService>();
+builder.Services.AddScoped<SoftLicence.Server.Services.CanaryAckService>(); // Reçus canaris signés et anti-rejeu
 builder.Services.AddScoped<SoftLicence.Server.Services.EncryptionService>(); // Chiffrement des clés
+builder.Services.AddScoped<SoftLicence.Server.Services.ISignedLicenseFileService,
+    SoftLicence.Server.Services.SignedLicenseFileService>();
+builder.Services.AddSingleton<SoftLicence.Server.Services.IBackupProcessRunner,
+    SoftLicence.Server.Services.BackupProcessRunner>();
 builder.Services.AddSingleton<SoftLicence.Server.Services.BackupService>(); // Sauvegardes Drive (rclone)
 builder.Services.AddMemoryCache();
+builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<SoftLicence.Server.Services.GeoIpService>(); // Intelligence Geo-IP
 builder.Services.AddTransient<SoftLicence.Server.Services.EmailService>();
 builder.Services.AddSingleton<SoftLicence.Server.Services.AuditNotifier>(); // Push temps réel audit logs
@@ -193,10 +302,15 @@ builder.Services.AddTransient<SoftLicence.Server.Services.FreemiumAbuseRiskAnaly
 builder.Services.AddTransient<SoftLicence.Server.Services.AnalyticsApiKeyAuthService>(); // Analytics/MCP API key auth
 builder.Services.AddTransient<SoftLicence.Server.Services.LlmTipFeedbackService>(); // LLM tips feedback dedicated ingestion
 builder.Services.AddTransient<SoftLicence.Server.Services.SecurityBanAuditAnalyticsService>(); // Security ban read-only audit analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.SecurityCanaryAnalyticsService>(); // Canary security analytics
+builder.Services.AddScoped<SoftLicence.Server.Services.SecurityIncidentService>(); // Aggregated server-side security incidents
 builder.Services.AddTransient<SoftLicence.Server.Services.SecurityCaseContextService>(); // Shared securityCaseId and redacted enrichment context
 builder.Services.AddTransient<SoftLicence.Server.Services.CertPinningBugTraceAlertService>(); // Auto BugTrace tickets for cert pinning alerts
+builder.Services.AddTransient<SoftLicence.Server.Services.CertPinningDailyAlertService>(); // Persistent daily ntfy dedupe for cert pinning alerts
 builder.Services.AddTransient<SoftLicence.Server.Services.FreemiumAbuseBugTraceAlertService>(); // Auto BugTrace tickets for Freemium abuse risk alerts
 builder.Services.AddScoped<SoftLicence.Server.Services.TelemetryService>(); // Télémétrie
+builder.Services.AddScoped<SoftLicence.Server.Services.TelemetryRejectionService>();
+builder.Services.AddScoped<SoftLicence.Server.Services.ActivationIncidentService>();
 builder.Services.AddScoped<SoftLicence.Server.Services.FingerprintService>(); // Hardware Fingerprints
 builder.Services.AddScoped<SoftLicence.Server.Services.SeatCleanupService>(); // Enforcement un HWID par produit
 builder.Services.AddTransient<SoftLicence.Server.Services.PiracyDetectionService>(); // Détection piratage
@@ -225,7 +339,20 @@ app.UseForwardedHeaders(new ForwardedHeadersOptions
     KnownProxies = { System.Net.IPAddress.Loopback }
 });
 
-app.UseRateLimiter(); 
+// Runtime enrollment responses are sensitive on the entire route prefix,
+// including routing errors (404/405), throttling, and failures before MVC.
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments("/api/v1/runtime-enrollments")
+        || context.Request.Path.StartsWithSegments("/api/internal/v1/runtime-enrollments"))
+    {
+        context.Response.Headers.CacheControl = "no-store, max-age=0";
+        context.Response.Headers.Pragma = "no-cache";
+    }
+    await next(context);
+});
+
+app.UseRateLimiter();
 
 app.UseStaticFiles();
 
@@ -243,83 +370,19 @@ app.UseAntiforgery();
 
 app.UseAuthentication();
 
+app.UseMiddleware<SoftLicence.Server.Middlewares.TelemetryRejectionCaptureMiddleware>();
+
 // 2. LOGGING D'AUDIT GLOBAL (Placé AVANT l'autorisation pour capturer les accès refusés)
 app.UseMiddleware<SoftLicence.Server.Middlewares.AuditMiddleware>();
 
 app.UseAuthorization();
-
-// Application des Migrations avec Retry Logic
-if (builder.Configuration["IsIntegrationTest"] != "true")
-{
-    using (var scope = app.Services.CreateScope())
-    {
-        var services = scope.ServiceProvider;
-        var db = services.GetRequiredService<LicenseDbContext>();
-
-        int retryCount = 0;
-        const int maxRetries = 10;
-        var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
-        
-        if (app.Environment.IsDevelopment())
-        {
-            // Diagnostic DNS
-            try {
-                var host = connectionString?.Split(';').FirstOrDefault(s => s.StartsWith("Host="))?.Split('=')[1];
-                if (!string.IsNullOrEmpty(host)) {
-                    Console.WriteLine($"🌐 Résolution DNS pour : {host}...");
-                    var ips = System.Net.Dns.GetHostAddresses(host);
-                    Console.WriteLine($"🌐 DNS {host} résolu en : {string.Join(", ", ips.Select(i => i.ToString()))}");
-                }
-            } catch (Exception ex) { Console.WriteLine($"🌐 DNS Wait : {ex.Message}"); }
-
-            var displayConn = connectionString?.Split(';').Select(s => s.StartsWith("Password") ? "Password=***" : s).Aggregate((a, b) => a + ";" + b);
-            Console.WriteLine($"🔍 Tentative de connexion : {displayConn}");
-        }
-
-        while (retryCount < maxRetries)
-        {
-            try 
-            {
-                db.Database.Migrate();
-                if (app.Environment.IsDevelopment())
-                {
-                    Console.WriteLine("✅ Base de données prête et migrations appliquées.");
-                }
-
-                break;
-            }
-            catch (Exception ex)
-            {
-                retryCount++;
-                if (app.Environment.IsDevelopment())
-                {
-                    Console.WriteLine($"⚠️ Tentative {retryCount}/{maxRetries} échouée.");
-                    Console.WriteLine($"   Erreur : {ex.GetType().Name} - {ex.Message}");
-                    if (ex.InnerException != null) Console.WriteLine($"   Interne : {ex.InnerException.Message}");
-                }
-
-                if (retryCount >= maxRetries)
-                {
-                    Console.WriteLine($"[FATAL] Impossible de se connecter à PostgreSQL après {maxRetries} tentatives.");
-                    throw; 
-                }
-                
-                if (app.Environment.IsDevelopment())
-                {
-                    Console.WriteLine($"[WAIT] PostgreSQL n'est pas encore prêt. Attente de 5s...");
-                }
-                Thread.Sleep(5000); 
-            }
-        }
-    }
-}
 
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 }
 
-app.MapControllers(); 
+app.MapControllers();
 
 // Blazor Routes
 app.MapRazorComponents<App>()

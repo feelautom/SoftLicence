@@ -16,14 +16,18 @@ namespace SoftLicence.SDK
         public string? LicenseFile { get; }
         public StatusErrorCode ErrorCode { get; }
         public string? ErrorMessage { get; }
+        public string? ServerErrorCode { get; }
+        public string? CorrelationId { get; }
 
-        private LicenseStatusResult(bool success, string? status, StatusErrorCode errorCode, string? errorMessage, string? licenseFile = null)
+        private LicenseStatusResult(bool success, string? status, StatusErrorCode errorCode, string? errorMessage, string? licenseFile = null, string? serverErrorCode = null, string? correlationId = null)
         {
             Success = success;
             Status = status;
             ErrorCode = errorCode;
             ErrorMessage = errorMessage;
             LicenseFile = licenseFile;
+            ServerErrorCode = serverErrorCode;
+            CorrelationId = correlationId;
         }
 
         public static LicenseStatusResult Ok(string status, string? licenseFile = null, string? errorMessage = null) =>
@@ -37,5 +41,9 @@ namespace SoftLicence.SDK
 
         public static LicenseStatusResult Fail(StatusErrorCode code, string? message = null) =>
             new LicenseStatusResult(false, null, code, message);
+
+        /// <summary>Creates a failed status result with structured support diagnostics.</summary>
+        public static LicenseStatusResult Fail(StatusErrorCode code, string? message, string? serverErrorCode, string? correlationId) =>
+            new LicenseStatusResult(false, null, code, message, null, serverErrorCode, correlationId);
     }
 }

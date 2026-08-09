@@ -42,6 +42,7 @@ public class AnalyticsApiKey
 public static class AnalyticsApiKeyScopes
 {
     public const string TelemetryRead = "telemetry:read";
+    public const string SecurityRead = "security:read";
     public const string MultiProductRead = "analytics:multi-product:read";
 }
 
