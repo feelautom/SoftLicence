@@ -33,6 +33,11 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         });
     }
 
+    /// <summary>Creates an exact uppercase 16-character ASCII hexadecimal HWID for public activation endpoint fixtures.</summary>
+    /// <returns>A collision-resistant canonical test identity.</returns>
+    private static string NewCanonicalHardwareId() =>
+        Guid.NewGuid().ToString("N")[..16].ToUpperInvariant();
+
     private async Task SeedDataAsync(IServiceProvider services)
     {
         var db = services.GetRequiredService<LicenseDbContext>();
@@ -100,7 +105,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             await SeedDataAsync(scope.ServiceProvider);
         }
 
-        var request = new { LicenseKey = "INVALID", HardwareId = "HW1", AppName = "YOUR_APP_NAME" };
+        var request = new { LicenseKey = "INVALID", HardwareId = "D000000000000001", AppName = "YOUR_APP_NAME" };
         var response = await client.PostAsJsonAsync("/api/activation", request);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
@@ -116,7 +121,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
             db.BannedHardwareIds.Add(new BannedHardwareId
             {
-                HardwareId = "HW-STRUCTURED-COMPAT",
+                HardwareId = "D000000000000002",
                 Reason = "Compatibility test",
                 BannedAt = DateTime.UtcNow,
                 IsActive = true
@@ -127,7 +132,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         var response = await client.PostAsJsonAsync("/api/activation", new
         {
             LicenseKey = "YOUR_APP_NAME-FREE-TRIAL",
-            HardwareId = "HW-STRUCTURED-COMPAT",
+            HardwareId = "D000000000000002",
             AppName = "YOUR_APP_NAME"
         });
 
@@ -144,7 +149,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
     {
         var client = _factory.CreateClient();
         var licenseKey = $"INVALID-AUDIT-{Guid.NewGuid():N}".ToUpperInvariant();
-        var hardwareId = $"HW-AUDIT-{Guid.NewGuid():N}";
+        var hardwareId = NewCanonicalHardwareId();
         using (var scope = _factory.Services.CreateScope())
         {
             await SeedDataAsync(scope.ServiceProvider);
@@ -172,7 +177,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
     {
         var client = _factory.CreateClient();
         var licenseKey = $"EXPIRED-AUDIT-{Guid.NewGuid():N}".ToUpperInvariant();
-        var hardwareId = $"HW-EXPIRED-{Guid.NewGuid():N}";
+        var hardwareId = NewCanonicalHardwareId();
 
         using (var scope = _factory.Services.CreateScope())
         {
@@ -213,7 +218,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
     {
         var client = _factory.CreateClient();
         var licenseKey = $"DISABLED-{Guid.NewGuid():N}".ToUpperInvariant();
-        var hardwareId = $"HW-DISABLED-{Guid.NewGuid():N}";
+        var hardwareId = NewCanonicalHardwareId();
 
         using (var scope = _factory.Services.CreateScope())
         {
@@ -258,7 +263,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
     {
         var client = _factory.CreateClient();
         var licenseKey = $"PARTNER-{Guid.NewGuid():N}".ToUpperInvariant();
-        var hardwareId = $"HW-PARTNER-{Guid.NewGuid():N}";
+        var hardwareId = NewCanonicalHardwareId();
 
         using (var scope = _factory.Services.CreateScope())
         {
@@ -317,7 +322,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
                 LicenseTypeId = type.Id,
                 CustomerName = "Seat Limit",
                 CustomerEmail = "seat-limit@test.local",
-                HardwareId = "HW-FIRST-SEAT",
+                HardwareId = "D000000000000003",
                 ActivationDate = firstActivatedAt,
                 IsActive = true,
                 MaxSeats = 1,
@@ -328,7 +333,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             db.LicenseSeats.Add(new LicenseSeat
             {
                 LicenseId = license.Id,
-                HardwareId = "HW-FIRST-SEAT",
+                HardwareId = "D000000000000003",
                 FirstActivatedAt = firstActivatedAt,
                 LastCheckInAt = firstActivatedAt,
                 IsActive = true
@@ -339,14 +344,14 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         var response = await client.PostAsJsonAsync("/api/activation", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-SECOND-SEAT",
+            HardwareId = "D000000000000004",
             AppName = "YOUR_APP_NAME"
         });
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Equal("SEAT_LIMIT", response.Headers.GetValues("X-SoftLicence-Error-Code").Single());
 
-        var log = await WaitForActivationLogAsync(licenseKey, "HW-SECOND-SEAT");
+        var log = await WaitForActivationLogAsync(licenseKey, "D000000000000004");
         Assert.Equal("SEAT_LIMIT", log.ResultStatus);
     }
 
@@ -380,7 +385,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         var response = await client.PostAsJsonAsync("/api/activation", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-VALID-ACTIVATION",
+            HardwareId = "D000000000000005",
             AppName = "YOUR_APP_NAME",
             AppVersion = "2.2.640"
         });
@@ -400,7 +405,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             await SeedDataAsync(scope.ServiceProvider);
         }
 
-        var request = new { LicenseKey = "YOUR_APP_NAME-FREE-TRIAL", HardwareId = "NEW-PC-123", AppName = "YOUR_APP_NAME" };
+        var request = new { LicenseKey = "YOUR_APP_NAME-FREE-TRIAL", HardwareId = "D000000000000006", AppName = "YOUR_APP_NAME" };
         var response = await client.PostAsJsonAsync("/api/activation", request);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -553,7 +558,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         var response = await client.PostAsJsonAsync("/api/activation", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-NEW-ACT-BLOCKED",
+            HardwareId = "D000000000000007",
             AppName = productName
         });
 
@@ -567,7 +572,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
     {
         var productName = $"RecoveryAct-{Guid.NewGuid():N}";
         var licenseKey = $"RECOVERY-ACT-{Guid.NewGuid():N}".ToUpperInvariant();
-        const string hardwareId = "HW-EXISTING-RECOVERY";
+        const string hardwareId = "D000000000000008";
 
         using (var scope = _factory.Services.CreateScope())
         {

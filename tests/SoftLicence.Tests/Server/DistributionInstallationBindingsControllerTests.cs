@@ -58,6 +58,29 @@ public sealed class DistributionInstallationBindingsControllerTests
     }
 
     [Fact]
+    public async Task Finalize_AuthorityConflict_ReturnsAllowlistedInternalReasonWithoutSensitiveContext()
+    {
+        const string body = "{\"productId\":\"12345678-1234-4234-9234-1234567890ab\"}";
+        var authentication = new Mock<IDistributionS2SAuthenticationService>();
+        authentication.Setup(service => service.AuthenticateAndReserveNonceAsync(
+                It.IsAny<HttpContext>(), It.IsAny<ReadOnlyMemory<byte>>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id"));
+        var bindings = new Mock<IDistributionInstallationBindingService>();
+        bindings.Setup(service => service.FinalizeAsync(
+                "tia-connect-website", It.IsAny<string>(), It.IsAny<DistributionInstallationFinalizeRequest>(),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new DistributionOperationException(
+                "binding_conflict", StatusCodes.Status409Conflict, "cross_generation_grant_owner_mismatch"));
+        var controller = CreateController(authentication.Object, bindings.Object, body);
+
+        var result = Assert.IsType<ObjectResult>(
+            await controller.FinalizeInstallation(CancellationToken.None));
+
+        Assert.Equal(StatusCodes.Status409Conflict, result.StatusCode);
+        Assert.Equal(new DistributionApiError("binding_conflict", "cross_generation_grant_owner_mismatch"), result.Value);
+    }
+
+    [Fact]
     public async Task Finalize_DuplicateProductId_IsRejectedBeforeAuthentication()
     {
         const string body = "{\"productId\":\"12345678-1234-4234-9234-1234567890ab\",\"productId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\"}";

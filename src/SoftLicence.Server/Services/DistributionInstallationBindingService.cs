@@ -39,11 +39,12 @@ public interface IDistributionInstallationBindingService
         CancellationToken cancellationToken = default);
 }
 
-public sealed class DistributionOperationException(string errorCode, int statusCode)
+public sealed class DistributionOperationException(string errorCode, int statusCode, string? reasonCode = null)
     : Exception(errorCode)
 {
     public string ErrorCode { get; } = errorCode;
     public int StatusCode { get; } = statusCode;
+    public string? ReasonCode { get; } = reasonCode;
 }
 
 public sealed class DistributionInstallationBindingService : IDistributionInstallationBindingService
@@ -54,6 +55,10 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
     public const string IssueResponseSchema = "distribution-entitlement-v1";
     public const string FinalizeSchema = "distribution-installation-finalize-v1";
     public const string FinalizeV2Schema = "distribution-installation-finalize-v2";
+    public const string FinalizeV3Schema = "distribution-installation-finalize-v3";
+    public const string FinalizeV4Schema = "distribution-installation-finalize-v4";
+    public const string LicenseReplacementSchema = "distribution-license-replacement-v1";
+    public const string LicenseReplacementCandidatesSchema = "distribution-license-replacement-candidates-v1";
     public const string BindingResponseSchema = "distribution-installation-binding-v1";
     public const string InvalidationSchema = "distribution-installation-invalidation-v1";
     public const string InvalidationResponseSchema = "distribution-installation-invalidation-result-v1";
@@ -62,8 +67,9 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
     private const string IssueV3Operation = "issue_entitlement_v3";
     private const string FinalizeOperation = "finalize_binding";
     private const string InvalidateOperation = "invalidate_binding";
-    private const string EntitlementPurpose = "SoftLicence.DistributionEntitlement.v1";
+    internal const string EntitlementPurpose = "SoftLicence.DistributionEntitlement.v1";
     private const string UtcFormat = "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'";
+    private const int MaximumLicenseReplacementCandidates = 16;
 
     private static readonly string[] RequiredBinaryKeys = ["FP_EXE", "FP_DLL", "FP_CORE"];
     private static readonly HashSet<string> RequiredBinaryKeySet = new(RequiredBinaryKeys, StringComparer.Ordinal);
@@ -219,6 +225,22 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
         }
     }
 
+    /// <summary>
+    /// Finalizes a fresh installation binding under the product, grant, installation and Runtime authority locks.
+    /// </summary>
+    /// <param name="clientId">The exact authorized Distribution S2S client identifier.</param>
+    /// <param name="exactPayloadDigest">The canonical SHA-256 digest used for request idempotency.</param>
+    /// <param name="request">The validated finalize intent and its bounded authority evidence.</param>
+    /// <param name="cancellationToken">Cancels the database operation before commit.</param>
+    /// <returns>The committed binding response and whether it came from an exact replay.</returns>
+    /// <exception cref="DistributionOperationException">
+    /// Thrown when entitlement, ownership, authority, security history or replay evidence fails closed.
+    /// </exception>
+    /// <remarks>
+    /// A terminal business enrollment can seed a new cryptographic generation only when its binding is the
+    /// unique exact current authority. Historical cross-license candidates cannot override that server-owned
+    /// decision. See DevBrain DOC-324 and DOC-327.
+    /// </remarks>
     public async Task<DistributionOperationResult<DistributionInstallationBindingResponse>> FinalizeAsync(
         string clientId,
         string exactPayloadDigest,
@@ -381,6 +403,8 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
         IReadOnlyList<RuntimeEnrollment> supersededEnrollments = [];
         if (existingInstallation != null)
         {
+            if (validated.LicenseReplacement != null || validated.LicenseReplacementCandidates.Count > 0)
+                throw Conflict("binding_conflict", "replacement_existing_installation_conflict");
             var rotation = await RotateCrossGenerationBindingAsync(
                 db, clientId, validated, entitlement, seat.Id, grantRefDigest,
                 hardwareIdHash, binaryMap, now, cancellationToken);
@@ -389,27 +413,111 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
         }
         else
         {
-            var activeHardwareBindings = await db.DistributionInstallationBindings.AsNoTracking()
+            var hardwareBindings = await db.DistributionInstallationBindings.AsNoTracking()
                 .Where(candidate => candidate.ProductId == validated.ProductId
-                    && candidate.HardwareIdHash == hardwareIdHash
-                    && candidate.State == "active")
+                    && candidate.HardwareIdHash == hardwareIdHash)
                 .OrderBy(candidate => candidate.Id)
-                .Take(2)
                 .ToListAsync(cancellationToken);
-            if (activeHardwareBindings.Count > 1)
-                throw Conflict("binding_conflict");
-            if (activeHardwareBindings.Count == 1)
+            LicenseReplacementValidated? replacement = validated.LicenseReplacement;
+            var proofs = validated.LicenseReplacementCandidates.Count > 0
+                ? validated.LicenseReplacementCandidates
+                : replacement == null ? [] : [replacement];
+            var isSameLicenseSeatTransition = false;
+            DistributionInstallationBinding? recoverySource = null;
+            var hasActiveHardwareAuthority = hardwareBindings.Any(candidate => candidate.State == "active");
+            var hasSecurityTerminalHardwareAuthority = hardwareBindings.Any(candidate =>
+                !RuntimeAuthorityTransitionResolver.IsRecoverableBinding(
+                    candidate.State, candidate.InvalidationReason));
+            if (!hasActiveHardwareAuthority
+                && !hasSecurityTerminalHardwareAuthority
+                && replacement == null
+                && entitlement.ContractVersion == 3
+                && entitlement.SubjectRefDigestSha256 is { Length: 64 })
+            {
+                recoverySource = await ResolveSameLicenseSeatTransitionSourceAsync(
+                    db, validated.ProductId, entitlement.LicenseId, seat.Id,
+                    entitlement.SubjectRefDigestSha256, hardwareIdHash, cancellationToken);
+                isSameLicenseSeatTransition = recoverySource != null;
+            }
+            if (recoverySource == null)
+            {
+                var bindingDecision = RuntimeAuthorityTransitionResolver.ResolveBinding(
+                    hardwareBindings.Select(candidate => new RuntimeAuthorityBindingSnapshot(
+                            candidate.Id,
+                            candidate.SupersededBindingId,
+                            candidate.State,
+                            candidate.InvalidationReason,
+                            proofs.Count > 0
+                                ? proofs.Count(proof =>
+                                    proof.SourceBindingId == candidate.Id
+                                    && proof.SourceLicenseId == candidate.LicenseId
+                                    && proof.SourceSubjectRefDigestSha256 == candidate.SubjectRefDigestSha256) == 1
+                                : candidate.LicenseId == entitlement.LicenseId
+                                    && candidate.LicenseSeatId == seat.Id
+                                    && candidate.SubjectRefDigestSha256 == entitlement.SubjectRefDigestSha256))
+                        .ToList());
+                if (bindingDecision.Kind == RuntimeAuthorityBindingDecisionKind.RejectAmbiguous)
+                    throw Conflict("binding_conflict", "replacement_hardware_ambiguous");
+                recoverySource = bindingDecision.BindingId.HasValue
+                    ? hardwareBindings.Single(candidate => candidate.Id == bindingDecision.BindingId.Value)
+                    : null;
+            }
+            var isExactActiveAuthorityRecovery = recoverySource is
+                {
+                    State: "active"
+                }
+                && !hasSecurityTerminalHardwareAuthority
+                && recoverySource.InvalidatedAtUtc == null
+                && recoverySource.InvalidationReason == null
+                && recoverySource.ProductId == validated.ProductId
+                && recoverySource.LicenseId == entitlement.LicenseId
+                && recoverySource.LicenseSeatId == seat.Id
+                && string.Equals(
+                    recoverySource.SubjectRefDigestSha256,
+                    entitlement.SubjectRefDigestSha256,
+                    StringComparison.Ordinal)
+                && string.Equals(recoverySource.HardwareIdHash, hardwareIdHash, StringComparison.Ordinal);
+            if (recoverySource != null
+                && validated.LicenseReplacementCandidates.Count > 0
+                && !isSameLicenseSeatTransition
+                && !isExactActiveAuthorityRecovery)
+            {
+                var matches = validated.LicenseReplacementCandidates.Where(proof =>
+                        proof.SourceBindingId == recoverySource.Id
+                        && proof.SourceLicenseId == recoverySource.LicenseId
+                        && proof.SourceSubjectRefDigestSha256 == recoverySource.SubjectRefDigestSha256)
+                    .ToList();
+                if (matches.Count != 1)
+                    throw Conflict("binding_conflict", "replacement_candidate_none");
+                replacement = matches[0];
+            }
+            if (recoverySource != null)
             {
                 if (!validated.AllowSameAuthorityRecovery)
-                    throw Conflict("binding_conflict");
+                    throw Conflict("binding_conflict", "replacement_authority_missing");
+                if (validated.LicenseReplacementCandidates.Count > 0
+                    && replacement == null
+                    && !isSameLicenseSeatTransition
+                    && !isExactActiveAuthorityRecovery)
+                    throw Conflict("binding_conflict", "replacement_candidate_none");
+                if (replacement is { } exactReplacement
+                    && exactReplacement.SourceBindingId != recoverySource.Id)
+                    throw Conflict("binding_conflict", "replacement_source_binding_mismatch");
                 var recovery = await RecoverSameAuthorityInstallationAsync(
-                    db, clientId, activeHardwareBindings[0].Id, validated, entitlement, seat.Id,
+                    db, clientId, recoverySource.Id,
+                    isExactActiveAuthorityRecovery && validated.LicenseReplacementCandidates.Count > 0,
+                    replacement,
+                    validated, entitlement, seat.Id,
                     grantRefDigest, hardwareIdHash, binaryMap, now, cancellationToken);
                 binding = recovery.Binding;
                 supersededEnrollments = recovery.Enrollments;
             }
             else
             {
+                if (validated.LicenseReplacement != null || validated.LicenseReplacementCandidates.Count > 0)
+                    throw Conflict("binding_conflict", "replacement_candidate_none");
+                if (hardwareBindings.Count > 0)
+                    throw Conflict("binding_conflict", "replacement_authority_missing");
                 binding = CreateBinding(
                     validated, entitlement, seat.Id, grantRefDigest, hardwareIdHash, binaryMap, now,
                     supersededBindingId: null, initialSecurityEpoch: 1);
@@ -623,8 +731,20 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
         return ToResponse(binding);
     }
 
-    private async Task<EntitlementIdentity> ReadEntitlementAsync(
+    private Task<EntitlementIdentity> ReadEntitlementAsync(
         LicenseDbContext db,
+        string entitlementRef,
+        string expectedClientId,
+        Guid expectedProductId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken) =>
+        ReadEntitlementAsync(
+            db, _entitlementProtector, entitlementRef, expectedClientId, expectedProductId, now,
+            cancellationToken);
+
+    internal static async Task<EntitlementIdentity> ReadEntitlementAsync(
+        LicenseDbContext db,
+        IDataProtector entitlementProtector,
         string entitlementRef,
         string expectedClientId,
         Guid expectedProductId,
@@ -635,7 +755,7 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
             throw Reject("entitlement_ineligible");
         try
         {
-            var json = _entitlementProtector.Unprotect(entitlementRef);
+            var json = entitlementProtector.Unprotect(entitlementRef);
             var payload = JsonSerializer.Deserialize<EntitlementTokenPayload>(json, JsonOptions);
             if (payload == null
                 || payload.Schema != IssueResponseSchema
@@ -721,11 +841,26 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
 
     private static FinalizeValidated ValidateFinalizeRequest(DistributionInstallationFinalizeRequest request)
     {
-        var allowSameAuthorityRecovery = request.Schema switch
+        var replacementAuthority = request.Schema switch
         {
-            FinalizeSchema when !request.AllowSameAuthorityRecoveryPresent => false,
+            FinalizeSchema when !request.AllowSameAuthorityRecoveryPresent
+                && !request.LicenseReplacementPresent
+                && !request.LicenseReplacementCandidatesPresent =>
+                new FinalizeReplacementAuthority(false, null, []),
             FinalizeV2Schema when request.AllowSameAuthorityRecoveryPresent
-                && request.AllowSameAuthorityRecovery == true => true,
+                && request.AllowSameAuthorityRecovery == true
+                && !request.LicenseReplacementPresent
+                && !request.LicenseReplacementCandidatesPresent => new FinalizeReplacementAuthority(true, null, []),
+            FinalizeV3Schema when request.AllowSameAuthorityRecoveryPresent
+                && request.AllowSameAuthorityRecovery == true
+                && request.LicenseReplacementPresent
+                && !request.LicenseReplacementCandidatesPresent =>
+                new FinalizeReplacementAuthority(true, ValidateLicenseReplacement(request.LicenseReplacement), []),
+            FinalizeV4Schema when request.AllowSameAuthorityRecoveryPresent
+                && request.AllowSameAuthorityRecovery == true
+                && !request.LicenseReplacementPresent
+                && request.LicenseReplacementCandidatesPresent =>
+                new FinalizeReplacementAuthority(true, null, ValidateLicenseReplacementCandidates(request.LicenseReplacementCandidates)),
             _ => throw Invalid()
         };
         if (request.ExtensionData is { Count: > 0 }
@@ -764,7 +899,46 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
             request.Release.InstallerFilename!,
             request.Release.InstallerSha256!,
             binaries,
-            allowSameAuthorityRecovery);
+            replacementAuthority.AllowSameAuthorityRecovery,
+            replacementAuthority.LicenseReplacement,
+            replacementAuthority.LicenseReplacementCandidates);
+    }
+
+    private static LicenseReplacementValidated ValidateLicenseReplacement(
+        DistributionLicenseReplacementProof? replacement)
+    {
+        if (replacement == null
+            || replacement.ExtensionData is { Count: > 0 }
+            || replacement.Schema != LicenseReplacementSchema
+            || !TryCanonicalUuid(replacement.SourceBindingId, out var sourceBindingId)
+            || !TryCanonicalUuid(replacement.SourceLicenseId, out var sourceLicenseId)
+            || !IsCanonicalSubjectRef(replacement.SourceSubjectRef))
+        {
+            throw Invalid();
+        }
+
+        return new(
+            sourceBindingId,
+            sourceLicenseId,
+            Sha256(replacement.SourceSubjectRef!));
+    }
+
+    private static IReadOnlyList<LicenseReplacementValidated> ValidateLicenseReplacementCandidates(
+        DistributionLicenseReplacementCandidateSet? candidateSet)
+    {
+        if (candidateSet == null
+            || candidateSet.ExtensionData is { Count: > 0 }
+            || candidateSet.Schema != LicenseReplacementCandidatesSchema
+            || candidateSet.Sources is not { Count: > 0 }
+            || candidateSet.Sources.Count > MaximumLicenseReplacementCandidates)
+        {
+            throw Invalid();
+        }
+
+        var candidates = candidateSet.Sources.Select(ValidateLicenseReplacement).ToList();
+        if (candidates.Select(candidate => candidate.SourceBindingId).Distinct().Count() != candidates.Count)
+            throw Invalid();
+        return candidates;
     }
 
     private static InvalidationValidated ValidateInvalidationRequest(
@@ -1020,38 +1194,32 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
                 candidate.ProductId == binding.ProductId
                 && candidate.GrantRefDigestSha256 == binding.GrantRefDigestSha256,
                 cancellationToken);
+        var hasSuccessor = await db.DistributionInstallationBindings.AsNoTracking().AnyAsync(
+            candidate => candidate.SupersededBindingId == binding.Id,
+            cancellationToken);
+        var hasCompetingActiveHardwareAuthority = await db.DistributionInstallationBindings.AsNoTracking()
+            .AnyAsync(candidate =>
+                candidate.Id != binding.Id
+                && candidate.ProductId == binding.ProductId
+                && candidate.HardwareIdHash == binding.HardwareIdHash
+                && candidate.State == "active",
+                cancellationToken);
 
-        var sameAuthority = entitlement.ContractVersion == 3
-            && entitlement.SubjectRefDigestSha256 is { Length: 64 }
-            && previousEntitlement is
-            {
-                ContractVersion: 3,
-                State: "finalized",
-                SubjectRefDigestSha256.Length: 64
-            }
-            && binding.State == "active"
-            && binding.ProductId == request.ProductId
-            && binding.LicenseId == entitlement.LicenseId
-            && binding.LicenseSeatId == seatId
-            && binding.HardwareIdHash == hardwareIdHash
-            && binding.SubjectRefDigestSha256 == entitlement.SubjectRefDigestSha256
-            && previousEntitlement.Id == binding.EntitlementId
-            && previousEntitlement.ClientId == clientId
-            && previousEntitlement.ProductId == binding.ProductId
-            && previousEntitlement.LicenseId == binding.LicenseId
-            && previousEntitlement.GrantRefDigestSha256 == binding.GrantRefDigestSha256
-            && previousEntitlement.SubjectRefDigestSha256 == binding.SubjectRefDigestSha256
-            && previousGrantOwner != null
-            && previousGrantOwner.ClientId == clientId
-            && finalizeOwners.Count == 1
-            && finalizeOwners[0] == clientId
-            && binding.GrantRefDigestSha256 == Sha256(binding.GrantRef)
-            && binding.GrantRefDigestSha256 != grantRefDigestSha256
-            && binding.HandoffIssuedAtUtc.HasValue
-            && request.HandoffIssuedAtUtc.UtcDateTime > binding.HandoffIssuedAtUtc.Value
-            && !IsVersionBelow(request.Version, binding.Version);
-        if (!sameAuthority)
-            throw Conflict("binding_conflict");
+        var authorityFailureReason = GetCrossGenerationAuthorityFailureReason(
+            clientId,
+            request,
+            entitlement,
+            seatId,
+            grantRefDigestSha256,
+            hardwareIdHash,
+            binding,
+            previousEntitlement,
+            previousGrantOwner,
+            finalizeOwners,
+            hasSuccessor,
+            hasCompetingActiveHardwareAuthority);
+        if (authorityFailureReason != null)
+            throw Conflict("binding_conflict", authorityFailureReason);
 
         var enrollments = db.Database.IsNpgsql()
             ? await db.RuntimeEnrollments.FromSqlInterpolated($"""
@@ -1073,6 +1241,11 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
             enrollment.InvalidationReason = "binding_superseded";
         }
 
+        // Recoverable invalidations describe an interrupted business transition. They may be
+        // revived only after every exact same-authority check above has succeeded.
+        binding.State = "active";
+        binding.InvalidatedAtUtc = null;
+        binding.InvalidationReason = null;
         binding.EntitlementId = entitlement.EntitlementId;
         binding.SubjectRefDigestSha256 = entitlement.SubjectRefDigestSha256;
         binding.GrantRef = request.GrantRef;
@@ -1092,10 +1265,178 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
         return new CrossGenerationRotation(binding, enrollments);
     }
 
+    /// <summary>
+    /// Identifies the first bounded reason why an existing installation cannot be rotated to
+    /// a newer distribution generation owned by the same authority.
+    /// </summary>
+    /// <param name="clientId">The exact authenticated S2S client identifier.</param>
+    /// <param name="request">The validated finalize request for the candidate generation.</param>
+    /// <param name="entitlement">The validated entitlement carried by the candidate request.</param>
+    /// <param name="seatId">The exact seat selected for the candidate authority.</param>
+    /// <param name="grantRefDigestSha256">The exact candidate grant digest.</param>
+    /// <param name="hardwareIdHash">The exact candidate hardware digest.</param>
+    /// <param name="binding">The locked binding for the reused installation identifier.</param>
+    /// <param name="previousEntitlement">The entitlement referenced by the locked binding.</param>
+    /// <param name="previousGrantOwner">The registered owner of the binding grant.</param>
+    /// <param name="finalizeOwners">The distinct clients that finalized the locked binding.</param>
+    /// <param name="hasSuccessor">Whether the locked binding already has a successor generation.</param>
+    /// <param name="hasCompetingActiveHardwareAuthority">
+    /// Whether another active binding already owns the same product and hardware authority.
+    /// </param>
+    /// <returns>
+    /// A stable ASCII reason code containing no customer or authority value, or <see langword="null"/>
+    /// when every existing same-authority invariant is satisfied.
+    /// </returns>
+    /// <remarks>
+    /// The checks deliberately preserve the former conjunction order and exact string semantics.
+    /// These codes are intended only for the authenticated Website S2S diagnostic boundary. They
+    /// do not weaken authorization and must not be rendered as detailed public client messages.
+    /// </remarks>
+    private static string? GetCrossGenerationAuthorityFailureReason(
+        string clientId,
+        FinalizeValidated request,
+        EntitlementIdentity entitlement,
+        Guid seatId,
+        string grantRefDigestSha256,
+        string hardwareIdHash,
+        DistributionInstallationBinding binding,
+        DistributionEntitlement? previousEntitlement,
+        DistributionGrantOwnership? previousGrantOwner,
+        IReadOnlyList<string> finalizeOwners,
+        bool hasSuccessor,
+        bool hasCompetingActiveHardwareAuthority)
+    {
+        if (entitlement.ContractVersion != 3 || entitlement.SubjectRefDigestSha256 is not { Length: 64 })
+            return "cross_generation_candidate_entitlement_invalid";
+        if (previousEntitlement is not
+            {
+                ContractVersion: 3,
+                State: "finalized",
+                SubjectRefDigestSha256.Length: 64
+            })
+            return "cross_generation_previous_entitlement_invalid";
+        if (binding.State != "active"
+            && !RuntimeAuthorityTransitionResolver.IsRecoverableBinding(
+                binding.State,
+                binding.InvalidationReason))
+            return "cross_generation_binding_inactive";
+        if (hasSuccessor || hasCompetingActiveHardwareAuthority)
+            return "cross_generation_binding_inactive";
+        if (binding.ProductId != request.ProductId)
+            return "cross_generation_product_mismatch";
+        if (binding.LicenseId != entitlement.LicenseId)
+            return "cross_generation_license_mismatch";
+        if (binding.LicenseSeatId != seatId)
+            return "cross_generation_seat_mismatch";
+        if (binding.HardwareIdHash != hardwareIdHash)
+            return "cross_generation_hardware_mismatch";
+        if (binding.SubjectRefDigestSha256 != entitlement.SubjectRefDigestSha256)
+            return "cross_generation_subject_mismatch";
+        if (previousEntitlement.Id != binding.EntitlementId)
+            return "cross_generation_entitlement_reference_mismatch";
+        if (previousEntitlement.ClientId != clientId)
+            return "cross_generation_entitlement_client_mismatch";
+        if (previousEntitlement.ProductId != binding.ProductId)
+            return "cross_generation_entitlement_product_mismatch";
+        if (previousEntitlement.LicenseId != binding.LicenseId)
+            return "cross_generation_entitlement_license_mismatch";
+        if (previousEntitlement.GrantRefDigestSha256 != binding.GrantRefDigestSha256)
+            return "cross_generation_entitlement_grant_mismatch";
+        if (previousEntitlement.SubjectRefDigestSha256 != binding.SubjectRefDigestSha256)
+            return "cross_generation_entitlement_subject_mismatch";
+        if (previousGrantOwner == null || previousGrantOwner.ClientId != clientId)
+            return "cross_generation_grant_owner_mismatch";
+        if (finalizeOwners.Count != 1 || finalizeOwners[0] != clientId)
+            return "cross_generation_finalize_owner_mismatch";
+        if (binding.GrantRefDigestSha256 != Sha256(binding.GrantRef))
+            return "cross_generation_binding_grant_invalid";
+        if (binding.GrantRefDigestSha256 == grantRefDigestSha256)
+            return "cross_generation_grant_reused";
+        if (!binding.HandoffIssuedAtUtc.HasValue)
+            return "cross_generation_previous_handoff_missing";
+        if (request.HandoffIssuedAtUtc.UtcDateTime <= binding.HandoffIssuedAtUtc.Value)
+            return "cross_generation_handoff_not_newer";
+        if (IsVersionBelow(request.Version, binding.Version))
+            return "cross_generation_version_regression";
+        return null;
+    }
+
+    /// <summary>
+    /// Resolves the unique previous Runtime authority after the same license was explicitly
+    /// unlinked from one seat and activated on another. Historical replacement proofs belong
+    /// to cross-license renewal and therefore cannot select or veto this same-license path.
+    /// The selected rows are revalidated under authority and row locks before mutation.
+    /// See DevBrain DOC-324.
+    /// </summary>
+    private static async Task<DistributionInstallationBinding?> ResolveSameLicenseSeatTransitionSourceAsync(
+        LicenseDbContext db,
+        Guid productId,
+        Guid licenseId,
+        Guid targetSeatId,
+        string subjectRefDigestSha256,
+        string targetHardwareIdHash,
+        CancellationToken cancellationToken)
+    {
+        var candidates = await (
+                from binding in db.DistributionInstallationBindings.AsNoTracking()
+                join sourceSeat in db.LicenseSeats.AsNoTracking()
+                    on binding.LicenseSeatId equals sourceSeat.Id
+                where binding.ProductId == productId
+                    && binding.LicenseId == licenseId
+                    && binding.LicenseSeatId != targetSeatId
+                    && binding.HardwareIdHash != targetHardwareIdHash
+                    && binding.SubjectRefDigestSha256 == subjectRefDigestSha256
+                    && sourceSeat.LicenseId == licenseId
+                    && !sourceSeat.IsActive
+                    && sourceSeat.UnlinkedAt != null
+                orderby binding.Id
+                select binding)
+            .ToListAsync(cancellationToken);
+        var decision = RuntimeAuthorityTransitionResolver.ResolveBinding(
+            candidates.Select(candidate => new RuntimeAuthorityBindingSnapshot(
+                    candidate.Id,
+                    candidate.SupersededBindingId,
+                    candidate.State,
+                    candidate.InvalidationReason,
+                    IsAuthorizedCandidate: true))
+                .ToList());
+        if (decision.Kind == RuntimeAuthorityBindingDecisionKind.RejectAmbiguous)
+            throw Conflict("binding_conflict", "same_license_seat_transition_ambiguous");
+        return decision.BindingId.HasValue
+            ? candidates.Single(candidate => candidate.Id == decision.BindingId.Value)
+            : null;
+    }
+
+    /// <summary>
+    /// Revalidates and supersedes one persisted Runtime authority inside the caller's binding transaction.
+    /// </summary>
+    /// <param name="db">The transaction-scoped database context.</param>
+    /// <param name="clientId">The exact Distribution S2S owner.</param>
+    /// <param name="sourceBindingId">The unique binding selected from authoritative server history.</param>
+    /// <param name="requireExactRecoverableEnrollment">
+    /// Requires the exact source binding to have either one active enrollment or one business-terminal
+    /// enrollment whose reason is <c>authority_ineligible</c>. It is used only for the exact
+    /// active-binding recovery described by DOC-327.
+    /// </param>
+    /// <param name="replacement">The optional exact cross-license replacement proof.</param>
+    /// <param name="request">The validated fresh finalize request.</param>
+    /// <param name="entitlement">The authoritative target entitlement.</param>
+    /// <param name="seatId">The authoritative active target seat.</param>
+    /// <param name="grantRefDigestSha256">The exact target grant digest.</param>
+    /// <param name="hardwareIdHash">The exact target hardware digest.</param>
+    /// <param name="binaries">The validated approved-binary evidence keyed by canonical component code.</param>
+    /// <param name="now">The authoritative operation time.</param>
+    /// <param name="cancellationToken">Cancels the operation before commit.</param>
+    /// <returns>The fresh successor and any live source enrollments terminalized by the transition.</returns>
+    /// <exception cref="DistributionOperationException">
+    /// Thrown when ownership, history, security, freshness or exact-authority checks fail closed.
+    /// </exception>
     private static async Task<CrossGenerationRotation> RecoverSameAuthorityInstallationAsync(
         LicenseDbContext db,
         string clientId,
         Guid sourceBindingId,
+        bool requireExactRecoverableEnrollment,
+        LicenseReplacementValidated? replacement,
         FinalizeValidated request,
         EntitlementIdentity entitlement,
         Guid seatId,
@@ -1135,6 +1476,55 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
                 && candidate.GrantRefDigestSha256 == source.GrantRefDigestSha256,
                 cancellationToken);
 
+        var sourceLicense = replacement == null
+            ? null
+            : await db.Licenses.AsNoTracking().SingleOrDefaultAsync(candidate =>
+                candidate.Id == source.LicenseId
+                && candidate.ProductId == source.ProductId,
+                cancellationToken);
+        var sourceSeat = db.Database.IsNpgsql()
+            ? await db.LicenseSeats.FromSqlInterpolated($"""
+                SELECT * FROM public."LicenseSeats"
+                WHERE "Id" = {source.LicenseSeatId}
+                FOR UPDATE
+                """).SingleOrDefaultAsync(cancellationToken)
+            : await db.LicenseSeats.SingleOrDefaultAsync(
+                candidate => candidate.Id == source.LicenseSeatId, cancellationToken);
+        var targetSeat = db.Database.IsNpgsql()
+            ? await db.LicenseSeats.FromSqlInterpolated($"""
+                SELECT * FROM public."LicenseSeats"
+                WHERE "Id" = {seatId}
+                FOR UPDATE
+                """).SingleOrDefaultAsync(cancellationToken)
+            : await db.LicenseSeats.SingleOrDefaultAsync(
+                candidate => candidate.Id == seatId, cancellationToken);
+        var exactSameLicenseAuthority = source.LicenseId == entitlement.LicenseId
+            && source.LicenseSeatId == seatId
+            && source.SubjectRefDigestSha256 == entitlement.SubjectRefDigestSha256;
+        var exactSameLicenseSeatTransition = replacement == null
+            && source.LicenseId == entitlement.LicenseId
+            && source.LicenseSeatId != seatId
+            && source.SubjectRefDigestSha256 == entitlement.SubjectRefDigestSha256
+            && source.HardwareIdHash != hardwareIdHash
+            && sourceSeat != null
+            && sourceSeat.LicenseId == source.LicenseId
+            && !sourceSeat.IsActive
+            && sourceSeat.UnlinkedAt != null
+            && Sha256(sourceSeat.HardwareId) == source.HardwareIdHash
+            && targetSeat != null
+            && targetSeat.LicenseId == entitlement.LicenseId
+            && targetSeat.IsActive
+            && string.Equals(targetSeat.HardwareId, request.HardwareId, StringComparison.Ordinal)
+            && Sha256(targetSeat.HardwareId) == hardwareIdHash;
+        var exactRenewalAuthority = replacement != null
+            && replacement.SourceBindingId == source.Id
+            && replacement.SourceLicenseId == source.LicenseId
+            && replacement.SourceSubjectRefDigestSha256 == source.SubjectRefDigestSha256
+            && source.LicenseId != entitlement.LicenseId
+            && source.LicenseSeatId != seatId
+            && sourceLicense != null
+            && IsReplacementSourceIneligible(sourceLicense, now);
+
         var sameAuthority = entitlement.ContractVersion == 3
             && entitlement.SubjectRefDigestSha256 is { Length: 64 }
             && previousEntitlement is
@@ -1143,13 +1533,11 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
                 State: "finalized",
                 SubjectRefDigestSha256.Length: 64
             }
-            && source.State == "active"
+            && RuntimeAuthorityTransitionResolver.IsRecoverableBinding(source.State, source.InvalidationReason)
             && source.ProductId == request.ProductId
-            && source.LicenseId == entitlement.LicenseId
-            && source.LicenseSeatId == seatId
+            && (exactSameLicenseAuthority || exactSameLicenseSeatTransition || exactRenewalAuthority)
             && source.InstallationId != request.InstallationId
-            && source.HardwareIdHash == hardwareIdHash
-            && source.SubjectRefDigestSha256 == entitlement.SubjectRefDigestSha256
+            && (source.HardwareIdHash == hardwareIdHash || exactSameLicenseSeatTransition)
             && previousEntitlement.Id == source.EntitlementId
             && previousEntitlement.ClientId == clientId
             && previousEntitlement.ProductId == source.ProductId
@@ -1166,13 +1554,15 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
             && request.HandoffIssuedAtUtc.UtcDateTime > source.HandoffIssuedAtUtc.Value
             && !IsVersionBelow(request.Version, source.Version);
         if (!sameAuthority)
-            throw Conflict("binding_conflict");
+            throw Conflict("binding_conflict", replacement == null
+                ? "same_authority_mismatch"
+                : "replacement_source_authority_mismatch");
 
         if (await db.RuntimeCriticalIncidents.AsNoTracking().AnyAsync(
                 incident => incident.BindingId == source.Id && incident.State == "OPEN",
                 cancellationToken))
         {
-            throw Conflict("binding_conflict");
+            throw Conflict("binding_conflict", "replacement_source_incident");
         }
 
         var enrollments = db.Database.IsNpgsql()
@@ -1184,29 +1574,39 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
             : await db.RuntimeEnrollments.Where(candidate => candidate.BindingId == source.Id)
                 .OrderBy(candidate => candidate.Id)
                 .ToListAsync(cancellationToken);
-        var liveEnrollments = enrollments.Where(candidate => candidate.State is "PENDING" or "ACTIVE").ToList();
-        var activeEnrollment = liveEnrollments.Count == 1
-            && string.Equals(liveEnrollments[0].State, "ACTIVE", StringComparison.Ordinal)
-            ? liveEnrollments[0]
-            : null;
-        // A never-consumed challenge that expired before activation cannot carry Runtime authority.
-        // Its exact terminal row is preserved as forensic evidence; every other terminal history
-        // remains ineligible so recovery cannot collapse ambiguous or previously-used identities.
-        var abandonedEnrollment = enrollments.Count == 1
-            && string.Equals(enrollments[0].State, "INVALIDATED", StringComparison.Ordinal)
-            && string.Equals(enrollments[0].InvalidationReason, "challenge_expired", StringComparison.Ordinal)
-            && enrollments[0].ActivatedAtUtc == null
-            && enrollments[0].ChallengeConsumedAtUtc == null
-            && enrollments[0].InvalidatedAtUtc.HasValue
-            && enrollments[0].ChallengeExpiresAtUtc <= now.UtcDateTime
-            && enrollments[0].InvalidatedAtUtc.GetValueOrDefault() <= now.UtcDateTime
-            && enrollments[0].InvalidatedAtUtc.GetValueOrDefault() >= enrollments[0].ChallengeExpiresAtUtc
-            ? enrollments[0]
-            : null;
-        if (activeEnrollment == null && abandonedEnrollment == null)
-            throw Conflict("binding_conflict");
+        var enrollmentDecision = RuntimeAuthorityTransitionResolver.ClassifyEnrollments(
+            enrollments.Select(candidate => new RuntimeAuthorityEnrollmentSnapshot(
+                    candidate.State,
+                    candidate.InvalidationReason,
+                    candidate.ChallengeExpiresAtUtc,
+                    candidate.ChallengeConsumedAtUtc,
+                    candidate.ActivatedAtUtc,
+                    candidate.InvalidatedAtUtc))
+                .ToList(),
+            now.UtcDateTime);
+        if (enrollmentDecision is RuntimeAuthorityEnrollmentDecision.RejectAmbiguous)
+            throw Conflict("binding_conflict", "replacement_enrollment_ambiguous");
+        if (enrollmentDecision is RuntimeAuthorityEnrollmentDecision.RejectSecurity)
+            throw Conflict("binding_conflict", "replacement_enrollment_security_terminal");
+        var isExactActiveEnrollment = enrollmentDecision == RuntimeAuthorityEnrollmentDecision.UseActive
+            && enrollments.Count == 1;
+        var isExactAuthorityIneligibleTerminal =
+            enrollmentDecision == RuntimeAuthorityEnrollmentDecision.UseBusinessTerminal
+            && enrollments.Count == 1
+            && string.Equals(
+                enrollments[0].InvalidationReason,
+                "authority_ineligible",
+                StringComparison.Ordinal);
+        if (requireExactRecoverableEnrollment
+            && !isExactActiveEnrollment
+            && !isExactAuthorityIneligibleTerminal)
+        {
+            throw Conflict("binding_conflict", "same_authority_active_enrollment_mismatch");
+        }
 
-        var sourceEnrollment = activeEnrollment ?? abandonedEnrollment!;
+        var sourceEnrollment = enrollmentDecision == RuntimeAuthorityEnrollmentDecision.UseActive
+            ? enrollments.Single(candidate => candidate.State == RuntimeAuthorityTransitionResolver.ActiveState)
+            : enrollments.Single();
         var enrollmentMatchesAuthority = string.Equals(sourceEnrollment.ClientId, clientId, StringComparison.Ordinal)
             && sourceEnrollment.BindingId == source.Id
             && sourceEnrollment.ProductId == source.ProductId
@@ -1233,18 +1633,22 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
             throw Conflict("binding_conflict");
 
         var initialSecurityEpoch = checked(enrollments.Max(candidate => candidate.SecurityEpoch) + 1);
-        IReadOnlyList<RuntimeEnrollment> enrollmentsToInvalidate = activeEnrollment == null
-            ? Array.Empty<RuntimeEnrollment>()
-            : [activeEnrollment];
+        IReadOnlyList<RuntimeEnrollment> enrollmentsToInvalidate =
+            enrollmentDecision == RuntimeAuthorityEnrollmentDecision.UseActive
+                ? [sourceEnrollment]
+                : Array.Empty<RuntimeEnrollment>();
         foreach (var enrollment in enrollmentsToInvalidate)
         {
             enrollment.State = "INVALIDATED";
             enrollment.InvalidatedAtUtc = now.UtcDateTime;
             enrollment.InvalidationReason = "binding_superseded";
         }
-        source.State = "invalidated";
-        source.InvalidatedAtUtc = now.UtcDateTime;
-        source.InvalidationReason = "installation_superseded";
+        if (source.State == "active")
+        {
+            source.State = "invalidated";
+            source.InvalidatedAtUtc = now.UtcDateTime;
+            source.InvalidationReason = "installation_superseded";
+        }
 
         // Free the active-HWID uniqueness slot before inserting the successor in this transaction.
         await db.SaveChangesAsync(cancellationToken);
@@ -1255,6 +1659,11 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
         db.DistributionInstallationBindings.Add(successor);
         return new CrossGenerationRotation(successor, enrollmentsToInvalidate);
     }
+
+    private static bool IsReplacementSourceIneligible(License license, DateTimeOffset now) =>
+        !license.IsActive
+        || license.RevokedAt != null
+        || (license.ExpirationDate.HasValue && license.ExpirationDate.Value <= now.UtcDateTime);
 
     private static DistributionInstallationBinding CreateBinding(
         FinalizeValidated request,
@@ -1633,6 +2042,9 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
     private static DistributionOperationException Conflict(string errorCode) =>
         new(errorCode, StatusCodes.Status409Conflict);
 
+    private static DistributionOperationException Conflict(string errorCode, string reasonCode) =>
+        new(errorCode, StatusCodes.Status409Conflict, reasonCode);
+
     private sealed record EntitlementTokenPayload(
         string Schema,
         string EntitlementId,
@@ -1645,7 +2057,7 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
         string? SubjectRefDigestSha256 = null,
         int ContractVersion = 1);
 
-    private sealed record EntitlementIdentity(
+    internal sealed record EntitlementIdentity(
         Guid EntitlementId,
         Guid LicenseId,
         string? GrantRefDigestSha256,
@@ -1678,7 +2090,17 @@ public sealed class DistributionInstallationBindingService : IDistributionInstal
         string InstallerFilename,
         string InstallerSha256,
         IReadOnlyList<BinaryValidated> Binaries,
-        bool AllowSameAuthorityRecovery);
+        bool AllowSameAuthorityRecovery,
+        LicenseReplacementValidated? LicenseReplacement,
+        IReadOnlyList<LicenseReplacementValidated> LicenseReplacementCandidates);
+    private sealed record FinalizeReplacementAuthority(
+        bool AllowSameAuthorityRecovery,
+        LicenseReplacementValidated? LicenseReplacement,
+        IReadOnlyList<LicenseReplacementValidated> LicenseReplacementCandidates);
+    private sealed record LicenseReplacementValidated(
+        Guid SourceBindingId,
+        Guid SourceLicenseId,
+        string SourceSubjectRefDigestSha256);
     private sealed record InvalidationValidated(
         string RequestId,
         Guid ProductId,

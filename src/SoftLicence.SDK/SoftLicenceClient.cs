@@ -6,7 +6,7 @@ namespace SoftLicence.SDK
 {
     public class SoftLicenceClient : ISoftLicenceClient
     {
-        private const string SdkVersion = "1.1.13";
+        private const string SdkVersion = "1.1.14";
         private const string ErrorCodeHeader = "X-SoftLicence-Error-Code";
         private const string CorrelationIdHeader = "X-SoftLicence-Correlation-Id";
         private const string LegacyHardwareIdAlgorithm = "legacy-wmi-first-disk";
@@ -23,28 +23,42 @@ namespace SoftLicence.SDK
             _httpClient = httpClient ?? new HttpClient();
         }
 
-        public async Task<ActivationResult> ActivateAsync(string licenseKey, string appName, string? appId = null, string? appVersion = null, string? customerEmail = null, string? customerName = null)
+        /// <inheritdoc />
+        public Task<ActivationResult> ActivateAsync(string licenseKey, string appName, string? appId = null, string? appVersion = null, string? customerEmail = null, string? customerName = null)
+        {
+            var migrationInfo = HardwareInfo.GetHardwareIdMigrationInfo();
+            return ActivateCoreAsync(licenseKey, appName, appId, appVersion, customerEmail, customerName, migrationInfo.LegacyHardwareId, migrationInfo, TryGetComponentFingerprints());
+        }
+
+        /// <inheritdoc />
+        public Task<ActivationResult> ActivateAsync(string licenseKey, string appName, string? appId, string? appVersion, string? customerEmail, string? customerName, string authoritativeHardwareId)
+        {
+            ValidateAuthoritativeHardwareId(authoritativeHardwareId);
+            return ActivateCoreAsync(licenseKey, appName, appId, appVersion, customerEmail, customerName, authoritativeHardwareId, null, TryGetComponentFingerprints());
+        }
+
+        /// <summary>
+        /// Sends the activation payload with one caller-selected primary identity and bounded migration observations.
+        /// </summary>
+        /// <remarks>The migration observations never authorize an alias. Only the signed Runtime migration endpoint can create that server-side relationship.</remarks>
+        private async Task<ActivationResult> ActivateCoreAsync(string licenseKey, string appName, string? appId, string? appVersion, string? customerEmail, string? customerName, string hardwareId, HardwareIdMigrationInfo? migrationInfo, Dictionary<string, string>? fingerprints)
         {
             try
             {
-                var migrationInfo = HardwareInfo.GetHardwareIdMigrationInfo();
-                Dictionary<string, string>? fingerprints = null;
-                try { fingerprints = HardwareInfo.GetComponentFingerprints(); } catch { }
-
                 var payload = new Dictionary<string, object?>
                 {
                     ["LicenseKey"] = licenseKey,
-                    ["HardwareId"] = migrationInfo.LegacyHardwareId,
+                    ["HardwareId"] = hardwareId,
                     ["AppName"] = appName,
                     ["AppId"] = appId,
                     ["AppVersion"] = appVersion,
                     ["CustomerEmail"] = customerEmail,
                     ["CustomerName"] = customerName,
                     ["ComponentFingerprints"] = fingerprints,
-                    ["HardwareIdV2"] = migrationInfo.StableHardwareId,
-                    ["HardwareIdV2Differs"] = migrationInfo.HasStableHardwareId ? migrationInfo.HasDistinctHardwareIds : null,
-                    ["HardwareIdAlgorithm"] = LegacyHardwareIdAlgorithm,
-                    ["HardwareIdV2Algorithm"] = migrationInfo.HasStableHardwareId ? StableHardwareIdAlgorithm : null,
+                    ["HardwareIdV2"] = migrationInfo?.StableHardwareId,
+                    ["HardwareIdV2Differs"] = migrationInfo?.HasStableHardwareId == true ? migrationInfo.HasDistinctHardwareIds : null,
+                    ["HardwareIdAlgorithm"] = migrationInfo == null ? null : LegacyHardwareIdAlgorithm,
+                    ["HardwareIdV2Algorithm"] = migrationInfo?.HasStableHardwareId == true ? StableHardwareIdAlgorithm : null,
                     ["SdkVersion"] = SdkVersion
                 }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
 
@@ -127,26 +141,39 @@ namespace SoftLicence.SDK
             }
         }
 
-        public async Task<LicenseStatusResult> CheckStatusAsync(string licenseKey, string appName, string? appId = null, string? appVersion = null)
+        /// <inheritdoc />
+        public Task<LicenseStatusResult> CheckStatusAsync(string licenseKey, string appName, string? appId = null, string? appVersion = null)
+        {
+            var migrationInfo = HardwareInfo.GetHardwareIdMigrationInfo();
+            return CheckStatusCoreAsync(licenseKey, appName, appId, appVersion, migrationInfo.LegacyHardwareId, migrationInfo, TryGetComponentFingerprints());
+        }
+
+        /// <inheritdoc />
+        public Task<LicenseStatusResult> CheckStatusAsync(string licenseKey, string appName, string? appId, string? appVersion, string authoritativeHardwareId)
+        {
+            ValidateAuthoritativeHardwareId(authoritativeHardwareId);
+            return CheckStatusCoreAsync(licenseKey, appName, appId, appVersion, authoritativeHardwareId, null, TryGetComponentFingerprints());
+        }
+
+        /// <summary>
+        /// Sends a status request with one caller-selected primary identity and non-authoritative migration observations.
+        /// </summary>
+        private async Task<LicenseStatusResult> CheckStatusCoreAsync(string licenseKey, string appName, string? appId, string? appVersion, string hardwareId, HardwareIdMigrationInfo? migrationInfo, Dictionary<string, string>? fingerprints)
         {
             try
             {
-                var migrationInfo = HardwareInfo.GetHardwareIdMigrationInfo();
-                Dictionary<string, string>? fingerprints = null;
-                try { fingerprints = HardwareInfo.GetComponentFingerprints(); } catch { }
-
                 var payload = new Dictionary<string, object?>
                 {
                     ["LicenseKey"] = licenseKey,
-                    ["HardwareId"] = migrationInfo.LegacyHardwareId,
+                    ["HardwareId"] = hardwareId,
                     ["AppName"] = appName,
                     ["AppId"] = appId,
                     ["AppVersion"] = appVersion,
                     ["ComponentFingerprints"] = fingerprints,
-                    ["HardwareIdV2"] = migrationInfo.StableHardwareId,
-                    ["HardwareIdV2Differs"] = migrationInfo.HasStableHardwareId ? migrationInfo.HasDistinctHardwareIds : null,
-                    ["HardwareIdAlgorithm"] = LegacyHardwareIdAlgorithm,
-                    ["HardwareIdV2Algorithm"] = migrationInfo.HasStableHardwareId ? StableHardwareIdAlgorithm : null,
+                    ["HardwareIdV2"] = migrationInfo?.StableHardwareId,
+                    ["HardwareIdV2Differs"] = migrationInfo?.HasStableHardwareId == true ? migrationInfo.HasDistinctHardwareIds : null,
+                    ["HardwareIdAlgorithm"] = migrationInfo == null ? null : LegacyHardwareIdAlgorithm,
+                    ["HardwareIdV2Algorithm"] = migrationInfo?.HasStableHardwareId == true ? StableHardwareIdAlgorithm : null,
                     ["SdkVersion"] = SdkVersion
                 }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
 
@@ -325,6 +352,36 @@ namespace SoftLicence.SDK
             catch
             {
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Enforces the Runtime hardware-authority wire contract without silently rewriting caller input.
+        /// </summary>
+        /// <param name="hardwareId">Candidate authoritative hardware identifier.</param>
+        /// <exception cref="ArgumentException">Thrown when the value is not exactly 16 uppercase ASCII hexadecimal characters.</exception>
+        private static void ValidateAuthoritativeHardwareId(string hardwareId)
+        {
+            if (hardwareId == null)
+                throw new ArgumentNullException(nameof(hardwareId));
+
+            if (hardwareId.Length != 16 || hardwareId.Any(character => character is not (>= '0' and <= '9' or >= 'A' and <= 'F')))
+                throw new ArgumentException("The authoritative hardware ID must contain exactly 16 uppercase ASCII hexadecimal characters.", nameof(hardwareId));
+        }
+
+        /// <summary>
+        /// Collects optional legacy component observations for compatibility calls without making collection failures fatal.
+        /// </summary>
+        /// <returns>The available component fingerprints, or <see langword="null"/> when WMI collection is unavailable.</returns>
+        private static Dictionary<string, string>? TryGetComponentFingerprints()
+        {
+            try
+            {
+                return HardwareInfo.GetComponentFingerprints();
+            }
+            catch
+            {
+                return null;
             }
         }
 

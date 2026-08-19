@@ -87,7 +87,7 @@ public sealed class DistributionInstallationBindingsController : ControllerBase
         }
         catch (DistributionOperationException exception)
         {
-            return StatusCode(exception.StatusCode, new DistributionApiError(exception.ErrorCode));
+            return StatusCode(exception.StatusCode, new DistributionApiError(exception.ErrorCode, exception.ReasonCode));
         }
         catch (InvalidDataException)
         {

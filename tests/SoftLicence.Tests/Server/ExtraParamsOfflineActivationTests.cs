@@ -57,7 +57,7 @@ public sealed class ExtraParamsOfflineActivationTests : IClassFixture<WebApplica
         var response = await client.PostAsJsonAsync("/api/activation", new
         {
             fixture.LicenseKey,
-            HardwareId = "HW-EXTRA-PARAMS",
+            HardwareId = "E000000000000001",
             AppName = fixture.ProductName,
             ExtraParams = extraParams,
             ComponentFingerprints = new Dictionary<string, string> { ["disk"] = "CLIENT-FINGERPRINT" }
@@ -84,13 +84,13 @@ public sealed class ExtraParamsOfflineActivationTests : IClassFixture<WebApplica
         var response = await _factory.CreateClient().PostAsJsonAsync("/api/activation", new
         {
             fixture.LicenseKey,
-            HardwareId = "HW-NORMAL",
+            HardwareId = "E000000000000002",
             AppName = fixture.ProductName
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var licenseFile = await ReadLicenseFileAsync(response);
-        var validation = LicenseService.ValidateLicenseDetailed(licenseFile, fixture.PublicKey, "HW-NORMAL");
+        var validation = LicenseService.ValidateLicenseDetailed(licenseFile, fixture.PublicKey, "E000000000000002");
         Assert.True(validation.IsValid, validation.ErrorMessage);
         Assert.Equal("false", validation.License!.Features["premiumFeature"]);
         Assert.Equal("5", validation.License.Features["maxProjects"]);
@@ -308,7 +308,7 @@ public sealed class ExtraParamsOfflineActivationTests : IClassFixture<WebApplica
         var activation = await client.PostAsJsonAsync("/api/activation", new
         {
             fixture.LicenseKey,
-            HardwareId = "HW-CHECK",
+            HardwareId = "E000000000000003",
             AppName = fixture.ProductName
         });
         Assert.Equal(HttpStatusCode.OK, activation.StatusCode);
@@ -316,7 +316,7 @@ public sealed class ExtraParamsOfflineActivationTests : IClassFixture<WebApplica
         var check = await client.PostAsJsonAsync("/api/activation/check", new
         {
             fixture.LicenseKey,
-            HardwareId = "HW-CHECK",
+            HardwareId = "E000000000000003",
             AppName = fixture.ProductName,
             ExtraParams = new Dictionary<string, string>
             {
@@ -329,7 +329,7 @@ public sealed class ExtraParamsOfflineActivationTests : IClassFixture<WebApplica
         Assert.Equal(HttpStatusCode.OK, check.StatusCode);
         using var responseJson = JsonDocument.Parse(await check.Content.ReadAsStringAsync());
         var licenseFile = responseJson.RootElement.GetProperty("licenseFile").GetString()!;
-        var validation = LicenseService.ValidateLicenseDetailed(licenseFile, fixture.PublicKey, "HW-CHECK");
+        var validation = LicenseService.ValidateLicenseDetailed(licenseFile, fixture.PublicKey, "E000000000000003");
         Assert.True(validation.IsValid, validation.ErrorMessage);
         Assert.Equal("false", validation.License!.Features["premiumFeature"]);
         Assert.Equal("5", validation.License.Features["maxProjects"]);
@@ -340,7 +340,7 @@ public sealed class ExtraParamsOfflineActivationTests : IClassFixture<WebApplica
     public async Task SensitiveActivationRoutes_AreRedactedInAccessLogAndErrors()
     {
         var fixture = await SeedLicenseAsync();
-        const string hardwareId = "HW-SENSITIVE-LOG";
+        const string hardwareId = "E000000000000004";
         const string requestCode = "ABCD-EF01-2345-6789";
 
         var activationResponse = await _factory.CreateClient().PostAsJsonAsync("/api/activation", new

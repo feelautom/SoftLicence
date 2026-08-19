@@ -4,13 +4,67 @@ The official SDK for integrating **SoftLicence** protection into your .NET appli
 
 SoftLicence provides an industrial-grade licensing solution using RSA-4096 cryptography and hardware fingerprinting (HWID).
 
+## Explicit Runtime hardware authority in SDK 1.1.14
+
+SDK 1.1.14 adds explicit activation and status overloads for applications whose trusted
+Runtime has completed a server-authenticated migration from the legacy HWID to HWID V2:
+
+```csharp
+string authority = RuntimeHardwareAuthority.CurrentHardwareId;
+
+ActivationResult activation = await client.ActivateAsync(
+    licenseKey: "YOUR-LICENSE-KEY",
+    appName: "YourAppName",
+    appId: null,
+    appVersion: "2.3.394",
+    customerEmail: null,
+    customerName: null,
+    authoritativeHardwareId: authority);
+
+LicenseStatusResult status = await client.CheckStatusAsync(
+    licenseKey: "YOUR-LICENSE-KEY",
+    appName: "YourAppName",
+    appId: null,
+    appVersion: "2.3.394",
+    authoritativeHardwareId: authority);
+```
+
+The explicit `authoritativeHardwareId` is not a migration hint. It is the single primary
+identity already selected by the Runtime after SoftLicence accepted the signed migration.
+It must contain exactly 16 uppercase ASCII hexadecimal characters. The SDK rejects
+lowercase, whitespace, separators, invalid characters, and incorrect lengths without
+trimming, uppercasing, or sending a network request.
+
+These overloads never call `HardwareInfo.GetHardwareIdMigrationInfo()`, never calculate a
+legacy identity, and never send invented `HardwareIdV2` or legacy algorithm fields. Optional
+component fingerprints remain best-effort anti-abuse observations and do not authorize an
+identity relationship.
+
+The existing overloads are unchanged. They continue to send the legacy HWID as the primary
+`HardwareId` and the available V2 value only as observation metadata. They do not
+auto-migrate, retry with V2 after a mismatch, or treat a client-supplied legacy/V2 pair as
+authority. Only a signed Runtime migration accepted by SoftLicence, or an exact server-owned
+relation reconstructed from that proof, may authorize the transition.
+
+### T-IA Connect adoption
+
+After the migration response has been authenticated and committed, T-IA Connect must pass
+`RuntimeHardwareAuthority.CurrentHardwareId` to both explicit overloads. The same exact
+value must also be supplied to managed and native license validation. Do not select V2 merely
+because it is observable, and do not substitute either identity after `HardwareMismatch`.
+
+During rollout, older T-IA Connect builds may keep the historical overloads. SoftLicence can
+resolve their legacy primary identity only while the product compatibility policy is enabled
+and only when the server already owns the authenticated alias. Once clients adopt the explicit
+overloads, direct V2 requests do not depend on legacy alias compatibility.
+
 ## Structured server errors in SDK 1.1.13
 
 Canonical integration guide: `docs-public/sdk-1.1.13-error-contract-integration.md` in the SoftLicence repository.
 
 Activation and trial failures now prefer the server's canonical `X-SoftLicence-Error-Code` value and expose its opaque support correlation through `ActivationResult.CorrelationId`. Unknown structured values fail closed as `ServerError`; localized text parsing is used only with legacy servers that do not send the structured code header. `ActivationResult.UsedLegacyErrorFallback` can be measured without logging response bodies.
 
-This release does not change HWID authority: legacy and V2 values continue to be sent together, and V2 remains observation-only.
+SDK 1.1.13 did not change HWID authority: its historical overloads send legacy and V2 values together, with V2 remaining observation-only for those overloads.
 
 Structured JSON responses keep the deprecated `errorMessage` property as an alias of the canonical `message` property for contract-version-1 compatibility. Applications embedding the SDK DLL must update both their package reference and embedded resource path when adopting 1.1.13.
 
@@ -47,8 +101,8 @@ separately for observation:
 - `HasStableHardwareId`: whether V2 could be calculated.
 - `HasDistinctHardwareIds`: whether the available V2 value differs from legacy.
 
-`SoftLicenceClient` keeps `HardwareId` set to the legacy value in activation, trial, and
-status payloads. When V2 is available, the client also sends `HardwareIdV2` and its
+The historical `SoftLicenceClient` overloads keep `HardwareId` set to the legacy value in
+activation, trial, and status payloads. When V2 is available, the client also sends `HardwareIdV2` and its
 metadata as secondary observation fields. There is no fallback from an unavailable V2
 value to legacy in those V2 fields.
 
@@ -123,9 +177,11 @@ if (!validation.IsValid &&
 }
 ```
 
-Hardware IDs are compared exactly. Do not trim, rewrite, or substitute
-`GetStableHardwareId()` after a mismatch. The stable/V2 value remains an
-observation-only migration signal.
+Hardware IDs are compared exactly. On historical overloads, do not trim, rewrite, or
+substitute `GetStableHardwareId()` after a mismatch. The stable/V2 value remains an
+observation-only migration signal until the server accepts the signed Runtime migration.
+After that migration, use the new explicit overloads and validate the returned license with
+the same Runtime-selected authoritative HWID. A mismatch never triggers identity fallback.
 
 ### Observation-first example
 

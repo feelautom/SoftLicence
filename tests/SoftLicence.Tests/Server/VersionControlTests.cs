@@ -59,7 +59,7 @@ public class VersionControlTests : IClassFixture<WebApplicationFactory<Program>>
         var client = _factory.CreateClient();
         var request = new { 
             LicenseKey = licenseKey, 
-            HardwareId = "HW1", 
+            HardwareId = "A000000000000001",
             AppName = "YOUR_APP_NAME",
             AppVersion = "2.0.0" // Tentative en v2
         };
@@ -101,7 +101,7 @@ public class VersionControlTests : IClassFixture<WebApplicationFactory<Program>>
         var client = _factory.CreateClient();
         var request = new { 
             LicenseKey = licenseKey, 
-            HardwareId = "HW1", 
+            HardwareId = "A000000000000001",
             AppName = "YOUR_APP_NAME",
             AppVersion = "1.2.3" // Version compatible v1.*
         };
@@ -144,7 +144,7 @@ public class VersionControlTests : IClassFixture<WebApplicationFactory<Program>>
         var request = new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-EXPIRED",
+            HardwareId = "A000000000000002",
             AppName = "ExpiredApp",
             AppVersion = "2.1.781"
         };
@@ -190,7 +190,7 @@ public class VersionControlTests : IClassFixture<WebApplicationFactory<Program>>
         var request = new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-REVOKED",
+            HardwareId = "A000000000000003",
             AppName = "RevokedApp",
             AppVersion = "2.1.781"
         };
@@ -234,7 +234,7 @@ public class VersionControlTests : IClassFixture<WebApplicationFactory<Program>>
                 ProductId = prod.Id,
                 LicenseTypeId = type.Id,
                 AllowedVersions = "*",
-                HardwareId = "HW-MIN-VERSION",
+                HardwareId = "A000000000000004",
                 IsActive = true,
                 CustomerName = "Test",
                 ExpirationDate = DateTime.UtcNow.AddDays(30)
@@ -246,7 +246,7 @@ public class VersionControlTests : IClassFixture<WebApplicationFactory<Program>>
         var response = await client.PostAsJsonAsync("/api/activation/check", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-MIN-VERSION",
+            HardwareId = "A000000000000004",
             AppName = "MinVersionApp",
             AppVersion = "2.1.736"
         });
@@ -291,7 +291,7 @@ public class VersionControlTests : IClassFixture<WebApplicationFactory<Program>>
                 ProductId = prod.Id,
                 LicenseTypeId = type.Id,
                 AllowedVersions = "*",
-                HardwareId = "HW-REVOKED-MIN-VERSION",
+                HardwareId = "A000000000000005",
                 IsActive = false,
                 RevokedAt = DateTime.UtcNow.AddDays(-1),
                 CustomerName = "Test",
@@ -304,7 +304,7 @@ public class VersionControlTests : IClassFixture<WebApplicationFactory<Program>>
         var response = await client.PostAsJsonAsync("/api/activation/check", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-REVOKED-MIN-VERSION",
+            HardwareId = "A000000000000005",
             AppName = "RevokedMinVersionApp",
             AppVersion = "2.1.736"
         });

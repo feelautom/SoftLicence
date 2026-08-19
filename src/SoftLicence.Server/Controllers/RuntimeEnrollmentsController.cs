@@ -40,6 +40,12 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
         _logger = logger;
     }
 
+    /// <summary>
+    /// Authorizes an exact reinstall proof and records bounded server-only refusal diagnostics
+    /// while preserving the generic public error contract.
+    /// </summary>
+    /// <param name="cancellationToken">Request cancellation token.</param>
+    /// <returns>The minimal authority assertion or a generic error response.</returns>
     [HttpPost("/api/internal/v1/runtime-enrollments/reinstall-authorizations")]
     [EnableRateLimiting("DistributionS2SAPI")]
     public async Task<IActionResult> AuthorizeReinstall(CancellationToken cancellationToken)
@@ -73,8 +79,9 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
         catch (RuntimeEnrollmentException exception)
         {
             _logger?.LogWarning(
-                "Runtime reinstall authority {Outcome} CorrelationId={CorrelationId} ReasonCode={ReasonCode}",
-                "refused", correlationId ?? "unavailable", exception.ErrorCode);
+                "Runtime reinstall authority {Outcome} CorrelationId={CorrelationId} ReasonCode={ReasonCode} DiagnosticCode={DiagnosticCode}",
+                "refused", correlationId ?? "unavailable", exception.ErrorCode,
+                exception.DiagnosticCode ?? "unspecified");
             return StatusCode(exception.StatusCode, new RuntimeEnrollmentApiError(exception.ErrorCode));
         }
         catch (Exception exception) when (IsTransportFailure(exception))
@@ -457,6 +464,19 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
     public Task<IActionResult> LicenseBootstrap(string enrollmentId, CancellationToken cancellationToken) =>
         ExecutePublicAsync(enrollmentId, "license-bootstrap", cancellationToken);
 
+    /// <summary>
+    /// Transitions the authenticated Runtime installation from its legacy hardware identity
+    /// to the deterministic V2 identity without allocating another license seat.
+    /// </summary>
+    /// <param name="enrollmentId">Canonical Runtime enrollment identifier.</param>
+    /// <param name="cancellationToken">Request cancellation token.</param>
+    /// <returns>The exact replay-safe migration response.</returns>
+    [HttpPost("/api/v1/runtime-enrollments/{enrollmentId}/hardware-authority-migrations")]
+    [EnableRateLimiting("RuntimeEnrollmentPublicAPI")]
+    public Task<IActionResult> MigrateHardwareAuthority(string enrollmentId, CancellationToken cancellationToken) =>
+        ExecutePublicAsync(enrollmentId, "hardware-authority-migrations", cancellationToken);
+
+    /// <summary>Executes a strict public Runtime operation over exact body bytes and proof headers.</summary>
     private async Task<IActionResult> ExecutePublicAsync(
         string enrollmentId,
         string operation,
@@ -481,6 +501,14 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
             {
                 var request = Deserialize<RuntimeLicenseBootstrapRedeemRequest>(exactBody);
                 var result = await _enrollments.RedeemLicenseBootstrapAsync(
+                    parsedEnrollmentId, digest, request, proof,
+                    HttpContext.Connection.RemoteIpAddress, cancellationToken);
+                return File(result.ExactResponseBody, "application/json");
+            }
+            else if (operation == "hardware-authority-migrations")
+            {
+                var request = Deserialize<RuntimeHardwareAuthorityMigrationRequest>(exactBody);
+                var result = await _enrollments.MigrateHardwareAuthorityAsync(
                     parsedEnrollmentId, digest, request, proof,
                     HttpContext.Connection.RemoteIpAddress, cancellationToken);
                 return File(result.ExactResponseBody, "application/json");

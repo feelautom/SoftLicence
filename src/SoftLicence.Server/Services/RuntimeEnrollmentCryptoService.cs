@@ -447,12 +447,14 @@ public sealed class RuntimeEnrollmentCryptoService : IRuntimeEnrollmentCryptoSer
             "runtime-enrollment-envelope-v2", ownerType, ownerId.ToString("D"), ownerReference,
             enrollmentEpoch.ToString(CultureInfo.InvariantCulture), keyId));
 
+    /// <summary>Restricts envelope domain separation to the reviewed persistence owners.</summary>
     private static bool IsOwnerType(string value) => value is
         "enrollment-spki" or "enrollment-challenge" or "prepare-response" or "confirm-response"
             or "capability-response" or "canary-response" or "critical-recovery-response"
             or "recovery-refetch-response" or "milestone-response" or "upgrade-response"
             or "rollback-response" or "bootstrap-issue-response"
             or "bootstrap-redeem-response" or "websetup-transition-response"
+            or "hardware-migration-response"
             or "websetup-upgrade-response";
 
     private static byte[] SerializeJson(Action<Utf8JsonWriter> write)

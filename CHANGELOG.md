@@ -1,5 +1,22 @@
 # Changelog
 
+## SDK v1.1.14 - 2026-08-19
+
+### Explicit Runtime hardware authority
+
+- feat(sdk): add an `ActivateAsync` overload whose final `authoritativeHardwareId` argument is the exact primary identity selected by the Runtime after a server-authenticated hardware-authority migration
+- feat(sdk): add a matching `CheckStatusAsync` overload so activation, managed status checks, and local validation can use one identical authoritative HWID
+- security(sdk): require explicit authoritative HWIDs to contain exactly 16 uppercase ASCII hexadecimal characters; invalid casing, length, alphabet, or whitespace is rejected before any request and is never normalized
+- compatibility(sdk): preserve all historical overloads; they continue to send the legacy HWID as `HardwareId` and the available V2 value only as secondary observation metadata
+- compatibility(sdk): explicit overloads do not calculate a legacy identity, invent a legacy/V2 pair, auto-migrate a machine, or retry with another HWID after a mismatch
+- security(server): authorize legacy-to-V2 compatibility only from a signed Runtime migration accepted by SoftLicence or a strictly revalidated server-owned relation, never from an arbitrary client-supplied pair
+
+### T-IA Connect adoption
+
+- integration(tia): after the Runtime migration is accepted, pass `RuntimeHardwareAuthority.CurrentHardwareId` to the new activation and status overloads and use that same exact value for managed and native license validation
+- integration(tia): do not call the explicit overload with V2 before the server migration establishes V2 authority; transitional clients may remain on the historical overload while SoftLicence resolves only authenticated legacy aliases
+- test(sdk/server): cover explicit payloads without legacy migration metadata, optional component fingerprints, strict input validation, one-seat migration and reactivation, lowercase legacy rejection, per-product alias retirement, and direct V2 operation
+
 ## SDK v1.1.13 — 2026-08-09
 
 ### Structured server errors

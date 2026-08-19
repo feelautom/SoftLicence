@@ -198,7 +198,7 @@
                 <tbody>
                     @foreach (var l in LicensesList)
                     {
-                        <tr class="@(l.HasUninstallEvent ? "border-start border-3 border-warning" : "")">
+                        <tr>
                             <td>
                                 <div class="fw-bold">@l.Product?.Name</div>
                                 <small class="text-muted" style="font-size: 0.65rem">@TZ.ToLocal(l.CreationDate).ToString("dd/MM/yyyy HH:mm")</small>
@@ -210,16 +210,6 @@
                                         <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" fill="currentColor" class="bi bi-graph-up ms-1 opacity-50" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M0 0h1v15h15v1H0V0Zm14.817 3.113a.5.5 0 0 1 .07.704l-4.5 5.5a.5.5 0 0 1-.74.037L7.06 6.767l-3.656 5.027a.5.5 0 0 1-.808-.588l4-5.5a.5.5 0 0 1 .758-.06l2.609 2.61 4.15-5.073a.5.5 0 0 1 .704-.07Z"/></svg>
                                     </a>
                                     <small class="text-muted">@l.CustomerEmail</small>
-                                    @if (l.HasUninstallEvent)
-                                    {
-                                        <div class="d-flex align-items-center gap-1 mt-1">
-                                            <span class="badge bg-warning text-dark" style="font-size: 0.6rem;" title="Désinstallation détectée@(l.LastUninstallAt.HasValue ? " le " + TZ.ToLocal(l.LastUninstallAt.Value).ToString("dd/MM/yyyy HH:mm") : "")">
-                                                <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" fill="currentColor" viewBox="0 0 16 16"><path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5zm3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V6z"/><path fill-rule="evenodd" d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1v1zM4.118 4L4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4H4.118zM2.5 3V2h11v1h-11z"/></svg>
-                                                Désinstallé
-                                            </span>
-                                            <button class="btn btn-link text-muted p-0" style="font-size: 0.55rem; line-height:1" @onclick="() => ClearUninstallFlag(l)" @onclick:stopPropagation="true" title="Effacer le flag désinstallation">✕</button>
-                                        </div>
-                                    }
                                 </div>
                             </td>
                             <td>
@@ -1262,19 +1252,6 @@
 
         NewClientName = ""; NewClientEmail = ""; showCreate = false; newMaxSeats = 1;
         await LoadData();
-    }
-
-    private async Task ClearUninstallFlag(License l)
-    {
-        using var db = await DbFactory.CreateDbContextAsync();
-        var dbLic = await db.Licenses.FirstOrDefaultAsync(x => x.Id == l.Id);
-        if (dbLic == null) return;
-        dbLic.HasUninstallEvent = false;
-        dbLic.LastUninstallAt = null;
-        await db.SaveChangesAsync();
-        l.HasUninstallEvent = false;
-        l.LastUninstallAt = null;
-        Toast.ShowSuccess("Flag désinstallation effacé");
     }
 
     private async Task Reactivate(License l)

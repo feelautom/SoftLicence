@@ -103,7 +103,10 @@ namespace SoftLicence.Server.Data
         public DbSet<AnalyticsApiKey> AnalyticsApiKeys { get; set; }
         public DbSet<LlmTipFeedbackEvent> LlmTipFeedbackEvents { get; set; }
         public DbSet<LlmTipFeedbackTip> LlmTipFeedbackTips { get; set; }
+        /// <summary>Gets or sets authenticated, license-scoped legacy identity aliases whose live authority graph is revalidated on every use.</summary>
+        public DbSet<HardwareAuthorityAlias> HardwareAuthorityAliases { get; set; }
 
+        /// <inheritdoc />
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
             modelBuilder.Entity<Product>()
@@ -150,6 +153,60 @@ namespace SoftLicence.Server.Data
                 .HasIndex(s => new { s.LicenseId, s.HardwareId })
                 .IsUnique()
                 .HasFilter("\"IsActive\" = true");
+
+            modelBuilder.Entity<HardwareAuthorityAlias>()
+                .HasIndex(alias => new { alias.LicenseId, alias.LegacyHardwareIdSha256 })
+                .IsUnique();
+            modelBuilder.Entity<HardwareAuthorityAlias>()
+                .HasIndex(alias => new { alias.ProductId, alias.LegacyHardwareIdSha256 });
+            modelBuilder.Entity<HardwareAuthorityAlias>()
+                .HasOne(alias => alias.Product)
+                .WithMany()
+                .HasForeignKey(alias => alias.ProductId)
+                .OnDelete(DeleteBehavior.Restrict);
+            modelBuilder.Entity<HardwareAuthorityAlias>()
+                .HasOne(alias => alias.License)
+                .WithMany()
+                .HasForeignKey(alias => alias.LicenseId)
+                .OnDelete(DeleteBehavior.Cascade);
+            modelBuilder.Entity<HardwareAuthorityAlias>()
+                .HasOne(alias => alias.LicenseSeat)
+                .WithMany()
+                .HasForeignKey(alias => alias.LicenseSeatId)
+                .OnDelete(DeleteBehavior.Cascade);
+            modelBuilder.Entity<HardwareAuthorityAlias>()
+                .HasOne(alias => alias.RuntimeEnrollment)
+                .WithMany()
+                .HasForeignKey(alias => alias.RuntimeEnrollmentId)
+                .OnDelete(DeleteBehavior.Restrict);
+            modelBuilder.Entity<HardwareAuthorityAlias>()
+                .HasOne(alias => alias.Binding)
+                .WithMany()
+                .HasForeignKey(alias => alias.BindingId)
+                .OnDelete(DeleteBehavior.Restrict);
+            modelBuilder.Entity<HardwareAuthorityAlias>()
+                .ToTable(table =>
+                {
+                    table.HasCheckConstraint(
+                        "CK_HardwareAuthorityAliases_LegacyHardwareIdSha256",
+                        Database.IsNpgsql()
+                            ? "length(\"LegacyHardwareIdSha256\") = 64 AND \"LegacyHardwareIdSha256\" ~ '^[0-9a-f]{64}$'"
+                            : "length(\"LegacyHardwareIdSha256\") = 64");
+                    table.HasCheckConstraint(
+                        "CK_HardwareAuthorityAliases_CanonicalHardwareIdSha256",
+                        Database.IsNpgsql()
+                            ? "length(\"CanonicalHardwareIdSha256\") = 64 AND \"CanonicalHardwareIdSha256\" ~ '^[0-9a-f]{64}$'"
+                            : "length(\"CanonicalHardwareIdSha256\") = 64");
+                    table.HasCheckConstraint(
+                        "CK_HardwareAuthorityAliases_ObservationCount",
+                        "\"ObservationCount\" >= 0");
+                    table.HasCheckConstraint(
+                        "CK_HardwareAuthorityAliases_Epochs",
+                        "\"SecurityEpoch\" >= 1 AND \"AuthorityEpoch\" >= 0");
+                    table.HasCheckConstraint(
+                        "CK_HardwareAuthorityAliases_State",
+                        "(\"IsActive\" AND \"DisabledAtUtc\" IS NULL) OR (NOT \"IsActive\" AND \"DisabledAtUtc\" IS NOT NULL)");
+                });
 
             // Index de performance sur les colonnes fréquemment requêtées
             modelBuilder.Entity<License>()
@@ -800,7 +857,7 @@ namespace SoftLicence.Server.Data
                     table.HasCheckConstraint("CK_RuntimeEnrollmentProofNonces_ResponseKeyPurpose",
                         "\"ResponseKeyPurpose\" = 'encryption'");
                     table.HasCheckConstraint("CK_RuntimeEnrollmentProofNonces_Operation",
-                        "\"Operation\" IN ('confirm', 'capability', 'critical-recovery-refetch', 'milestone', 'upgrade', 'rollback', 'websetup-upgrade')");
+                        "\"Operation\" IN ('confirm', 'capability', 'critical-recovery-refetch', 'milestone', 'upgrade', 'rollback', 'websetup-upgrade', 'hardware-authority-migration')");
                 });
 
             modelBuilder.Entity<RuntimeEnrollmentProofNonce>()

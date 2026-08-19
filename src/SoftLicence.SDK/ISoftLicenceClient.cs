@@ -8,6 +8,19 @@ namespace SoftLicence.SDK
         Task<ActivationResult> ActivateAsync(string licenseKey, string appName, string? appId = null, string? appVersion = null, string? customerEmail = null, string? customerName = null);
 
         /// <summary>
+        /// Activates a license while binding the signed license to an explicitly selected Runtime hardware authority.
+        /// </summary>
+        /// <param name="licenseKey">License key to activate.</param>
+        /// <param name="appName">Server product name.</param>
+        /// <param name="appId">Optional canonical product identifier.</param>
+        /// <param name="appVersion">Optional client version used by server compatibility policy.</param>
+        /// <param name="customerEmail">Optional customer email required by some license types.</param>
+        /// <param name="customerName">Optional customer display name.</param>
+        /// <param name="authoritativeHardwareId">Exact 16-character uppercase ASCII hexadecimal hardware authority selected by the Runtime.</param>
+        /// <returns>The activation result. Invalid authority syntax throws before any network request.</returns>
+        Task<ActivationResult> ActivateAsync(string licenseKey, string appName, string? appId, string? appVersion, string? customerEmail, string? customerName, string authoritativeHardwareId);
+
+        /// <summary>
         /// Effectue une demande de version d'essai (Auto-Trial) pour cette machine.
         /// </summary>
         Task<ActivationResult> RequestTrialAsync(string appName, string? appId = null, string typeSlug = "TRIAL", string? appVersion = null, string? customerEmail = null, string? customerName = null);
@@ -16,6 +29,17 @@ namespace SoftLicence.SDK
         /// Vérifie le statut d'une licence en ligne.
         /// </summary>
         Task<LicenseStatusResult> CheckStatusAsync(string licenseKey, string appName, string? appId = null, string? appVersion = null);
+
+        /// <summary>
+        /// Checks a license while using the exact Runtime-selected hardware authority as the primary server identity.
+        /// </summary>
+        /// <param name="licenseKey">License key to check.</param>
+        /// <param name="appName">Server product name.</param>
+        /// <param name="appId">Optional canonical product identifier.</param>
+        /// <param name="appVersion">Optional client version used by server compatibility policy.</param>
+        /// <param name="authoritativeHardwareId">Exact 16-character uppercase ASCII hexadecimal hardware authority selected by the Runtime.</param>
+        /// <returns>The server status result. Invalid authority syntax throws before any network request.</returns>
+        Task<LicenseStatusResult> CheckStatusAsync(string licenseKey, string appName, string? appId, string? appVersion, string authoritativeHardwareId);
 
         /// <summary>
         /// Valide une licence pour un matériel spécifique (Signature RSA + Hardware ID + Expiration).

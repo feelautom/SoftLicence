@@ -23,6 +23,984 @@ namespace SoftLicence.Tests.Server;
 public sealed partial class RuntimeEnrollmentPostgreSqlTests
 {
     [Fact]
+    public async Task DistributionFinalize_SameLicenseSeatRelinkAcrossHardware_CreatesRuntimeSuccessor()
+    {
+        var connections = await ProvisionAsync();
+        var factory = new TestDbFactory(connections.App);
+        var fixture = await SeedDistributionAuthorityWithoutBindingAsync(factory);
+        using var activeSigning = CreateSigningKey(ActiveSigningPrivateKey);
+        using var nextSigning = CreateSigningKey(NextSigningPrivateKey);
+        var runtimeOptions = RuntimeOptions(fixture.ProductId, activeSigning, nextSigning);
+        await UpsertKeyRegistryAsync(connections.Admin, runtimeOptions);
+
+        var now = DateTimeOffset.UtcNow;
+        var service = new DistributionInstallationBindingService(
+            factory, new EphemeralDataProtectionProvider(), new FixedTimeProvider(now));
+        var subjectRef = Convert.ToBase64String(SHA256.HashData("same-license-seat-transfer"u8.ToArray()))
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        const string targetHardwareId = "F1A2B3C4D5E6A7B8";
+
+        async Task<(string GrantRef, string EntitlementRef)> IssueAsync(
+            string label,
+            string? requestedSubjectRef = null,
+            string requestedClientId = "website-step1")
+        {
+            var grantRef = Guid.NewGuid().ToString("D");
+            var issued = await service.IssueEntitlementAsync(
+                requestedClientId,
+                Sha256(label + "-issue"),
+                new DistributionEntitlementIssueRequest
+                {
+                    Schema = DistributionInstallationBindingService.IssueV3Schema,
+                    RequestId = Guid.NewGuid().ToString("D"),
+                    ProductId = fixture.ProductId.ToString("D"),
+                    SoftLicenceLicenseId = fixture.LicenseId.ToString("D"),
+                    GrantRefDigestSha256 = Sha256(grantRef),
+                    SubjectRef = requestedSubjectRef ?? subjectRef
+                });
+            return (grantRef, issued.Response.EntitlementRef);
+        }
+
+        DistributionInstallationFinalizeRequest FinalizeRequest(
+            string label,
+            (string GrantRef, string EntitlementRef) authority,
+            string hardwareId,
+            DateTimeOffset issuedAt) => new()
+            {
+                Schema = DistributionInstallationBindingService.FinalizeV2Schema,
+                RequestId = Guid.NewGuid().ToString("D"),
+                GrantRef = authority.GrantRef,
+                HandoffDigestSha256 = Sha256(label + "-handoff-" + authority.GrantRef),
+                HandoffIssuedAtUtc = FormatUtc(issuedAt),
+                HandoffExpiresAtUtc = FormatUtc(now.AddMinutes(30)),
+                DownloadCompletedAtUtc = FormatUtc(issuedAt.AddMinutes(1)),
+                ProductId = fixture.ProductId.ToString("D"),
+                EntitlementRef = authority.EntitlementRef,
+                InstallationId = Guid.NewGuid().ToString("D"),
+                HardwareId = hardwareId,
+                AllowSameAuthorityRecovery = true,
+                Release = new DistributionReleaseEvidence
+                {
+                    Version = fixture.Version,
+                    InstallerFilename = "TiaConnect-Setup_v2.3.195.exe",
+                    InstallerSha256 = Sha256(label + "-installer")
+                },
+                Binaries =
+                [
+                    new() { Key = "FP_EXE", Sha256 = new string('a', 64) },
+                    new() { Key = "FP_DLL", Sha256 = new string('b', 64) },
+                    new() { Key = "FP_CORE", Sha256 = new string('c', 64) }
+                ]
+            };
+
+        var sourceAuthority = await IssueAsync("same-license-source");
+        var sourceRequest = FinalizeRequest(
+            "same-license-source", sourceAuthority, fixture.HardwareId, now.AddMinutes(-15));
+        var sourceResult = await service.FinalizeAsync(
+            "website-step1", Sha256("same-license-source-finalize"), sourceRequest);
+        var sourceBindingId = Guid.Parse(sourceResult.Response.BindingId);
+        Guid sourceSeatId;
+        Guid targetSeatId;
+        Guid sourceEnrollmentId;
+
+        await using (var moveSeat = await factory.CreateDbContextAsync())
+        {
+            var sourceBinding = await moveSeat.DistributionInstallationBindings
+                .SingleAsync(candidate => candidate.Id == sourceBindingId);
+            sourceSeatId = sourceBinding.LicenseSeatId;
+            var sourceSeat = await moveSeat.LicenseSeats
+                .SingleAsync(candidate => candidate.Id == sourceSeatId);
+            sourceSeat.IsActive = false;
+            sourceSeat.UnlinkedAt = null;
+
+            targetSeatId = Guid.NewGuid();
+            moveSeat.LicenseSeats.Add(new LicenseSeat
+            {
+                Id = targetSeatId,
+                LicenseId = fixture.LicenseId,
+                HardwareId = targetHardwareId,
+                IsActive = true,
+                FirstActivatedAt = now.AddMinutes(-7).UtcDateTime,
+                LastCheckInAt = now.AddMinutes(-7).UtcDateTime,
+                AppVersion = fixture.Version
+            });
+
+            var authorityEpoch = await moveSeat.RuntimeEnrollmentAuthorityStates.AsNoTracking()
+                .Where(candidate => candidate.Id == 1)
+                .Select(candidate => candidate.Epoch)
+                .SingleAsync();
+            sourceEnrollmentId = Guid.NewGuid();
+            moveSeat.RuntimeEnrollments.Add(new RuntimeEnrollment
+            {
+                Id = sourceEnrollmentId,
+                ClientId = "website-step1",
+                BindingId = sourceBinding.Id,
+                ProductId = sourceBinding.ProductId,
+                LicenseId = sourceBinding.LicenseId,
+                LicenseSeatId = sourceBinding.LicenseSeatId,
+                InstallationId = sourceBinding.InstallationId,
+                HardwareIdHash = sourceBinding.HardwareIdHash,
+                ReleaseVersion = sourceBinding.Version,
+                HandoffDigestSha256 = sourceBinding.HandoffDigestSha256,
+                SubjectRefDigestSha256 = sourceBinding.SubjectRefDigestSha256,
+                ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion,
+                Algorithm = "PS256",
+                KeyBackend = "software-cng-unattested",
+                AttestationLevel = "none",
+                PublicKeySpkiCiphertext = "test",
+                PublicKeySpkiKeyId = runtimeOptions.Encryption.ActiveKeyId,
+                PublicKeySpkiSha256 = new string('d', 64),
+                KeyThumbprint = "sl-" + Guid.NewGuid().ToString("N"),
+                ChallengeCiphertext = "test",
+                ChallengeKeyId = runtimeOptions.Encryption.ActiveKeyId,
+                ChallengeDigestSha256 = new string('e', 64),
+                State = "ACTIVE",
+                Epoch = 1,
+                SecurityEpoch = 4,
+                AuthorityEpoch = authorityEpoch,
+                ChallengeExpiresAtUtc = now.AddHours(1).UtcDateTime,
+                CreatedAtUtc = now.AddHours(-1).UtcDateTime,
+                ActivatedAtUtc = now.AddMinutes(-10).UtcDateTime
+            });
+            await moveSeat.SaveChangesAsync();
+        }
+
+        DistributionLicenseReplacementProof UnrelatedCandidate(string label) => new()
+        {
+            Schema = DistributionInstallationBindingService.LicenseReplacementSchema,
+            SourceBindingId = Guid.NewGuid().ToString("D"),
+            SourceLicenseId = Guid.NewGuid().ToString("D"),
+            SourceSubjectRef = Convert.ToBase64String(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(label)))
+                .TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        };
+
+        DistributionLicenseReplacementCandidateSet UnrelatedCandidates(string prefix) => new()
+        {
+            Schema = DistributionInstallationBindingService.LicenseReplacementCandidatesSchema,
+            Sources =
+            [
+                UnrelatedCandidate(prefix + "-one"),
+                UnrelatedCandidate(prefix + "-two"),
+                UnrelatedCandidate(prefix + "-three")
+            ]
+        };
+
+        var missingUnlinkAuthority = await IssueAsync("same-license-missing-unlink");
+        var missingUnlinkRequest = FinalizeRequest(
+            "same-license-missing-unlink", missingUnlinkAuthority, targetHardwareId, now.AddMinutes(-7));
+        missingUnlinkRequest.Schema = DistributionInstallationBindingService.FinalizeV4Schema;
+        missingUnlinkRequest.LicenseReplacementCandidates = UnrelatedCandidates("missing-unlink-history");
+        var missingUnlink = await Assert.ThrowsAsync<DistributionOperationException>(() => service.FinalizeAsync(
+            "website-step1", Sha256("same-license-missing-unlink-finalize"), missingUnlinkRequest));
+        Assert.Equal("binding_conflict", missingUnlink.ErrorCode);
+        Assert.Equal("replacement_candidate_none", missingUnlink.ReasonCode);
+
+        await using (var markExplicitUnlink = await factory.CreateDbContextAsync())
+        {
+            var sourceSeat = await markExplicitUnlink.LicenseSeats
+                .SingleAsync(candidate => candidate.Id == sourceSeatId);
+            sourceSeat.UnlinkedAt = now.AddMinutes(-6).UtcDateTime;
+            await markExplicitUnlink.SaveChangesAsync();
+        }
+
+        var divergentSubject = Convert.ToBase64String(SHA256.HashData("different-seat-owner"u8.ToArray()))
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        var divergentAuthority = await IssueAsync("same-license-divergent-subject", divergentSubject);
+        var divergentRequest = FinalizeRequest(
+            "same-license-divergent-subject", divergentAuthority, targetHardwareId, now.AddMinutes(-5));
+        divergentRequest.Schema = DistributionInstallationBindingService.FinalizeV4Schema;
+        divergentRequest.LicenseReplacementCandidates = UnrelatedCandidates("divergent-subject-history");
+        var divergent = await Assert.ThrowsAsync<DistributionOperationException>(() => service.FinalizeAsync(
+            "website-step1", Sha256("same-license-divergent-subject-finalize"), divergentRequest));
+        Assert.Equal("binding_conflict", divergent.ErrorCode);
+        Assert.Equal("replacement_candidate_none", divergent.ReasonCode);
+
+        const string differentClientId = "other-authorized-client";
+        var differentClientAuthority = await IssueAsync(
+            "same-license-different-client", subjectRef, differentClientId);
+        var differentClientRequest = FinalizeRequest(
+            "same-license-different-client", differentClientAuthority, targetHardwareId, now.AddMinutes(-5));
+        differentClientRequest.Schema = DistributionInstallationBindingService.FinalizeV4Schema;
+        differentClientRequest.LicenseReplacementCandidates = UnrelatedCandidates("different-client-history");
+        var differentClient = await Assert.ThrowsAsync<DistributionOperationException>(() => service.FinalizeAsync(
+            differentClientId, Sha256("same-license-different-client-finalize"), differentClientRequest));
+        Assert.Equal("binding_conflict", differentClient.ErrorCode);
+        Assert.Equal("same_authority_mismatch", differentClient.ReasonCode);
+
+        await using (var unchanged = await factory.CreateDbContextAsync())
+        {
+            Assert.Equal("active", (await unchanged.DistributionInstallationBindings.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == sourceBindingId)).State);
+            Assert.Equal("ACTIVE", (await unchanged.RuntimeEnrollments.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == sourceEnrollmentId)).State);
+        }
+
+        var targetSecurityBindingId = Guid.NewGuid();
+        await using (var addTargetSecurityHistory = await factory.CreateDbContextAsync())
+        {
+            var sourceBinding = await addTargetSecurityHistory.DistributionInstallationBindings.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == sourceBindingId);
+            var targetHistoryGrantRef = Guid.NewGuid().ToString("D");
+            addTargetSecurityHistory.DistributionInstallationBindings.Add(new DistributionInstallationBinding
+            {
+                Id = targetSecurityBindingId,
+                ProductId = sourceBinding.ProductId,
+                LicenseId = sourceBinding.LicenseId,
+                LicenseSeatId = targetSeatId,
+                EntitlementId = sourceBinding.EntitlementId,
+                SubjectRefDigestSha256 = sourceBinding.SubjectRefDigestSha256,
+                GrantRef = targetHistoryGrantRef,
+                GrantRefDigestSha256 = Sha256(targetHistoryGrantRef),
+                HandoffDigestSha256 = Sha256("target-security-history-handoff"),
+                HandoffIssuedAtUtc = now.AddHours(-2).UtcDateTime,
+                HandoffExpiresAtUtc = now.AddHours(-1).UtcDateTime,
+                DownloadCompletedAtUtc = now.AddHours(-2).AddMinutes(1).UtcDateTime,
+                InstallationId = Guid.NewGuid().ToString("D"),
+                HardwareIdHash = Sha256(targetHardwareId),
+                Version = sourceBinding.Version,
+                InstallerFilename = sourceBinding.InstallerFilename,
+                InstallerSha256 = sourceBinding.InstallerSha256,
+                ExecutableSha256 = sourceBinding.ExecutableSha256,
+                NativeDllSha256 = sourceBinding.NativeDllSha256,
+                CoreSha256 = sourceBinding.CoreSha256,
+                ApprovedBinariesSource = sourceBinding.ApprovedBinariesSource,
+                State = "invalidated",
+                BoundAtUtc = now.AddHours(-2).UtcDateTime,
+                InitialSecurityEpoch = 1,
+                InvalidatedAtUtc = now.AddHours(-1).UtcDateTime,
+                InvalidationReason = "security_lockdown"
+            });
+            await addTargetSecurityHistory.SaveChangesAsync();
+        }
+
+        var securityHistoryAuthority = await IssueAsync("same-license-target-security-history");
+        var securityHistoryRequest = FinalizeRequest(
+            "same-license-target-security-history", securityHistoryAuthority, targetHardwareId, now.AddMinutes(-5));
+        securityHistoryRequest.Schema = DistributionInstallationBindingService.FinalizeV4Schema;
+        securityHistoryRequest.LicenseReplacementCandidates = UnrelatedCandidates("security-history");
+        var securityHistory = await Assert.ThrowsAsync<DistributionOperationException>(() => service.FinalizeAsync(
+            "website-step1", Sha256("same-license-target-security-history-finalize"), securityHistoryRequest));
+        Assert.Equal("binding_conflict", securityHistory.ErrorCode);
+        Assert.Equal("replacement_candidate_none", securityHistory.ReasonCode);
+
+        await using (var markTargetHistoryBusinessTerminal = await factory.CreateDbContextAsync())
+        {
+            var targetHistory = await markTargetHistoryBusinessTerminal.DistributionInstallationBindings
+                .SingleAsync(candidate => candidate.Id == targetSecurityBindingId);
+            targetHistory.InvalidationReason = "installation_superseded";
+            await markTargetHistoryBusinessTerminal.SaveChangesAsync();
+        }
+
+        var targetAuthority = await IssueAsync("same-license-target");
+        var targetRequest = FinalizeRequest(
+            "same-license-target", targetAuthority, targetHardwareId, now.AddMinutes(-5));
+        targetRequest.Schema = DistributionInstallationBindingService.FinalizeV4Schema;
+        targetRequest.LicenseReplacementCandidates = UnrelatedCandidates("historical-license");
+
+        var successor = await service.FinalizeAsync(
+            "website-step1", Sha256("same-license-target-finalize"), targetRequest);
+
+        Assert.False(successor.Idempotent);
+        await using var check = await factory.CreateDbContextAsync();
+        var successorBinding = await check.DistributionInstallationBindings.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == Guid.Parse(successor.Response.BindingId));
+        Assert.Equal(fixture.LicenseId, successorBinding.LicenseId);
+        Assert.Equal(targetSeatId, successorBinding.LicenseSeatId);
+        Assert.Equal(Sha256(targetHardwareId), successorBinding.HardwareIdHash);
+        Assert.Equal(sourceBindingId, successorBinding.SupersededBindingId);
+        Assert.Equal(5, successorBinding.InitialSecurityEpoch);
+
+        var sourceBindingAfter = await check.DistributionInstallationBindings.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == sourceBindingId);
+        Assert.Equal("invalidated", sourceBindingAfter.State);
+        Assert.Equal("installation_superseded", sourceBindingAfter.InvalidationReason);
+        Assert.False((await check.LicenseSeats.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == sourceSeatId)).IsActive);
+        Assert.True((await check.LicenseSeats.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == targetSeatId)).IsActive);
+
+        var sourceEnrollmentAfter = await check.RuntimeEnrollments.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == sourceEnrollmentId);
+        Assert.Equal("INVALIDATED", sourceEnrollmentAfter.State);
+        Assert.Equal("binding_superseded", sourceEnrollmentAfter.InvalidationReason);
+
+        var replay = await service.FinalizeAsync(
+            "website-step1", Sha256("same-license-target-finalize"), targetRequest);
+        Assert.True(replay.Idempotent);
+        Assert.Equal(successor.Response, replay.Response);
+
+        var successorBindingId = successorBinding.Id;
+        Guid successorEnrollmentId;
+        await using (var moveBack = await factory.CreateDbContextAsync())
+        {
+            var sourceSeat = await moveBack.LicenseSeats.SingleAsync(candidate => candidate.Id == sourceSeatId);
+            var targetSeat = await moveBack.LicenseSeats.SingleAsync(candidate => candidate.Id == targetSeatId);
+            sourceSeat.IsActive = true;
+            sourceSeat.UnlinkedAt = null;
+            sourceSeat.LastCheckInAt = now.AddMinutes(-2).UtcDateTime;
+            targetSeat.IsActive = false;
+            targetSeat.UnlinkedAt = now.AddMinutes(-3).UtcDateTime;
+
+            var currentBinding = await moveBack.DistributionInstallationBindings
+                .SingleAsync(candidate => candidate.Id == successorBindingId);
+            var authorityEpoch = await moveBack.RuntimeEnrollmentAuthorityStates.AsNoTracking()
+                .Where(candidate => candidate.Id == 1)
+                .Select(candidate => candidate.Epoch)
+                .SingleAsync();
+            successorEnrollmentId = Guid.NewGuid();
+            moveBack.RuntimeEnrollments.Add(new RuntimeEnrollment
+            {
+                Id = successorEnrollmentId,
+                ClientId = "website-step1",
+                BindingId = currentBinding.Id,
+                ProductId = currentBinding.ProductId,
+                LicenseId = currentBinding.LicenseId,
+                LicenseSeatId = currentBinding.LicenseSeatId,
+                InstallationId = currentBinding.InstallationId,
+                HardwareIdHash = currentBinding.HardwareIdHash,
+                ReleaseVersion = currentBinding.Version,
+                HandoffDigestSha256 = currentBinding.HandoffDigestSha256,
+                SubjectRefDigestSha256 = currentBinding.SubjectRefDigestSha256,
+                ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion,
+                Algorithm = "PS256",
+                KeyBackend = "software-cng-unattested",
+                AttestationLevel = "none",
+                PublicKeySpkiCiphertext = "test",
+                PublicKeySpkiKeyId = runtimeOptions.Encryption.ActiveKeyId,
+                PublicKeySpkiSha256 = new string('f', 64),
+                KeyThumbprint = "sl-" + Guid.NewGuid().ToString("N"),
+                ChallengeCiphertext = "test",
+                ChallengeKeyId = runtimeOptions.Encryption.ActiveKeyId,
+                ChallengeDigestSha256 = new string('1', 64),
+                State = "ACTIVE",
+                Epoch = 1,
+                SecurityEpoch = 5,
+                AuthorityEpoch = authorityEpoch,
+                ChallengeExpiresAtUtc = now.AddHours(1).UtcDateTime,
+                CreatedAtUtc = now.AddMinutes(-4).UtcDateTime,
+                ActivatedAtUtc = now.AddMinutes(-3).UtcDateTime
+            });
+            await moveBack.SaveChangesAsync();
+        }
+
+        var returnAuthority = await IssueAsync("same-license-return");
+        var returnRequest = FinalizeRequest(
+            "same-license-return", returnAuthority, fixture.HardwareId, now.AddMinutes(-1));
+        returnRequest.Schema = DistributionInstallationBindingService.FinalizeV4Schema;
+        returnRequest.LicenseReplacementCandidates = UnrelatedCandidates("return-historical");
+
+        var returned = await service.FinalizeAsync(
+            "website-step1", Sha256("same-license-return-finalize"), returnRequest);
+
+        await using var returnCheck = await factory.CreateDbContextAsync();
+        var returnedBinding = await returnCheck.DistributionInstallationBindings.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == Guid.Parse(returned.Response.BindingId));
+        Assert.Equal(sourceSeatId, returnedBinding.LicenseSeatId);
+        Assert.Equal(successorBindingId, returnedBinding.SupersededBindingId);
+        Assert.Equal(6, returnedBinding.InitialSecurityEpoch);
+        var successorBindingAfterReturn = await returnCheck.DistributionInstallationBindings.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == successorBindingId);
+        Assert.Equal("invalidated", successorBindingAfterReturn.State);
+        Assert.Equal("installation_superseded", successorBindingAfterReturn.InvalidationReason);
+        var successorEnrollmentAfterReturn = await returnCheck.RuntimeEnrollments.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == successorEnrollmentId);
+        Assert.Equal("INVALIDATED", successorEnrollmentAfterReturn.State);
+        Assert.Equal("binding_superseded", successorEnrollmentAfterReturn.InvalidationReason);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DistributionFinalize_ActiveBindingWithExactEnrollment_ReissuesExactAuthority(
+        bool sourceEnrollmentIsActive)
+    {
+        var connections = await ProvisionAsync();
+        var factory = new TestDbFactory(connections.App);
+        var fixture = await SeedDistributionAuthorityWithoutBindingAsync(factory);
+        using var activeSigning = CreateSigningKey(ActiveSigningPrivateKey);
+        using var nextSigning = CreateSigningKey(NextSigningPrivateKey);
+        var runtimeOptions = RuntimeOptions(fixture.ProductId, activeSigning, nextSigning);
+        await UpsertKeyRegistryAsync(connections.Admin, runtimeOptions);
+
+        var now = DateTimeOffset.UtcNow;
+        var service = new DistributionInstallationBindingService(
+            factory, new EphemeralDataProtectionProvider(), new FixedTimeProvider(now));
+        var subjectRef = Convert.ToBase64String(SHA256.HashData("active-binding-authority-recovery"u8.ToArray()))
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+        async Task<(string GrantRef, string EntitlementRef)> IssueAsync(string label)
+        {
+            var grantRef = Guid.NewGuid().ToString("D");
+            var issued = await service.IssueEntitlementAsync(
+                "website-step1",
+                Sha256(label + "-issue"),
+                new DistributionEntitlementIssueRequest
+                {
+                    Schema = DistributionInstallationBindingService.IssueV3Schema,
+                    RequestId = Guid.NewGuid().ToString("D"),
+                    ProductId = fixture.ProductId.ToString("D"),
+                    SoftLicenceLicenseId = fixture.LicenseId.ToString("D"),
+                    GrantRefDigestSha256 = Sha256(grantRef),
+                    SubjectRef = subjectRef
+                });
+            return (grantRef, issued.Response.EntitlementRef);
+        }
+
+        DistributionInstallationFinalizeRequest FinalizeRequest(
+            string label,
+            (string GrantRef, string EntitlementRef) authority,
+            DateTimeOffset issuedAt) => new()
+        {
+            Schema = DistributionInstallationBindingService.FinalizeV2Schema,
+            RequestId = Guid.NewGuid().ToString("D"),
+            GrantRef = authority.GrantRef,
+            HandoffDigestSha256 = Sha256(label + "-handoff-" + authority.GrantRef),
+            HandoffIssuedAtUtc = FormatUtc(issuedAt),
+            HandoffExpiresAtUtc = FormatUtc(now.AddMinutes(30)),
+            DownloadCompletedAtUtc = FormatUtc(issuedAt.AddMinutes(1)),
+            ProductId = fixture.ProductId.ToString("D"),
+            EntitlementRef = authority.EntitlementRef,
+            InstallationId = Guid.NewGuid().ToString("D"),
+            HardwareId = fixture.HardwareId,
+            AllowSameAuthorityRecovery = true,
+            Release = new DistributionReleaseEvidence
+            {
+                Version = fixture.Version,
+                InstallerFilename = "TiaConnect-Setup_v2.3.195.exe",
+                InstallerSha256 = Sha256(label + "-installer")
+            },
+            Binaries =
+            [
+                new() { Key = "FP_EXE", Sha256 = new string('a', 64) },
+                new() { Key = "FP_DLL", Sha256 = new string('b', 64) },
+                new() { Key = "FP_CORE", Sha256 = new string('c', 64) }
+            ]
+        };
+
+        DistributionLicenseReplacementProof UnrelatedCandidate(string label) => new()
+        {
+            Schema = DistributionInstallationBindingService.LicenseReplacementSchema,
+            SourceBindingId = Guid.NewGuid().ToString("D"),
+            SourceLicenseId = Guid.NewGuid().ToString("D"),
+            SourceSubjectRef = Convert.ToBase64String(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(label)))
+                .TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        };
+
+        var sourceAuthority = await IssueAsync("active-binding-source");
+        var sourceRequest = FinalizeRequest(
+            "active-binding-source", sourceAuthority, now.AddMinutes(-20));
+        var source = await service.FinalizeAsync(
+            "website-step1", Sha256("active-binding-source-finalize"), sourceRequest);
+        var sourceBindingId = Guid.Parse(source.Response.BindingId);
+        var sourceEnrollmentId = Guid.NewGuid();
+
+        await using (var seed = await factory.CreateDbContextAsync())
+        {
+            var sourceBinding = await seed.DistributionInstallationBindings.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == sourceBindingId);
+            var authorityEpoch = await seed.RuntimeEnrollmentAuthorityStates.AsNoTracking()
+                .Where(candidate => candidate.Id == 1)
+                .Select(candidate => candidate.Epoch)
+                .SingleAsync();
+            seed.RuntimeEnrollments.Add(new RuntimeEnrollment
+            {
+                Id = sourceEnrollmentId,
+                ClientId = "website-step1",
+                BindingId = sourceBinding.Id,
+                ProductId = sourceBinding.ProductId,
+                LicenseId = sourceBinding.LicenseId,
+                LicenseSeatId = sourceBinding.LicenseSeatId,
+                InstallationId = sourceBinding.InstallationId,
+                HardwareIdHash = sourceBinding.HardwareIdHash,
+                ReleaseVersion = sourceBinding.Version,
+                HandoffDigestSha256 = sourceBinding.HandoffDigestSha256,
+                SubjectRefDigestSha256 = sourceBinding.SubjectRefDigestSha256,
+                ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion,
+                Algorithm = "PS256",
+                KeyBackend = "software-cng-unattested",
+                AttestationLevel = "none",
+                PublicKeySpkiCiphertext = "test",
+                PublicKeySpkiKeyId = runtimeOptions.Encryption.ActiveKeyId,
+                PublicKeySpkiSha256 = new string('d', 64),
+                KeyThumbprint = "sl-" + Guid.NewGuid().ToString("N"),
+                ChallengeCiphertext = "test",
+                ChallengeKeyId = runtimeOptions.Encryption.ActiveKeyId,
+                ChallengeDigestSha256 = new string('e', 64),
+                State = "INVALIDATED",
+                Epoch = 1,
+                SecurityEpoch = 2,
+                AuthorityEpoch = authorityEpoch,
+                ChallengeExpiresAtUtc = now.AddHours(1).UtcDateTime,
+                CreatedAtUtc = now.AddHours(-2).UtcDateTime,
+                ChallengeConsumedAtUtc = now.AddHours(-1).AddMinutes(-5).UtcDateTime,
+                ActivatedAtUtc = now.AddHours(-1).UtcDateTime,
+                InvalidatedAtUtc = now.AddMinutes(-40).UtcDateTime,
+                InvalidationReason = "authority_ineligible"
+            });
+            seed.LicenseSeats.Add(new LicenseSeat
+            {
+                Id = Guid.NewGuid(),
+                LicenseId = fixture.LicenseId,
+                HardwareId = "C6AC7E0660A9BADD",
+                IsActive = false,
+                FirstActivatedAt = now.AddMinutes(-50).UtcDateTime,
+                LastCheckInAt = now.AddMinutes(-45).UtcDateTime,
+                UnlinkedAt = now.AddMinutes(-3).UtcDateTime,
+                AppVersion = fixture.Version
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var targetAuthority = await IssueAsync("active-binding-target");
+        var targetRequest = FinalizeRequest(
+            "active-binding-target", targetAuthority, now.AddMinutes(-2));
+        targetRequest.Schema = DistributionInstallationBindingService.FinalizeV4Schema;
+        targetRequest.LicenseReplacementCandidates = new DistributionLicenseReplacementCandidateSet
+        {
+            Schema = DistributionInstallationBindingService.LicenseReplacementCandidatesSchema,
+            Sources =
+            [
+                UnrelatedCandidate("historical-one"),
+                UnrelatedCandidate("historical-two"),
+                UnrelatedCandidate("historical-three")
+            ]
+        };
+
+        foreach (var terminalReason in new[] { "security_lockdown", "unknown_terminal" })
+        {
+            await using (var mutate = await factory.CreateDbContextAsync())
+            {
+                var enrollment = await mutate.RuntimeEnrollments
+                    .SingleAsync(candidate => candidate.Id == sourceEnrollmentId);
+                enrollment.InvalidationReason = terminalReason;
+                await mutate.SaveChangesAsync();
+            }
+
+            var rejected = await Assert.ThrowsAsync<DistributionOperationException>(() => service.FinalizeAsync(
+                "website-step1", Sha256("active-binding-target-finalize"), targetRequest));
+            Assert.Equal("binding_conflict", rejected.ErrorCode);
+            Assert.Equal("replacement_enrollment_security_terminal", rejected.ReasonCode);
+
+            await using (var restore = await factory.CreateDbContextAsync())
+            {
+                var enrollment = await restore.RuntimeEnrollments
+                    .SingleAsync(candidate => candidate.Id == sourceEnrollmentId);
+                enrollment.InvalidationReason = "authority_ineligible";
+                await restore.SaveChangesAsync();
+            }
+        }
+
+        await using (var mutate = await factory.CreateDbContextAsync())
+        {
+            var enrollment = await mutate.RuntimeEnrollments
+                .SingleAsync(candidate => candidate.Id == sourceEnrollmentId);
+            enrollment.InvalidationReason = "binding_superseded";
+            await mutate.SaveChangesAsync();
+        }
+        var unrelatedBusinessTerminal = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            service.FinalizeAsync(
+                "website-step1", Sha256("active-binding-target-finalize"), targetRequest));
+        Assert.Equal("binding_conflict", unrelatedBusinessTerminal.ErrorCode);
+        Assert.Equal("same_authority_active_enrollment_mismatch", unrelatedBusinessTerminal.ReasonCode);
+        await using (var restore = await factory.CreateDbContextAsync())
+        {
+            var enrollment = await restore.RuntimeEnrollments
+                .SingleAsync(candidate => candidate.Id == sourceEnrollmentId);
+            enrollment.State = sourceEnrollmentIsActive ? "ACTIVE" : "INVALIDATED";
+            enrollment.InvalidatedAtUtc = sourceEnrollmentIsActive
+                ? null
+                : now.AddMinutes(-40).UtcDateTime;
+            enrollment.InvalidationReason = sourceEnrollmentIsActive
+                ? null
+                : "authority_ineligible";
+            await restore.SaveChangesAsync();
+        }
+
+        var recovered = await service.FinalizeAsync(
+            "website-step1", Sha256("active-binding-target-finalize"), targetRequest);
+
+        Assert.False(recovered.Idempotent);
+        await using var check = await factory.CreateDbContextAsync();
+        var sourceBindingAfter = await check.DistributionInstallationBindings.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == sourceBindingId);
+        var sourceEnrollmentAfter = await check.RuntimeEnrollments.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == sourceEnrollmentId);
+        var successor = await check.DistributionInstallationBindings.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == Guid.Parse(recovered.Response.BindingId));
+        Assert.Equal("invalidated", sourceBindingAfter.State);
+        Assert.Equal("installation_superseded", sourceBindingAfter.InvalidationReason);
+        Assert.Equal("INVALIDATED", sourceEnrollmentAfter.State);
+        Assert.Equal(
+            sourceEnrollmentIsActive ? "binding_superseded" : "authority_ineligible",
+            sourceEnrollmentAfter.InvalidationReason);
+        Assert.Equal(sourceBindingId, successor.SupersededBindingId);
+        Assert.Equal(sourceBindingAfter.LicenseSeatId, successor.LicenseSeatId);
+        Assert.Equal(sourceBindingAfter.HardwareIdHash, successor.HardwareIdHash);
+        Assert.Equal(3, successor.InitialSecurityEpoch);
+
+        var replay = await service.FinalizeAsync(
+            "website-step1", Sha256("active-binding-target-finalize"), targetRequest);
+        Assert.True(replay.Idempotent);
+        Assert.Equal(recovered.Response, replay.Response);
+    }
+
+    [Fact]
+    public async Task DistributionFinalize_ExpiredSourceAndNewLicense_V4AtomicallySelectsExactWebsiteAuthority()
+    {
+        var connections = await ProvisionAsync();
+        var factory = new TestDbFactory(connections.App);
+        var fixture = await SeedDistributionAuthorityWithoutBindingAsync(factory);
+        using var activeSigning = CreateSigningKey(ActiveSigningPrivateKey);
+        using var nextSigning = CreateSigningKey(NextSigningPrivateKey);
+        var runtimeOptions = RuntimeOptions(fixture.ProductId, activeSigning, nextSigning);
+        await UpsertKeyRegistryAsync(connections.Admin, runtimeOptions);
+
+        var now = DateTimeOffset.UtcNow;
+        var service = new DistributionInstallationBindingService(
+            factory, new EphemeralDataProtectionProvider(), new FixedTimeProvider(now));
+        var sourceSubjectRef = Convert.ToBase64String(SHA256.HashData("cross-license-red-subject"u8.ToArray()))
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        var targetSubjectRef = Convert.ToBase64String(SHA256.HashData("cross-license-target-subject"u8.ToArray()))
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+        async Task<(string GrantRef, string EntitlementRef)> IssueAsync(
+            Guid licenseId,
+            string label,
+            string subjectRef)
+        {
+            var grantRef = Guid.NewGuid().ToString("D");
+            var issued = await service.IssueEntitlementAsync(
+                "website-step1",
+                Sha256(label + "-issue"),
+                new DistributionEntitlementIssueRequest
+                {
+                    Schema = DistributionInstallationBindingService.IssueV3Schema,
+                    RequestId = Guid.NewGuid().ToString("D"),
+                    ProductId = fixture.ProductId.ToString("D"),
+                    SoftLicenceLicenseId = licenseId.ToString("D"),
+                    GrantRefDigestSha256 = Sha256(grantRef),
+                    SubjectRef = subjectRef
+                });
+            return (grantRef, issued.Response.EntitlementRef);
+        }
+
+        DistributionInstallationFinalizeRequest FinalizeRequest(
+            string label,
+            (string GrantRef, string EntitlementRef) authority,
+            DateTimeOffset issuedAt) => new()
+            {
+                Schema = DistributionInstallationBindingService.FinalizeV2Schema,
+                RequestId = Guid.NewGuid().ToString("D"),
+                GrantRef = authority.GrantRef,
+                HandoffDigestSha256 = Sha256(label + "-handoff-" + authority.GrantRef),
+                HandoffIssuedAtUtc = FormatUtc(issuedAt),
+                HandoffExpiresAtUtc = FormatUtc(now.AddMinutes(30)),
+                DownloadCompletedAtUtc = FormatUtc(issuedAt.AddMinutes(1)),
+                ProductId = fixture.ProductId.ToString("D"),
+                EntitlementRef = authority.EntitlementRef,
+                InstallationId = Guid.NewGuid().ToString("D"),
+                HardwareId = fixture.HardwareId,
+                AllowSameAuthorityRecovery = true,
+                Release = new DistributionReleaseEvidence
+                {
+                    Version = fixture.Version,
+                    InstallerFilename = "TiaConnect-Setup_v2.2.844.exe",
+                    InstallerSha256 = Sha256(label + "-installer")
+                },
+                Binaries =
+            [
+                new() { Key = "FP_EXE", Sha256 = new string('a', 64) },
+                new() { Key = "FP_DLL", Sha256 = new string('b', 64) },
+                new() { Key = "FP_CORE", Sha256 = new string('c', 64) }
+            ]
+            };
+
+        var sourceAuthority = await IssueAsync(fixture.LicenseId, "cross-license-source", sourceSubjectRef);
+        var sourceRequest = FinalizeRequest("cross-license-source", sourceAuthority, now.AddMinutes(-15));
+        var source = await service.FinalizeAsync(
+            "website-step1", Sha256("cross-license-source-finalize"), sourceRequest);
+        var sourceBindingId = Guid.Parse(source.Response.BindingId);
+        Guid targetLicenseId;
+        Guid targetSeatId;
+        long authorityEpoch;
+        await using (var authorityReader = await new TestDbFactory(connections.Admin).CreateDbContextAsync())
+        {
+            // The application role intentionally cannot read the protected global authority
+            // state. Test setup uses the administrative fixture only to seed an exact epoch.
+            authorityEpoch = await authorityReader.RuntimeEnrollmentAuthorityStates.AsNoTracking()
+                .Where(candidate => candidate.Id == 1)
+                .Select(candidate => candidate.Epoch)
+                .SingleAsync();
+        }
+
+        await using (var seed = await factory.CreateDbContextAsync())
+        {
+            var sourceBinding = await seed.DistributionInstallationBindings.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == sourceBindingId);
+            var sourceLicense = await seed.Licenses.SingleAsync(candidate => candidate.Id == fixture.LicenseId);
+            sourceLicense.IsActive = false;
+            sourceLicense.RevokedAt = now.AddMinutes(-10).UtcDateTime;
+            sourceLicense.ExpirationDate = now.AddMinutes(-10).UtcDateTime;
+
+            targetLicenseId = Guid.NewGuid();
+            targetSeatId = Guid.NewGuid();
+            seed.Licenses.Add(new License
+            {
+                Id = targetLicenseId,
+                ProductId = fixture.ProductId,
+                LicenseTypeId = sourceLicense.LicenseTypeId,
+                LicenseKey = "CROSS-LICENSE-" + Guid.NewGuid().ToString("N"),
+                IsActive = true,
+                MaxSeats = 1,
+                AllowedVersions = sourceLicense.AllowedVersions,
+                ExpirationDate = now.AddDays(30).UtcDateTime
+            });
+            seed.LicenseSeats.Add(new LicenseSeat
+            {
+                Id = targetSeatId,
+                LicenseId = targetLicenseId,
+                HardwareId = fixture.HardwareId,
+                IsActive = true,
+                FirstActivatedAt = now.AddMinutes(-8).UtcDateTime,
+                LastCheckInAt = now.AddMinutes(-8).UtcDateTime
+            });
+            seed.RuntimeEnrollments.Add(new RuntimeEnrollment
+            {
+                Id = Guid.NewGuid(),
+                ClientId = "website-step1",
+                BindingId = sourceBinding.Id,
+                ProductId = sourceBinding.ProductId,
+                LicenseId = sourceBinding.LicenseId,
+                LicenseSeatId = sourceBinding.LicenseSeatId,
+                InstallationId = sourceBinding.InstallationId,
+                HardwareIdHash = sourceBinding.HardwareIdHash,
+                ReleaseVersion = sourceBinding.Version,
+                HandoffDigestSha256 = sourceBinding.HandoffDigestSha256,
+                SubjectRefDigestSha256 = sourceBinding.SubjectRefDigestSha256,
+                ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion,
+                Algorithm = "PS256",
+                KeyBackend = "software-cng-unattested",
+                AttestationLevel = "none",
+                PublicKeySpkiCiphertext = "test",
+                PublicKeySpkiKeyId = runtimeOptions.Encryption.ActiveKeyId,
+                PublicKeySpkiSha256 = new string('d', 64),
+                KeyThumbprint = "xl-" + Guid.NewGuid().ToString("N"),
+                ChallengeCiphertext = "test",
+                ChallengeKeyId = runtimeOptions.Encryption.ActiveKeyId,
+                ChallengeDigestSha256 = new string('e', 64),
+                State = "ACTIVE",
+                Epoch = 1,
+                SecurityEpoch = 4,
+                AuthorityEpoch = authorityEpoch,
+                ChallengeExpiresAtUtc = now.AddHours(1).UtcDateTime,
+                CreatedAtUtc = now.AddHours(-1).UtcDateTime,
+                ActivatedAtUtc = now.AddMinutes(-30).UtcDateTime
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        var targetAuthority = await IssueAsync(targetLicenseId, "cross-license-target", targetSubjectRef);
+        var targetRequest = FinalizeRequest("cross-license-target", targetAuthority, now.AddMinutes(-5));
+
+        DistributionLicenseReplacementProof ReplacementProof(string sourceSubject) => new()
+        {
+            Schema = DistributionInstallationBindingService.LicenseReplacementSchema,
+            SourceBindingId = sourceBindingId.ToString("D"),
+            SourceLicenseId = fixture.LicenseId.ToString("D"),
+            SourceSubjectRef = sourceSubject
+        };
+        DistributionLicenseReplacementCandidateSet ReplacementCandidates(bool includeMatchingSource) => new()
+        {
+            Schema = DistributionInstallationBindingService.LicenseReplacementCandidatesSchema,
+            Sources =
+            [
+                new()
+                {
+                    Schema = DistributionInstallationBindingService.LicenseReplacementSchema,
+                    SourceBindingId = Guid.NewGuid().ToString("D"),
+                    SourceLicenseId = Guid.NewGuid().ToString("D"),
+                    SourceSubjectRef = Convert.ToBase64String(SHA256.HashData("legacy-candidate-one"u8.ToArray()))
+                        .TrimEnd('=').Replace('+', '-').Replace('/', '_')
+                },
+                includeMatchingSource ? ReplacementProof(sourceSubjectRef) : new()
+                {
+                    Schema = DistributionInstallationBindingService.LicenseReplacementSchema,
+                    SourceBindingId = Guid.NewGuid().ToString("D"),
+                    SourceLicenseId = Guid.NewGuid().ToString("D"),
+                    SourceSubjectRef = Convert.ToBase64String(SHA256.HashData("legacy-candidate-missing"u8.ToArray()))
+                        .TrimEnd('=').Replace('+', '-').Replace('/', '_')
+                },
+                new()
+                {
+                    Schema = DistributionInstallationBindingService.LicenseReplacementSchema,
+                    SourceBindingId = Guid.NewGuid().ToString("D"),
+                    SourceLicenseId = Guid.NewGuid().ToString("D"),
+                    SourceSubjectRef = Convert.ToBase64String(SHA256.HashData("legacy-candidate-three"u8.ToArray()))
+                        .TrimEnd('=').Replace('+', '-').Replace('/', '_')
+                }
+            ]
+        };
+        targetRequest.Schema = DistributionInstallationBindingService.FinalizeV4Schema;
+        targetRequest.LicenseReplacementCandidates = ReplacementCandidates(includeMatchingSource: true);
+
+        var legacyProbe = FinalizeRequest("cross-license-legacy-probe", targetAuthority, now.AddMinutes(-4));
+        var legacyError = await Assert.ThrowsAsync<DistributionOperationException>(() => service.FinalizeAsync(
+            "website-step1", Sha256("cross-license-legacy-probe-finalize"), legacyProbe));
+        Assert.Equal("binding_conflict", legacyError.ErrorCode);
+
+        var divergentSubjectProbe = FinalizeRequest(
+            "cross-license-divergent-subject-probe", targetAuthority, now.AddMinutes(-4));
+        divergentSubjectProbe.Schema = DistributionInstallationBindingService.FinalizeV3Schema;
+        divergentSubjectProbe.LicenseReplacement = ReplacementProof(targetSubjectRef);
+        var divergentSubjectError = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            service.FinalizeAsync(
+                "website-step1",
+                Sha256("cross-license-divergent-subject-probe-finalize"),
+                divergentSubjectProbe));
+        Assert.Equal("binding_conflict", divergentSubjectError.ErrorCode);
+
+        await using (var makeSourceEligible = await factory.CreateDbContextAsync())
+        {
+            var sourceLicense = await makeSourceEligible.Licenses.SingleAsync(candidate =>
+                candidate.Id == fixture.LicenseId);
+            sourceLicense.IsActive = true;
+            sourceLicense.RevokedAt = null;
+            sourceLicense.ExpirationDate = now.AddDays(1).UtcDateTime;
+            await makeSourceEligible.SaveChangesAsync();
+        }
+        var eligibleSourceProbe = FinalizeRequest(
+            "cross-license-eligible-source-probe", targetAuthority, now.AddMinutes(-3));
+        eligibleSourceProbe.Schema = DistributionInstallationBindingService.FinalizeV3Schema;
+        eligibleSourceProbe.LicenseReplacement = ReplacementProof(sourceSubjectRef);
+        var eligibleSourceError = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            service.FinalizeAsync(
+                "website-step1",
+                Sha256("cross-license-eligible-source-probe-finalize"),
+                eligibleSourceProbe));
+        Assert.Equal("binding_conflict", eligibleSourceError.ErrorCode);
+        await using (var restoreSourceIneligible = await factory.CreateDbContextAsync())
+        {
+            var sourceLicense = await restoreSourceIneligible.Licenses.SingleAsync(candidate =>
+                candidate.Id == fixture.LicenseId);
+            sourceLicense.IsActive = false;
+            sourceLicense.RevokedAt = now.AddMinutes(-10).UtcDateTime;
+            sourceLicense.ExpirationDate = now.AddMinutes(-10).UtcDateTime;
+            await restoreSourceIneligible.SaveChangesAsync();
+        }
+
+        var missingCandidateProbe = FinalizeRequest(
+            "cross-license-missing-candidate-probe", targetAuthority, now.AddMinutes(-3));
+        missingCandidateProbe.Schema = DistributionInstallationBindingService.FinalizeV4Schema;
+        missingCandidateProbe.LicenseReplacementCandidates = ReplacementCandidates(includeMatchingSource: false);
+        var missingCandidateError = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            service.FinalizeAsync(
+                "website-step1",
+                Sha256("cross-license-missing-candidate-probe-finalize"),
+                missingCandidateProbe));
+        Assert.Equal("binding_conflict", missingCandidateError.ErrorCode);
+        Assert.Equal("replacement_candidate_none", missingCandidateError.ReasonCode);
+
+        // Reproduce TKT-000295: classic activation has already moved the product seat to the
+        // replacement license, leaving the last exact Runtime generation as a business tombstone.
+        // Finalize-v4 must resolve that unique leaf from the bounded Website candidate set without
+        // reviving or rewriting the forensic rows.
+        DateTime sourceInvalidatedAt;
+        long businessTerminalAuthorityEpoch;
+        await using (var advanceAuthority = await new TestDbFactory(connections.Admin).CreateDbContextAsync())
+        {
+            var authorityState = await advanceAuthority.RuntimeEnrollmentAuthorityStates
+                .SingleAsync(candidate => candidate.Id == 1);
+            authorityState.Epoch++;
+            businessTerminalAuthorityEpoch = authorityState.Epoch;
+            await advanceAuthority.SaveChangesAsync();
+        }
+        await using (var invalidateSource = await factory.CreateDbContextAsync())
+        {
+            var invalidatedAt = now.AddMinutes(-2).UtcDateTime;
+            sourceInvalidatedAt = new DateTime(
+                invalidatedAt.Ticks - invalidatedAt.Ticks % 10,
+                DateTimeKind.Utc);
+            var sourceBinding = await invalidateSource.DistributionInstallationBindings
+                .SingleAsync(candidate => candidate.Id == sourceBindingId);
+            sourceBinding.State = "invalidated";
+            sourceBinding.InvalidatedAtUtc = sourceInvalidatedAt;
+            sourceBinding.InvalidationReason = "seat_reassigned_product_scope";
+            var sourceEnrollment = await invalidateSource.RuntimeEnrollments
+                .SingleAsync(candidate => candidate.BindingId == sourceBindingId);
+            sourceEnrollment.State = "INVALIDATED";
+            sourceEnrollment.InvalidatedAtUtc = sourceInvalidatedAt;
+            sourceEnrollment.InvalidationReason = "seat_reassigned_product_scope";
+            sourceEnrollment.AuthorityEpoch = businessTerminalAuthorityEpoch;
+            await invalidateSource.SaveChangesAsync();
+        }
+
+        // The additive v4 assertion carries bounded Website-owned history. SoftLicence matches the
+        // sole hardware binding under its authority lock; list order never grants preference.
+        var competingRequest = FinalizeRequest(
+            "cross-license-competing-target", targetAuthority, now.AddMinutes(-2));
+        competingRequest.Schema = DistributionInstallationBindingService.FinalizeV4Schema;
+        competingRequest.LicenseReplacementCandidates = targetRequest.LicenseReplacementCandidates;
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstFinalize = Task.Run(async () =>
+        {
+            await start.Task;
+            return await CaptureAsync(() => service.FinalizeAsync(
+                "website-step1", Sha256("cross-license-target-finalize"), targetRequest));
+        });
+        var secondFinalize = Task.Run(async () =>
+        {
+            await start.Task;
+            return await CaptureAsync(() => service.FinalizeAsync(
+                "website-step1", Sha256("cross-license-competing-target-finalize"), competingRequest));
+        });
+        start.SetResult();
+        var outcomes = await Task.WhenAll(firstFinalize, secondFinalize);
+        var winnerIndex = Array.FindIndex(outcomes, outcome => outcome.Error == null);
+        Assert.True(winnerIndex >= 0);
+        Assert.Single(outcomes, outcome => outcome.Error == null);
+        var losingError = Assert.IsType<DistributionOperationException>(
+            Assert.Single(outcomes, outcome => outcome.Error != null).Error);
+        Assert.True(losingError.ErrorCode is "binding_conflict" or "entitlement_ineligible");
+        var replaced = outcomes[winnerIndex].Result!;
+        var winnerRequest = winnerIndex == 0 ? targetRequest : competingRequest;
+        var winnerDigest = winnerIndex == 0
+            ? Sha256("cross-license-target-finalize")
+            : Sha256("cross-license-competing-target-finalize");
+
+        Assert.False(replaced.Idempotent);
+        await using var check = await factory.CreateDbContextAsync();
+        var active = await check.DistributionInstallationBindings.AsNoTracking()
+            .SingleAsync(candidate => candidate.ProductId == fixture.ProductId
+                && candidate.HardwareIdHash == Sha256(fixture.HardwareId)
+                && candidate.State == "active");
+        Assert.Equal(targetLicenseId, active.LicenseId);
+        Assert.Equal(targetSeatId, active.LicenseSeatId);
+        Assert.Equal(sourceBindingId, active.SupersededBindingId);
+        Assert.Equal(5, active.InitialSecurityEpoch);
+        var sourceAfter = await check.DistributionInstallationBindings.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == sourceBindingId);
+        Assert.Equal("invalidated", sourceAfter.State);
+        Assert.Equal("seat_reassigned_product_scope", sourceAfter.InvalidationReason);
+        Assert.Equal(sourceInvalidatedAt, sourceAfter.InvalidatedAtUtc);
+        var enrollmentAfter = await check.RuntimeEnrollments.AsNoTracking()
+            .SingleAsync(candidate => candidate.BindingId == sourceBindingId);
+        Assert.Equal("INVALIDATED", enrollmentAfter.State);
+        Assert.Equal("seat_reassigned_product_scope", enrollmentAfter.InvalidationReason);
+        Assert.Equal(sourceInvalidatedAt, enrollmentAfter.InvalidatedAtUtc);
+        var finalAuthorityEpoch = await check.RuntimeEnrollmentAuthorityStates.AsNoTracking()
+            .Where(candidate => candidate.Id == 1)
+            .Select(candidate => candidate.Epoch)
+            .SingleAsync();
+        Assert.True(finalAuthorityEpoch > authorityEpoch);
+        Assert.Equal(businessTerminalAuthorityEpoch, enrollmentAfter.AuthorityEpoch);
+
+        var replay = await service.FinalizeAsync(
+            "website-step1", winnerDigest, winnerRequest);
+        Assert.True(replay.Idempotent);
+        Assert.Equal(replaced.Response, replay.Response);
+    }
+
+    [Fact]
     public async Task DistributionFinalize_CompletesBeforeClassicActivation_ActivationAtomicallyInvalidatesRuntimeIdentity()
     {
         const string invalidationReason = "seat_reassigned_product_scope";
@@ -969,6 +1947,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var losingError = Assert.IsType<DistributionOperationException>(
             Assert.Single(outcomes, outcome => outcome.Error != null).Error);
         Assert.Equal("binding_conflict", losingError.ErrorCode);
+        Assert.Equal("cross_generation_handoff_not_newer", losingError.ReasonCode);
         var winnerRequest = winnerIndex == 0 ? firstRequest : secondRequest;
         var winnerDigest = winnerIndex == 0
             ? Sha256("postgres-cross-generation-first-finalize")
@@ -1002,11 +1981,50 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             service.FinalizeAsync(
                 "website-step1", Sha256("postgres-cross-generation-divergent-finalize"), divergentRequest));
         Assert.Equal("binding_conflict", divergentError.ErrorCode);
+        Assert.Equal("cross_generation_subject_mismatch", divergentError.ReasonCode);
+
+        var recoveryAuthority = await IssueAsync("postgres-cross-generation-recovery", subjectRef);
+        var recoveryRequest = FinalizeRequest(
+            "postgres-cross-generation-recovery", recoveryAuthority.GrantRef,
+            recoveryAuthority.EntitlementRef, now.AddMinutes(-3), nextVersion, '1', '2', '3');
+        await using (var markSecurityTerminal = await factory.CreateDbContextAsync())
+        {
+            var binding = await markSecurityTerminal.DistributionInstallationBindings
+                .SingleAsync(candidate => candidate.Id == bindingId);
+            binding.State = "invalidated";
+            binding.InvalidatedAtUtc = now.AddMinutes(-2).UtcDateTime;
+            binding.InvalidationReason = "security_lockdown";
+            await markSecurityTerminal.SaveChangesAsync();
+        }
+        var securityTerminalError = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            service.FinalizeAsync(
+                "website-step1",
+                Sha256("postgres-cross-generation-recovery-finalize"),
+                recoveryRequest));
+        Assert.Equal("binding_conflict", securityTerminalError.ErrorCode);
+        Assert.Equal("cross_generation_binding_inactive", securityTerminalError.ReasonCode);
+
+        await using (var markRecoverableTerminal = await factory.CreateDbContextAsync())
+        {
+            var binding = await markRecoverableTerminal.DistributionInstallationBindings
+                .SingleAsync(candidate => candidate.Id == bindingId);
+            binding.InvalidationReason = "installation_superseded";
+            await markRecoverableTerminal.SaveChangesAsync();
+        }
+        var recovered = await service.FinalizeAsync(
+            "website-step1",
+            Sha256("postgres-cross-generation-recovery-finalize"),
+            recoveryRequest);
+        Assert.False(recovered.Idempotent);
+        Assert.Equal(original.Response.BindingId, recovered.Response.BindingId);
 
         await using var check = await factory.CreateDbContextAsync();
         var finalBinding = await check.DistributionInstallationBindings.SingleAsync(candidate => candidate.Id == bindingId);
         var supersededEnrollment = await check.RuntimeEnrollments.SingleAsync(candidate => candidate.Id == enrollmentId);
-        Assert.Equal(winnerRequest.HandoffDigestSha256, finalBinding.HandoffDigestSha256);
+        Assert.Equal("active", finalBinding.State);
+        Assert.Null(finalBinding.InvalidatedAtUtc);
+        Assert.Null(finalBinding.InvalidationReason);
+        Assert.Equal(recoveryRequest.HandoffDigestSha256, finalBinding.HandoffDigestSha256);
         Assert.Equal(nextVersion, finalBinding.Version);
         Assert.Equal("INVALIDATED", supersededEnrollment.State);
         Assert.Equal("binding_superseded", supersededEnrollment.InvalidationReason);
@@ -1726,7 +2744,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             ("future-invalidation", enrollment => enrollment.InvalidatedAtUtc = now.AddMinutes(5).UtcDateTime),
             ("invalidation-before-expiry", enrollment => enrollment.InvalidatedAtUtc = now.AddMinutes(-6).UtcDateTime),
             ("missing-invalidation-time", enrollment => enrollment.InvalidatedAtUtc = null),
-            ("wrong-reason", enrollment => enrollment.InvalidationReason = "binding_superseded"),
+            ("security-terminal", enrollment => enrollment.InvalidationReason = "security_lockdown"),
             ("pending-identity", enrollment => enrollment.State = "PENDING"),
             ("client-divergence", enrollment => enrollment.ClientId = "other-website-client"),
             ("protocol-divergence", enrollment => enrollment.ProtocolVersion = "runtime-enrollment-v0")

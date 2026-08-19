@@ -91,7 +91,86 @@ public class SoftLicenceClientTests
         Assert.True(root.GetProperty("HardwareIdV2Differs").GetBoolean());
         Assert.Equal("legacy-wmi-first-disk", root.GetProperty("HardwareIdAlgorithm").GetString());
         Assert.Equal("v2-wmi-disk-index-0", root.GetProperty("HardwareIdV2Algorithm").GetString());
-        Assert.Equal("1.1.13", root.GetProperty("SdkVersion").GetString());
+        Assert.Equal("1.1.14", root.GetProperty("SdkVersion").GetString());
+    }
+
+    [Fact]
+    public async Task ActivateAsync_WithExplicitAuthority_SendsAuthorityAsPrimaryIdentity()
+    {
+        using var readerOverride = HardwareInfo.UseWmiPropertyReaderForTests((_, _, _) =>
+            throw new InvalidOperationException("Optional component collection is unavailable."));
+        string? capturedPayload = null;
+        var handler = new MockHttpMessageHandler(request =>
+        {
+            capturedPayload = request.Content?.ReadAsStringAsync().Result;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"LicenseFile\":\"abc\"}", Encoding.UTF8, "application/json")
+            };
+        });
+
+        await CreateClient(handler).ActivateAsync(
+            "KEY-123", "TestApp", null, "2.3.394", null, null, "A6D3ABCD1234EF90");
+
+        using var document = JsonDocument.Parse(capturedPayload!);
+        Assert.Equal("A6D3ABCD1234EF90", document.RootElement.GetProperty("HardwareId").GetString());
+        Assert.Equal("1.1.14", document.RootElement.GetProperty("SdkVersion").GetString());
+        Assert.False(document.RootElement.TryGetProperty("HardwareIdV2", out _));
+        Assert.False(document.RootElement.TryGetProperty("HardwareIdAlgorithm", out _));
+        Assert.False(document.RootElement.TryGetProperty("HardwareIdV2Algorithm", out _));
+        Assert.False(document.RootElement.TryGetProperty("ComponentFingerprints", out _));
+    }
+
+    [Fact]
+    public async Task ActivateAsync_WithExplicitAuthority_PreservesOptionalComponentFingerprints()
+    {
+        var legacyDiskReadCount = 0;
+        var stableDiskReadCount = 0;
+        using var readerOverride = HardwareInfo.UseWmiPropertyReaderForTests((className, propertyName, whereClause) =>
+        {
+            if (className == "Win32_DiskDrive")
+            {
+                if (whereClause == null)
+                    Interlocked.Increment(ref legacyDiskReadCount);
+                else if (whereClause == "Index=0")
+                    Interlocked.Increment(ref stableDiskReadCount);
+            }
+            return $"{className}:{propertyName}";
+        });
+        string? capturedPayload = null;
+        var handler = new MockHttpMessageHandler(request =>
+        {
+            capturedPayload = request.Content?.ReadAsStringAsync().Result;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"LicenseFile\":\"abc\"}", Encoding.UTF8, "application/json")
+            };
+        });
+
+        await CreateClient(handler).ActivateAsync(
+            "KEY-123", "TestApp", null, null, null, null, "A6D3ABCD1234EF90");
+
+        using var document = JsonDocument.Parse(capturedPayload!);
+        Assert.True(document.RootElement.TryGetProperty("ComponentFingerprints", out var fingerprints));
+        Assert.True(fingerprints.EnumerateObject().Any());
+        Assert.Equal(1, legacyDiskReadCount);
+        Assert.Equal(0, stableDiskReadCount);
+        Assert.False(document.RootElement.TryGetProperty("HardwareIdV2", out _));
+        Assert.False(document.RootElement.TryGetProperty("HardwareIdAlgorithm", out _));
+    }
+
+    [Theory]
+    [InlineData("a6d3abcd1234ef90")]
+    [InlineData("A6D3ABCD1234EF9")]
+    [InlineData("A6D3ABCD1234EF9Z")]
+    [InlineData(" A6D3ABCD1234EF90")]
+    public async Task ActivateAsync_WithNonCanonicalExplicitAuthority_RejectsBeforeNetwork(string hardwareId)
+    {
+        var handler = new MockHttpMessageHandler(_ => throw new InvalidOperationException("No request expected."));
+        var client = CreateClient(handler);
+
+        await Assert.ThrowsAsync<ArgumentException>(() => client.ActivateAsync(
+            "KEY-123", "TestApp", null, null, null, null, hardwareId));
     }
 
     [Fact]
@@ -343,7 +422,39 @@ public class SoftLicenceClientTests
         Assert.False(root.TryGetProperty("HardwareIdV2", out var hardwareIdV2Property));
         Assert.False(root.TryGetProperty("HardwareIdV2Differs", out var hardwareIdV2DiffersProperty));
         Assert.False(root.TryGetProperty("HardwareIdV2Algorithm", out var hardwareIdV2AlgorithmProperty));
-        Assert.Equal("1.1.13", root.GetProperty("SdkVersion").GetString());
+        Assert.Equal("1.1.14", root.GetProperty("SdkVersion").GetString());
+    }
+
+    [Fact]
+    public async Task CheckStatusAsync_WithExplicitAuthority_SendsAuthorityAsPrimaryIdentity()
+    {
+        var diskReadCount = 0;
+        using var readerOverride = HardwareInfo.UseWmiPropertyReaderForTests((_, _, _) =>
+        {
+            Interlocked.Increment(ref diskReadCount);
+            throw new InvalidOperationException("Optional component collection is unavailable.");
+        });
+        string? capturedPayload = null;
+        var handler = new MockHttpMessageHandler(request =>
+        {
+            capturedPayload = request.Content?.ReadAsStringAsync().Result;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"Status\":\"VALID\"}", Encoding.UTF8, "application/json")
+            };
+        });
+
+        await CreateClient(handler).CheckStatusAsync(
+            "KEY-123", "TestApp", null, "2.3.394", "A6D3ABCD1234EF90");
+
+        using var document = JsonDocument.Parse(capturedPayload!);
+        Assert.Equal("A6D3ABCD1234EF90", document.RootElement.GetProperty("HardwareId").GetString());
+        Assert.Equal("1.1.14", document.RootElement.GetProperty("SdkVersion").GetString());
+        Assert.Equal(1, diskReadCount);
+        Assert.False(document.RootElement.TryGetProperty("HardwareIdV2", out _));
+        Assert.False(document.RootElement.TryGetProperty("HardwareIdAlgorithm", out _));
+        Assert.False(document.RootElement.TryGetProperty("HardwareIdV2Algorithm", out _));
+        Assert.False(document.RootElement.TryGetProperty("ComponentFingerprints", out _));
     }
 
     [Fact]

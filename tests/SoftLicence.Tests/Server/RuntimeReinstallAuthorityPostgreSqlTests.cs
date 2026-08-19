@@ -73,6 +73,22 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     }
 
     [Fact]
+    public async Task ReinstallAuthority_ModernV2_RepeatedFinalizeRequestsFromSameOwnerAreAcceptedWithoutMutation()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivatePreparedEnrollmentAsync(scenario);
+        var (grantRef, subjectRef) = await ConfigureModernV2AuthorityAsync(scenario);
+        await AddFinalizeRequestsAsync(scenario, "website-step1", 3);
+        var before = await SnapshotReinstallAuthorityAsync(scenario);
+
+        var response = await scenario.Runtime.AuthorizeReinstallAsync(
+            "website-step1", BuildReinstallAuthorityRequest(scenario, grantRef, subjectRef));
+
+        Assert.Equal(Sha256(subjectRef), response.SubjectRefDigestSha256);
+        Assert.Equal(before, await SnapshotReinstallAuthorityAsync(scenario));
+    }
+
+    [Fact]
     public async Task ReinstallAuthority_ModernFinalizeV1_CompleteAuthorityIsAcceptedWithoutMutation()
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
@@ -160,7 +176,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     [InlineData("mixed-legacy-source")]
     [InlineData("missing-entitlement")]
     [InlineData("missing-finalize")]
-    [InlineData("duplicate-finalize-owner")]
+    [InlineData("divergent-finalize-owner")]
+    [InlineData("case-divergent-finalize-owner")]
     [InlineData("ambiguous-finalize-owner")]
     [InlineData("ownership-client")]
     [InlineData("entitlement-client")]
@@ -181,6 +198,15 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
 
         Assert.Equal(StatusCodes.Status403Forbidden, error.StatusCode);
         Assert.Equal("reinstall_authority_ineligible", error.ErrorCode);
+        Assert.Equal(
+            mutation switch
+            {
+                "missing-finalize" => "v2_finalize_owner_missing",
+                "divergent-finalize-owner" or "case-divergent-finalize-owner" or
+                    "ambiguous-finalize-owner" => "v2_finalize_owner_mismatch",
+                _ => "v2_authority_invariant_mismatch"
+            },
+            error.DiagnosticCode);
         Assert.Equal(before, await SnapshotReinstallAuthorityAsync(scenario));
     }
 
@@ -340,6 +366,31 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.Equal(request.SecurityEpoch, response.SecurityEpoch);
         Assert.Matches("^[0-9a-f]{64}$", response.SubjectRefDigestSha256);
         Assert.Matches("^[0-9a-f-]{36}$", response.GrantRef);
+    }
+
+    [Fact]
+    public async Task ReinstallAuthorityV2_ExpiredLicense_ConfirmsIdentityWithoutGrantingLicenseAuthority()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivatePreparedEnrollmentAsync(scenario);
+        var (grantRef, subjectRef) = await ConfigureModernV2AuthorityAsync(scenario);
+        await using (var db = await scenario.Factory.CreateDbContextAsync())
+        {
+            var binding = await db.DistributionInstallationBindings.SingleAsync(
+                row => row.Id == scenario.Fixture.BindingId);
+            var license = await db.Licenses.SingleAsync(row => row.Id == binding.LicenseId);
+            license.ExpirationDate = DateTime.UtcNow.AddMinutes(-1);
+            license.AllowedVersions = "9.*";
+            await db.SaveChangesAsync();
+        }
+        var request = BuildReinstallAuthorityRequest(scenario, grantRef, subjectRef);
+
+        var response = await scenario.Runtime.AuthorizeReinstallAsync("website-step1", request);
+
+        Assert.Equal("identity_confirmed", response.Decision);
+        Assert.Equal(scenario.Fixture.BindingId.ToString("D"), response.BindingId);
+        Assert.Equal(grantRef, response.GrantRef);
+        Assert.Equal(Sha256(subjectRef), response.SubjectRefDigestSha256);
     }
 
     [Theory]
@@ -533,17 +584,11 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                     CreatedAtUtc = DateTime.UtcNow
                 });
                 break;
-            case "duplicate-finalize-owner":
-                db.DistributionBindingRequests.Add(new DistributionBindingRequest
-                {
-                    ClientId = "website-step1",
-                    RequestId = Guid.NewGuid().ToString("D"),
-                    Operation = "finalize_binding",
-                    PayloadDigest = new string('e', 64),
-                    BindingId = binding.Id,
-                    ResponseJson = "{}",
-                    CreatedAtUtc = DateTime.UtcNow
-                });
+            case "divergent-finalize-owner":
+                finalize.ClientId = "other-client";
+                break;
+            case "case-divergent-finalize-owner":
+                finalize.ClientId = "Website-step1";
                 break;
             case "ownership-client":
                 ownership.ClientId = "other-client";
@@ -571,6 +616,35 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 break;
             default:
                 throw new InvalidOperationException("Unknown mutation: " + mutation);
+        }
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Adds bounded historical finalization requests for a single exact owner so the
+    /// PostgreSQL regression exercises physical row multiplicity independently of ownership.
+    /// </summary>
+    /// <param name="scenario">Isolated PostgreSQL Runtime Enrollment scenario.</param>
+    /// <param name="clientId">Exact owner value to persist without normalization.</param>
+    /// <param name="count">Number of additional physical request rows.</param>
+    private static async Task AddFinalizeRequestsAsync(
+        PreparedBootstrapScenario scenario,
+        string clientId,
+        int count)
+    {
+        await using var db = await scenario.Factory.CreateDbContextAsync();
+        for (var index = 0; index < count; index++)
+        {
+            db.DistributionBindingRequests.Add(new DistributionBindingRequest
+            {
+                ClientId = clientId,
+                RequestId = Guid.NewGuid().ToString("D"),
+                Operation = "finalize_binding",
+                PayloadDigest = new string((char)('a' + index), 64),
+                BindingId = scenario.Fixture.BindingId,
+                ResponseJson = "{}",
+                CreatedAtUtc = DateTime.UtcNow.AddSeconds(index + 1)
+            });
         }
         await db.SaveChangesAsync();
     }

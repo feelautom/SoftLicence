@@ -142,6 +142,70 @@ public sealed class DistributionInstallationBindingServiceTests : IDisposable
         Assert.Equal("invalid_request", exception.ErrorCode);
     }
 
+    [Fact]
+    public async Task FinalizeV3_ReplacementProof_IsStrictAndCannotAuthorizeInitialInstallation()
+    {
+        var canonicalSubject = Convert.ToBase64String(SHA256.HashData("replacement-source"u8.ToArray()))
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        var legacyWithNullReplacement = FinalizeRequest("opaque-entitlement-token");
+        legacyWithNullReplacement.Schema = DistributionInstallationBindingService.FinalizeV2Schema;
+        legacyWithNullReplacement.AllowSameAuthorityRecovery = true;
+        legacyWithNullReplacement.LicenseReplacement = null;
+        var legacyExtension = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            _service.FinalizeAsync(
+                ClientId, Hash("replacement-v2-explicit-null"), legacyWithNullReplacement));
+        Assert.Equal("invalid_request", legacyExtension.ErrorCode);
+
+        var request = FinalizeRequest("opaque-entitlement-token");
+        request.Schema = DistributionInstallationBindingService.FinalizeV3Schema;
+        request.AllowSameAuthorityRecovery = true;
+
+        var missing = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            _service.FinalizeAsync(ClientId, Hash("replacement-missing"), request));
+        Assert.Equal("invalid_request", missing.ErrorCode);
+
+        request.LicenseReplacement = new DistributionLicenseReplacementProof
+        {
+            Schema = DistributionInstallationBindingService.LicenseReplacementSchema,
+            SourceBindingId = Guid.NewGuid().ToString("D"),
+            SourceLicenseId = Guid.NewGuid().ToString("D"),
+            SourceSubjectRef = canonicalSubject,
+            ExtensionData = new Dictionary<string, JsonElement>
+            {
+                ["sourceLicenseSeatId"] = JsonDocument.Parse($"\"{Guid.NewGuid():D}\"").RootElement.Clone()
+            }
+        };
+        var extension = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            _service.FinalizeAsync(ClientId, Hash("replacement-extension"), request));
+        Assert.Equal("invalid_request", extension.ErrorCode);
+
+        request.LicenseReplacement.ExtensionData = null;
+        request.LicenseReplacement.SourceSubjectRef = canonicalSubject + "=";
+        var nonCanonical = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            _service.FinalizeAsync(ClientId, Hash("replacement-noncanonical"), request));
+        Assert.Equal("invalid_request", nonCanonical.ErrorCode);
+
+        var issue = IssueRequest(Hash(DefaultGrantRef), v2: false);
+        issue.Schema = DistributionInstallationBindingService.IssueV3Schema;
+        issue.SubjectRef = canonicalSubject;
+        var entitlement = await _service.IssueEntitlementAsync(
+            ClientId, Hash("replacement-initial-issue"), issue);
+        request = FinalizeRequest(entitlement.Response.EntitlementRef);
+        request.Schema = DistributionInstallationBindingService.FinalizeV3Schema;
+        request.AllowSameAuthorityRecovery = true;
+        request.LicenseReplacement = new DistributionLicenseReplacementProof
+        {
+            Schema = DistributionInstallationBindingService.LicenseReplacementSchema,
+            SourceBindingId = Guid.NewGuid().ToString("D"),
+            SourceLicenseId = Guid.NewGuid().ToString("D"),
+            SourceSubjectRef = canonicalSubject
+        };
+
+        var noSource = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            _service.FinalizeAsync(ClientId, Hash("replacement-initial-finalize"), request));
+        Assert.Equal("binding_conflict", noSource.ErrorCode);
+    }
+
     [Theory]
     [InlineData("distribution-installation-finalize-v1", "absent", true)]
     [InlineData("distribution-installation-finalize-v1", "null", false)]
@@ -453,6 +517,7 @@ public sealed class DistributionInstallationBindingServiceTests : IDisposable
             _service.FinalizeAsync(ClientId, Hash("divergent-next-finalize"), divergentRequest));
 
         Assert.Equal("binding_conflict", exception.ErrorCode);
+        Assert.Equal("cross_generation_subject_mismatch", exception.ReasonCode);
         await using var check = new LicenseDbContext(_options);
         var binding = await check.DistributionInstallationBindings.SingleAsync();
         Assert.Equal(Hash(DefaultGrantRef), binding.GrantRefDigestSha256);

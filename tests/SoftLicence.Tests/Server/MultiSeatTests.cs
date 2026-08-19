@@ -80,10 +80,10 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         }
 
         // PC 1 : OK
-        await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = "PC-1", AppName = "MultiApp" });
+        await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = "C000000000000001", AppName = "MultiApp" });
 
         // PC 2 : Rejeté
-        var response = await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = "PC-2", AppName = "MultiApp" });
+        var response = await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = "C000000000000002", AppName = "MultiApp" });
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         var content = await response.Content.ReadAsStringAsync();
@@ -102,8 +102,8 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
             licenseKey = lic.LicenseKey;
         }
 
-        var res1 = await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = "PC-A", AppName = "MultiApp" });
-        var res2 = await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = "PC-B", AppName = "MultiApp" });
+        var res1 = await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = "C000000000000003", AppName = "MultiApp" });
+        var res2 = await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = "C000000000000004", AppName = "MultiApp" });
 
         Assert.Equal(HttpStatusCode.OK, res1.StatusCode);
         Assert.Equal(HttpStatusCode.OK, res2.StatusCode);
@@ -126,8 +126,8 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var response = await client.PostAsJsonAsync("/api/activation", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-LEGACY",
-            HardwareIdV2 = "HW-STABLE-V2",
+            HardwareId = "C000000000000005",
+            HardwareIdV2 = "C000000000000006",
             HardwareIdV2Differs = true,
             HardwareIdAlgorithm = "legacy-wmi-first-disk",
             HardwareIdV2Algorithm = "v2-wmi-disk-index-0",
@@ -142,18 +142,18 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         using var verifyScope = _factory.Services.CreateScope();
         var verifyDb = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
         var license = await verifyDb.Licenses.Include(l => l.Seats).SingleAsync(l => l.Id == licenseId);
-        Assert.Equal("HW-LEGACY", license.HardwareId);
+        Assert.Equal("C000000000000005", license.HardwareId);
         Assert.Single(license.Seats, s => s.IsActive);
-        Assert.Contains(license.Seats, s => s.IsActive && s.HardwareId == "HW-LEGACY");
-        Assert.DoesNotContain(license.Seats, s => s.HardwareId == "HW-STABLE-V2");
+        Assert.Contains(license.Seats, s => s.IsActive && s.HardwareId == "C000000000000005");
+        Assert.DoesNotContain(license.Seats, s => s.HardwareId == "C000000000000006");
 
         var observation = await verifyDb.LicenseHistories.SingleAsync(h =>
             h.LicenseId == licenseId && h.Action == HistoryActions.HardwareIdV2Observed);
         using var details = JsonDocument.Parse(observation.Details!);
         var root = details.RootElement;
         Assert.Equal("ACTIVATE", root.GetProperty("endpoint").GetString());
-        Assert.Equal("HW-LEGACY", root.GetProperty("legacyHardwareId").GetString());
-        Assert.Equal("HW-STABLE-V2", root.GetProperty("hardwareIdV2").GetString());
+        Assert.Equal("C000000000000005", root.GetProperty("legacyHardwareId").GetString());
+        Assert.Equal("C000000000000006", root.GetProperty("hardwareIdV2").GetString());
         Assert.True(root.GetProperty("hardwareIdV2Differs").GetBoolean());
         Assert.Equal("1.1.11", root.GetProperty("sdkVersion").GetString());
         Assert.Equal("BUILD-123", root.GetProperty("buildHash").GetString());
@@ -176,20 +176,20 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
             setupDb.LicenseSeats.Add(new LicenseSeat
             {
                 LicenseId = licenseId,
-                HardwareId = "HW-LEGACY",
+                HardwareId = "C000000000000005",
                 FirstActivatedAt = DateTime.UtcNow.AddDays(-1),
                 LastCheckInAt = DateTime.UtcNow.AddDays(-1),
                 IsActive = true
             });
-            lic.HardwareId = "HW-LEGACY";
+            lic.HardwareId = "C000000000000005";
             await setupDb.SaveChangesAsync();
         }
 
         var response = await client.PostAsJsonAsync("/api/activation/check", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-OTHER",
-            HardwareIdV2 = "HW-LEGACY",
+            HardwareId = "C000000000000007",
+            HardwareIdV2 = "C000000000000005",
             HardwareIdV2Differs = true,
             AppName = "MultiApp",
             AppVersion = "2.3.4",
@@ -208,8 +208,8 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var duplicateResponse = await client.PostAsJsonAsync("/api/activation/check", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-OTHER",
-            HardwareIdV2 = "HW-LEGACY",
+            HardwareId = "C000000000000007",
+            HardwareIdV2 = "C000000000000005",
             HardwareIdV2Differs = true,
             AppName = "MultiApp",
             AppVersion = "2.3.4",
@@ -220,16 +220,16 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         using var verifyScope = _factory.Services.CreateScope();
         var verifyDb = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
         var license = await verifyDb.Licenses.Include(l => l.Seats).SingleAsync(l => l.Id == licenseId);
-        Assert.Equal("HW-LEGACY", license.HardwareId);
+        Assert.Equal("C000000000000005", license.HardwareId);
         Assert.Single(license.Seats, s => s.IsActive);
-        Assert.DoesNotContain(license.Seats, s => s.HardwareId == "HW-OTHER");
+        Assert.DoesNotContain(license.Seats, s => s.HardwareId == "C000000000000007");
 
         var observation = await verifyDb.LicenseHistories.SingleAsync(h =>
             h.LicenseId == licenseId && h.Action == HistoryActions.HardwareIdV2Observed);
         using var details = JsonDocument.Parse(observation.Details!);
         Assert.Equal("CHECK", details.RootElement.GetProperty("endpoint").GetString());
-        Assert.Equal("HW-OTHER", details.RootElement.GetProperty("legacyHardwareId").GetString());
-        Assert.Equal("HW-LEGACY", details.RootElement.GetProperty("hardwareIdV2").GetString());
+        Assert.Equal("C000000000000007", details.RootElement.GetProperty("legacyHardwareId").GetString());
+        Assert.Equal("C000000000000005", details.RootElement.GetProperty("hardwareIdV2").GetString());
     }
 
     [Fact]
@@ -249,7 +249,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var firstActivation = await client.PostAsJsonAsync("/api/activation", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-A",
+            HardwareId = "C000000000000008",
             AppName = "MultiApp",
             AppId = appId
         });
@@ -258,7 +258,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var clientUnlink = await client.PostAsJsonAsync("/api/activation/deactivate", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-A",
+            HardwareId = "C000000000000008",
             AppName = "MultiApp",
             AppId = appId,
             Source = "settings_button"
@@ -277,7 +277,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var secondActivation = await client.PostAsJsonAsync("/api/activation", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-B",
+            HardwareId = "C000000000000009",
             AppName = "MultiApp",
             AppId = appId
         });
@@ -287,13 +287,13 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         {
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
             var license = await db.Licenses.Include(l => l.Seats).SingleAsync(l => l.LicenseKey == licenseKey);
-            Assert.Equal("HW-B", license.HardwareId);
-            Assert.Contains(license.Seats, s => s.HardwareId == "HW-B" && s.IsActive);
-            Assert.Contains(license.Seats, s => s.HardwareId == "HW-A" && !s.IsActive);
+            Assert.Equal("C000000000000009", license.HardwareId);
+            Assert.Contains(license.Seats, s => s.HardwareId == "C000000000000009" && s.IsActive);
+            Assert.Contains(license.Seats, s => s.HardwareId == "C000000000000008" && !s.IsActive);
         }
 
         client.DefaultRequestHeaders.Add("X-Admin-Secret", ProductApiSecret);
-        var adminUnlink = await client.DeleteAsync($"/api/admin/licenses/{licenseKey}/seats/HW-B");
+        var adminUnlink = await client.DeleteAsync($"/api/admin/licenses/{licenseKey}/seats/C000000000000009");
         Assert.Equal(HttpStatusCode.OK, adminUnlink.StatusCode);
 
         using (var scope = _factory.Services.CreateScope())
@@ -303,7 +303,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
             Assert.Null(license.HardwareId);
             Assert.Null(license.ActivationDate);
             Assert.DoesNotContain(license.Seats, s => s.IsActive);
-            Assert.Contains(license.Seats, s => s.HardwareId == "HW-B" && !s.IsActive);
+            Assert.Contains(license.Seats, s => s.HardwareId == "C000000000000009" && !s.IsActive);
         }
     }
 
@@ -324,7 +324,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var activation = await client.PostAsJsonAsync("/api/activation", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-SOURCE",
+            HardwareId = "C000000000000010",
             AppName = "MultiApp",
             AppId = appId
         });
@@ -333,7 +333,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var unlink = await client.PostAsJsonAsync("/api/activation/deactivate", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-SOURCE",
+            HardwareId = "C000000000000010",
             AppName = "MultiApp",
             AppId = appId,
             Source = "settings_button"
@@ -367,7 +367,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var activation = await client.PostAsJsonAsync("/api/activation", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-LEGACY-SOURCE",
+            HardwareId = "C000000000000011",
             AppName = "MultiApp",
             AppId = appId
         });
@@ -377,7 +377,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         {
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
             var license = await db.Licenses.Include(l => l.Seats).SingleAsync(l => l.LicenseKey == licenseKey);
-            var seat = Assert.Single(license.Seats, s => s.HardwareId == "HW-LEGACY-SOURCE" && s.IsActive);
+            var seat = Assert.Single(license.Seats, s => s.HardwareId == "C000000000000011" && s.IsActive);
             seat.FirstActivatedAt = DateTime.UtcNow.AddMinutes(-10);
             await db.SaveChangesAsync();
         }
@@ -385,7 +385,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var unlink = await client.PostAsJsonAsync("/api/activation/deactivate", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-LEGACY-SOURCE",
+            HardwareId = "C000000000000011",
             AppName = "MultiApp",
             AppId = appId
         });
@@ -418,7 +418,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var activation = await client.PostAsJsonAsync("/api/activation", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-IMMEDIATE-LEGACY",
+            HardwareId = "C000000000000012",
             AppName = "MultiApp",
             AppId = appId
         });
@@ -427,7 +427,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var unlink = await client.PostAsJsonAsync("/api/activation/deactivate", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-IMMEDIATE-LEGACY",
+            HardwareId = "C000000000000012",
             AppName = "MultiApp",
             AppId = appId
         });
@@ -437,7 +437,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         using var verifyScope = _factory.Services.CreateScope();
         var db = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
         var license = await db.Licenses.Include(l => l.Seats).SingleAsync(l => l.LicenseKey == licenseKey);
-        Assert.Contains(license.Seats, s => s.HardwareId == "HW-IMMEDIATE-LEGACY" && s.IsActive);
+        Assert.Contains(license.Seats, s => s.HardwareId == "C000000000000012" && s.IsActive);
         Assert.False(await db.LicenseHistories.AnyAsync(h => h.LicenseId == license.Id && h.Action == HistoryActions.UnlinkedApi));
     }
 
@@ -458,7 +458,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var activation = await client.PostAsJsonAsync("/api/activation", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-IMMEDIATE-UNINSTALL",
+            HardwareId = "C000000000000013",
             AppName = "MultiApp",
             AppId = appId
         });
@@ -467,7 +467,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var unlink = await client.PostAsJsonAsync("/api/activation/deactivate", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "HW-IMMEDIATE-UNINSTALL",
+            HardwareId = "C000000000000013",
             AppName = "MultiApp",
             AppId = appId,
             Source = "uninstall"
@@ -478,7 +478,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         using var verifyScope = _factory.Services.CreateScope();
         var db = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
         var license = await db.Licenses.Include(l => l.Seats).SingleAsync(l => l.LicenseKey == licenseKey);
-        Assert.DoesNotContain(license.Seats, s => s.HardwareId == "HW-IMMEDIATE-UNINSTALL" && s.IsActive);
+        Assert.DoesNotContain(license.Seats, s => s.HardwareId == "C000000000000013" && s.IsActive);
         var history = await db.LicenseHistories.SingleAsync(h => h.LicenseId == license.Id && h.Action == HistoryActions.UnlinkedApi);
         var details = Assert.IsType<string>(history.Details);
         Assert.Contains("uninstall", details);
@@ -496,11 +496,11 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
             licenseKey = lic.LicenseKey;
 
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
-            lic.HardwareId = "PC-LEGACY";
+            lic.HardwareId = "C000000000000014";
             db.LicenseSeats.Add(new LicenseSeat
             {
                 LicenseId = lic.Id,
-                HardwareId = "PC-OTHER",
+                HardwareId = "C000000000000015",
                 FirstActivatedAt = DateTime.UtcNow.AddDays(-1),
                 LastCheckInAt = DateTime.UtcNow.AddMinutes(-10),
                 IsActive = true
@@ -511,7 +511,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var response = await client.PostAsJsonAsync("/api/activation/check", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "PC-LEGACY",
+            HardwareId = "C000000000000014",
             AppName = "MultiApp"
         });
 
@@ -537,7 +537,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var activation = await client.PostAsJsonAsync("/api/activation", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "TIA-HW-A",
+            HardwareId = "C000000000000016",
             AppName = "MultiApp",
             AppId = appId
         });
@@ -547,7 +547,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var firstHeartbeat = await client.PostAsJsonAsync("/api/activation/check", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "TIA-HW-A",
+            HardwareId = "C000000000000016",
             AppName = "MultiApp",
             AppId = appId
         });
@@ -565,7 +565,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
             var license = await db.Licenses
                 .Include(l => l.Seats)
                 .SingleAsync(l => l.LicenseKey == licenseKey);
-            var seat = Assert.Single(license.Seats, s => s.HardwareId == "TIA-HW-A" && s.IsActive);
+            var seat = Assert.Single(license.Seats, s => s.HardwareId == "C000000000000016" && s.IsActive);
             seat.IsActive = false;
             seat.UnlinkedAt = DateTime.UtcNow;
             await db.SaveChangesAsync();
@@ -574,7 +574,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var secondHeartbeat = await client.PostAsJsonAsync("/api/activation/check", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "TIA-HW-A",
+            HardwareId = "C000000000000016",
             AppName = "MultiApp",
             AppId = appId
         });
@@ -599,14 +599,14 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
             licenseKey = lic.LicenseKey;
 
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
-            lic.HardwareId = "PC-LEGACY-ONLY";
+            lic.HardwareId = "C000000000000017";
             await db.SaveChangesAsync();
         }
 
         var response = await client.PostAsJsonAsync("/api/activation/check", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "PC-LEGACY-ONLY",
+            HardwareId = "C000000000000017",
             AppName = "MultiApp"
         });
 
@@ -628,11 +628,11 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
             licenseKey = lic.LicenseKey;
 
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
-            lic.HardwareId = "PC-LEGACY-BLOCKED";
+            lic.HardwareId = "C000000000000018";
             db.LicenseSeats.Add(new LicenseSeat
             {
                 LicenseId = lic.Id,
-                HardwareId = "PC-LEGACY-BLOCKED",
+                HardwareId = "C000000000000018",
                 FirstActivatedAt = DateTime.UtcNow.AddDays(-1),
                 LastCheckInAt = DateTime.UtcNow.AddMinutes(-10),
                 IsActive = false,
@@ -644,7 +644,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var response = await client.PostAsJsonAsync("/api/activation/check", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "PC-LEGACY-BLOCKED",
+            HardwareId = "C000000000000018",
             AppName = "MultiApp"
         });
 
@@ -666,11 +666,11 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
             licenseKey = lic.LicenseKey;
 
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
-            lic.HardwareId = "PC-ACTIVE";
+            lic.HardwareId = "C000000000000019";
             db.LicenseSeats.Add(new LicenseSeat
             {
                 LicenseId = lic.Id,
-                HardwareId = "PC-ACTIVE",
+                HardwareId = "C000000000000019",
                 FirstActivatedAt = DateTime.UtcNow.AddDays(-1),
                 LastCheckInAt = DateTime.UtcNow.AddMinutes(-10),
                 IsActive = true
@@ -681,7 +681,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var response = await client.PostAsJsonAsync("/api/activation/check", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "PC-ACTIVE",
+            HardwareId = "C000000000000019",
             AppName = "MultiApp"
         });
 
@@ -703,11 +703,11 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
             licenseKey = lic.LicenseKey;
 
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
-            lic.HardwareId = "PC-UNLINKED";
+            lic.HardwareId = "C000000000000020";
             db.LicenseSeats.Add(new LicenseSeat
             {
                 LicenseId = lic.Id,
-                HardwareId = "PC-UNLINKED",
+                HardwareId = "C000000000000020",
                 FirstActivatedAt = DateTime.UtcNow.AddDays(-1),
                 LastCheckInAt = DateTime.UtcNow.AddMinutes(-10),
                 IsActive = false,
@@ -719,7 +719,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var response = await client.PostAsJsonAsync("/api/activation/check", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "PC-UNLINKED",
+            HardwareId = "C000000000000020",
             AppName = "MultiApp"
         });
 
@@ -741,11 +741,11 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
             licenseKey = lic.LicenseKey;
 
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
-            lic.HardwareId = "PC-ACTIVE";
+            lic.HardwareId = "C000000000000019";
             db.LicenseSeats.Add(new LicenseSeat
             {
                 LicenseId = lic.Id,
-                HardwareId = "PC-ACTIVE",
+                HardwareId = "C000000000000019",
                 FirstActivatedAt = DateTime.UtcNow.AddDays(-1),
                 LastCheckInAt = DateTime.UtcNow.AddMinutes(-10),
                 IsActive = true
@@ -756,7 +756,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var response = await client.PostAsJsonAsync("/api/activation/check", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "PC-OTHER",
+            HardwareId = "C000000000000015",
             AppName = "MultiApp"
         });
 
@@ -778,12 +778,12 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
             licenseKey = lic.LicenseKey;
 
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
-            lic.HardwareId = "PC-FIRST";
+            lic.HardwareId = "C000000000000021";
             db.LicenseSeats.AddRange(
                 new LicenseSeat
                 {
                     LicenseId = lic.Id,
-                    HardwareId = "PC-FIRST",
+                    HardwareId = "C000000000000021",
                     FirstActivatedAt = DateTime.UtcNow.AddDays(-2),
                     LastCheckInAt = DateTime.UtcNow.AddDays(-1),
                     IsActive = false,
@@ -792,7 +792,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
                 new LicenseSeat
                 {
                     LicenseId = lic.Id,
-                    HardwareId = "PC-SECOND",
+                    HardwareId = "C000000000000022",
                     FirstActivatedAt = DateTime.UtcNow.AddDays(-2),
                     LastCheckInAt = DateTime.UtcNow.AddDays(-1),
                     IsActive = false,
@@ -804,7 +804,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         var response = await client.PostAsJsonAsync("/api/activation/check", new
         {
             LicenseKey = licenseKey,
-            HardwareId = "PC-FIRST",
+            HardwareId = "C000000000000021",
             AppName = "MultiApp"
         });
 

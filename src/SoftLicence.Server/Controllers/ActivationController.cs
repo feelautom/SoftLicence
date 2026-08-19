@@ -37,7 +37,27 @@ namespace SoftLicence.Server.Controllers
         private readonly Services.HwidReuseAlertService _hwidReuseAlerts;
         private readonly Services.AdminSecretAuthenticationService _adminSecretAuthentication;
         private readonly Services.ISignedLicenseFileService _signedLicenseFiles;
+        private readonly Services.IHardwareAuthorityAliasResolver _hardwareAuthorityAliases;
 
+        /// <summary>
+        /// Creates the public activation API with centralized signing, ban enforcement, and authenticated hardware-authority resolution.
+        /// </summary>
+        /// <param name="db">Scoped licensing database context.</param>
+        /// <param name="logger">Structured controller logger.</param>
+        /// <param name="encryption">Legacy encryption service retained by activation flows outside centralized signing.</param>
+        /// <param name="mailer">Customer reset email service.</param>
+        /// <param name="telemetry">Activation telemetry service.</param>
+        /// <param name="geoIp">Remote address enrichment service.</param>
+        /// <param name="config">Server configuration.</param>
+        /// <param name="localizer">Customer-facing response localizer.</param>
+        /// <param name="notifier">Operational notification service.</param>
+        /// <param name="security">Submitted and canonical hardware ban authority.</param>
+        /// <param name="fingerprint">Optional component fingerprint persistence service.</param>
+        /// <param name="seatCleanup">Cross-license seat cleanup service.</param>
+        /// <param name="hwidReuseAlerts">Hardware reuse alert service.</param>
+        /// <param name="adminSecretAuthentication">Offline activation administrator authentication service.</param>
+        /// <param name="signedLicenseFiles">Central signer used by activation and status responses.</param>
+        /// <param name="hardwareAuthorityAliases">Fail-closed resolver for server-authenticated legacy aliases.</param>
         public ActivationController(
             LicenseDbContext db,
             ILogger<ActivationController> logger,
@@ -53,7 +73,8 @@ namespace SoftLicence.Server.Controllers
             Services.SeatCleanupService seatCleanup,
             Services.HwidReuseAlertService hwidReuseAlerts,
             Services.AdminSecretAuthenticationService adminSecretAuthentication,
-            Services.ISignedLicenseFileService signedLicenseFiles)
+            Services.ISignedLicenseFileService signedLicenseFiles,
+            Services.IHardwareAuthorityAliasResolver hardwareAuthorityAliases)
         {
             _db = db;
             _logger = logger;
@@ -70,6 +91,7 @@ namespace SoftLicence.Server.Controllers
             _hwidReuseAlerts = hwidReuseAlerts;
             _adminSecretAuthentication = adminSecretAuthentication;
             _signedLicenseFiles = signedLicenseFiles;
+            _hardwareAuthorityAliases = hardwareAuthorityAliases;
         }
 
         public class ActivationRequest
@@ -178,6 +200,21 @@ namespace SoftLicence.Server.Controllers
                 errorMessage,
                 correlationId = HttpContext.TraceIdentifier,
                 contractVersion = 1
+            });
+        }
+
+        /// <summary>
+        /// Rejects a primary hardware identity that violates the exact uppercase ASCII hexadecimal wire contract.
+        /// The value is never normalized because doing so could turn attacker-controlled input into a known alias.
+        /// </summary>
+        /// <returns>A typed bad-request response emitted before any alias, ban, quota, fingerprint, or seat decision.</returns>
+        private IActionResult RejectInvalidPrimaryHardwareId()
+        {
+            TagActivationFailure("INVALID_HARDWARE_ID");
+            return BadRequest(new
+            {
+                error = "invalid_hardware_id",
+                message = "HardwareId must contain exactly 16 uppercase ASCII hexadecimal characters."
             });
         }
 
@@ -680,9 +717,18 @@ namespace SoftLicence.Server.Controllers
             }
         }
 
+        /// <summary>
+        /// Activates a public online license only when the primary HWID already satisfies the exact canonical wire contract.
+        /// Invalid casing, alphabet, or length is rejected without normalization before extra parameters or business state are evaluated.
+        /// </summary>
+        /// <param name="req">Public activation request containing an exact uppercase 16-character ASCII hexadecimal HWID.</param>
+        /// <returns>The normal activation workflow, or INVALID_HARDWARE_ID before any licensing side effect.</returns>
         [HttpPost]
         public Task<IActionResult> Activate([FromBody] ActivationRequest req)
         {
+            if (!Services.HardwareAuthorityAliasResolver.IsCanonicalHardwareId(req.HardwareId))
+                return Task.FromResult(RejectInvalidPrimaryHardwareId());
+
             if (req.ExtraParams != null)
             {
                 HttpContext.Items[LogKeys.AppName] = string.IsNullOrWhiteSpace(req.AppName) ? "API_CLIENT" : req.AppName;
@@ -753,6 +799,13 @@ namespace SoftLicence.Server.Controllers
             return OfflineActivationDenied();
         }
 
+        /// <summary>
+        /// Activates or reactivates exactly one canonical seat after resolving any authenticated legacy alias.
+        /// Known invalid aliases fail closed before quota or seat creation, while successful responses are signed for the canonical authority.
+        /// </summary>
+        /// <param name="req">Validated JSON request containing the submitted primary hardware identity.</param>
+        /// <param name="offlineContext">Optional administrator-authenticated offline feature override.</param>
+        /// <returns>An activation response, including typed compatibility refusal without creating a legacy seat.</returns>
         private async Task<IActionResult> ActivateCoreAsync(ActivationRequest req, OfflineActivationContext? offlineContext)
         {
             var cleanKey = req.LicenseKey.Trim().ToUpper();
@@ -995,6 +1048,25 @@ namespace SoftLicence.Server.Controllers
                 _logger.LogWarning("Activation refused: license not found for product {ProductId}.", product.Id);
                 return BadRequest(_localizer["Api_InvalidLicenseKey"].Value);
             }
+
+            var hardwareResolution = await _hardwareAuthorityAliases.ResolveAsync(
+                license.ProductId,
+                license.Id,
+                req.HardwareId,
+                Services.HardwareAuthorityResolutionIntent.Activation,
+                HttpContext.RequestAborted);
+            var authoritativeHardwareId = hardwareResolution.EffectiveHardwareId;
+            if (hardwareResolution.Refused)
+                return ActivationJsonFailure(
+                    "HARDWARE_AUTHORITY_REFUSED",
+                    "The legacy hardware identity is no longer accepted. Use the authoritative V2 identity.");
+            if (hardwareResolution.UsedAlias)
+            {
+                await Services.ProductHardwareSeatLockAuthority.AcquireAsync(
+                    _db, product.Id, authoritativeHardwareId);
+                if (await _security.IsHardwareIdBannedAsync(authoritativeHardwareId))
+                    return ActivationJsonFailure("BANNED", "Access denied by server");
+            }
             
             if (!license.IsActive) 
             {
@@ -1122,14 +1194,14 @@ namespace SoftLicence.Server.Controllers
             }
 
             // --- GESTION MULTI-POSTES (SEATS) ---
-            var existingSeat = await _db.LicenseSeats.FirstOrDefaultAsync(s => s.LicenseId == license.Id && s.HardwareId == req.HardwareId && s.IsActive);
+            var existingSeat = await _db.LicenseSeats.FirstOrDefaultAsync(s => s.LicenseId == license.Id && s.HardwareId == authoritativeHardwareId && s.IsActive);
             
             if (existingSeat != null)
             {
                 // Poste déjà connu : On met à jour la date de passage
                 existingSeat.LastCheckInAt = DateTime.UtcNow;
                 if (!string.IsNullOrEmpty(req.AppVersion)) existingSeat.AppVersion = req.AppVersion;
-                license.HardwareId = req.HardwareId;
+                license.HardwareId = authoritativeHardwareId;
                 license.ActivationDate = existingSeat.FirstActivatedAt;
                 var resolvedVersion = req.AppVersion ?? existingSeat.AppVersion ?? "Unknown";
                 license.RecoveryCount++;
@@ -1140,7 +1212,7 @@ namespace SoftLicence.Server.Controllers
                     LicenseId = license.Id,
                     Action = HistoryActions.Recovery,
                     Details = offlineContext == null
-                        ? string.Format(_localizer["Licenses_Action_Activated"].Value, req.HardwareId, resolvedVersion)
+                        ? string.Format(_localizer["Licenses_Action_Activated"].Value, authoritativeHardwareId, resolvedVersion)
                         : "Offline license recovery",
                     PerformedBy = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown"
                 });
@@ -1151,7 +1223,7 @@ namespace SoftLicence.Server.Controllers
                 if (newActivationsDisabled != null)
                     return newActivationsDisabled;
 
-                var freemiumAlreadyConsumed = await RejectIfSingleUseHardwareAlreadyConsumedAsync(license.ProductId, license.Type, req.HardwareId, license.Id);
+                var freemiumAlreadyConsumed = await RejectIfSingleUseHardwareAlreadyConsumedAsync(license.ProductId, license.Type, authoritativeHardwareId, license.Id);
                 if (freemiumAlreadyConsumed != null)
                     return freemiumAlreadyConsumed;
 
@@ -1181,7 +1253,7 @@ namespace SoftLicence.Server.Controllers
 
                 var newSeat = license.Seats
                     .Where(candidate => !candidate.IsActive
-                        && string.Equals(candidate.HardwareId, req.HardwareId, StringComparison.Ordinal))
+                        && string.Equals(candidate.HardwareId, authoritativeHardwareId, StringComparison.Ordinal))
                     .OrderByDescending(candidate => candidate.FirstActivatedAt)
                     .FirstOrDefault();
                 if (newSeat == null)
@@ -1189,7 +1261,7 @@ namespace SoftLicence.Server.Controllers
                     newSeat = new LicenseSeat
                     {
                         LicenseId = license.Id,
-                        HardwareId = req.HardwareId,
+                        HardwareId = authoritativeHardwareId,
                         FirstActivatedAt = DateTime.UtcNow
                     };
                     _db.LicenseSeats.Add(newSeat);
@@ -1203,7 +1275,7 @@ namespace SoftLicence.Server.Controllers
                     LicenseId = license.Id,
                     Action = HistoryActions.Activated,
                     Details = offlineContext == null
-                        ? string.Format(_localizer["Licenses_Action_Activated"].Value, req.HardwareId, req.AppVersion ?? "Unknown")
+                        ? string.Format(_localizer["Licenses_Action_Activated"].Value, authoritativeHardwareId, req.AppVersion ?? "Unknown")
                         : "Offline license activation",
                     PerformedBy = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown"
                 });
@@ -1211,7 +1283,7 @@ namespace SoftLicence.Server.Controllers
                 // Pour la compatibilité v1, on garde le champ principal aligné sur le premier poste actif.
                 if (currentSeatsCount == 0 || string.IsNullOrEmpty(license.HardwareId))
                 {
-                    license.HardwareId = req.HardwareId;
+                    license.HardwareId = authoritativeHardwareId;
                     license.ActivationDate = newSeat.FirstActivatedAt;
 
                     // Démarrer le décompte de validité à la première activation
@@ -1239,14 +1311,14 @@ namespace SoftLicence.Server.Controllers
 
             // Enforcement : un HWID ne peut être actif que sur une seule licence par produit
             await _seatCleanup.UnlinkHwidFromOtherProductLicensesAsync(
-                req.HardwareId, license.Id, license.ProductId, redactSensitiveDetails: offlineContext != null);
+                authoritativeHardwareId, license.Id, license.ProductId, redactSensitiveDetails: offlineContext != null);
 
             // Génération du fichier signé
             var features = offlineContext?.Features ?? BuildFeatures(license.Type?.CustomParams);
 
             try
             {
-                var signedLicenseString = _signedLicenseFiles.Generate(license, req.HardwareId, features);
+                var signedLicenseString = _signedLicenseFiles.Generate(license, authoritativeHardwareId, features);
                 if (activationTransaction != null)
                     await activationTransaction.CommitAsync();
                 if (deferredAutoUnbanNotification != null)
@@ -1268,7 +1340,7 @@ namespace SoftLicence.Server.Controllers
                         deferredActivationNotification.Message);
                 }
                 if (existingSeat == null)
-                    await _hwidReuseAlerts.CheckAndNotifyAsync(license.ProductId, req.HardwareId, license.Id);
+                    await _hwidReuseAlerts.CheckAndNotifyAsync(license.ProductId, authoritativeHardwareId, license.Id);
                 return Ok(new { LicenseFile = signedLicenseString });
             }
             catch (Exception ex)
@@ -1356,9 +1428,18 @@ namespace SoftLicence.Server.Controllers
             return true;
         }
 
+        /// <summary>
+        /// Returns the current license status for the submitted or resolved canonical authority and refreshes a valid signed license for that same authority.
+        /// Non-canonical primary input is rejected without normalization, while known divergent aliases return HARDWARE_AUTHORITY_REFUSED and never fall back to direct legacy identity.
+        /// </summary>
+        /// <param name="req">Status request whose hardware identity is checked against submitted and canonical bans.</param>
+        /// <returns>An HTTP status contract with a centralized signed license when the logical status is VALID.</returns>
         [HttpPost("check")]
         public async Task<IActionResult> CheckStatus([FromBody] ActivationRequest req)
         {
+            if (!Services.HardwareAuthorityAliasResolver.IsCanonicalHardwareId(req.HardwareId))
+                return RejectInvalidPrimaryHardwareId();
+
             var cleanKey = req.LicenseKey.Trim().ToUpper();
             TagLog(req, "CHECK");
 
@@ -1404,6 +1485,35 @@ namespace SoftLicence.Server.Controllers
                 return NotFound(_localizer["Api_LicenseNotFound"].Value);
             }
 
+            var hardwareResolution = await _hardwareAuthorityAliases.ResolveAsync(
+                license.ProductId,
+                license.Id,
+                req.HardwareId,
+                Services.HardwareAuthorityResolutionIntent.StatusCheck,
+                HttpContext.RequestAborted);
+            var authoritativeHardwareId = hardwareResolution.EffectiveHardwareId;
+            if (hardwareResolution.Refused)
+            {
+                TagActivationFailure("HARDWARE_AUTHORITY_REFUSED");
+                return Ok(new
+                {
+                    isSuccess = true,
+                    status = "HARDWARE_AUTHORITY_REFUSED",
+                    errorMessage = "The legacy hardware identity is no longer accepted. Use the authoritative V2 identity."
+                });
+            }
+            if (hardwareResolution.UsedAlias)
+            {
+                var authoritativeBan = await _security.GetActiveHardwareBanAsync(authoritativeHardwareId, license.ProductId);
+                if (authoritativeBan != null)
+                {
+                    if (authoritativeBan.BanCategory == BannedHardwareId.Categories.OutdatedVersion)
+                        return Ok(new { isSuccess = true, status = "UPDATE_REQUIRED", errorMessage = "Update required by server" });
+
+                    return Ok(new { isSuccess = true, status = "REVOKED", errorMessage = "Access denied by server" });
+                }
+            }
+
             string status = "VALID";
             if (!license.IsActive || license.RevokedAt != null) status = "REVOKED";
             else if (license.ExpirationDate.HasValue && DateTime.UtcNow > license.ExpirationDate.Value) status = "EXPIRED";
@@ -1414,10 +1524,10 @@ namespace SoftLicence.Server.Controllers
                 var hasAnyActiveSeat = await _db.LicenseSeats.AnyAsync(s => s.LicenseId == license.Id && s.IsActive);
                 if (hasAnyActiveSeat)
                 {
-                    var hasSeatForHwid = await _db.LicenseSeats.AnyAsync(s => s.LicenseId == license.Id && s.HardwareId == req.HardwareId && s.IsActive);
+                    var hasSeatForHwid = await _db.LicenseSeats.AnyAsync(s => s.LicenseId == license.Id && s.HardwareId == authoritativeHardwareId && s.IsActive);
                     if (!hasSeatForHwid)
                     {
-                        var hasInactiveSeatForHwid = await _db.LicenseSeats.AnyAsync(s => s.LicenseId == license.Id && s.HardwareId == req.HardwareId && !s.IsActive);
+                        var hasInactiveSeatForHwid = await _db.LicenseSeats.AnyAsync(s => s.LicenseId == license.Id && s.HardwareId == authoritativeHardwareId && !s.IsActive);
                         status = hasInactiveSeatForHwid ? "HARDWARE_NOT_ACTIVATED" : "HARDWARE_MISMATCH";
                     }
                 }
@@ -1425,7 +1535,7 @@ namespace SoftLicence.Server.Controllers
                     status = "HARDWARE_NOT_ACTIVATED";
                 else if (string.IsNullOrEmpty(license.HardwareId))
                     status = "REQUIRES_ACTIVATION";
-                else if (license.HardwareId != req.HardwareId)
+                else if (license.HardwareId != authoritativeHardwareId)
                     status = "HARDWARE_MISMATCH";
             }
 
@@ -1446,7 +1556,7 @@ namespace SoftLicence.Server.Controllers
 
             if (status is "VALID" or "REQUIRES_ACTIVATION"
                 && EnforcesSingleUsePerHardwareId(license.Type)
-                && await HasConsumedLicenseTypeOnHardwareAsync(license.ProductId, license.LicenseTypeId, req.HardwareId, license.Id))
+                && await HasConsumedLicenseTypeOnHardwareAsync(license.ProductId, license.LicenseTypeId, authoritativeHardwareId, license.Id))
             {
                 status = "FREEMIUM_HWID_ALREADY_CONSUMED";
                 errorMessage = "Freemium access has already been used on this machine.";
@@ -1477,26 +1587,10 @@ namespace SoftLicence.Server.Controllers
             {
                 try
                 {
-                    var licenseModel = new LicenseModel
-                    {
-                        Id = license.Id,
-                        LicenseKey = license.LicenseKey,
-                        CustomerName = license.CustomerName,
-                        CustomerEmail = license.CustomerEmail,
-                        TypeSlug = license.Type?.Slug ?? "STANDARD",
-                        Reference = license.Reference,
-                        CreationDate = license.CreationDate,
-                        ExpirationDate = license.ExpirationDate,
-                        HardwareId = req.HardwareId,
-                        Features = BuildFeatures(license.Type?.CustomParams)
-                    };
-
-                    var signingProduct = license.Product ?? product;
-                    var decryptedKey = _encryption.Decrypt(signingProduct.PrivateKeyXml);
-                    if (decryptedKey != "ERROR_DECRYPTION_FAILED")
-                    {
-                        licenseFile = LicenseService.GenerateLicense(licenseModel, decryptedKey);
-                    }
+                    licenseFile = _signedLicenseFiles.Generate(
+                        license,
+                        authoritativeHardwareId,
+                        BuildFeatures(license.Type?.CustomParams));
                 }
                 catch (Exception ex)
                 {
@@ -1504,12 +1598,14 @@ namespace SoftLicence.Server.Controllers
                 }
             }
 
-            if (HasHardwareIdV2Observation(req.HardwareIdV2)
-                && !await HasRecentHardwareIdV2ObservationAsync(license.Id, req.HardwareId, req.HardwareIdV2!))
+            var addedObservation = HasHardwareIdV2Observation(req.HardwareIdV2)
+                && !await HasRecentHardwareIdV2ObservationAsync(license.Id, req.HardwareId, req.HardwareIdV2!);
+            if (addedObservation)
             {
                 AddHardwareIdV2Observation(license, product, "CHECK", req);
-                await _db.SaveChangesAsync();
             }
+            if (addedObservation || hardwareResolution.UsedAlias)
+                await _db.SaveChangesAsync();
 
             return Ok(new { Status = status, LicenseFile = licenseFile, ErrorMessage = errorMessage });
         }
@@ -1636,9 +1732,18 @@ namespace SoftLicence.Server.Controllers
             public Dictionary<string, string>? ComponentFingerprints { get; set; }
         }
 
+        /// <summary>
+        /// Deactivates the active canonical seat proven by the submitted identity while preserving that seat for later authenticated reactivation.
+        /// Non-canonical primary input, alias divergence, compatibility retirement, and bans fail before any seat mutation.
+        /// </summary>
+        /// <param name="req">Deactivation request containing the submitted identity and audited source.</param>
+        /// <returns>A success response only after the exact active canonical seat is deactivated and persisted.</returns>
         [HttpPost("deactivate")]
         public async Task<IActionResult> Deactivate([FromBody] DeactivateRequest req)
         {
+            if (!Services.HardwareAuthorityAliasResolver.IsCanonicalHardwareId(req.HardwareId))
+                return RejectInvalidPrimaryHardwareId();
+
             var cleanKey = req.LicenseKey.Trim().ToUpper();
             var source = NormalizeDeactivationSource(req.Source, req.DeactivationSource);
             HttpContext.Items[LogKeys.AppName] = req.AppName;
@@ -1674,6 +1779,27 @@ namespace SoftLicence.Server.Controllers
                 return BadRequest(_localizer["Api_InvalidLicenseKey"].Value);
             }
 
+            var hardwareResolution = await _hardwareAuthorityAliases.ResolveAsync(
+                license.ProductId,
+                license.Id,
+                req.HardwareId,
+                Services.HardwareAuthorityResolutionIntent.Deactivation,
+                HttpContext.RequestAborted);
+            var authoritativeHardwareId = hardwareResolution.EffectiveHardwareId;
+            if (hardwareResolution.Refused)
+            {
+                TagActivationFailure("HARDWARE_AUTHORITY_REFUSED");
+                return StatusCode(
+                    StatusCodes.Status409Conflict,
+                    "The legacy hardware identity is no longer accepted. Use the authoritative V2 identity.");
+            }
+            if (hardwareResolution.UsedAlias
+                && await _security.IsHardwareIdBannedAsync(authoritativeHardwareId))
+            {
+                TagActivationFailure("BANNED");
+                return StatusCode(403, "Access denied");
+            }
+
             // Vérification du quota de déliements par jour
             var maxPerDay = license.Type?.MaxActivationsPerDay ?? 0;
             if (maxPerDay > 0)
@@ -1688,7 +1814,7 @@ namespace SoftLicence.Server.Controllers
                 }
             }
 
-            var seat = license.Seats?.FirstOrDefault(s => s.HardwareId == req.HardwareId && s.IsActive);
+            var seat = license.Seats?.FirstOrDefault(s => s.HardwareId == authoritativeHardwareId && s.IsActive);
             if (seat == null)
             {
                 TagActivationFailure("SEAT_NOT_FOUND");
@@ -1702,7 +1828,7 @@ namespace SoftLicence.Server.Controllers
                 _logger.LogWarning(
                     "Immediate deactivation refused for license {LicenseId}, HWID {HardwareId}, source {DeactivationSource}, seat age {SeatAgeSeconds}s.",
                     license.Id,
-                    req.HardwareId,
+                    authoritativeHardwareId,
                     source,
                     Math.Round(seatAge.TotalSeconds));
                 TagActivationFailure("DEACTIVATION_SOURCE_REQUIRED");
@@ -1716,7 +1842,7 @@ namespace SoftLicence.Server.Controllers
             _logger.LogInformation(
                 "Client deactivation accepted for license {LicenseId}, HWID {HardwareId}, source {DeactivationSource}, seat age {SeatAgeSeconds}s.",
                 license.Id,
-                req.HardwareId,
+                authoritativeHardwareId,
                 source,
                 Math.Round(seatAge.TotalSeconds));
 
@@ -1724,7 +1850,7 @@ namespace SoftLicence.Server.Controllers
             {
                 LicenseId = license.Id,
                 Action = HistoryActions.UnlinkedApi,
-                Details = string.Format(_localizer["Licenses_Action_UnlinkedApi"].Value, req.HardwareId, source),
+                Details = string.Format(_localizer["Licenses_Action_UnlinkedApi"].Value, authoritativeHardwareId, source),
                 PerformedBy = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown"
             });
 

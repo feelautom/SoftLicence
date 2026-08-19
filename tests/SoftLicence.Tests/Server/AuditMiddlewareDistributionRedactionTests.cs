@@ -1,4 +1,5 @@
 using System.Net;
+using System.Reflection;
 using System.Text;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -17,6 +18,25 @@ namespace SoftLicence.Tests.Server;
 public sealed class AuditMiddlewareDistributionRedactionTests
 {
     private const string ClientId = "tia-connect-website";
+
+    [Fact]
+    public void GenericAuditSanitizer_RedactsHistoricalReplacementSubjectRef()
+    {
+        const string sourceSubjectRef = "sensitive-historical-subject-reference";
+        var method = typeof(SoftLicence.Server.Middlewares.AuditMiddleware).GetMethod(
+            "SanitizeErrorDetails",
+            BindingFlags.NonPublic | BindingFlags.Static,
+            binder: null,
+            types: [typeof(string), typeof(bool)],
+            modifiers: null);
+
+        Assert.NotNull(method);
+        var sanitized = Assert.IsType<string>(method.Invoke(
+            null,
+            [$"{{\"sourceSubjectRef\":\"{sourceSubjectRef}\",\"error\":\"binding_conflict\"}}", false]));
+        Assert.DoesNotContain(sourceSubjectRef, sanitized, StringComparison.Ordinal);
+        Assert.Contains("\"sourceSubjectRef\":\"[REDACTED]\"", sanitized, StringComparison.Ordinal);
+    }
 
     [Theory]
     [InlineData("/api/internal/v1/distribution-license-bootstraps/issue")]

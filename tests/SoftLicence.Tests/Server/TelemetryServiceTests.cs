@@ -238,6 +238,70 @@ public class TelemetryServiceTests
         Assert.False(await checkDb.TelemetryFloodSuppressionCounters.AnyAsync());
     }
 
+    [Theory]
+    [InlineData("Uninstall_Completed")]
+    [InlineData("uninstallation_attempted")]
+    [InlineData("Startup_AppStarted")]
+    public async Task SaveEventAsync_PublicLifecycleTelemetryDoesNotMutateGlobalLicenceProjection(
+        string eventName)
+    {
+        var productId = Guid.NewGuid();
+        var typeId = Guid.NewGuid();
+        var licenseId = Guid.NewGuid();
+        using (var db = new LicenseDbContext(_dbOptions))
+        {
+            db.Products.Add(new Product
+            {
+                Id = productId,
+                Name = "TIAConnect",
+                PrivateKeyXml = "key",
+                PublicKeyXml = "key",
+                ApiSecret = "secret-TIAConnect"
+            });
+            db.LicenseTypes.Add(new LicenseType
+            {
+                Id = typeId,
+                ProductId = productId,
+                Name = "Test",
+                Slug = "TEST"
+            });
+            db.Licenses.Add(new License
+            {
+                Id = licenseId,
+                ProductId = productId,
+                LicenseTypeId = typeId,
+                LicenseKey = "TEST-LICENCE",
+                HardwareId = "HW-LIFECYCLE",
+                HasUninstallEvent = true,
+                LastUninstallAt = new DateTime(2026, 8, 1, 12, 0, 0, DateTimeKind.Utc)
+            });
+            db.LicenseSeats.Add(new LicenseSeat
+            {
+                LicenseId = licenseId,
+                HardwareId = "HW-LIFECYCLE",
+                IsActive = true
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var before = new DateTime(2026, 8, 1, 12, 0, 0, DateTimeKind.Utc);
+        var service = BuildTelemetryServiceWithSecurity();
+        await service.SaveEventAsync(new TelemetryEventRequest
+        {
+            AppName = "TIAConnect",
+            HardwareId = "HW-LIFECYCLE",
+            Version = "2.3.278",
+            EventName = eventName
+        });
+
+        using var checkDb = new LicenseDbContext(_dbOptions);
+        var license = await checkDb.Licenses.SingleAsync(candidate => candidate.Id == licenseId);
+        Assert.True(license.HasUninstallEvent);
+        Assert.Equal(before, license.LastUninstallAt);
+        Assert.Single(await checkDb.TelemetryRecords.Where(record =>
+            record.HardwareId == "HW-LIFECYCLE" && record.EventName == eventName).ToListAsync());
+    }
+
     [Fact]
     public async Task GetTelemetryForProductAsync_ShouldRespectIsolation()
     {

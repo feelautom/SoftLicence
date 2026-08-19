@@ -59,6 +59,40 @@ public sealed class RuntimeEnrollmentConfirmRequest
     public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
 
+/// <summary>
+/// Requests an authenticated, in-place transition from the legacy hardware identifier
+/// bound to the current Runtime enrollment to the deterministic V2 identifier.
+/// </summary>
+public sealed class RuntimeHardwareAuthorityMigrationRequest
+{
+    /// <summary>Gets or sets the exact request schema identifier.</summary>
+    public string? Schema { get; set; }
+    /// <summary>Gets or sets the Runtime enrollment protocol version.</summary>
+    public string? ProtocolVersion { get; set; }
+    /// <summary>Gets or sets the canonical idempotency request UUID.</summary>
+    public string? RequestId { get; set; }
+    /// <summary>Gets or sets the canonical enrollment UUID bound into the request path.</summary>
+    public string? EnrollmentId { get; set; }
+    /// <summary>Gets or sets the immutable enrollment epoch.</summary>
+    public int? Epoch { get; set; }
+    /// <summary>Gets or sets the current security generation observed by the Runtime.</summary>
+    public int? SecurityEpoch { get; set; }
+    /// <summary>Gets or sets the uppercase legacy hardware identifier currently owning the seat.</summary>
+    public string? LegacyHardwareId { get; set; }
+    /// <summary>Gets or sets the uppercase deterministic V2 hardware identifier.</summary>
+    public string? HardwareIdV2 { get; set; }
+    /// <summary>Gets or sets the exact reviewed legacy identity algorithm identifier.</summary>
+    public string? LegacyAlgorithm { get; set; }
+    /// <summary>Gets or sets the exact reviewed V2 identity algorithm identifier.</summary>
+    public string? HardwareIdV2Algorithm { get; set; }
+    /// <summary>Gets or sets the SDK semantic version that produced both identifiers.</summary>
+    public string? SdkVersion { get; set; }
+
+    /// <summary>Captures unknown JSON members so strict validation can reject them.</summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? ExtensionData { get; set; }
+}
+
 public sealed class RuntimeEnrollmentCapabilityRequest
 {
     private string? _installationId;
@@ -168,6 +202,36 @@ public sealed record RuntimeEnrollmentConfirmResponse(
     int Epoch,
     string ActivatedAtUtc);
 
+/// <summary>
+/// Returns the authoritative hardware identity generation and a newly signed license file
+/// after a replay-safe Runtime hardware authority transition.
+/// </summary>
+/// <param name="Schema">Exact response schema identifier.</param>
+/// <param name="ProtocolVersion">Runtime enrollment protocol version.</param>
+/// <param name="Decision">Bounded migration decision.</param>
+/// <param name="RequestId">Canonical idempotency request UUID.</param>
+/// <param name="EnrollmentId">Canonical enrollment UUID.</param>
+/// <param name="BindingId">Canonical distribution binding UUID.</param>
+/// <param name="LicenseSeatId">Canonical license seat UUID updated in place.</param>
+/// <param name="OldSecurityEpoch">Security generation before the transition.</param>
+/// <param name="NewSecurityEpoch">Authoritative security generation after the transition.</param>
+/// <param name="HardwareIdV2">Uppercase deterministic V2 hardware identifier.</param>
+/// <param name="LicenseFile">Newly signed license file bound to the V2 identifier.</param>
+/// <param name="CompletedAtUtc">Authoritative PostgreSQL completion timestamp.</param>
+public sealed record RuntimeHardwareAuthorityMigrationResponse(
+    string Schema,
+    string ProtocolVersion,
+    string Decision,
+    string RequestId,
+    string EnrollmentId,
+    string BindingId,
+    string LicenseSeatId,
+    int OldSecurityEpoch,
+    int NewSecurityEpoch,
+    string HardwareIdV2,
+    string LicenseFile,
+    string CompletedAtUtc);
+
 public sealed record RuntimeEnrollmentCapabilityResponse(
     string Schema,
     string ProtocolVersion,
@@ -182,6 +246,12 @@ public sealed class RuntimeWebSetupTransitionIssueRequest
     public string? ProductId { get; set; }
     public string? BindingId { get; set; }
     public string? EnrollmentId { get; set; }
+    public string? SourceLicenseId { get; set; }
+    public string? SourceSubjectRef { get; set; }
+    public string? TargetGrantRef { get; set; }
+    public string? TargetLicenseId { get; set; }
+    public string? TargetSubjectRef { get; set; }
+    public string? TargetEntitlementRef { get; set; }
     public string? SourceVersion { get; set; }
     public string? TargetVersion { get; set; }
     public string? TargetInstallerFilename { get; set; }

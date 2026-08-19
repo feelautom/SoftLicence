@@ -125,38 +125,11 @@ public class TelemetryService
         MaybeCreateCertPinningBugTraceTicket(productId, req, ip, geo?.Isp);
         MaybeCreateFreemiumAbuseBugTraceTicket(productId, req);
 
-        // Mise à jour du flag uninstall sur la licence (best-effort)
-        bool isUninstall = req.EventName != null && req.EventName.Contains("ninstall", StringComparison.OrdinalIgnoreCase);
-        bool isStartup = req.EventName != null && req.EventName.StartsWith("Startup_", StringComparison.OrdinalIgnoreCase);
-        if ((isUninstall || isStartup) && productId.HasValue)
-        {
-            try
-            {
-                var hwId = req.HardwareId;
-                var lic = await db.Licenses.FirstOrDefaultAsync(l =>
-                    l.ProductId == productId.Value && (
-                        l.HardwareId == hwId ||
-                        db.LicenseSeats.Any(s => s.LicenseId == l.Id && s.HardwareId == hwId)));
-                if (lic != null)
-                {
-                    if (isUninstall)
-                    {
-                        lic.HasUninstallEvent = true;
-                        lic.LastUninstallAt = DateTime.UtcNow;
-                    }
-                    else // Startup = réinstallation
-                    {
-                        lic.HasUninstallEvent = false;
-                        lic.LastUninstallAt = null;
-                    }
-                    await db.SaveChangesAsync();
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "Failed to update uninstall flag for {HardwareId}", req.HardwareId);
-            }
-        }
+        // Public telemetry is immutable evidence, not licensing authority. A hardware identifier
+        // can legitimately occur on several historical seats or licences, so neither uninstall
+        // nor startup events may mutate the global licence projection.
+        bool isStartup = req.EventName != null
+            && req.EventName.StartsWith("Startup_", StringComparison.OrdinalIgnoreCase);
 
         // Extract FP_* fingerprints from Startup events and upsert (best-effort, BEFORE auto-ban)
         Dictionary<string, string>? fingerprints = null;

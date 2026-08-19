@@ -1121,6 +1121,15 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         public byte[]? ConsumedResponseBytes { get; private set; }
         public Guid EnrollmentId => Guid.Parse(Prepared.EnrollmentId);
 
+        /// <summary>Gets the application-role PostgreSQL connection used by HTTP integration tests.</summary>
+        public string AppConnectionString => _appConnectionString;
+
+        /// <summary>Gets the PostgreSQL administrator connection used only for migration lifecycle tests.</summary>
+        public string AdminConnectionString => _adminConnectionString;
+
+        /// <summary>Gets the signer bound to the scenario product encryption authority.</summary>
+        public ISignedLicenseFileService SignedLicenseFiles => _signedLicenseFiles;
+
         public PreparedBootstrapScenario(
             TestDbFactory factory,
             string adminConnectionString,

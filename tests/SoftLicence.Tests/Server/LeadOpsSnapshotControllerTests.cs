@@ -56,7 +56,10 @@ public sealed class LeadOpsSnapshotControllerTests : IClassFixture<WebApplicatio
         Assert.Equal(2, GetInt(json, "nextPage"));
         Assert.Equal("1", GetString(json, "nextCursor"));
         Assert.Equal(1, GetInt(GetProperty(json, "counts"), "licenses"));
-        Assert.Single(GetArray(json, "licenses"));
+        var licenses = GetArray(json, "licenses");
+        Assert.Single(licenses);
+        Assert.False(GetBool(licenses[0], "hasUninstallEvent"));
+        Assert.Equal(JsonValueKind.Null, GetProperty(licenses[0], "lastUninstallAtUtc").ValueKind);
 
         var coverage = GetProperty(json, "coverage");
         var licensesCoverage = GetProperty(coverage, "licenses");
@@ -261,7 +264,9 @@ public sealed class LeadOpsSnapshotControllerTests : IClassFixture<WebApplicatio
                 ActivationDate = now.AddDays(-i),
                 CreationDate = now.AddMinutes(-i),
                 ExpirationDate = now.AddDays(30),
-                IsActive = true
+                IsActive = true,
+                HasUninstallEvent = i == 0,
+                LastUninstallAt = i == 0 ? now.AddHours(-2) : null
             };
             license.Seats.Add(new LicenseSeat
             {

@@ -11,7 +11,7 @@ namespace SoftLicence.Server.Middlewares
         private const int MaximumErrorDetailsBytes = 8 * 1024;
         private const string TruncationMarker = "\n[TRUNCATED]";
         private static readonly Regex SensitiveJsonValuePattern = new(
-            "(?i)(\\\"(?:licenseKey|licenseFile|token|secret|password|authorization|capability|subjectRef|email|customerEmail|customerName|hardwareId)\\\"\\s*:\\s*)\\\"(?:\\\\.|[^\\\"])*\\\"",
+            "(?i)(\\\"(?:licenseKey|licenseFile|token|secret|password|authorization|capability|subjectRef|sourceSubjectRef|email|customerEmail|customerName|hardwareId)\\\"\\s*:\\s*)\\\"(?:\\\\.|[^\\\"])*\\\"",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
         private static readonly Regex EmailPattern = new(
             "(?i)(?<![a-z0-9.!#$%&'*+/=?^_`{|}~-])[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\\.[a-z]{2,}",

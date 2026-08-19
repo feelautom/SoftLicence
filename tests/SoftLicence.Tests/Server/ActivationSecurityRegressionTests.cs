@@ -47,18 +47,18 @@ public sealed class ActivationSecurityRegressionTests : IClassFixture<WebApplica
     public async Task Activate_WithRevokedPaidLicenseAndOutdatedBan_DoesNotAutoUnban()
     {
         var seeded = await SeedPaidLicenseAsync(isActive: false, revokedAt: DateTime.UtcNow.AddMinutes(-5));
-        await SeedBanAsync(seeded.ProductId, "HW-REVOKED", BannedHardwareId.Categories.OutdatedVersion);
+        await SeedBanAsync(seeded.ProductId, "B000000000000001", BannedHardwareId.Categories.OutdatedVersion);
 
         var client = _factory.CreateClient();
         var response = await client.PostAsJsonAsync("/api/activation", new
         {
             LicenseKey = seeded.LicenseKey,
-            HardwareId = "HW-REVOKED",
+            HardwareId = "B000000000000001",
             AppName = "SecureApp"
         });
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        await AssertBanActiveAsync("HW-REVOKED");
+        await AssertBanActiveAsync("B000000000000001");
         _notifierMock.Verify(
             n => n.Notify(
                 It.IsAny<string>(),
@@ -72,19 +72,19 @@ public sealed class ActivationSecurityRegressionTests : IClassFixture<WebApplica
     public async Task Activate_WithValidPaidLicenseAndOutdatedBan_AutoUnbansWithVersionLabel()
     {
         var seeded = await SeedPaidLicenseAsync(isActive: true, revokedAt: null);
-        await SeedBanAsync(seeded.ProductId, "HW-VALID", BannedHardwareId.Categories.OutdatedVersion);
+        await SeedBanAsync(seeded.ProductId, "B000000000000002", BannedHardwareId.Categories.OutdatedVersion);
 
         var client = _factory.CreateClient();
         var response = await client.PostAsJsonAsync("/api/activation", new
         {
             LicenseKey = seeded.LicenseKey,
-            HardwareId = "HW-VALID",
+            HardwareId = "B000000000000002",
             AppName = "SecureApp",
             CustomerEmail = "paid@example.com"
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        await AssertBanInactiveAsync("HW-VALID");
+        await AssertBanInactiveAsync("B000000000000002");
         _notifierMock.Verify(
             n => n.Notify(
                 NotificationService.Triggers.SecurityIpBanned,
@@ -98,13 +98,13 @@ public sealed class ActivationSecurityRegressionTests : IClassFixture<WebApplica
     public async Task CheckStatus_WithOutdatedVersionBan_ReturnsUpdateRequiredNotRevoked()
     {
         var seeded = await SeedPaidLicenseAsync(isActive: true, revokedAt: null);
-        await SeedBanAsync(seeded.ProductId, "HW-OUTDATED", BannedHardwareId.Categories.OutdatedVersion);
+        await SeedBanAsync(seeded.ProductId, "B000000000000003", BannedHardwareId.Categories.OutdatedVersion);
 
         var client = _factory.CreateClient();
         var response = await client.PostAsJsonAsync("/api/activation/check", new
         {
             LicenseKey = seeded.LicenseKey,
-            HardwareId = "HW-OUTDATED",
+            HardwareId = "B000000000000003",
             AppName = "SecureApp"
         });
 

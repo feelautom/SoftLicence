@@ -1137,6 +1137,153 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     }
 
     [Fact]
+    public async Task WebSetupTransitionV2_ExpiredSource_TransfersToSelectedEligibleLicenseAtomically()
+    {
+        var connections = await ProvisionAsync();
+        var factory = new TestDbFactory(connections.App);
+        var fixture = await SeedAuthorityAsync(factory, "2.2.985");
+        using var capabilitySigning = CreateSigningKey(ActiveSigningPrivateKey);
+        using var nextSigning = CreateSigningKey(NextSigningPrivateKey);
+        using var enrollmentKey = RSA.Create(3072);
+        var options = RuntimeOptions(fixture.ProductId, capabilitySigning, nextSigning);
+        await UpsertKeyRegistryAsync(connections.Admin, options);
+        var dataProtection = new EphemeralDataProtectionProvider();
+        var authority = new RuntimeEnrollmentAuthorityService(factory, Options.Create(options));
+        var registry = new RuntimeEnrollmentKeyRegistryService(factory, Options.Create(options));
+        using var crypto = new RuntimeEnrollmentCryptoService(Options.Create(options));
+        var service = new RuntimeEnrollmentService(
+            factory, authority, registry, crypto, Options.Create(options), dataProtectionProvider: dataProtection);
+
+        var sourceSubjectRef = Base64Url(SHA256.HashData("websetup-source-subject"u8.ToArray()));
+        var targetSubjectRef = Base64Url(SHA256.HashData("websetup-target-subject"u8.ToArray()));
+        Guid sourceLicenseId;
+        Guid sourceSeatId;
+        Guid licenseTypeId;
+        await using (var sourceSeed = await factory.CreateDbContextAsync())
+        {
+            var binding = await sourceSeed.DistributionInstallationBindings.SingleAsync(row => row.Id == fixture.BindingId);
+            sourceLicenseId = binding.LicenseId;
+            sourceSeatId = binding.LicenseSeatId;
+            binding.SubjectRefDigestSha256 = Sha256(sourceSubjectRef);
+            licenseTypeId = (await sourceSeed.Licenses.SingleAsync(row => row.Id == sourceLicenseId)).LicenseTypeId;
+            await sourceSeed.SaveChangesAsync();
+        }
+
+        var prepared = await service.PrepareAsync("website-step1", Sha256("websetup-v2-transfer-prepare"),
+            PrepareRequest(fixture, Guid.NewGuid().ToString("D"), enrollmentKey));
+        var enrollmentId = Guid.Parse(prepared.Response.EnrollmentId);
+        var confirm = new RuntimeEnrollmentConfirmRequest
+        {
+            Schema = RuntimeEnrollmentService.ConfirmSchema,
+            ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion,
+            EnrollmentId = enrollmentId.ToString("D"),
+            Epoch = 1
+        };
+        var confirmDigest = Sha256("websetup-v2-transfer-confirm");
+        await service.ConfirmAsync(enrollmentId, confirmDigest, confirm,
+            Proof(enrollmentKey, "confirm", enrollmentId, options.ConfirmAudience,
+                prepared.Response.Challenge, confirmDigest), IPAddress.Loopback);
+
+        const string targetVersion = "2.2.987";
+        var targetLicenseId = Guid.NewGuid();
+        await using (var targetSeed = await factory.CreateDbContextAsync())
+        {
+            targetSeed.Licenses.Add(new License
+            {
+                Id = targetLicenseId,
+                ProductId = fixture.ProductId,
+                LicenseTypeId = licenseTypeId,
+                LicenseKey = "RUNTIME-TRANSFER-" + Guid.NewGuid().ToString("N"),
+                IsActive = true,
+                MaxSeats = 1,
+                AllowedVersions = "2.2.*",
+                ExpirationDate = DateTime.UtcNow.AddDays(30)
+            });
+            foreach (var binary in new[] { ("FP_CORE", '1'), ("FP_DLL", '2'), ("FP_EXE", '3') })
+                targetSeed.ApprovedBinaries.Add(new ApprovedBinary
+                {
+                    ProductId = fixture.ProductId,
+                    Version = targetVersion,
+                    Key = binary.Item1,
+                    Hash = new string(binary.Item2, 64),
+                    Source = ApprovedBinaryService.ReleaseSource
+                });
+            var sourceLicense = await targetSeed.Licenses.SingleAsync(row => row.Id == sourceLicenseId);
+            sourceLicense.ExpirationDate = DateTime.UtcNow.AddMinutes(-1);
+            sourceLicense.AllowedVersions = "9.*";
+            await targetSeed.SaveChangesAsync();
+        }
+
+        var targetGrantRef = Guid.NewGuid().ToString("D");
+        var distribution = new DistributionInstallationBindingService(
+            factory, dataProtection, TimeProvider.System);
+        var entitlementRequest = new DistributionEntitlementIssueRequest
+        {
+            Schema = DistributionInstallationBindingService.IssueV3Schema,
+            RequestId = Guid.NewGuid().ToString("D"),
+            ProductId = fixture.ProductId.ToString("D"),
+            SoftLicenceLicenseId = targetLicenseId.ToString("D"),
+            GrantRefDigestSha256 = Sha256(targetGrantRef),
+            SubjectRef = targetSubjectRef
+        };
+        var entitlement = await distribution.IssueEntitlementAsync(
+            "website-step1", Sha256(JsonSerializer.Serialize(entitlementRequest)), entitlementRequest);
+        var issue = new RuntimeWebSetupTransitionIssueRequest
+        {
+            Schema = RuntimeEnrollmentService.WebSetupTransitionIssueV2Schema,
+            RequestId = Guid.NewGuid().ToString("D"),
+            ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion,
+            ProductId = fixture.ProductId.ToString("D"),
+            BindingId = fixture.BindingId.ToString("D"),
+            EnrollmentId = enrollmentId.ToString("D"),
+            SourceLicenseId = sourceLicenseId.ToString("D"),
+            SourceSubjectRef = sourceSubjectRef,
+            TargetGrantRef = targetGrantRef,
+            TargetLicenseId = targetLicenseId.ToString("D"),
+            TargetSubjectRef = targetSubjectRef,
+            TargetEntitlementRef = entitlement.Response.EntitlementRef,
+            SourceVersion = fixture.Version,
+            TargetVersion = targetVersion,
+            TargetInstallerFilename = $"TiaConnect-Setup_v{targetVersion}.msi",
+            TargetInstallerSha256 = new string('4', 64)
+        };
+        var validRequestId = issue.RequestId;
+        issue.RequestId = Guid.NewGuid().ToString("D");
+        issue.TargetSubjectRef = Base64Url(SHA256.HashData("wrong-target-subject"u8.ToArray()));
+        var rejected = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() =>
+            service.IssueWebSetupTransitionAsync(
+                "website-step1", Sha256(JsonSerializer.Serialize(issue)), issue));
+        Assert.Equal("websetup_transition_ineligible", rejected.ErrorCode);
+        await using (var unchanged = await factory.CreateDbContextAsync())
+        {
+            Assert.Equal(sourceLicenseId, (await unchanged.DistributionInstallationBindings.SingleAsync(
+                row => row.Id == fixture.BindingId)).LicenseId);
+            Assert.True((await unchanged.LicenseSeats.SingleAsync(row => row.Id == sourceSeatId)).IsActive);
+        }
+
+        issue.RequestId = validRequestId;
+        issue.TargetSubjectRef = targetSubjectRef;
+        var issueDigest = Sha256(JsonSerializer.Serialize(issue));
+        var issued = await service.IssueWebSetupTransitionAsync("website-step1", issueDigest, issue);
+        var replay = await service.IssueWebSetupTransitionAsync("website-step1", issueDigest, issue);
+        Assert.False(issued.Idempotent);
+        Assert.True(replay.Idempotent);
+        Assert.Equal(issued.ExactResponseBody, replay.ExactResponseBody);
+
+        await using var check = await factory.CreateDbContextAsync();
+        var rebound = await check.DistributionInstallationBindings.SingleAsync(row => row.Id == fixture.BindingId);
+        var enrollment = await check.RuntimeEnrollments.SingleAsync(row => row.Id == enrollmentId);
+        Assert.Equal(targetLicenseId, rebound.LicenseId);
+        Assert.Equal(targetGrantRef, rebound.GrantRef);
+        Assert.Equal(Sha256(targetSubjectRef), rebound.SubjectRefDigestSha256);
+        Assert.Equal(targetLicenseId, enrollment.LicenseId);
+        Assert.False((await check.LicenseSeats.SingleAsync(row => row.Id == sourceSeatId)).IsActive);
+        Assert.True((await check.LicenseSeats.SingleAsync(row => row.Id == rebound.LicenseSeatId)).IsActive);
+        Assert.Equal("finalized", (await check.DistributionEntitlements.SingleAsync(
+            row => row.Id == rebound.EntitlementId)).State);
+    }
+
+    [Fact]
     public async Task WebSetupTransition_EndToEnd_IsOneShotAtomic_ReplaysFrozenResponse_AndAllowsHistoricalCriticalRecovery()
     {
         var connections = await ProvisionAsync();

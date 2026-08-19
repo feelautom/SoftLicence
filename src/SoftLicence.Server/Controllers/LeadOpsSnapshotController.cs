@@ -313,8 +313,10 @@ public sealed class LeadOpsSnapshotController(
             license.PartnerCode,
             license.MaxSeats,
             license.RecoveryCount,
-            license.HasUninstallEvent,
-            license.LastUninstallAt,
+            // Preserve the additive snapshot contract while retiring the unauthenticated global
+            // uninstall projection. Consumers must use immutable telemetry history instead.
+            false,
+            null,
             lastTelemetry,
             seats);
     }

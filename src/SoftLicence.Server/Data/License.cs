@@ -49,7 +49,8 @@ namespace SoftLicence.Server.Data
         public ICollection<LicenseSeat> Seats { get; set; } = new List<LicenseSeat>();
         public ICollection<LicenseHistory> History { get; set; } = new List<LicenseHistory>();
 
-        // Uninstall detection flag (set when telemetry Uninstall_* event is received)
+        // Legacy presentation fields retained for schema compatibility. Public telemetry is
+        // observation-only and must not mutate licensing authority or these global fields.
         public bool HasUninstallEvent { get; set; } = false;
         public DateTime? LastUninstallAt { get; set; }
 

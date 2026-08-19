@@ -264,6 +264,13 @@ builder.Services.AddScoped<SoftLicence.Server.Services.CanaryAckService>(); // R
 builder.Services.AddScoped<SoftLicence.Server.Services.EncryptionService>(); // Chiffrement des clés
 builder.Services.AddScoped<SoftLicence.Server.Services.ISignedLicenseFileService,
     SoftLicence.Server.Services.SignedLicenseFileService>();
+builder.Services.AddOptions<SoftLicence.Server.Services.HardwareAuthorityAliasOptions>()
+    .Bind(builder.Configuration.GetSection("HardwareAuthorityAliases"))
+    .ValidateOnStart();
+builder.Services.AddSingleton<Microsoft.Extensions.Options.IValidateOptions<SoftLicence.Server.Services.HardwareAuthorityAliasOptions>,
+    SoftLicence.Server.Services.HardwareAuthorityAliasOptionsValidator>();
+builder.Services.AddScoped<SoftLicence.Server.Services.IHardwareAuthorityAliasResolver,
+    SoftLicence.Server.Services.HardwareAuthorityAliasResolver>();
 builder.Services.AddSingleton<SoftLicence.Server.Services.IBackupProcessRunner,
     SoftLicence.Server.Services.BackupProcessRunner>();
 builder.Services.AddSingleton<SoftLicence.Server.Services.BackupService>(); // Sauvegardes Drive (rclone)

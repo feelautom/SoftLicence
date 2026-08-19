@@ -15,6 +15,91 @@ namespace SoftLicence.Tests.Server;
 
 public sealed class RuntimeEnrollmentServiceTests
 {
+    /// <summary>Verifies the hardware migration path is frozen into the signed proof contract.</summary>
+    [Fact]
+    public void HardwareAuthorityMigration_ProofPathIsExact()
+    {
+        var enrollmentId = Guid.Parse("11111111-1111-4111-8111-111111111111");
+
+        Assert.Equal(
+            "/api/v1/runtime-enrollments/11111111-1111-4111-8111-111111111111/hardware-authority-migrations",
+            RuntimeEnrollmentService.BuildProofPath(enrollmentId, "hardware-authority-migration"));
+    }
+
+    /// <summary>Verifies the strict migration schema accepts only canonical V1 authority values.</summary>
+    [Fact]
+    public void HardwareAuthorityMigration_ValidationAcceptsCanonicalContract()
+    {
+        var validate = typeof(RuntimeEnrollmentService).GetMethod(
+            "ValidateHardwareAuthorityMigration", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var enrollmentId = Guid.Parse("11111111-1111-4111-8111-111111111111");
+
+        var validated = validate.Invoke(null,
+        [
+            enrollmentId, ValidHardwareMigrationRequest(enrollmentId), ValidMigrationProofHeaders(), new string('d', 64)
+        ]);
+
+        Assert.NotNull(validated);
+    }
+
+    /// <summary>Verifies case, length, algorithm, version, and extension near misses fail closed.</summary>
+    [Theory]
+    [InlineData("legacy-lowercase")]
+    [InlineData("stable-short")]
+    [InlineData("legacy-algorithm")]
+    [InlineData("stable-algorithm")]
+    [InlineData("sdk-old")]
+    [InlineData("schema-case")]
+    [InlineData("extension")]
+    public void HardwareAuthorityMigration_ValidationRejectsNearMisses(string mutation)
+    {
+        var validate = typeof(RuntimeEnrollmentService).GetMethod(
+            "ValidateHardwareAuthorityMigration", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var enrollmentId = Guid.Parse("11111111-1111-4111-8111-111111111111");
+        var request = ValidHardwareMigrationRequest(enrollmentId);
+        switch (mutation)
+        {
+            case "legacy-lowercase": request.LegacyHardwareId = "a6d3eed115bc84ad"; break;
+            case "stable-short": request.HardwareIdV2 = "A6D3EED115BC84A"; break;
+            case "legacy-algorithm": request.LegacyAlgorithm = "legacy-wmi-any-disk"; break;
+            case "stable-algorithm": request.HardwareIdV2Algorithm = "v2-wmi-first-disk"; break;
+            case "sdk-old": request.SdkVersion = "1.1.12"; break;
+            case "schema-case": request.Schema = request.Schema!.ToUpperInvariant(); break;
+            case "extension": request.ExtensionData = new() { ["unexpected"] = default }; break;
+        }
+
+        var thrown = Assert.Throws<TargetInvocationException>(() => validate.Invoke(null,
+        [
+            enrollmentId, request, ValidMigrationProofHeaders(), new string('d', 64)
+        ]));
+
+        var invalid = Assert.IsType<RuntimeEnrollmentException>(thrown.InnerException);
+        Assert.Equal(StatusCodes.Status400BadRequest, invalid.StatusCode);
+        Assert.Equal("invalid_request", invalid.ErrorCode);
+    }
+
+    /// <summary>Builds the canonical request shared by strict contract tests.</summary>
+    private static RuntimeHardwareAuthorityMigrationRequest ValidHardwareMigrationRequest(Guid enrollmentId) => new()
+    {
+        Schema = RuntimeEnrollmentService.HardwareAuthorityMigrationSchema,
+        ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion,
+        RequestId = "22222222-2222-4222-8222-222222222222",
+        EnrollmentId = enrollmentId.ToString("D"),
+        Epoch = 1,
+        SecurityEpoch = 3,
+        LegacyHardwareId = "A00272B768FFD6AF",
+        HardwareIdV2 = "A6D3EED115BC84AD",
+        LegacyAlgorithm = "legacy-wmi-first-disk",
+        HardwareIdV2Algorithm = "v2-wmi-disk-index-0",
+        SdkVersion = "1.1.13"
+    };
+
+    /// <summary>Builds syntactically canonical detached proof headers for validator tests.</summary>
+    private static RuntimeProofHeaders ValidMigrationProofHeaders() => new(
+        "2026-08-16T13:00:00.0000000Z",
+        "33333333-3333-4333-8333-333333333333",
+        new string('A', 512));
+
     [Fact]
     public void PrepareResponseV1_SerializationRemainsExactWithoutSecurityEpoch()
     {

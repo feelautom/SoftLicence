@@ -1,6 +1,7 @@
 using System.Text;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Moq;
 using SoftLicence.Server.Controllers;
@@ -83,6 +84,44 @@ public sealed class RuntimeEnrollmentsControllerTests
 
         var result = Assert.IsType<FileContentResult>(
             await controller.Milestone(enrollmentId, CancellationToken.None));
+
+        Assert.Equal(exact, result.FileContents);
+        service.VerifyAll();
+    }
+
+    /// <summary>Verifies the public migration route preserves strict body bytes and proof headers.</summary>
+    [Fact]
+    public async Task HardwareAuthorityMigration_WithStrictProofReturnsFrozenExactBody()
+    {
+        const string enrollmentId = "11111111-1111-4111-8111-111111111111";
+        var body = "{\"schema\":\"runtime-hardware-authority-migration-v1\"," +
+            "\"protocolVersion\":\"runtime-enrollment-v1\",\"requestId\":\"22222222-2222-4222-8222-222222222222\"," +
+            "\"enrollmentId\":\"" + enrollmentId + "\",\"epoch\":1,\"securityEpoch\":1," +
+            "\"legacyHardwareId\":\"A00272B768FFD6AF\",\"hardwareIdV2\":\"A6D3EED115BC84AD\"," +
+            "\"legacyAlgorithm\":\"legacy-wmi-first-disk\",\"hardwareIdV2Algorithm\":\"v2-wmi-disk-index-0\"," +
+            "\"sdkVersion\":\"1.1.13\"}";
+        var service = new Mock<IRuntimeEnrollmentService>(MockBehavior.Strict);
+        var exact = Encoding.UTF8.GetBytes("{\"migrated\":true}");
+        service.Setup(runtime => runtime.MigrateHardwareAuthorityAsync(
+                Guid.Parse(enrollmentId), It.IsAny<string>(),
+                It.IsAny<RuntimeHardwareAuthorityMigrationRequest>(), It.IsAny<RuntimeProofHeaders>(),
+                It.IsAny<System.Net.IPAddress?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new RuntimeEnrollmentOperationResult<RuntimeHardwareAuthorityMigrationResponse>(
+                new(RuntimeEnrollmentService.HardwareAuthorityMigrationResponseSchema,
+                    RuntimeEnrollmentService.ProtocolVersion, "migrated",
+                    "22222222-2222-4222-8222-222222222222", enrollmentId,
+                    "33333333-3333-4333-8333-333333333333",
+                    "44444444-4444-4444-8444-444444444444", 1, 2,
+                    "A6D3EED115BC84AD", "signed-license", "2026-08-16T13:00:00.0000000Z"),
+                false, exact));
+        var controller = CreateController(new(MockBehavior.Strict), service, "enabled",
+            $"/api/v1/runtime-enrollments/{enrollmentId}/hardware-authority-migrations", body);
+        controller.Request.Headers["X-Runtime-Enrollment-Timestamp"] = "2026-08-16T13:00:00.0000000Z";
+        controller.Request.Headers["X-Runtime-Enrollment-Jti"] = "55555555-5555-4555-8555-555555555555";
+        controller.Request.Headers["X-Runtime-Enrollment-Signature"] = new string('A', 512);
+
+        var result = Assert.IsType<FileContentResult>(
+            await controller.MigrateHardwareAuthority(enrollmentId, CancellationToken.None));
 
         Assert.Equal(exact, result.FileContents);
         service.VerifyAll();
@@ -288,6 +327,49 @@ public sealed class RuntimeEnrollmentsControllerTests
         runtime.VerifyAll();
     }
 
+    [Fact]
+    public async Task ReinstallAuthority_WhenRefused_LogsInternalDiagnosticWithoutExposingIt()
+    {
+        const string productId = "11111111-1111-4111-8111-111111111111";
+        const string bootstrapId = "22222222-2222-4222-8222-222222222222";
+        var body = "{\"schema\":\"runtime-enrollment-reinstall-authority-v1\","+
+            "\"protocolVersion\":\"runtime-enrollment-v1\",\"requestId\":\"33333333-3333-4333-8333-333333333333\","+
+            "\"productId\":\"" + productId + "\",\"bootstrapId\":\"" + bootstrapId + "\","+
+            "\"installationId\":\"44444444-4444-4444-8444-444444444444\","+
+            "\"enrollmentId\":\"55555555-5555-4555-8555-555555555555\",\"releaseVersion\":\"2.3.7\","+
+            "\"keyThumbprint\":\"" + new string('A', 43) + "\",\"securityEpoch\":3,"+
+            "\"challenge\":\"" + new string('B', 86) + "\",\"signature\":\"" + new string('C', 512) + "\"}";
+        var s2s = new Mock<IDistributionS2SAuthenticationService>(MockBehavior.Strict);
+        s2s.Setup(service => service.AuthenticateAndReserveNonceAsync(
+                It.IsAny<HttpContext>(), It.IsAny<ReadOnlyMemory<byte>>(), productId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new DistributionS2SPrincipal("website-step1", "key-1"));
+        var runtime = new Mock<IRuntimeEnrollmentService>(MockBehavior.Strict);
+        runtime.Setup(service => service.AuthorizeReinstallAsync(
+                "website-step1", It.IsAny<RuntimeReinstallAuthorityRequest>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new RuntimeEnrollmentException(
+                "reinstall_authority_ineligible",
+                StatusCodes.Status403Forbidden,
+                "v2_finalize_owner_mismatch"));
+        var logger = new Mock<ILogger<RuntimeEnrollmentsController>>();
+        var controller = CreateController(s2s, runtime, "enabled",
+            "/api/internal/v1/runtime-enrollments/reinstall-authorizations", body, logger: logger.Object);
+
+        var result = Assert.IsType<ObjectResult>(
+            await controller.AuthorizeReinstall(CancellationToken.None));
+
+        Assert.Equal(StatusCodes.Status403Forbidden, result.StatusCode);
+        Assert.Equal(
+            "reinstall_authority_ineligible",
+            Assert.IsType<RuntimeEnrollmentApiError>(result.Value).Error);
+        logger.Verify(entry => entry.Log(
+            LogLevel.Warning,
+            It.IsAny<EventId>(),
+            It.Is<It.IsAnyType>((value, _) =>
+                value.ToString()!.Contains("v2_finalize_owner_mismatch", StringComparison.Ordinal)),
+            null,
+            It.IsAny<Func<It.IsAnyType, Exception?, string>>()), Times.Once);
+    }
+
     private static string RecoveryBody(string productId) =>
         "{\"schema\":\"runtime-critical-recovery-v1\",\"protocolVersion\":\"runtime-enrollment-v1\","
         + "\"requestId\":\"11111111-1111-4111-8111-111111111111\",\"productId\":\"" + productId + "\","
@@ -303,7 +385,8 @@ public sealed class RuntimeEnrollmentsControllerTests
         string mode,
         string path,
         string body,
-        string query = "")
+        string query = "",
+        ILogger<RuntimeEnrollmentsController>? logger = null)
     {
         var bytes = Encoding.UTF8.GetBytes(body);
         var context = new DefaultHttpContext();
@@ -314,7 +397,7 @@ public sealed class RuntimeEnrollmentsControllerTests
         context.Request.ContentLength = bytes.Length;
         context.Request.Body = new MemoryStream(bytes);
         return new RuntimeEnrollmentsController(
-            s2s.Object, service.Object, Options.Create(new RuntimeEnrollmentOptions { Mode = mode }))
+            s2s.Object, service.Object, Options.Create(new RuntimeEnrollmentOptions { Mode = mode }), logger)
         {
             ControllerContext = new ControllerContext { HttpContext = context }
         };
