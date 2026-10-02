@@ -15,7 +15,7 @@ namespace SoftLicence.Server.Controllers
     [ApiController]
     [Route("api/activation")]
     [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("PublicAPI")]
-    public class ActivationController : ControllerBase
+    public partial class ActivationController : ControllerBase
     {
         private const string ActivationErrorCodeHeader = "X-SoftLicence-Error-Code";
         private const string ActivationCorrelationIdHeader = "X-SoftLicence-Correlation-Id";
@@ -38,6 +38,8 @@ namespace SoftLicence.Server.Controllers
         private readonly Services.AdminSecretAuthenticationService _adminSecretAuthentication;
         private readonly Services.ISignedLicenseFileService _signedLicenseFiles;
         private readonly Services.IHardwareAuthorityAliasResolver _hardwareAuthorityAliases;
+        /// <summary>Stops bounded history finalization when the application shuts down, independently of HTTP cancellation.</summary>
+        private readonly CancellationToken _legacyApplicationStopping;
 
         /// <summary>
         /// Creates the public activation API with centralized signing, ban enforcement, and authenticated hardware-authority resolution.
@@ -58,6 +60,7 @@ namespace SoftLicence.Server.Controllers
         /// <param name="adminSecretAuthentication">Offline activation administrator authentication service.</param>
         /// <param name="signedLicenseFiles">Central signer used by activation and status responses.</param>
         /// <param name="hardwareAuthorityAliases">Fail-closed resolver for server-authenticated legacy aliases.</param>
+        /// <param name="applicationLifetime">Host shutdown signal for bounded decision persistence; isolated tests may omit a host.</param>
         public ActivationController(
             LicenseDbContext db,
             ILogger<ActivationController> logger,
@@ -74,7 +77,8 @@ namespace SoftLicence.Server.Controllers
             Services.HwidReuseAlertService hwidReuseAlerts,
             Services.AdminSecretAuthenticationService adminSecretAuthentication,
             Services.ISignedLicenseFileService signedLicenseFiles,
-            Services.IHardwareAuthorityAliasResolver hardwareAuthorityAliases)
+            Services.IHardwareAuthorityAliasResolver hardwareAuthorityAliases,
+            IHostApplicationLifetime? applicationLifetime = null)
         {
             _db = db;
             _logger = logger;
@@ -92,6 +96,88 @@ namespace SoftLicence.Server.Controllers
             _adminSecretAuthentication = adminSecretAuthentication;
             _signedLicenseFiles = signedLicenseFiles;
             _hardwareAuthorityAliases = hardwareAuthorityAliases;
+            _legacyApplicationStopping = applicationLifetime?.ApplicationStopping ?? CancellationToken.None;
+        }
+
+        /// <summary>
+        /// TEMP-FAIL-OPEN(TKT-001262): temporary compatibility only. Strict Runtime-graph authority
+        /// is the intended behavior, but the current code or persisted graph is known to be buggy;
+        /// Franck requested logging instead of refusing legitimate clients. Every logged case must
+        /// be analysed and corrected, then this branch must return to the strict decision and this
+        /// marker must be removed. Cross-authority aliases remain closed, active bans stay enforced,
+        /// and the warning is deliberately identifier-free.
+        /// </summary>
+        private async Task<string?> TryResolveLoggedCompatibilityAliasAsync(
+            License license,
+            Services.HardwareAuthorityResolution resolution)
+        {
+            if (resolution.RefusalReason != Services.HardwareAuthorityRefusalReason.AuthorityGraphDiverged
+                || resolution.AliasId is not Guid aliasId
+                || resolution.LicenseSeatId is not Guid seatId
+                || !license.IsActive
+                || license.RevokedAt != null
+                || (license.ExpirationDate.HasValue && license.ExpirationDate.Value <= DateTime.UtcNow))
+                return null;
+
+            var candidate = await _db.HardwareAuthorityAliases.AsNoTracking()
+                .Where(alias => alias.Id == aliasId
+                    && alias.IsActive && alias.DisabledAtUtc == null
+                    && alias.ProductId == license.ProductId && alias.LicenseId == license.Id
+                    && alias.LicenseSeatId == seatId
+                    && alias.LicenseSeat!.IsActive
+                    && alias.LicenseSeat.LicenseId == license.Id
+                    && alias.Binding!.ProductId == license.ProductId
+                    && alias.Binding.LicenseId == license.Id
+                    && alias.Binding.LicenseSeatId == seatId
+                    && alias.RuntimeEnrollment!.ProductId == license.ProductId
+                    && alias.RuntimeEnrollment.LicenseId == license.Id
+                    && alias.RuntimeEnrollment.LicenseSeatId == seatId)
+                .Select(alias => new
+                {
+                    SeatHardwareId = alias.LicenseSeat!.HardwareId,
+                    BindingId = alias.Binding!.Id
+                })
+                .SingleOrDefaultAsync(HttpContext.RequestAborted);
+            if (candidate == null
+                || !Services.HardwareAuthorityAliasResolver.IsCanonicalHardwareId(candidate.SeatHardwareId))
+                return null;
+
+            var binding = await _db.DistributionInstallationBindings.AsNoTracking()
+                .SingleAsync(item => item.Id == candidate.BindingId, HttpContext.RequestAborted);
+            var enrollmentRows = await _db.RuntimeEnrollments.AsNoTracking()
+                .Where(enrollment => enrollment.BindingId == candidate.BindingId)
+                .ToListAsync(HttpContext.RequestAborted);
+            var now = DateTime.UtcNow;
+            var coherentSeatRelease = Services.RuntimeAuthorityTransitionResolver.IsCoherentSeatRelease(
+                binding, enrollmentRows, now);
+            var enrollments = enrollmentRows
+                .Select(enrollment => new Services.RuntimeAuthorityEnrollmentSnapshot(
+                    enrollment.State,
+                    enrollment.InvalidationReason,
+                    enrollment.ChallengeExpiresAtUtc,
+                    enrollment.ChallengeConsumedAtUtc,
+                    enrollment.ActivatedAtUtc,
+                    enrollment.InvalidatedAtUtc))
+                .ToList();
+            var enrollmentDecision = Services.RuntimeAuthorityTransitionResolver.ClassifyEnrollments(
+                enrollments, now);
+
+            _logger.LogWarning(
+                "TEMP-FAIL-OPEN(TKT-001262) Hardware authority compatibility fail-open used for alias {AliasId}, product {ProductId}, licence {LicenseId}, seat {LicenseSeatId}, binding {BindingId}; reason {RefusalReason}, binding state {BindingState}, binding invalidation {BindingInvalidationReason}, enrollment count {EnrollmentCount}, enrollment states {EnrollmentStates}, enrollment invalidations {EnrollmentInvalidationReasons}, coherent seat release {CoherentSeatRelease}, enrollment decision {EnrollmentDecision}.",
+                aliasId,
+                license.ProductId,
+                license.Id,
+                seatId,
+                binding.Id,
+                resolution.RefusalReason,
+                binding.State,
+                binding.InvalidationReason ?? "none",
+                enrollmentRows.Count,
+                string.Join(',', enrollmentRows.Select(item => item.State).OrderBy(value => value, StringComparer.Ordinal)),
+                string.Join(',', enrollmentRows.Select(item => item.InvalidationReason ?? "none").OrderBy(value => value, StringComparer.Ordinal)),
+                coherentSeatRelease,
+                enrollmentDecision);
+            return candidate.SeatHardwareId;
         }
 
         public class ActivationRequest
@@ -236,6 +322,10 @@ namespace SoftLicence.Server.Controllers
                 license.RecoveryCount = 0;
         }
 
+        /// <summary>
+        /// Maps anonymous client hints to the persisted audit vocabulary. Portal is deliberately
+        /// not a public authority and therefore collapses to the fail-closed unknown value.
+        /// </summary>
         private static string NormalizeDeactivationSource(string? source, string? deactivationSource)
         {
             var raw = string.IsNullOrWhiteSpace(source) ? deactivationSource : source;
@@ -246,7 +336,6 @@ namespace SoftLicence.Server.Controllers
             {
                 "settings_button" or "settings" or "settings-button" => "settings_button",
                 "uninstall" or "uninstaller" => "uninstall",
-                "portal" => "portal",
                 "admin" => "admin",
                 "legacy_unknown" => "legacy_unknown",
                 "unknown" => "unknown",
@@ -254,6 +343,11 @@ namespace SoftLicence.Server.Controllers
             };
         }
 
+        /// <summary>
+        /// Determines whether a canonical audited client source may bypass the five-minute
+        /// anonymous-deactivation guard. Only the documented settings and uninstall interactions
+        /// remain trusted; provider portal authority is available exclusively on the internal S2S route.
+        /// </summary>
         private static bool IsTrustedImmediateDeactivationSource(string source)
         {
             return source is "settings_button" or "uninstall";
@@ -281,24 +375,6 @@ namespace SoftLicence.Server.Controllers
             {
                 return false;
             }
-        }
-
-        private static bool IsPaidLicenseEligibleForAutoUnban(License license)
-        {
-            if (!license.IsActive || license.RevokedAt != null)
-                return false;
-
-            if (license.ExpirationDate.HasValue && DateTime.UtcNow > license.ExpirationDate.Value)
-                return false;
-
-            var slug = license.Type?.Slug?.Trim().ToUpperInvariant();
-            if (string.IsNullOrWhiteSpace(slug))
-                return false;
-
-            if (license.Type?.IsFree == true)
-                return false;
-
-            return slug is not ("FREEMIUM" or "TRIAL" or "FREE" or "STUDENT");
         }
 
         private static bool EnforcesSingleUsePerHardwareId(LicenseType? type)
@@ -478,6 +554,8 @@ namespace SoftLicence.Server.Controllers
             return string.Compare(current, minimum, StringComparison.Ordinal) < 0;
         }
 
+        /// <summary>Issues or reuses a trial licence using existing hardware-lock rules. The reserved paid-pass type can only recover an existing key, never receive an unpaid new key.</summary>
+        /// <remarks>Pre-identity refusals are not attributed to a claimed licence. Existing-licence refusal history commits after the business savepoint is rolled back; accepted history shares the existing commit after successful signing. Observed seats do not imply global quota serialization. History faults use existing technical failure handling.</remarks>
         [HttpPost("trial")]
         public async Task<IActionResult> GetTrial([FromBody] TrialRequest req)
         {
@@ -538,11 +616,15 @@ namespace SoftLicence.Server.Controllers
                     _db, product.Id, req.HardwareId);
                 await _db.Entry(existing).ReloadAsync();
 
+                var trialHistory = await CaptureTrialHistoryAsync(existing, existingTrialTransaction,
+                    req.HardwareId, req.AppVersion, "trial_existing");
+                await BeginLegacyHistorySavepointAsync(trialHistory);
+
                 // Révoquée → 403 Forbidden
                 if (!existing.IsActive)
                 {
                     TagActivationFailure("LICENSE_DISABLED");
-                    return StatusCode(403, _localizer["Api_AccessRevoked"].Value);
+                    return await PersistLegacyRefusalAsync(trialHistory, StatusCode(403, _localizer["Api_AccessRevoked"].Value));
                 }
 
                 bool isExpired = existing.ExpirationDate.HasValue && DateTime.UtcNow > existing.ExpirationDate.Value;
@@ -613,6 +695,7 @@ namespace SoftLicence.Server.Controllers
                         var decryptedKey = _encryption.Decrypt(product.PrivateKeyXml);
                         if (decryptedKey == "ERROR_DECRYPTION_FAILED") return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
                         var signed = LicenseService.GenerateLicense(model, decryptedKey);
+                        await SaveTrialAcceptanceAsync(trialHistory, existing.HardwareId);
                         if (existingTrialTransaction != null)
                             await existingTrialTransaction.CommitAsync();
                         _logger.LogInformation("Licence recovery : Renvoi de la licence existante ({TypeSlug}) pour {HardwareId}", existing.Type?.Slug, req.HardwareId);
@@ -625,6 +708,10 @@ namespace SoftLicence.Server.Controllers
                     }
                 }
             }
+
+            // A paid pass may recover above, but public trial selection must never mint paid time.
+            if (Services.PersonalDayPassPolicy.IsPassType(type.Slug))
+                return ActivationJsonFailure("PAYMENT_REQUIRED", "A confirmed payment is required for this license type.");
 
             // Sinon, création d'une nouvelle licence Trial
             var trialNewActivationsDisabled = RejectIfNewActivationsDisabled(type);
@@ -639,6 +726,9 @@ namespace SoftLicence.Server.Controllers
             if (freemiumAlreadyConsumed != null)
                 return freemiumAlreadyConsumed;
 
+            // Once commit starts, acknowledgement failure cannot establish absence.
+            // Dispose the owned transaction without attempting rollback of a completed commit.
+            var trialCommitStarted = false;
             try
             {
             var newKey = Guid.NewGuid().ToString("D").ToUpper();
@@ -657,6 +747,9 @@ namespace SoftLicence.Server.Controllers
             };
 
             _db.Licenses.Add(license);
+
+            var newTrialHistory = await CaptureTrialHistoryAsync(license, trialTransaction,
+                req.HardwareId, req.AppVersion, "trial_create", newlyCreated: true);
 
             // Création du siège initial pour le multi-postes
             var firstSeat = new LicenseSeat
@@ -706,12 +799,19 @@ namespace SoftLicence.Server.Controllers
                 return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
             }
             var signedLicenseString = LicenseService.GenerateLicense(licenseModel, decryptedKey);
+            await SaveTrialAcceptanceAsync(newTrialHistory, license.HardwareId);
+            trialCommitStarted = true;
             if (trialTransaction != null) await trialTransaction.CommitAsync();
             return Ok(new { LicenseFile = signedLicenseString });
             }
             catch (Exception ex)
             {
-                if (trialTransaction != null) await trialTransaction.RollbackAsync();
+                if (trialTransaction != null && !trialCommitStarted) await trialTransaction.RollbackAsync();
+                if (trialCommitStarted)
+                {
+                    _logger.LogError("LicenseDecisionPersistenceFailed Phase=trial_create CommitOutcome=indeterminate");
+                    return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
+                }
                 _logger.LogError(ex, "Erreur creation trial pour {HardwareId}", req.HardwareId);
                 return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
             }
@@ -740,6 +840,10 @@ namespace SoftLicence.Server.Controllers
             return ActivateCoreAsync(req, offlineContext: null);
         }
 
+        /// <summary>Activates one uniquely administrator-authorized offline licence, preserving the existing generic403 refusal contract.</summary>
+        /// <param name="req">At most4KiB of offline request data under the existing key, HWID and request-code validation rules.</param>
+        /// <returns>The existing signed success,401/400 before authority,403 generic refusal, or redacted500 when history/activation fails.</returns>
+        /// <remarks>Prechecks capture the loaded licence before predicate evaluation and never infer a resolved HWID or narrower refusal reason. Ban-expiry maintenance retains its separate legacy transaction. Refusal history alone commits in a private context with bounded host-linked finalization. Core delegation preserves its original offline status mapping; no decision is attributed before a unique authorized licence exists.</remarks>
         [HttpPost("offline")]
         [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("AdminAPI")]
         [RequestSizeLimit(4 * 1024)]
@@ -768,6 +872,12 @@ namespace SoftLicence.Server.Controllers
                 return OfflineActivationDenied();
 
             var license = candidates[0];
+            // Freeze the already authorized loaded graph before evaluating the original
+            // compound predicate. Its ban helper may commit legacy expiry maintenance
+            // in a separate context; this observation does not assert its later result.
+            var offlineObservation = Services.LicenseDecisionHistoryWriter.CaptureObserved(license,
+                DateTimeOffset.UtcNow, null, "authorized_offline_precheck_observation")
+                with { ActivationsToday = null };
             if (!license.IsActive
                 || license.RevokedAt != null
                 || license.Type == null
@@ -776,7 +886,7 @@ namespace SoftLicence.Server.Controllers
                 || await _security.IsHardwareIdBannedAsync(hardwareId)
                 || !TryBuildOfflineFeatures(license.Type.CustomParams, requestCode, out var features))
             {
-                return OfflineActivationDenied();
+                return await PersistOfflinePrecheckRefusalAsync(offlineObservation, hardwareId);
             }
 
             var activationRequest = new ActivationRequest
@@ -787,7 +897,7 @@ namespace SoftLicence.Server.Controllers
             };
 
             if (string.IsNullOrWhiteSpace(activationRequest.AppName))
-                return OfflineActivationDenied();
+                return await PersistOfflinePrecheckRefusalAsync(offlineObservation, hardwareId);
 
             var result = await ActivateCoreAsync(activationRequest, new OfflineActivationContext(features));
             if (result is OkObjectResult)
@@ -801,8 +911,10 @@ namespace SoftLicence.Server.Controllers
 
         /// <summary>
         /// Activates or reactivates exactly one canonical seat after resolving any authenticated legacy alias.
-        /// Known invalid aliases fail closed before quota or seat creation, while successful responses are signed for the canonical authority.
+        /// Known invalid aliases fail closed before quota or seat creation, while successful responses are signed for the authenticated identifier presented by the caller.
+        /// Auto-trial cannot create the reserved paid-pass type or extend its existing key without payment; paid recovery is retained.
         /// </summary>
+        /// <remarks>Existing-license decisions are frozen under the original hardware locks. Legacy observations do not assert global quota atomicity across different HWIDs. Refusals commit history only after business savepoint rollback; unconfirmed history returns the existing technical error while retaining correlation. Auto-trial creation remains a separate producer.</remarks>
         /// <param name="req">Validated JSON request containing the submitted primary hardware identity.</param>
         /// <param name="offlineContext">Optional administrator-authenticated offline feature override.</param>
         /// <returns>An activation response, including typed compatibility refusal without creating a legacy seat.</returns>
@@ -873,15 +985,21 @@ namespace SoftLicence.Server.Controllers
                         _db, product.Id, req.HardwareId);
                     await _db.Entry(existing).ReloadAsync();
 
+                    var autoTrialHistory = await CaptureTrialHistoryAsync(existing, existingAutoTrialTransaction,
+                        req.HardwareId, req.AppVersion, "auto_trial_existing");
+                    await BeginLegacyHistorySavepointAsync(autoTrialHistory);
+
                     // Révoquée → 403 Forbidden
                     if (!existing.IsActive)
                     {
                         TagActivationFailure("LICENSE_DISABLED");
-                        return StatusCode(403, _localizer["Api_AccessRevoked"].Value);
+                        return await PersistLegacyRefusalAsync(autoTrialHistory, StatusCode(403, _localizer["Api_AccessRevoked"].Value));
                     }
 
                     // Récurrent (Community) + expirée → renouvellement automatique
-                    if (existing.Type?.IsRecurring == true && existing.ExpirationDate.HasValue && DateTime.UtcNow > existing.ExpirationDate.Value)
+                    // Reserved paid passes never receive free time, even after an erroneous admin recurring toggle.
+                    if (!Services.PersonalDayPassPolicy.IsPassType(existing.Type?.Slug)
+                        && existing.Type?.IsRecurring == true && existing.ExpirationDate.HasValue && DateTime.UtcNow > existing.ExpirationDate.Value)
                     {
                         existing.ExpirationDate = DateTime.UtcNow.AddDays(existing.Type.DefaultDurationDays);
                         _db.LicenseHistories.Add(new LicenseHistory {
@@ -940,6 +1058,7 @@ namespace SoftLicence.Server.Controllers
                         var decryptedKey = _encryption.Decrypt(product.PrivateKeyXml);
                         if (decryptedKey == "ERROR_DECRYPTION_FAILED") return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
                         var signed = LicenseService.GenerateLicense(recoveryModel, decryptedKey);
+                        await SaveTrialAcceptanceAsync(autoTrialHistory, existing.HardwareId);
                         if (existingAutoTrialTransaction != null)
                             await existingAutoTrialTransaction.CommitAsync();
                         return Ok(new { LicenseFile = signed });
@@ -951,6 +1070,10 @@ namespace SoftLicence.Server.Controllers
                     }
                 }
 
+                // Recovery above preserves paid keys; only creation of the reserved paid type is denied.
+                if (Services.PersonalDayPassPolicy.IsPassType(type.Slug))
+                    return ActivationJsonFailure("PAYMENT_REQUIRED", "A confirmed payment is required for this license type.");
+
                 // Création auto (atomique)
                 await using var autoTrialTx = await Services.ProductHardwareSeatLockAuthority
                     .BeginReadCommittedTransactionAsync(_db);
@@ -960,6 +1083,9 @@ namespace SoftLicence.Server.Controllers
                 if (freemiumAlreadyConsumed != null)
                     return freemiumAlreadyConsumed;
 
+                // A failed acknowledgement may follow a committed creation; disposal
+                // owns cleanup and must not replace the existing technical response.
+                var autoTrialCommitStarted = false;
                 try
                 {
                 var newKey = Guid.NewGuid().ToString("D").ToUpper();
@@ -970,6 +1096,9 @@ namespace SoftLicence.Server.Controllers
                     ExpirationDate = DateTime.UtcNow.AddDays(type.DefaultDurationDays), IsActive = true
                 };
                 _db.Licenses.Add(newLic);
+
+                var newAutoTrialHistory = await CaptureTrialHistoryAsync(newLic, autoTrialTx,
+                    req.HardwareId, req.AppVersion, "auto_trial_create", newlyCreated: true);
 
                 // Création du siège initial pour le multi-postes
                 var firstSeat = new LicenseSeat
@@ -1016,12 +1145,19 @@ namespace SoftLicence.Server.Controllers
                     return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
                 }
                 var signed = LicenseService.GenerateLicense(newModel, decryptedKey);
+                await SaveTrialAcceptanceAsync(newAutoTrialHistory, newLic.HardwareId);
+                autoTrialCommitStarted = true;
                 if (autoTrialTx != null) await autoTrialTx.CommitAsync();
                 return Ok(new { LicenseFile = signed });
                 }
                 catch (Exception ex)
                 {
-                    if (autoTrialTx != null) await autoTrialTx.RollbackAsync();
+                    if (autoTrialTx != null && !autoTrialCommitStarted) await autoTrialTx.RollbackAsync();
+                    if (autoTrialCommitStarted)
+                    {
+                        _logger.LogError("LicenseDecisionPersistenceFailed Phase=auto_trial_create CommitOutcome=indeterminate");
+                        return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
+                    }
                     _logger.LogError(ex, "Erreur creation auto-trial pour {AppName}", req.AppName);
                     return StatusCode(500, _localizer["Api_InternalErrorSignature"].Value);
                 }
@@ -1029,8 +1165,19 @@ namespace SoftLicence.Server.Controllers
             // --- FIN INTERCEPTION ---
 
             var productIds = await GetProductHierarchyIds(product.Id);
+            var requiresPersonalPassAuthorityLock = await (
+                from pass in _db.PersonalDayPasses.AsNoTracking()
+                join candidate in _db.Licenses.AsNoTracking() on pass.LicenseId equals candidate.Id
+                where candidate.LicenseKey.ToUpper() == cleanKey && productIds.Contains(candidate.ProductId)
+                select pass.Id).AnyAsync();
             await using var activationTransaction = await Services.ProductHardwareSeatLockAuthority
                 .BeginReadCommittedTransactionAsync(_db);
+            if (requiresPersonalPassAuthorityLock)
+            {
+                // Paid-pass purchases take this lock before licence rows. First activation follows the
+                // same order so a simultaneous payment cannot split the deferred duration or seat horizon.
+                await _db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(999831, 1)");
+            }
             await Services.ProductHardwareSeatLockAuthority.AcquireAsync(
                 _db, product.Id, req.HardwareId);
             var license = await _db.Licenses
@@ -1049,30 +1196,59 @@ namespace SoftLicence.Server.Controllers
                 return BadRequest(_localizer["Api_InvalidLicenseKey"].Value);
             }
 
+            var legacyHistory = new LegacyHistoryObservation
+            {
+                Snapshot = Services.LicenseDecisionHistoryWriter.CaptureObserved(license, DateTimeOffset.UtcNow, null),
+                Transaction = activationTransaction,
+                SubmittedHardwareId = req.HardwareId,
+                Phase = offlineContext == null ? "legacy_activation" : "offline_activation",
+                AppVersion = req.AppVersion
+            };
             var hardwareResolution = await _hardwareAuthorityAliases.ResolveAsync(
+                _db,
                 license.ProductId,
                 license.Id,
                 req.HardwareId,
                 Services.HardwareAuthorityResolutionIntent.Activation,
                 HttpContext.RequestAborted);
             var authoritativeHardwareId = hardwareResolution.EffectiveHardwareId;
+            var compatibilityAliasUsed = false;
             if (hardwareResolution.Refused)
-                return ActivationJsonFailure(
-                    "HARDWARE_AUTHORITY_REFUSED",
-                    "The legacy hardware identity is no longer accepted. Use the authoritative V2 identity.");
-            if (hardwareResolution.UsedAlias)
+            {
+                var compatibilityHardwareId = await TryResolveLoggedCompatibilityAliasAsync(
+                    license, hardwareResolution);
+                if (compatibilityHardwareId == null)
+                {
+                    _logger.LogWarning(
+                        "Hardware authority refusal retained for alias {AliasId}, licence {LicenseId}; reason {RefusalReason}.",
+                        hardwareResolution.AliasId,
+                        license.Id,
+                        hardwareResolution.RefusalReason);
+                    return await PersistLegacyRefusalAsync(legacyHistory, ActivationJsonFailure(
+                        "HARDWARE_AUTHORITY_REFUSED",
+                        "The legacy hardware identity is no longer accepted. Use the authoritative V2 identity."));
+                }
+                authoritativeHardwareId = compatibilityHardwareId;
+                compatibilityAliasUsed = true;
+            }
+            legacyHistory.ResolvedHardwareId = authoritativeHardwareId;
+            legacyHistory.ResolutionSource = hardwareResolution.UsedAlias ? "provider_alias" : "provider_direct";
+            legacyHistory.Snapshot = Services.LicenseDecisionHistoryWriter.CaptureObserved(
+                license, DateTimeOffset.UtcNow, authoritativeHardwareId);
+            if (hardwareResolution.UsedAlias || compatibilityAliasUsed)
             {
                 await Services.ProductHardwareSeatLockAuthority.AcquireAsync(
                     _db, product.Id, authoritativeHardwareId);
                 if (await _security.IsHardwareIdBannedAsync(authoritativeHardwareId))
-                    return ActivationJsonFailure("BANNED", "Access denied by server");
+                    return await PersistLegacyRefusalAsync(legacyHistory, ActivationJsonFailure("BANNED", "Access denied by server"));
             }
             
+            await BeginLegacyHistorySavepointAsync(legacyHistory);
             if (!license.IsActive) 
             {
                 TagActivationFailure("LICENSE_DISABLED");
                 _logger.LogWarning("Activation refused: license {LicenseId} is disabled.", license.Id);
-                return BadRequest(_localizer["Api_LicenseDisabled"].Value);
+                return await PersistLegacyRefusalAsync(legacyHistory, BadRequest(_localizer["Api_LicenseDisabled"].Value));
             }
             
             if (license.ExpirationDate.HasValue && DateTime.UtcNow > license.ExpirationDate.Value)
@@ -1084,7 +1260,7 @@ namespace SoftLicence.Server.Controllers
                     product.Id,
                     license.Type?.Slug ?? "UNKNOWN",
                     license.ExpirationDate);
-                return BadRequest(_localizer["Api_LicenseExpired"].Value);
+                return await PersistLegacyRefusalAsync(legacyHistory, BadRequest(_localizer["Api_LicenseExpired"].Value));
             }
 
             // Vérification de version
@@ -1092,7 +1268,7 @@ namespace SoftLicence.Server.Controllers
             {
                 TagActivationFailure("VERSION_NOT_ALLOWED");
                 _logger.LogWarning("Activation refused: version not allowed for license {LicenseId}.", license.Id);
-                return BadRequest(string.Format(_localizer["Api_VersionNotAllowed"].Value, req.AppVersion));
+                return await PersistLegacyRefusalAsync(legacyHistory, BadRequest(string.Format(_localizer["Api_VersionNotAllowed"].Value, req.AppVersion)));
             }
 
             // --- VÉRIFICATION PARTENAIRE ---
@@ -1110,7 +1286,7 @@ namespace SoftLicence.Server.Controllers
                     else
                         _logger.LogError("Activation refused: partner is disabled for license {LicenseId}.", license.Id);
                     TagActivationFailure("PARTNER_INVALID");
-                    return BadRequest(_localizer["Api_LicenseDisabled"].Value);
+                    return await PersistLegacyRefusalAsync(legacyHistory, BadRequest(_localizer["Api_LicenseDisabled"].Value));
                 }
             }
 
@@ -1136,7 +1312,7 @@ namespace SoftLicence.Server.Controllers
                 {
                     TagActivationFailure("EMAIL_MISMATCH");
                     _logger.LogWarning("Activation refused: customer identity mismatch for license {LicenseId}.", license.Id);
-                    return BadRequest(_localizer["Api_EmailMismatch"].Value);
+                    return await PersistLegacyRefusalAsync(legacyHistory, BadRequest(_localizer["Api_EmailMismatch"].Value));
                 }
             }
             else if (!licenseHasEmail && isAnonymousType)
@@ -1146,20 +1322,20 @@ namespace SoftLicence.Server.Controllers
                 {
                     TagActivationFailure("EMAIL_REQUIRED");
                     _logger.LogWarning("Activation refused: customer identity is required for license {LicenseId}.", license.Id);
-                    return BadRequest(_localizer["Api_EmailRequiredAnonymous"].Value);
+                    return await PersistLegacyRefusalAsync(legacyHistory, BadRequest(_localizer["Api_EmailRequiredAnonymous"].Value));
                 }
 
                 // Vérification syntaxe + MX
                 if (!IsValidEmailSyntax(req.CustomerEmail!))
                 {
                     TagActivationFailure("EMAIL_INVALID");
-                    return BadRequest(_localizer["Api_InvalidEmail"].Value);
+                    return await PersistLegacyRefusalAsync(legacyHistory, BadRequest(_localizer["Api_InvalidEmail"].Value));
                 }
                 if (!HasValidMxRecord(req.CustomerEmail!))
                 {
                     TagActivationFailure("EMAIL_DOMAIN_INVALID");
                     _logger.LogWarning("Activation refused: customer email domain is invalid for license {LicenseId}.", license.Id);
-                    return BadRequest(_localizer["Api_InvalidEmailDomain"].Value);
+                    return await PersistLegacyRefusalAsync(legacyHistory, BadRequest(_localizer["Api_InvalidEmailDomain"].Value));
                 }
 
                 // Associer l'email et le nom à la licence
@@ -1177,17 +1353,17 @@ namespace SoftLicence.Server.Controllers
 
             if (hwidBanned)
             {
-                if (!IsPaidLicenseEligibleForAutoUnban(license))
-                    return ActivationJsonFailure("BANNED", "Access denied by server");
+                if (!Services.SecurityService.IsPaidLicenseEligibleForAutoUnban(license, DateTime.UtcNow))
+                    return await PersistLegacyRefusalAsync(legacyHistory, ActivationJsonFailure("BANNED", "Access denied by server"));
 
                 var autoUnban = await _security.TryAutoUnbanForPaidLicenseAsync(
                     _db,
                     req.HardwareId,
                     license.ProductId);
                 if (!autoUnban.CanProceed)
-                    return ActivationJsonFailure(
+                    return await PersistLegacyRefusalAsync(legacyHistory, ActivationJsonFailure(
                         "BANNED",
-                        autoUnban.PermanentBan ? "Access permanently denied" : "Access denied by server");
+                        autoUnban.PermanentBan ? "Access permanently denied" : "Access denied by server"));
 
                 hwidBanned = false;
                 deferredAutoUnbanNotification = autoUnban.Notification;
@@ -1221,20 +1397,26 @@ namespace SoftLicence.Server.Controllers
             {
                 var newActivationsDisabled = RejectIfNewActivationsDisabled(license.Type);
                 if (newActivationsDisabled != null)
-                    return newActivationsDisabled;
+                    return await PersistLegacyRefusalAsync(legacyHistory, newActivationsDisabled);
 
                 var freemiumAlreadyConsumed = await RejectIfSingleUseHardwareAlreadyConsumedAsync(license.ProductId, license.Type, authoritativeHardwareId, license.Id);
                 if (freemiumAlreadyConsumed != null)
-                    return freemiumAlreadyConsumed;
+                    return await PersistLegacyRefusalAsync(legacyHistory, freemiumAlreadyConsumed);
 
                 // Nouveau poste : On vérifie si on a encore de la place
-                var currentSeatsCount = await _db.LicenseSeats.CountAsync(s => s.LicenseId == license.Id && s.IsActive);
+                // Count and hardware evidence come from the same statement snapshot; the
+                // predicate and existing lock scope remain unchanged.
+                var observedActiveSeats = await _db.LicenseSeats.AsNoTracking()
+                    .Where(s => s.LicenseId == license.Id && s.IsActive).ToListAsync();
+                var currentSeatsCount = observedActiveSeats.Count;
+                legacyHistory.Snapshot = Services.LicenseDecisionHistoryWriter.WithObservedActiveSeats(
+                    legacyHistory.Snapshot, observedActiveSeats, authoritativeHardwareId);
 
                 if (currentSeatsCount >= license.MaxSeats)
                 {
                     TagActivationFailure("SEAT_LIMIT");
                     _logger.LogWarning("Activation refused: seat limit reached for license {LicenseId}.", license.Id);
-                    return BadRequest(string.Format(_localizer["Api_MaxActivationsReached"].Value, license.MaxSeats));
+                    return await PersistLegacyRefusalAsync(legacyHistory, BadRequest(string.Format(_localizer["Api_MaxActivationsReached"].Value, license.MaxSeats)));
                 }
 
                 // Vérification du quota d'activations par jour
@@ -1243,14 +1425,22 @@ namespace SoftLicence.Server.Controllers
                 {
                     var todayStart = DateTime.UtcNow.Date;
                     var activationsToday = await _db.LicenseSeats.CountAsync(s => s.LicenseId == license.Id && s.FirstActivatedAt >= todayStart);
+                    legacyHistory.Snapshot = legacyHistory.Snapshot with { ActivationsToday = activationsToday };
                     if (activationsToday >= maxPerDay)
                     {
                         TagActivationFailure("MAX_DAILY_ACTIVATIONS_REACHED");
                         _logger.LogWarning("Activation refused: daily activation limit reached for license {LicenseId}.", license.Id);
-                        return BadRequest(string.Format(_localizer["Api_MaxDailyActivationsReached"].Value, maxPerDay));
+                        return await PersistLegacyRefusalAsync(legacyHistory, BadRequest(string.Format(_localizer["Api_MaxDailyActivationsReached"].Value, maxPerDay)));
                     }
                 }
 
+                var acceptedAtUtc = DateTime.UtcNow;
+                await Services.PersonalDayPassActivationService.StartPendingAsync(
+                    _db,
+                    license,
+                    acceptedAtUtc,
+                    HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown",
+                    HttpContext.RequestAborted);
                 var newSeat = license.Seats
                     .Where(candidate => !candidate.IsActive
                         && string.Equals(candidate.HardwareId, authoritativeHardwareId, StringComparison.Ordinal))
@@ -1262,13 +1452,13 @@ namespace SoftLicence.Server.Controllers
                     {
                         LicenseId = license.Id,
                         HardwareId = authoritativeHardwareId,
-                        FirstActivatedAt = DateTime.UtcNow
+                        FirstActivatedAt = acceptedAtUtc
                     };
                     _db.LicenseSeats.Add(newSeat);
                 }
                 newSeat.IsActive = true;
                 newSeat.UnlinkedAt = null;
-                newSeat.LastCheckInAt = DateTime.UtcNow;
+                newSeat.LastCheckInAt = acceptedAtUtc;
                 newSeat.AppVersion = req.AppVersion;
 
                 _db.LicenseHistories.Add(new LicenseHistory {
@@ -1307,6 +1497,8 @@ namespace SoftLicence.Server.Controllers
                 license.CustomerName = req.CustomerName.Trim();
 
             AddHardwareIdV2Observation(license, product, "ACTIVATE", req);
+            var acceptedDecision = await AddLegacyDecisionAsync(legacyHistory, "accepted", "accepted", 200, HttpContext.RequestAborted);
+            legacyHistory.AcceptedEventId = acceptedDecision.Id;
             await _db.SaveChangesAsync();
 
             // Enforcement : un HWID ne peut être actif que sur une seule licence par produit
@@ -1318,7 +1510,13 @@ namespace SoftLicence.Server.Controllers
 
             try
             {
-                var signedLicenseString = _signedLicenseFiles.Generate(license, authoritativeHardwareId, features);
+                // Seat ownership remains canonical, but an authenticated alias caller needs a
+                // licence bound to the exact identifier it presented. Direct callers retain the
+                // authoritative seat identifier used by the historical path.
+                var signingHardwareId = hardwareResolution.UsedAlias || compatibilityAliasUsed
+                    ? hardwareResolution.SubmittedHardwareId
+                    : authoritativeHardwareId;
+                var signedLicenseString = _signedLicenseFiles.Generate(license, signingHardwareId, features);
                 if (activationTransaction != null)
                     await activationTransaction.CommitAsync();
                 if (deferredAutoUnbanNotification != null)
@@ -1337,7 +1535,7 @@ namespace SoftLicence.Server.Controllers
                     _notifier.Notify(
                         deferredActivationNotification.Trigger,
                         deferredActivationNotification.Title,
-                        deferredActivationNotification.Message);
+                        deferredActivationNotification.Message + BuildAcceptedDecisionNotificationContext(legacyHistory));
                 }
                 if (existingSeat == null)
                     await _hwidReuseAlerts.CheckAndNotifyAsync(license.ProductId, authoritativeHardwareId, license.Id);
@@ -1486,23 +1684,37 @@ namespace SoftLicence.Server.Controllers
             }
 
             var hardwareResolution = await _hardwareAuthorityAliases.ResolveAsync(
+                _db,
                 license.ProductId,
                 license.Id,
                 req.HardwareId,
                 Services.HardwareAuthorityResolutionIntent.StatusCheck,
                 HttpContext.RequestAborted);
             var authoritativeHardwareId = hardwareResolution.EffectiveHardwareId;
+            var compatibilityAliasUsed = false;
             if (hardwareResolution.Refused)
             {
-                TagActivationFailure("HARDWARE_AUTHORITY_REFUSED");
-                return Ok(new
+                var compatibilityHardwareId = await TryResolveLoggedCompatibilityAliasAsync(
+                    license, hardwareResolution);
+                if (compatibilityHardwareId == null)
                 {
-                    isSuccess = true,
-                    status = "HARDWARE_AUTHORITY_REFUSED",
-                    errorMessage = "The legacy hardware identity is no longer accepted. Use the authoritative V2 identity."
-                });
+                    _logger.LogWarning(
+                        "Hardware authority refusal retained for alias {AliasId}, licence {LicenseId}; reason {RefusalReason}.",
+                        hardwareResolution.AliasId,
+                        license.Id,
+                        hardwareResolution.RefusalReason);
+                    TagActivationFailure("HARDWARE_AUTHORITY_REFUSED");
+                    return Ok(new
+                    {
+                        isSuccess = true,
+                        status = "HARDWARE_AUTHORITY_REFUSED",
+                        errorMessage = "The legacy hardware identity is no longer accepted. Use the authoritative V2 identity."
+                    });
+                }
+                authoritativeHardwareId = compatibilityHardwareId;
+                compatibilityAliasUsed = true;
             }
-            if (hardwareResolution.UsedAlias)
+            if (hardwareResolution.UsedAlias || compatibilityAliasUsed)
             {
                 var authoritativeBan = await _security.GetActiveHardwareBanAsync(authoritativeHardwareId, license.ProductId);
                 if (authoritativeBan != null)
@@ -1587,9 +1799,12 @@ namespace SoftLicence.Server.Controllers
             {
                 try
                 {
+                    var signingHardwareId = hardwareResolution.UsedAlias || compatibilityAliasUsed
+                        ? hardwareResolution.SubmittedHardwareId
+                        : authoritativeHardwareId;
                     licenseFile = _signedLicenseFiles.Generate(
                         license,
-                        authoritativeHardwareId,
+                        signingHardwareId,
                         BuildFeatures(license.Type?.CustomParams));
                 }
                 catch (Exception ex)
@@ -1662,6 +1877,11 @@ namespace SoftLicence.Server.Controllers
             }
         }
 
+        /// <summary>
+        /// Consumes an authorized reset code and atomically releases all active seats and their Runtime rights.
+        /// When at least one seat is active, the live daily seat-change quota of
+        /// <see cref="Services.SeatChangeQuota"/> is enforced first; a refusal leaves the code unconsumed.
+        /// </summary>
         [HttpPost("reset-confirm")]
         public async Task<IActionResult> ConfirmReset([FromBody] ResetConfirmRequest req)
         {
@@ -1669,6 +1889,7 @@ namespace SoftLicence.Server.Controllers
             HttpContext.Items[LogKeys.LicenseKey] = req.LicenseKey;
             HttpContext.Items[LogKeys.Endpoint] = "RESET_CONFIRM";
 
+            await using var releaseTransaction = await Services.SeatRuntimeReleaseAuthority.BeginAsync(_db, HttpContext.RequestAborted);
             var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
             if (product == null) return BadRequest(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
 
@@ -1678,6 +1899,7 @@ namespace SoftLicence.Server.Controllers
             var confirmProductIds = await GetProductHierarchyIds(product.Id);
             var cleanKey = req.LicenseKey.Trim().ToUpper();
             var license = await _db.Licenses
+                .Include(l => l.Type)
                 .Include(l => l.Seats)
                 .FirstOrDefaultAsync(l => l.LicenseKey.ToUpper() == cleanKey && confirmProductIds.Contains(l.ProductId));
 
@@ -1689,6 +1911,21 @@ namespace SoftLicence.Server.Controllers
                     Encoding.UTF8.GetBytes(req.ResetCode)))
             {
                 return BadRequest(_localizer["Api_InvalidResetCode"].Value);
+            }
+
+            // A customer reset releases seats like a dashboard or Desktop unlink, so it obeys the
+            // same live daily seat-change quota (TKT-001206). The check runs before the one-time
+            // code is consumed, so a refused reset can be retried after the UTC reset. A reset
+            // with no active seat releases nothing and is not limited.
+            if (license.Seats?.Any(s => s.IsActive) == true)
+            {
+                var seatChangeQuota = await Services.SeatChangeQuota.GetStatusAsync(
+                    _db, license, DateTime.UtcNow, HttpContext.RequestAborted);
+                if (seatChangeQuota.IsExhausted)
+                {
+                    TagActivationFailure("MAX_DAILY_DEACTIVATIONS_REACHED");
+                    return BadRequest(string.Format(_localizer["Api_MaxDailyUnlinksReached"].Value, seatChangeQuota.Limit));
+                }
             }
 
             // Reset effectif
@@ -1704,6 +1941,7 @@ namespace SoftLicence.Server.Controllers
                 {
                     seat.IsActive = false;
                     seat.UnlinkedAt = DateTime.UtcNow;
+                    await Services.SeatRuntimeReleaseAuthority.InvalidateAsync(_db, license.ProductId, seat, seat.UnlinkedAt.Value, HttpContext.RequestAborted);
                     
                     _db.LicenseHistories.Add(new LicenseHistory {
                         LicenseId = license.Id,
@@ -1717,6 +1955,8 @@ namespace SoftLicence.Server.Controllers
             }
 
             await _db.SaveChangesAsync();
+            if (releaseTransaction != null)
+                await releaseTransaction.CommitAsync(HttpContext.RequestAborted);
 
             return Ok(new { Message = _localizer["Api_UnlinkSuccess"].Value });
         }
@@ -1733,8 +1973,9 @@ namespace SoftLicence.Server.Controllers
         }
 
         /// <summary>
-        /// Deactivates the active canonical seat proven by the submitted identity while preserving that seat for later authenticated reactivation.
+        /// Atomically deactivates the proven canonical seat and terminalizes its Runtime rights under the global mutation lock, preserving the seat for later authenticated reactivation.
         /// Non-canonical primary input, alias divergence, compatibility retirement, and bans fail before any seat mutation.
+        /// The live daily seat-change quota shared with the Website dashboard is enforced before the release.
         /// </summary>
         /// <param name="req">Deactivation request containing the submitted identity and audited source.</param>
         /// <returns>A success response only after the exact active canonical seat is deactivated and persisted.</returns>
@@ -1744,6 +1985,7 @@ namespace SoftLicence.Server.Controllers
             if (!Services.HardwareAuthorityAliasResolver.IsCanonicalHardwareId(req.HardwareId))
                 return RejectInvalidPrimaryHardwareId();
 
+            await using var releaseTransaction = await Services.SeatRuntimeReleaseAuthority.BeginAsync(_db, HttpContext.RequestAborted);
             var cleanKey = req.LicenseKey.Trim().ToUpper();
             var source = NormalizeDeactivationSource(req.Source, req.DeactivationSource);
             HttpContext.Items[LogKeys.AppName] = req.AppName;
@@ -1780,6 +2022,7 @@ namespace SoftLicence.Server.Controllers
             }
 
             var hardwareResolution = await _hardwareAuthorityAliases.ResolveAsync(
+                _db,
                 license.ProductId,
                 license.Id,
                 req.HardwareId,
@@ -1800,18 +2043,16 @@ namespace SoftLicence.Server.Controllers
                 return StatusCode(403, "Access denied");
             }
 
-            // Vérification du quota de déliements par jour
-            var maxPerDay = license.Type?.MaxActivationsPerDay ?? 0;
-            if (maxPerDay > 0)
+            // Daily seat-change quota shared with the Website dashboard (TKT-001206). It counts
+            // durable release events, so unlinking, reactivating and unlinking the same seat again
+            // cannot reset the counter; the limit is read live from the licence type.
+            var seatChangeQuota = await Services.SeatChangeQuota.GetStatusAsync(
+                _db, license, DateTime.UtcNow, HttpContext.RequestAborted);
+            if (seatChangeQuota.IsExhausted)
             {
-                var todayStart = DateTime.UtcNow.Date;
-                var unlinksToday = await _db.LicenseSeats.CountAsync(s => s.LicenseId == license.Id && !s.IsActive && s.UnlinkedAt >= todayStart);
-                if (unlinksToday >= maxPerDay)
-                {
-                    _logger.LogWarning("Deliement refuse : Limite quotidienne atteinte ({Max}/jour) pour la clé '{LicenseKey}'", maxPerDay, cleanKey);
-                    TagActivationFailure("MAX_DAILY_DEACTIVATIONS_REACHED");
-                    return BadRequest(string.Format(_localizer["Api_MaxDailyUnlinksReached"].Value, maxPerDay));
-                }
+                _logger.LogWarning("Deliement refuse : Limite quotidienne atteinte ({Max}/jour) pour la clé '{LicenseKey}'", seatChangeQuota.Limit, cleanKey);
+                TagActivationFailure("MAX_DAILY_DEACTIVATIONS_REACHED");
+                return BadRequest(string.Format(_localizer["Api_MaxDailyUnlinksReached"].Value, seatChangeQuota.Limit));
             }
 
             var seat = license.Seats?.FirstOrDefault(s => s.HardwareId == authoritativeHardwareId && s.IsActive);
@@ -1837,6 +2078,7 @@ namespace SoftLicence.Server.Controllers
 
             seat.IsActive = false;
             seat.UnlinkedAt = DateTime.UtcNow;
+            await Services.SeatRuntimeReleaseAuthority.InvalidateAsync(_db, license.ProductId, seat, seat.UnlinkedAt.Value, HttpContext.RequestAborted);
             SyncLegacyHardwareStateFromSeats(license);
 
             _logger.LogInformation(
@@ -1855,6 +2097,8 @@ namespace SoftLicence.Server.Controllers
             });
 
             await _db.SaveChangesAsync();
+            if (releaseTransaction != null)
+                await releaseTransaction.CommitAsync(HttpContext.RequestAborted);
 
             return Ok(new { Message = _localizer["Api_UnlinkSuccess"].Value });
         }

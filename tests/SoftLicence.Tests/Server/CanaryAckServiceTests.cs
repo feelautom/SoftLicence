@@ -24,8 +24,10 @@ public sealed class CanaryAckServiceTests : IDisposable
         var connectionString = $"Data Source={databaseName};Mode=Memory;Cache=Shared";
         _keepAlive = new SqliteConnection(connectionString);
         _keepAlive.Open();
+        SqliteFullModelHarness.RegisterConnection(_keepAlive);
         _options = new DbContextOptionsBuilder<LicenseDbContext>()
             .UseSqlite(connectionString)
+            .AddInterceptors(SqliteFullModelHarness.ConnectionInterceptor, SqliteFullModelHarness.CommandInterceptor)
             .Options;
         using (var db = new LicenseDbContext(_options))
             db.Database.EnsureCreated();

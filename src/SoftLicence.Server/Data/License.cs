@@ -30,6 +30,11 @@ namespace SoftLicence.Server.Data
         public int RecoveryCount { get; set; } = 0;
 
         public bool IsActive { get; set; } = true;
+        /// <summary>
+        /// Gets the opaque PostgreSQL-generated version replaced on every row update, including
+        /// legacy and SQL writers. Clients must round-trip it without interpreting its value.
+        /// </summary>
+        public Guid AuthorityVersion { get; set; }
         public string? RevocationReason { get; set; }
         public DateTime? RevokedAt { get; set; }
 

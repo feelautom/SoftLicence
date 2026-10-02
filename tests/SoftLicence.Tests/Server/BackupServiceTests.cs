@@ -89,6 +89,32 @@ public sealed class BackupServiceTests
         Assert.Equal(2, runner.FinalTargets.Distinct(StringComparer.Ordinal).Count());
     }
 
+    /// <summary>
+    /// Verifies new manifests bind the artifact to the exact configured PostgreSQL target without
+    /// serializing connection credentials.
+    /// </summary>
+    [Fact]
+    public async Task BackupManifest_BindsExactCanonicalPostgreSqlTargetWithoutCredentials()
+    {
+        var runner = new ControlledBackupRunner();
+        runner.ReleaseFirstPipe.TrySetResult();
+        var service = CreateService(runner);
+
+        await service.BackupDatabaseAsync();
+
+        var manifestJson = Assert.Single(runner.UploadedManifests);
+        using var document = System.Text.Json.JsonDocument.Parse(manifestJson);
+        var root = document.RootElement;
+        var canonicalTarget = "postgresql-target-v1\nlocalhost\n5432\ntest";
+        var expectedTargetSha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(canonicalTarget))).ToLowerInvariant();
+        Assert.Equal("softlicence-backup-manifest-v2", root.GetProperty("schema").GetString());
+        Assert.Equal("test", root.GetProperty("sourceDatabase").GetString());
+        Assert.Equal(expectedTargetSha256, root.GetProperty("sourceTargetSha256").GetString());
+        Assert.DoesNotContain("Password", manifestJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Username", manifestJson, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public async Task FailedRemoteHash_CleansPartialFinalAndManifestArtifacts()
     {
@@ -230,6 +256,10 @@ public sealed class BackupServiceTests
         Assert.Equal(cancellation.Token, error.CancellationToken);
     }
 
+    /// <summary>
+    /// Verifies listing preserves legacy files and valid v1 managed dumps while hiding partial,
+    /// malformed, wrong-size, missing-manifest, and wrong-target v2 managed artifacts.
+    /// </summary>
     [Fact]
     public async Task ListBackups_RequiresValidManifestForManagedDumpAndPreservesLegacyFormats()
     {
@@ -243,6 +273,7 @@ public sealed class BackupServiceTests
         Assert.DoesNotContain(ListingRunner.MissingManifestDump, names);
         Assert.DoesNotContain(ListingRunner.InvalidManifestDump, names);
         Assert.DoesNotContain(ListingRunner.WrongSizeManifestDump, names);
+        Assert.DoesNotContain(ListingRunner.WrongTargetManifestDump, names);
         Assert.Contains("softlicence_2026-07-29_09-00.sql", names);
         Assert.Contains("legacy-manual.dump", names);
         Assert.Contains("legacy-manual.backup", names);
@@ -293,12 +324,25 @@ public sealed class BackupServiceTests
         public TaskCompletionSource ReleaseFirstPipe { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public List<string> PartialTargets { get; } = [];
         public List<string> FinalTargets { get; } = [];
+        /// <summary>Captures manifest payloads supplied to the simulated remote upload.</summary>
+        public List<string> UploadedManifests { get; } = [];
         public int PipeCalls => Volatile.Read(ref _pipeCalls);
         public int MaximumConcurrentPipes => Volatile.Read(ref _maximumConcurrentPipes);
 
+        /// <summary>
+        /// Simulates successful rclone operations and captures uploaded manifests and final targets;
+        /// no external process or filesystem mutation is performed.
+        /// </summary>
         public Task<BackupProcessResult> RunAsync(BackupProcessSpec process, ReadOnlyMemory<byte>? standardInput,
             TimeSpan timeout, CancellationToken cancellationToken)
         {
+            if (process.Arguments.Count > 1
+                && process.Arguments[0] == "rcat"
+                && process.Arguments[1].Contains(".manifest.json.partial-", StringComparison.Ordinal)
+                && standardInput.HasValue)
+            {
+                UploadedManifests.Add(System.Text.Encoding.UTF8.GetString(standardInput.Value.Span));
+            }
             if (process.Arguments.Count > 0 && process.Arguments[0] == "size")
                 return Task.FromResult(new BackupProcessResult(0, "{\"count\":1,\"bytes\":123}", ""));
             if (process.Arguments.Count > 0 && process.Arguments[0] == "hashsum")
@@ -547,7 +591,13 @@ public sealed class BackupServiceTests
         public const string MissingManifestDump = "softlicence_2026-07-29_10-01-00-000_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.dump";
         public const string InvalidManifestDump = "softlicence_2026-07-29_10-02-00-000_cccccccccccccccccccccccccccccccc.dump";
         public const string WrongSizeManifestDump = "softlicence_2026-07-29_10-03-00-000_dddddddddddddddddddddddddddddddd.dump";
+        /// <summary>Managed dump whose v2 manifest is intentionally bound to another target.</summary>
+        public const string WrongTargetManifestDump = "softlicence_2026-07-29_10-04-00-000_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.dump";
 
+        /// <summary>
+        /// Returns a deterministic remote listing and manifest payloads, including a wrong-target
+        /// v2 manifest used to prove listing validation fails closed.
+        /// </summary>
         public Task<BackupProcessResult> RunAsync(BackupProcessSpec process, ReadOnlyMemory<byte>? standardInput,
             TimeSpan timeout, CancellationToken cancellationToken)
         {
@@ -562,6 +612,8 @@ public sealed class BackupServiceTests
                     $"Backups/Database/{InvalidManifestDump}.manifest.json|20|2026-07-29 10:02:01",
                     $"Backups/Database/{WrongSizeManifestDump}|123|2026-07-29 10:03:00",
                     $"Backups/Database/{WrongSizeManifestDump}.manifest.json|240|2026-07-29 10:03:01",
+                    $"Backups/Database/{WrongTargetManifestDump}|123|2026-07-29 10:04:00",
+                    $"Backups/Database/{WrongTargetManifestDump}.manifest.json|360|2026-07-29 10:04:01",
                     $"Backups/Database/{ValidManagedDump}.partial-deadbeef|50|2026-07-29 10:03:00",
                     "Backups/Database/softlicence_2026-07-29_09-00.sql|500|2026-07-29 09:00:00",
                     "Backups/Database/legacy-manual.dump|600|2026-07-28 09:00:00",
@@ -580,6 +632,11 @@ public sealed class BackupServiceTests
                 if (path.EndsWith(WrongSizeManifestDump + ".manifest.json", StringComparison.Ordinal))
                 {
                     var json = $$"""{"schema":"softlicence-backup-manifest-v1","file":"{{WrongSizeManifestDump}}","sizeBytes":122,"sha256":"{{Hash}}","createdAtUtc":"2026-07-29T10:03:00Z","format":"postgresql-custom"}""";
+                    return Task.FromResult(new BackupProcessResult(0, json, ""));
+                }
+                if (path.EndsWith(WrongTargetManifestDump + ".manifest.json", StringComparison.Ordinal))
+                {
+                    var json = $$"""{"schema":"softlicence-backup-manifest-v2","file":"{{WrongTargetManifestDump}}","sizeBytes":123,"sha256":"{{Hash}}","createdAtUtc":"2026-07-29T10:04:00Z","format":"postgresql-custom","sourceDatabase":"other","sourceTargetSha256":"{{new string('f', 64)}}"}""";
                     return Task.FromResult(new BackupProcessResult(0, json, ""));
                 }
                 return Task.FromResult(new BackupProcessResult(0, "{\"schema\":", ""));

@@ -25,9 +25,20 @@ public sealed class LlmTipFeedbackIntegrationTests : IClassFixture<WebApplicatio
     {
         _connection = new SqliteConnection("Data Source=:memory:");
         _connection.Open();
+        SqliteFullModelHarness.RegisterConnection(_connection);
         _sqliteServices = new ServiceCollection()
             .AddEntityFrameworkSqlite()
             .BuildServiceProvider();
+
+        // Create the schema before the host starts: its background services share this single
+        // connection and a transaction opened at startup makes EnsureCreated fail under load.
+        var schemaOptions = new DbContextOptionsBuilder<LicenseDbContext>()
+            .UseSqlite(_connection)
+            .AddInterceptors(SqliteFullModelHarness.ConnectionInterceptor, SqliteFullModelHarness.CommandInterceptor)
+            .Options;
+        using (var schemaDb = new LicenseDbContext(schemaOptions))
+            schemaDb.Database.EnsureCreated();
+
         _factory = factory.WithWebHostBuilder(builder =>
         {
             builder.UseSetting("IsIntegrationTest", "true");
@@ -39,14 +50,11 @@ public sealed class LlmTipFeedbackIntegrationTests : IClassFixture<WebApplicatio
                 services.RemoveAll<IBugTraceProxyService>();
                 services.AddDbContextFactory<LicenseDbContext>(options => options
                     .UseSqlite(_connection)
+                    .AddInterceptors(SqliteFullModelHarness.ConnectionInterceptor, SqliteFullModelHarness.CommandInterceptor)
                     .UseInternalServiceProvider(_sqliteServices));
                 services.AddSingleton<IBugTraceProxyService>(_fakeBugTrace);
             });
         });
-
-        using var scope = _factory.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
-        db.Database.EnsureCreated();
     }
 
     public void Dispose()

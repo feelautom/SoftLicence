@@ -162,6 +162,36 @@ public sealed class TelemetryMachineProfileAnalyticsServiceTests
         Assert.Null(profile);
     }
 
+    [Fact]
+    public async Task GetMachineProfileForProductKeyAsync_ExactSnapshotFailsInsteadOfTruncating()
+    {
+        var productId = Guid.NewGuid();
+        await using (var db = new LicenseDbContext(_dbOptions))
+        {
+            db.Products.Add(new Product
+            {
+                Id = productId, Name = "TIAConnect", PrivateKeyXml = "k",
+                PublicKeyXml = "k", ApiSecret = "secret"
+            });
+            foreach (var index in Enumerable.Range(0, 3))
+                AddEvent(db, productId, "HW-A", $"Event_{index}", "1.0", "{}",
+                    DateTime.UtcNow.AddMinutes(-index));
+            await db.SaveChangesAsync();
+        }
+
+        var service = new TelemetryMachineProfileAnalyticsService(_dbFactoryMock.Object, _cache);
+        var bounded = await service.GetMachineProfileForProductKeyAsync(
+            "secret", "HW-A", days: 7, top: 10, take: 2);
+        Assert.NotNull(bounded);
+        Assert.False(bounded.Complete);
+        Assert.Equal(3, bounded.RecordsAnalyzed);
+        Assert.Equal(2, bounded.RecentRecords.Count);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.GetMachineProfileForProductKeyAsync(
+                "secret", "HW-A", days: 7, top: 10, take: 2, requireComplete: true));
+    }
+
     private static void AddEvent(
         LicenseDbContext db,
         Guid productId,

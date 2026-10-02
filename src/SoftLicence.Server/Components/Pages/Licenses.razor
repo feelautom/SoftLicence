@@ -245,6 +245,10 @@
                                         }
                                     </div>
                                 }
+                                else if (hasSeatHistory)
+                                {
+                                    <span class="text-muted small fst-italic">@L["Licenses_SeatStatusUnlinked"]</span>
+                                }
                                 else
                                 {
                                     <span class="text-muted small">-</span>
@@ -276,9 +280,11 @@
                             </td>
                             <td>
                                 @{
-                                    var hasSeatHistoryForStatus = l.Seats?.Any() ?? false;
-                                    var isActivated = (l.Seats?.Any(s => s.IsActive) ?? false)
-                                        || (!hasSeatHistoryForStatus && !string.IsNullOrEmpty(l.HardwareId));
+                                    // Une fois activée au moins une fois, la licence ne redevient jamais "Délivré" :
+                                    // sa validité continue de se décompter même sans poste actuellement connecté.
+                                    var isActivated = (l.Seats?.Any() ?? false)
+                                        || !string.IsNullOrEmpty(l.HardwareId)
+                                        || l.ActivationDate.HasValue;
                                     var isExpired = l.ExpirationDate.HasValue && DateTime.UtcNow >= l.ExpirationDate.Value;
                                 }
                                 @if (!l.IsActive)
@@ -290,6 +296,13 @@
                                         }
                                     </div>
                                 }
+                                else if (isExpired)
+                                {
+                                    <div class="d-flex flex-column">
+                                        <span class="text-warning small">● @L["Common_Expired"]</span>
+                                        <small class="text-muted" style="font-size: 0.65rem">@TZ.ToLocal(l.ExpirationDate!.Value).ToString("dd/MM/yyyy")</small>
+                                    </div>
+                                }
                                 else if (!isActivated)
                                 {
                                     <div class="d-flex flex-column">
@@ -297,35 +310,6 @@
                                         @if (l.ValidityDays.HasValue)
                                         {
                                             <small class="text-muted" style="font-size: 0.65rem">@string.Format(L["Common_DaysValidity"], l.ValidityDays.Value)</small>
-                                        }
-                                    </div>
-                                }
-                                else if (isExpired)
-                                {
-                                    <div class="d-flex flex-column">
-                                        <span class="text-warning small">● @L["Common_Expired"]</span>
-                                        <small class="text-muted" style="font-size: 0.65rem">@TZ.ToLocal(l.ExpirationDate!.Value).ToString("dd/MM/yyyy")</small>
-                                        @if (l.IsActive)
-                                        {
-                                            @if (extendingLicenseId == l.Id)
-                                            {
-                                                <div class="d-flex flex-column gap-1 mt-1 align-items-center">
-                                                    <div class="btn-group btn-group-sm">
-                                                        <button class="btn btn-outline-success px-1 py-0" style="font-size: 0.65rem" @onclick="() => ExtendLicense(l, 30)">+30j</button>
-                                                        <button class="btn btn-outline-success px-1 py-0" style="font-size: 0.65rem" @onclick="() => ExtendLicense(l, 90)">+90j</button>
-                                                        <button class="btn btn-outline-success px-1 py-0" style="font-size: 0.65rem" @onclick="() => ExtendLicense(l, 365)">+1an</button>
-                                                    </div>
-                                                    <div class="d-flex align-items-center gap-1">
-                                                        <input type="date" class="form-control form-control-sm py-0" style="font-size: 0.65rem; width: 120px" @bind="extendCustomDate" />
-                                                        <button class="btn btn-sm btn-outline-info px-1 py-0" style="font-size: 0.65rem" @onclick="() => ExtendLicenseToDate(l)">OK</button>
-                                                    </div>
-                                                    <button class="btn btn-sm btn-link text-muted p-0" style="font-size: 0.6rem" @onclick="() => extendingLicenseId = null">@L["Common_Cancel"]</button>
-                                                </div>
-                                            }
-                                            else
-                                            {
-                                                <button class="btn btn-sm btn-link text-info p-0 mt-1" style="font-size: 0.6rem" @onclick="() => { extendingLicenseId = l.Id; extendCustomDate = DateTime.UtcNow.AddDays(30); }" @onclick:stopPropagation="true">@L["Licenses_Extend"]</button>
-                                            }
                                         }
                                     </div>
                                 }
@@ -349,27 +333,10 @@
                                         }
                                     }
                                 }
-                                @if (l.ExpirationDate.HasValue && l.IsActive)
+                                @if (l.ExpirationDate.HasValue && l.IsActive && !l.RevokedAt.HasValue)
                                 {
-                                    @if (extendingLicenseId == l.Id)
-                                    {
-                                        <div class="d-flex flex-column gap-1 mt-1 align-items-center">
-                                            <div class="btn-group btn-group-sm">
-                                                <button class="btn btn-outline-success px-1 py-0" style="font-size: 0.65rem" @onclick="() => ExtendLicense(l, 30)">+30j</button>
-                                                <button class="btn btn-outline-success px-1 py-0" style="font-size: 0.65rem" @onclick="() => ExtendLicense(l, 90)">+90j</button>
-                                                <button class="btn btn-outline-success px-1 py-0" style="font-size: 0.65rem" @onclick="() => ExtendLicense(l, 365)">+1an</button>
-                                            </div>
-                                            <div class="d-flex align-items-center gap-1">
-                                                <input type="date" class="form-control form-control-sm py-0" style="font-size: 0.65rem; width: 120px" @bind="extendCustomDate" />
-                                                <button class="btn btn-sm btn-outline-info px-1 py-0" style="font-size: 0.65rem" @onclick="() => ExtendLicenseToDate(l)">OK</button>
-                                            </div>
-                                            <button class="btn btn-sm btn-link text-muted p-0" style="font-size: 0.6rem" @onclick="() => extendingLicenseId = null">@L["Common_Cancel"]</button>
-                                        </div>
-                                    }
-                                    else
-                                    {
-                                        <button class="btn btn-sm btn-link text-info p-0" style="font-size: 0.6rem" @onclick="() => { extendingLicenseId = l.Id; extendCustomDate = l.ExpirationDate.Value.AddDays(30); }" @onclick:stopPropagation="true">@L["Licenses_Extend"]</button>
-                                    }
+                                    <button class="btn btn-sm btn-link text-info p-0" style="font-size: 0.6rem"
+                                            @onclick="() => licenseToExtend = l" @onclick:stopPropagation="true">@L["Licenses_Extend"]</button>
                                 }
                             </td>
                             <td class="text-center">
@@ -552,12 +519,21 @@
                                                             <tbody>
                                                                 @foreach (var entry in l.History.OrderByDescending(h => h.Timestamp))
                                                                 {
-                                                                    <tr>
+                                                                    <tr id="@($"history-{entry.Id:D}")">
                                                                         <td class="text-muted">@TZ.ToLocal(entry.Timestamp).ToString("dd/MM/yyyy HH:mm:ss")</td>
                                                                         <td>
                                                                             <span class="badge @GetActionBadgeClass(entry.Action)" title="@entry.Action">@GetActionDisplayLabel(entry)</span>
                                                                         </td>
-                                                                        <td class="text-info-emphasis">@GetHistoryDetailsDisplay(entry)</td>
+                                                                        <td class="text-info-emphasis">
+                                                                            @if (entry.Action == "ACTIVATION_DECISION_V1")
+                                                                            {
+                                                                                <LicenseDecisionDetails Entry="@SoftLicence.Server.Models.LicenseDecisionHistoryProjection.FromHistory(entry, l.ProductId)" />
+                                                                            }
+                                                                            else
+                                                                            {
+                                                                                @GetHistoryDetailsDisplay(entry)
+                                                                            }
+                                                                        </td>
                                                                         <td class="small text-secondary">@GetPerformedByDisplay(entry.PerformedBy)</td>
                                                                     </tr>
                                                                 }
@@ -751,6 +727,12 @@
     </div>
 }
 
+@if (licenseToExtend is not null)
+{
+    <LicenseExtensionDialog @key="licenseToExtend.Id" License="licenseToExtend" Applied="OnExtensionAppliedAsync"
+                            Canceled="() => licenseToExtend = null" />
+}
+
 @code {
     private List<License> LicensesList = new();
     private List<Product> Products = new();
@@ -774,8 +756,8 @@
     private Guid? editingSeatsLicenseId;
     private int editingSeatsValue = 1;
 
-    private Guid? extendingLicenseId;
-    private DateTime extendCustomDate = DateTime.UtcNow.AddDays(30);
+    /// <summary>Owns the only extension dialog; the captured version is checked again when confirmed.</summary>
+    private License? licenseToExtend;
 
     private Guid? changingTypeLicenseId;
     private Guid changingTypeNewId;
@@ -868,66 +850,12 @@
         Toast.ShowSuccess($"Type: {oldTypeName} → {newType.Name}");
     }
 
-    private async Task ExtendLicense(License l, int days)
+    /// <summary>Reloads authoritative versions after success, then closes the extension dialog.</summary>
+    private async Task OnExtensionAppliedAsync()
     {
-        using var db = await DbFactory.CreateDbContextAsync();
-        var baseDate = l.ExpirationDate ?? DateTime.UtcNow;
-        if (baseDate < DateTime.UtcNow) baseDate = DateTime.UtcNow;
-        var oldExpiry = l.ExpirationDate?.ToString("dd/MM/yyyy HH:mm") ?? "Lifetime";
-        var newExpiry = baseDate.AddDays(days);
-
-        await db.Licenses.Where(x => x.Id == l.Id)
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(x => x.ExpirationDate, newExpiry)
-                .SetProperty(x => x.IsActive, true));
-
-        db.Set<LicenseHistory>().Add(new LicenseHistory
-        {
-            LicenseId = l.Id,
-            Action = "EXTENDED",
-            Details = $"Expiration: {oldExpiry} → {newExpiry:dd/MM/yyyy HH:mm} (+{days}j)",
-            PerformedBy = "Admin"
-        });
-        await db.SaveChangesAsync();
-
-        l.ExpirationDate = newExpiry;
-        l.IsActive = true;
-        extendingLicenseId = null;
-        Toast.ShowSuccess($"+{days}j → {TZ.ToLocal(newExpiry):dd/MM/yyyy HH:mm}");
+        await LoadData();
+        licenseToExtend = null;
     }
-
-    private async Task ExtendLicenseToDate(License l)
-    {
-        if (extendCustomDate <= DateTime.UtcNow)
-        {
-            Toast.ShowError(L["Licenses_ExtendDateInvalid"].Value);
-            return;
-        }
-
-        using var db = await DbFactory.CreateDbContextAsync();
-        var oldExpiry = l.ExpirationDate?.ToString("dd/MM/yyyy HH:mm") ?? "Lifetime";
-        var newExpiry = DateTime.SpecifyKind(extendCustomDate, DateTimeKind.Utc);
-
-        await db.Licenses.Where(x => x.Id == l.Id)
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(x => x.ExpirationDate, newExpiry)
-                .SetProperty(x => x.IsActive, true));
-
-        db.Set<LicenseHistory>().Add(new LicenseHistory
-        {
-            LicenseId = l.Id,
-            Action = "EXTENDED",
-            Details = $"Expiration: {oldExpiry} → {newExpiry:dd/MM/yyyy HH:mm} (date personnalisée)",
-            PerformedBy = "Admin"
-        });
-        await db.SaveChangesAsync();
-
-        l.ExpirationDate = newExpiry;
-        l.IsActive = true;
-        extendingLicenseId = null;
-        Toast.ShowSuccess($"→ {TZ.ToLocal(newExpiry):dd/MM/yyyy HH:mm}");
-    }
-
     private void OnTypeSelected(ChangeEventArgs e)
     {
         SelectedTypeId = e.Value?.ToString() ?? "";
@@ -978,12 +906,23 @@
         return MaskedSecret();
     }
 
+    /// <summary>Optional exact licence target for authenticated history deep links; it never bypasses licenses.view.</summary>
+    [SupplyParameterFromQuery(Name = "licenseId")]
+    public Guid? RequestedLicenseId { get; set; }
+
+    /// <summary>Loads only after licenses.view authorization and opens an exact initial history deep link when its licence is present.</summary>
+    /// <remarks>Missing targets remain an empty result. The query target is consumed on initial component initialization; same-component query changes do not trigger this initialization method.</remarks>
     protected override async Task OnInitializedAsync()
     {
         isAuthorized = await Auth.HasPermissionAsync("licenses.view");
         if (isAuthorized)
         {
             await LoadData();
+            if (RequestedLicenseId is { } requested && LicensesList.SingleOrDefault(l => l.Id == requested) is { } selected)
+            {
+                ExpandedLicenseId = requested;
+                await SwitchToHistoryTab(selected);
+            }
         }
     }
 
@@ -997,20 +936,18 @@
         }
     }
 
+    /// <summary>Refreshes mixed licence history from a fresh read context on every consultation, preserving original timestamps and unknown legacy provenance.</summary>
     private async Task SwitchToHistoryTab(License l)
     {
         activeDetailTab = "history";
-        // Lazy-load history on-demand via fresh context
-        if (!l.History.Any())
-        {
             using var db = await DbFactory.CreateDbContextAsync();
             var history = await db.LicenseHistories
                 .AsNoTracking()
                 .Where(h => h.LicenseId == l.Id)
                 .OrderByDescending(h => h.Timestamp)
                 .ToListAsync();
+            l.History.Clear();
             foreach (var h in history) l.History.Add(h);
-        }
     }
 
     private string GetActionBadgeClass(string action) => action switch
@@ -1123,6 +1060,7 @@
         await LoadData();
     }
 
+    /// <summary>Loads the authorized licence list with the exact optional initial target filter; missing identifiers yield no matching row rather than a broader history lookup.</summary>
     private async Task LoadData()
     {
         try
@@ -1137,8 +1075,10 @@
             statRevoked = await db.Licenses.CountAsync(l => !l.IsActive);
             statExpired = await db.Licenses.CountAsync(l => l.IsActive && l.ExpirationDate.HasValue && l.ExpirationDate <= DateTime.UtcNow);
             statIssued = await db.Licenses.CountAsync(l => l.IsActive
-                && !l.Seats.Any(s => s.IsActive)
-                && (l.Seats.Any() || l.HardwareId == null || l.HardwareId == ""));
+                && (!l.ExpirationDate.HasValue || l.ExpirationDate > DateTime.UtcNow)
+                && !l.Seats.Any()
+                && (l.HardwareId == null || l.HardwareId == "")
+                && !l.ActivationDate.HasValue);
             statActive = statTotal - statRevoked - statExpired - statIssued;
 
             bannedHwids = (await db.BannedHardwareIds
@@ -1157,6 +1097,8 @@
                 .ToList();
 
             var query = db.Licenses.AsQueryable();
+            if (RequestedLicenseId is { } requestedLicenseId)
+                query = query.Where(l => l.Id == requestedLicenseId);
 
             if (!string.IsNullOrWhiteSpace(searchText))
             {
@@ -1177,14 +1119,16 @@
 
             if (filterStatus == "active")
                 query = query.Where(l => l.IsActive
-                    && (l.Seats.Any(s => s.IsActive) || (!l.Seats.Any() && l.HardwareId != null))
+                    && (l.Seats.Any() || (l.HardwareId != null && l.HardwareId != "") || l.ActivationDate.HasValue)
                     && (!l.ExpirationDate.HasValue || l.ExpirationDate > DateTime.UtcNow));
             else if (filterStatus == "expired")
                 query = query.Where(l => l.IsActive && l.ExpirationDate.HasValue && l.ExpirationDate <= DateTime.UtcNow);
             else if (filterStatus == "issued")
                 query = query.Where(l => l.IsActive
-                    && !l.Seats.Any(s => s.IsActive)
-                    && (l.Seats.Any() || l.HardwareId == null || l.HardwareId == ""));
+                    && (!l.ExpirationDate.HasValue || l.ExpirationDate > DateTime.UtcNow)
+                    && !l.Seats.Any()
+                    && (l.HardwareId == null || l.HardwareId == "")
+                    && !l.ActivationDate.HasValue);
             else if (filterStatus == "revoked")
                 query = query.Where(l => !l.IsActive);
 

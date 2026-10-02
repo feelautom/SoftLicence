@@ -8,6 +8,7 @@ public sealed class SecurityBanAuditAnalyticsService
 {
     private const int DefaultTake = 25;
     private const int MaxTake = 100;
+    private const int MaxExactEvidenceRows = 10_000;
     private static readonly TimeSpan NearSourceWindow = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan FallbackSourceWindow = TimeSpan.FromHours(24);
 
@@ -29,19 +30,34 @@ public sealed class SecurityBanAuditAnalyticsService
         bool includeInactive,
         bool includeSourceEvents,
         int take = DefaultTake,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool exactHardwareId = false,
+        bool allowPartial = false)
     {
         take = Math.Clamp(take, 1, MaxTake);
+        if (exactHardwareId && (string.IsNullOrWhiteSpace(hardwareId) || componentHash != null
+            || componentType != null || clientIp != null || emailFragment != null || licenseFragment != null))
+            throw new ArgumentException("Exact hardware mode requires hardwareId as its only identity selector.");
         var criteria = NormalizeCriteria(hardwareId, componentHash, componentType, clientIp, emailFragment, licenseFragment);
 
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
         var productScopeIds = await ProductScopeResolver.ResolveProductScopeIdsAsync(db, productId, cancellationToken);
-        var candidateHwids = await ResolveCandidateHardwareIdsAsync(db, productScopeIds, criteria, cancellationToken);
-        var candidateHashes = await ResolveCandidateComponentHashesAsync(db, productScopeIds, criteria, candidateHwids, cancellationToken);
+        var candidateHwids = await ResolveCandidateHardwareIdsAsync(
+            db, productScopeIds, criteria, cancellationToken, exactHardwareId);
+        var incompleteReasons = allowPartial && exactHardwareId ? new List<string>() : null;
+        var candidateHashes = await ResolveCandidateComponentHashesAsync(
+            db, productScopeIds, criteria, candidateHwids, cancellationToken, exactHardwareId, incompleteReasons);
 
         var items = new List<SecurityBanAuditItem>();
-        items.AddRange(await QueryHardwareBansAsync(db, productScopeIds, criteria, candidateHwids, includeInactive, cancellationToken));
-        items.AddRange(await QueryComponentBansAsync(db, productScopeIds, criteria, candidateHashes, includeInactive, cancellationToken));
+        items.AddRange(await QueryHardwareBansAsync(
+            db, productScopeIds, criteria, candidateHwids, includeInactive, cancellationToken, exactHardwareId, incompleteReasons));
+        items.AddRange(await QueryComponentBansAsync(
+            db, productScopeIds, criteria, candidateHashes, includeInactive, cancellationToken, exactHardwareId, incompleteReasons));
+        if (exactHardwareId && criteria.HardwareId != null)
+        {
+            foreach (var item in items)
+                item.CorrelatedHardwareIds = [criteria.HardwareId];
+        }
 
         var ordered = items
             .OrderByDescending(i => i.IsActive)
@@ -49,8 +65,12 @@ public sealed class SecurityBanAuditAnalyticsService
             .ThenBy(i => i.TargetType, StringComparer.OrdinalIgnoreCase)
             .ThenBy(i => i.ComponentType, StringComparer.OrdinalIgnoreCase)
             .ToList();
+        if (exactHardwareId && ordered.Count > MaxTake)
+            RecordBound(incompleteReasons, "combined_ban_row_limit");
 
         var returned = ordered.Take(take).ToList();
+        if (incompleteReasons != null && ordered.Count > take)
+            incompleteReasons.Add("returned_ban_row_limit");
         foreach (var item in includeSourceEvents ? returned : [])
         {
             var source = await FindSourceEventAsync(db, productScopeIds, item, cancellationToken);
@@ -58,6 +78,9 @@ public sealed class SecurityBanAuditAnalyticsService
         }
         return new SecurityBanAuditResponse
         {
+            Complete = exactHardwareId && (incompleteReasons == null || incompleteReasons.Count == 0)
+                && ordered.Count <= take,
+            IncompleteReasons = incompleteReasons ?? [],
             Query = new SecurityBanAuditQuery
             {
                 HasHardwareId = criteria.HardwareId != null,
@@ -68,6 +91,7 @@ public sealed class SecurityBanAuditAnalyticsService
                 HasLicenseFragment = criteria.LicenseFragment != null,
                 IncludeInactive = includeInactive,
                 IncludeSourceEvents = includeSourceEvents,
+                ExactHardwareId = exactHardwareId,
                 Take = take
             },
             RecordsMatched = ordered.Count,
@@ -138,7 +162,9 @@ public sealed class SecurityBanAuditAnalyticsService
         SearchCriteria criteria,
         HashSet<string> candidateHwids,
         bool includeInactive,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool requireComplete,
+        List<string>? incompleteReasons = null)
     {
         var query = db.BannedHardwareIds.AsNoTracking()
             .Include(b => b.Product)
@@ -156,8 +182,10 @@ public sealed class SecurityBanAuditAnalyticsService
 
         var bans = await query
             .OrderByDescending(b => b.BannedAt)
-            .Take(MaxTake)
+            .Take(MaxTake + (requireComplete ? 1 : 0))
             .ToListAsync(cancellationToken);
+        if (requireComplete && bans.Count > MaxTake)
+            RecordBound(incompleteReasons, "hardware_ban_row_limit");
 
         return bans
             .Select(b => MapHardwareBan(b, candidateHwids.Count > 0 ? "resolved_hardware_id" : "hardware_id"))
@@ -170,7 +198,9 @@ public sealed class SecurityBanAuditAnalyticsService
         SearchCriteria criteria,
         HashSet<string> candidateHashes,
         bool includeInactive,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool requireComplete,
+        List<string>? incompleteReasons = null)
     {
         var query = db.BannedComponents.AsNoTracking()
             .Include(b => b.Product)
@@ -196,8 +226,10 @@ public sealed class SecurityBanAuditAnalyticsService
 
         var bans = await query
             .OrderByDescending(b => b.BannedAt)
-            .Take(MaxTake)
+            .Take(MaxTake + (requireComplete ? 1 : 0))
             .ToListAsync(cancellationToken);
+        if (requireComplete && bans.Count > MaxTake)
+            RecordBound(incompleteReasons, "component_ban_row_limit");
 
         return bans
             .Select(b => MapComponentBan(b, candidateHashes.Count > 0 ? "resolved_component_hash" : "component"))
@@ -208,21 +240,25 @@ public sealed class SecurityBanAuditAnalyticsService
         LicenseDbContext db,
         List<Guid> productScopeIds,
         SearchCriteria criteria,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool exactHardwareId)
     {
         var hwids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (criteria.HardwareId != null)
         {
-            var fromTelemetry = await db.TelemetryRecords.AsNoTracking()
-                .Where(r => r.ProductId.HasValue && productScopeIds.Contains(r.ProductId.Value) && r.HardwareId.ToUpper().Contains(criteria.HardwareId))
-                .Select(r => r.HardwareId)
-                .Distinct()
-                .Take(MaxTake)
-                .ToListAsync(cancellationToken);
-            foreach (var hwid in fromTelemetry)
-                hwids.Add(hwid);
-
             hwids.Add(criteria.HardwareId);
+            if (!exactHardwareId)
+            {
+                var fromTelemetry = await db.TelemetryRecords.AsNoTracking()
+                    .Where(r => r.ProductId.HasValue && productScopeIds.Contains(r.ProductId.Value)
+                        && r.HardwareId.ToUpper().Contains(criteria.HardwareId))
+                    .Select(r => r.HardwareId)
+                    .Distinct()
+                    .Take(MaxTake)
+                    .ToListAsync(cancellationToken);
+                foreach (var hwid in fromTelemetry)
+                    hwids.Add(hwid);
+            }
         }
 
         if (criteria.ClientIp != null)
@@ -308,7 +344,9 @@ public sealed class SecurityBanAuditAnalyticsService
         List<Guid> productScopeIds,
         SearchCriteria criteria,
         HashSet<string> candidateHwids,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool requireComplete,
+        List<string>? incompleteReasons = null)
     {
         var hashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (criteria.ComponentHash != null)
@@ -319,8 +357,10 @@ public sealed class SecurityBanAuditAnalyticsService
 
         var fingerprints = await db.HardwareFingerprints.AsNoTracking()
             .Where(f => candidateHwids.Contains(f.HardwareId))
-            .Take(MaxTake)
+            .Take(requireComplete ? MaxExactEvidenceRows + 1 : MaxTake)
             .ToListAsync(cancellationToken);
+        if (requireComplete && fingerprints.Count > MaxExactEvidenceRows)
+            RecordBound(incompleteReasons, "hardware_fingerprint_row_limit");
 
         foreach (var fingerprint in fingerprints)
         {
@@ -342,8 +382,10 @@ public sealed class SecurityBanAuditAnalyticsService
                 && r.EventData != null
                 && r.EventData.PropertiesJson != null)
             .OrderByDescending(r => r.Timestamp)
-            .Take(MaxTake * 5)
+            .Take(requireComplete ? MaxExactEvidenceRows + 1 : MaxTake * 5)
             .ToListAsync(cancellationToken);
+        if (requireComplete && telemetryRows.Count > MaxExactEvidenceRows)
+            RecordBound(incompleteReasons, "telemetry_fingerprint_row_limit");
 
         foreach (var row in telemetryRows)
             AddBinaryFingerprintHashes(hashes, row.EventData?.PropertiesJson);
@@ -354,14 +396,23 @@ public sealed class SecurityBanAuditAnalyticsService
                 && candidateHwids.Contains(a.HardwareId)
                 && a.BinaryFingerprintsJson != null)
             .OrderByDescending(a => a.LastSeenAt ?? a.ReceivedAt)
-            .Take(MaxTake * 5)
+            .Take(requireComplete ? MaxExactEvidenceRows + 1 : MaxTake * 5)
             .Select(a => a.BinaryFingerprintsJson)
             .ToListAsync(cancellationToken);
+        if (requireComplete && canaryRows.Count > MaxExactEvidenceRows)
+            RecordBound(incompleteReasons, "canary_fingerprint_row_limit");
 
         foreach (var fingerprintsJson in canaryRows)
             AddBinaryFingerprintHashes(hashes, fingerprintsJson);
 
         return hashes;
+    }
+
+    /// <summary>Retains strict readers' refusal while allowing opted-in diagnostics to disclose partial evidence.</summary>
+    private static void RecordBound(List<string>? incompleteReasons, string reason)
+    {
+        if (incompleteReasons == null) throw new InvalidOperationException(reason);
+        incompleteReasons.Add(reason);
     }
 
     private static void AddBinaryFingerprintHashes(HashSet<string> hashes, string? propertiesJson)

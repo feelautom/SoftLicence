@@ -1,0 +1,611 @@
+{
+  "schema": "runtime-enrollment-v2-reference-vectors",
+  "contractVersion": 2,
+  "requestCanonicalization": {
+    "request": {
+      "schema": "runtime-enrollment-authority-request-v2",
+      "contractVersion": 2,
+      "requestId": "018f6fd4-fe06-75d7-ae93-b15d36ca5501",
+      "provider": "softlicence",
+      "productId": "018f6fd4-94b2-7f7e-8f47-13eb8aab8b11",
+      "providerGrantRef": "grant:tenant-a:café:🚀",
+      "expectedAuthorityLineageId": null,
+      "expectedCurrentGenerationId": null,
+      "expectedPredecessorGenerationId": null,
+      "requestedAuthority": {
+        "release": {
+          "version": "2.3.445",
+          "artifactSetDigest": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "binding": {
+          "bindingId": "018f6fd4-bbc2-7467-a238-0bf114bb3101",
+          "hardwareIdDigest": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "enrollment": {
+          "enrollmentId": "018f6fd4-cbd3-7d7d-b8db-a905a7786201",
+          "state": "active",
+          "issuedAtUtc": "2026-08-22T16:00:01.000000Z",
+          "expiresAtUtc": null
+        },
+        "key": {
+          "authorityKeyId": "runtime-enrollment-ps256-2026-01",
+          "securityEpoch": 7
+        },
+        "installation": {
+          "installationId": "018f6fd4-dce4-7b2a-8202-5846e80d1301",
+          "seatId": "018f6fd4-edf5-7524-9c37-1ae1a3764401"
+        }
+      },
+      "transition": {
+        "kind": "genesis",
+        "reasonCode": "INITIAL_ENROLLMENT",
+        "requestedAtUtc": "2026-08-22T16:00:02.000000Z"
+      }
+    },
+    "canonicalJson": "{\"schema\":\"runtime-enrollment-authority-request-v2\",\"contractVersion\":2,\"requestId\":\"018f6fd4-fe06-75d7-ae93-b15d36ca5501\",\"provider\":\"softlicence\",\"productId\":\"018f6fd4-94b2-7f7e-8f47-13eb8aab8b11\",\"providerGrantRef\":\"grant:tenant-a:café:🚀\",\"expectedAuthorityLineageId\":null,\"expectedCurrentGenerationId\":null,\"expectedPredecessorGenerationId\":null,\"requestedAuthority\":{\"release\":{\"version\":\"2.3.445\",\"artifactSetDigest\":\"1111111111111111111111111111111111111111111111111111111111111111\"},\"binding\":{\"bindingId\":\"018f6fd4-bbc2-7467-a238-0bf114bb3101\",\"hardwareIdDigest\":\"2222222222222222222222222222222222222222222222222222222222222222\"},\"enrollment\":{\"enrollmentId\":\"018f6fd4-cbd3-7d7d-b8db-a905a7786201\",\"state\":\"active\",\"issuedAtUtc\":\"2026-08-22T16:00:01.000000Z\",\"expiresAtUtc\":null},\"key\":{\"authorityKeyId\":\"runtime-enrollment-ps256-2026-01\",\"securityEpoch\":7},\"installation\":{\"installationId\":\"018f6fd4-dce4-7b2a-8202-5846e80d1301\",\"seatId\":\"018f6fd4-edf5-7524-9c37-1ae1a3764401\"}},\"transition\":{\"kind\":\"genesis\",\"reasonCode\":\"INITIAL_ENROLLMENT\",\"requestedAtUtc\":\"2026-08-22T16:00:02.000000Z\"}}",
+    "canonicalUtf8Hex": "7b22736368656d61223a2272756e74696d652d656e726f6c6c6d656e742d617574686f726974792d726571756573742d7632222c22636f6e747261637456657273696f6e223a322c22726571756573744964223a2230313866366664342d666530362d373564372d616539332d623135643336636135353031222c2270726f7669646572223a22736f66746c6963656e6365222c2270726f647563744964223a2230313866366664342d393462322d376637652d386634372d313365623861616238623131222c2270726f76696465724772616e74526566223a226772616e743a74656e616e742d613a636166c3a93af09f9a80222c226578706563746564417574686f726974794c696e656167654964223a6e756c6c2c22657870656374656443757272656e7447656e65726174696f6e4964223a6e756c6c2c2265787065637465645072656465636573736f7247656e65726174696f6e4964223a6e756c6c2c22726571756573746564417574686f72697479223a7b2272656c65617365223a7b2276657273696f6e223a22322e332e343435222c226172746966616374536574446967657374223a2231313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131227d2c2262696e64696e67223a7b2262696e64696e674964223a2230313866366664342d626263322d373436372d613233382d306266313134626233313031222c2268617264776172654964446967657374223a2232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232227d2c22656e726f6c6c6d656e74223a7b22656e726f6c6c6d656e744964223a2230313866366664342d636264332d376437642d623864622d613930356137373836323031222c227374617465223a22616374697665222c226973737565644174557463223a22323032362d30382d32325431363a30303a30312e3030303030305a222c22657870697265734174557463223a6e756c6c7d2c226b6579223a7b22617574686f726974794b65794964223a2272756e74696d652d656e726f6c6c6d656e742d70733235362d323032362d3031222c22736563757269747945706f6368223a377d2c22696e7374616c6c6174696f6e223a7b22696e7374616c6c6174696f6e4964223a2230313866366664342d646365342d376232612d383230322d353834366538306431333031222c22736561744964223a2230313866366664342d656466352d373532342d396333372d316165316133373634343031227d7d2c227472616e736974696f6e223a7b226b696e64223a2267656e65736973222c22726561736f6e436f6465223a22494e495449414c5f454e524f4c4c4d454e54222c227265717565737465644174557463223a22323032362d30382d32325431363a30303a30322e3030303030305a227d7d",
+    "domainHex": "542d49412d434f4e4e4543540052554e54494d452d454e524f4c4c4d454e540052455155455354005632",
+    "domainByteCount": 42,
+    "requestDigest": "aecc766651f2c9ec1335365b6ecb2ef6caef09894b273c67524c83bdff8bff6a",
+    "attemptIds": [
+      "018f6fd5-0f17-7b2b-b010-1c8a16ad6601",
+      "018f6fd5-1028-70cf-8231-3e150dec7701"
+    ],
+    "divergentProviderGrantRef": "grant:tenant-a:café:🚀-different",
+    "preLineageRefusal": {
+      "schema": "runtime-enrollment-discovery-attempt-v2",
+      "contractVersion": 2,
+      "attemptId": "018f6fd5-1028-70cf-8231-3e150dec7701",
+      "requestId": "018f6fd4-fe06-75d7-ae93-b15d36ca5501",
+      "requestDigest": "aecc766651f2c9ec1335365b6ecb2ef6caef09894b273c67524c83bdff8bff6a",
+      "authorityLineageId": null,
+      "status": "refused",
+      "authorityGenerationId": null,
+      "errorCode": "LINEAGE_RESOLUTION_REFUSED",
+      "createdAtUtc": "2026-08-22T16:00:03.000000Z",
+      "completedAtUtc": "2026-08-22T16:00:04.000000Z"
+    },
+    "attemptReplay": {
+      "initial": {
+        "schema": "runtime-enrollment-discovery-attempt-v2",
+        "contractVersion": 2,
+        "attemptId": "018f6fd5-1028-70cf-8231-3e150dec7701",
+        "requestId": "018f6fd4-fe06-75d7-ae93-b15d36ca5501",
+        "requestDigest": "aecc766651f2c9ec1335365b6ecb2ef6caef09894b273c67524c83bdff8bff6a",
+        "authorityLineageId": null,
+        "status": "refused",
+        "authorityGenerationId": null,
+        "errorCode": "LINEAGE_RESOLUTION_REFUSED",
+        "createdAtUtc": "2026-08-22T16:00:03.000000Z",
+        "completedAtUtc": "2026-08-22T16:00:04.000000Z"
+      },
+      "reordered": {
+        "completedAtUtc": "2026-08-22T16:00:04.000000Z",
+        "createdAtUtc": "2026-08-22T16:00:03.000000Z",
+        "errorCode": "LINEAGE_RESOLUTION_REFUSED",
+        "authorityGenerationId": null,
+        "status": "refused",
+        "authorityLineageId": null,
+        "requestDigest": "aecc766651f2c9ec1335365b6ecb2ef6caef09894b273c67524c83bdff8bff6a",
+        "requestId": "018f6fd4-fe06-75d7-ae93-b15d36ca5501",
+        "attemptId": "018f6fd5-1028-70cf-8231-3e150dec7701",
+        "contractVersion": 2,
+        "schema": "runtime-enrollment-discovery-attempt-v2"
+      },
+      "divergentCompletedAtUtc": "2026-08-22T16:00:04.000001Z"
+    }
+  },
+  "transitionRegistry": {
+    "schema": "runtime-enrollment-transition-registry-v2",
+    "contractVersion": 2,
+    "entries": [
+      {
+        "reasonCode": "INITIAL_ENROLLMENT",
+        "kind": "genesis",
+        "allowedChanges": ["release.version", "release.artifactSetDigest", "binding.bindingId", "binding.hardwareIdDigest", "enrollment.enrollmentId", "enrollment.state", "enrollment.issuedAtUtc", "enrollment.expiresAtUtc", "key.authorityKeyId", "key.securityEpoch", "installation.installationId", "installation.seatId"],
+        "requiredChanges": ["release.version", "release.artifactSetDigest", "binding.bindingId", "binding.hardwareIdDigest", "enrollment.enrollmentId", "enrollment.state", "enrollment.issuedAtUtc", "enrollment.expiresAtUtc", "key.authorityKeyId", "key.securityEpoch", "installation.installationId", "installation.seatId"],
+        "allowedEnrollmentTransitions": ["none->pending", "none->active"],
+        "requiredEvidence": ["INITIAL_ENTITLEMENT"],
+        "refusalCode": "INITIAL_ENROLLMENT_NOT_AUTHORIZED"
+      },
+      {
+        "reasonCode": "APPROVED_RELEASE_ADVANCE",
+        "kind": "release",
+        "allowedChanges": ["release.version", "release.artifactSetDigest"],
+        "requiredChanges": ["release.version", "release.artifactSetDigest"],
+        "allowedEnrollmentTransitions": [],
+        "requiredEvidence": ["APPROVED_ARTIFACT_SET"],
+        "refusalCode": "RELEASE_NOT_AUTHORIZED"
+      },
+      {
+        "reasonCode": "BINDING_REPLACEMENT",
+        "kind": "binding",
+        "allowedChanges": ["binding.bindingId", "binding.hardwareIdDigest"],
+        "requiredChanges": ["binding.bindingId", "binding.hardwareIdDigest"],
+        "allowedEnrollmentTransitions": [],
+        "requiredEvidence": ["BINDING_REPLACEMENT_AUTHORITY", "ELIGIBLE_HARDWARE"],
+        "refusalCode": "BINDING_CHANGE_NOT_AUTHORIZED"
+      },
+      {
+        "reasonCode": "ENROLLMENT_ACTIVATED",
+        "kind": "enrollment",
+        "allowedChanges": ["enrollment.state"],
+        "requiredChanges": ["enrollment.state"],
+        "allowedEnrollmentTransitions": ["pending->active"],
+        "requiredEvidence": ["ACTIVATION_PROOF"],
+        "refusalCode": "ENROLLMENT_ACTIVATION_NOT_AUTHORIZED"
+      },
+      {
+        "reasonCode": "ENROLLMENT_EXPIRED",
+        "kind": "enrollment",
+        "allowedChanges": ["enrollment.state"],
+        "requiredChanges": ["enrollment.state"],
+        "allowedEnrollmentTransitions": ["active->expired"],
+        "requiredEvidence": ["AUTHORITATIVE_EXPIRY"],
+        "refusalCode": "ENROLLMENT_EXPIRY_NOT_AUTHORIZED"
+      },
+      {
+        "reasonCode": "ENROLLMENT_REPLACED",
+        "kind": "enrollment",
+        "allowedChanges": ["enrollment.enrollmentId", "enrollment.state", "enrollment.issuedAtUtc", "enrollment.expiresAtUtc"],
+        "requiredChanges": ["enrollment.enrollmentId", "enrollment.state", "enrollment.issuedAtUtc"],
+        "allowedEnrollmentTransitions": ["expired->pending", "expired->active", "revoked->pending", "revoked->active"],
+        "requiredEvidence": ["REPLACEMENT_ELIGIBILITY"],
+        "refusalCode": "ENROLLMENT_REPLACEMENT_NOT_AUTHORIZED"
+      },
+      {
+        "reasonCode": "AUTHORITY_REVOKED",
+        "kind": "revocation",
+        "allowedChanges": ["enrollment.state"],
+        "requiredChanges": ["enrollment.state"],
+        "allowedEnrollmentTransitions": ["pending->revoked", "active->revoked"],
+        "requiredEvidence": ["SIGNED_REVOCATION_DECISION"],
+        "refusalCode": "REVOCATION_NOT_AUTHORIZED"
+      },
+      {
+        "reasonCode": "SIGNING_KEY_ROTATED",
+        "kind": "key_rotation",
+        "allowedChanges": ["key.authorityKeyId", "key.securityEpoch"],
+        "requiredChanges": ["key.authorityKeyId", "key.securityEpoch"],
+        "allowedEnrollmentTransitions": [],
+        "requiredEvidence": ["PREDECESSOR_KEY_SIGNATURE", "KEY_ROTATION_AUTHORIZATION"],
+        "refusalCode": "KEY_ROTATION_NOT_AUTHORIZED"
+      },
+      {
+        "reasonCode": "SECURITY_EPOCH_ADVANCED",
+        "kind": "security_epoch",
+        "allowedChanges": ["key.securityEpoch"],
+        "requiredChanges": ["key.securityEpoch"],
+        "allowedEnrollmentTransitions": [],
+        "requiredEvidence": ["SECURITY_DECISION"],
+        "refusalCode": "SECURITY_EPOCH_NOT_AUTHORIZED"
+      },
+      {
+        "reasonCode": "INSTALLATION_REINSTALLED",
+        "kind": "reinstall",
+        "allowedChanges": ["installation.installationId"],
+        "requiredChanges": ["installation.installationId"],
+        "allowedEnrollmentTransitions": [],
+        "requiredEvidence": ["REINSTALL_PROOF", "CURRENT_HEAD_PROOF"],
+        "refusalCode": "INSTALLATION_CHANGE_NOT_AUTHORIZED"
+      },
+      {
+        "reasonCode": "RECOVERY_AUTHORIZED",
+        "kind": "recovery",
+        "allowedChanges": ["binding.bindingId", "binding.hardwareIdDigest", "enrollment.enrollmentId", "enrollment.state", "enrollment.issuedAtUtc", "enrollment.expiresAtUtc", "key.securityEpoch", "installation.installationId", "installation.seatId"],
+        "requiredChanges": [],
+        "allowedEnrollmentTransitions": ["pending->pending", "active->active", "expired->pending", "expired->active", "revoked->pending", "revoked->active"],
+        "requiredEvidence": ["SIGNED_RECOVERY_AUTHORITY", "CURRENT_HEAD_PROOF"],
+        "refusalCode": "RECOVERY_NOT_AUTHORIZED"
+      },
+      {
+        "reasonCode": "REPAIR_AUTHORIZED",
+        "kind": "repair",
+        "allowedChanges": [],
+        "requiredChanges": [],
+        "allowedEnrollmentTransitions": [],
+        "requiredEvidence": ["REPAIR_PROOF"],
+        "refusalCode": "REPAIR_NOT_AUTHORIZED"
+      },
+      {
+        "reasonCode": "SEAT_REASSIGNED",
+        "kind": "seat",
+        "allowedChanges": ["installation.seatId"],
+        "requiredChanges": ["installation.seatId"],
+        "allowedEnrollmentTransitions": [],
+        "requiredEvidence": ["SEAT_RELEASE_PROOF", "SEAT_ACQUISITION_PROOF"],
+        "refusalCode": "SEAT_CHANGE_NOT_AUTHORIZED"
+      }
+    ],
+    "cases": [
+      { "name": "genesis", "kind": "genesis", "reasonCode": "INITIAL_ENROLLMENT", "changedFields": ["release.version", "release.artifactSetDigest", "binding.bindingId", "binding.hardwareIdDigest", "enrollment.enrollmentId", "enrollment.state", "enrollment.issuedAtUtc", "enrollment.expiresAtUtc", "key.authorityKeyId", "key.securityEpoch", "installation.installationId", "installation.seatId"], "enrollmentTransition": "none->active", "terminalEnrollmentReuse": false, "evidence": ["INITIAL_ENTITLEMENT"], "expected": "ALLOWED" },
+      { "name": "release", "kind": "release", "reasonCode": "APPROVED_RELEASE_ADVANCE", "changedFields": ["release.version", "release.artifactSetDigest"], "enrollmentTransition": null, "terminalEnrollmentReuse": false, "evidence": ["APPROVED_ARTIFACT_SET"], "expected": "ALLOWED" },
+      { "name": "binding", "kind": "binding", "reasonCode": "BINDING_REPLACEMENT", "changedFields": ["binding.bindingId", "binding.hardwareIdDigest"], "enrollmentTransition": null, "terminalEnrollmentReuse": false, "evidence": ["BINDING_REPLACEMENT_AUTHORITY", "ELIGIBLE_HARDWARE"], "expected": "ALLOWED" },
+      { "name": "pending-active", "kind": "enrollment", "reasonCode": "ENROLLMENT_ACTIVATED", "changedFields": ["enrollment.state"], "enrollmentTransition": "pending->active", "terminalEnrollmentReuse": false, "evidence": ["ACTIVATION_PROOF"], "expected": "ALLOWED" },
+      { "name": "active-expired", "kind": "enrollment", "reasonCode": "ENROLLMENT_EXPIRED", "changedFields": ["enrollment.state"], "enrollmentTransition": "active->expired", "terminalEnrollmentReuse": false, "evidence": ["AUTHORITATIVE_EXPIRY"], "expected": "ALLOWED" },
+      { "name": "replacement", "kind": "enrollment", "reasonCode": "ENROLLMENT_REPLACED", "changedFields": ["enrollment.enrollmentId", "enrollment.state", "enrollment.issuedAtUtc", "enrollment.expiresAtUtc"], "enrollmentTransition": "revoked->active", "terminalEnrollmentReuse": false, "evidence": ["REPLACEMENT_ELIGIBILITY"], "expected": "ALLOWED" },
+      { "name": "revocation", "kind": "revocation", "reasonCode": "AUTHORITY_REVOKED", "changedFields": ["enrollment.state"], "enrollmentTransition": "active->revoked", "terminalEnrollmentReuse": false, "evidence": ["SIGNED_REVOCATION_DECISION"], "expected": "ALLOWED" },
+      { "name": "key-rotation", "kind": "key_rotation", "reasonCode": "SIGNING_KEY_ROTATED", "changedFields": ["key.authorityKeyId", "key.securityEpoch"], "enrollmentTransition": null, "terminalEnrollmentReuse": false, "evidence": ["PREDECESSOR_KEY_SIGNATURE", "KEY_ROTATION_AUTHORIZATION"], "expected": "ALLOWED" },
+      { "name": "security-epoch", "kind": "security_epoch", "reasonCode": "SECURITY_EPOCH_ADVANCED", "changedFields": ["key.securityEpoch"], "enrollmentTransition": null, "terminalEnrollmentReuse": false, "evidence": ["SECURITY_DECISION"], "expected": "ALLOWED" },
+      { "name": "reinstall", "kind": "reinstall", "reasonCode": "INSTALLATION_REINSTALLED", "changedFields": ["installation.installationId"], "enrollmentTransition": null, "terminalEnrollmentReuse": false, "evidence": ["REINSTALL_PROOF", "CURRENT_HEAD_PROOF"], "expected": "ALLOWED" },
+      { "name": "recovery", "kind": "recovery", "reasonCode": "RECOVERY_AUTHORIZED", "changedFields": ["binding.bindingId", "enrollment.enrollmentId", "enrollment.state", "enrollment.issuedAtUtc", "enrollment.expiresAtUtc", "key.securityEpoch", "installation.installationId", "installation.seatId"], "enrollmentTransition": "expired->active", "terminalEnrollmentReuse": false, "evidence": ["SIGNED_RECOVERY_AUTHORITY", "CURRENT_HEAD_PROOF"], "expected": "ALLOWED" },
+      { "name": "repair", "kind": "repair", "reasonCode": "REPAIR_AUTHORIZED", "changedFields": [], "enrollmentTransition": null, "terminalEnrollmentReuse": false, "evidence": ["REPAIR_PROOF"], "expected": "ALLOWED" },
+      { "name": "seat", "kind": "seat", "reasonCode": "SEAT_REASSIGNED", "changedFields": ["installation.seatId"], "enrollmentTransition": null, "terminalEnrollmentReuse": false, "evidence": ["SEAT_RELEASE_PROOF", "SEAT_ACQUISITION_PROOF"], "expected": "ALLOWED" },
+      { "name": "unknown-reason", "kind": "genesis", "reasonCode": "TOTALLY_UNKNOWN", "changedFields": [], "enrollmentTransition": null, "terminalEnrollmentReuse": false, "evidence": [], "expected": "TRANSITION_REASON_UNKNOWN" },
+      { "name": "incompatible-kind-reason", "kind": "release", "reasonCode": "ENROLLMENT_ACTIVATED", "changedFields": ["enrollment.state"], "enrollmentTransition": "pending->active", "terminalEnrollmentReuse": false, "evidence": ["ACTIVATION_PROOF"], "expected": "TRANSITION_KIND_REASON_MISMATCH" },
+      { "name": "unclassified-field", "kind": "release", "reasonCode": "APPROVED_RELEASE_ADVANCE", "changedFields": ["binding.bindingId"], "enrollmentTransition": null, "terminalEnrollmentReuse": false, "evidence": ["APPROVED_ARTIFACT_SET"], "expected": "TRANSITION_SCOPE_VIOLATION" },
+      { "name": "missing-evidence", "kind": "seat", "reasonCode": "SEAT_REASSIGNED", "changedFields": ["installation.seatId"], "enrollmentTransition": null, "terminalEnrollmentReuse": false, "evidence": ["SEAT_RELEASE_PROOF"], "expected": "SEAT_CHANGE_NOT_AUTHORIZED" },
+      { "name": "security-epoch-key-change", "kind": "security_epoch", "reasonCode": "SECURITY_EPOCH_ADVANCED", "changedFields": ["key.securityEpoch", "key.authorityKeyId"], "enrollmentTransition": null, "terminalEnrollmentReuse": false, "evidence": ["SECURITY_DECISION"], "expected": "KEY_ROTATION_REQUIRED" },
+      { "name": "key-rotation-key-only", "kind": "key_rotation", "reasonCode": "SIGNING_KEY_ROTATED", "changedFields": ["key.authorityKeyId"], "enrollmentTransition": null, "terminalEnrollmentReuse": false, "evidence": ["PREDECESSOR_KEY_SIGNATURE", "KEY_ROTATION_AUTHORIZATION"], "expected": "KEY_EPOCH_MISMATCH" },
+      { "name": "key-rotation-epoch-only", "kind": "key_rotation", "reasonCode": "SIGNING_KEY_ROTATED", "changedFields": ["key.securityEpoch"], "enrollmentTransition": null, "terminalEnrollmentReuse": false, "evidence": ["PREDECESSOR_KEY_SIGNATURE", "KEY_ROTATION_AUTHORIZATION"], "expected": "KEY_ROTATION_REQUIRED" },
+      { "name": "key-rotation-wrong-signer", "kind": "key_rotation", "reasonCode": "SIGNING_KEY_ROTATED", "changedFields": ["key.authorityKeyId", "key.securityEpoch"], "enrollmentTransition": null, "terminalEnrollmentReuse": false, "evidence": ["KEY_ROTATION_AUTHORIZATION"], "expected": "KEY_ROTATION_SIGNER_INVALID" },
+      { "name": "revoked-reactivation", "kind": "enrollment", "reasonCode": "ENROLLMENT_ACTIVATED", "changedFields": ["enrollment.state"], "enrollmentTransition": "revoked->active", "terminalEnrollmentReuse": true, "evidence": ["ACTIVATION_PROOF"], "expected": "ENROLLMENT_TERMINAL" },
+      { "name": "repair-out-of-scope", "kind": "repair", "reasonCode": "REPAIR_AUTHORIZED", "changedFields": ["installation.installationId"], "enrollmentTransition": null, "terminalEnrollmentReuse": false, "evidence": ["REPAIR_PROOF"], "expected": "REPAIR_SCOPE_VIOLATION" },
+      { "name": "repair-missing-proof", "kind": "repair", "reasonCode": "REPAIR_AUTHORIZED", "changedFields": [], "enrollmentTransition": null, "terminalEnrollmentReuse": false, "evidence": [], "expected": "REPAIR_NOT_AUTHORIZED" },
+      { "name": "invalid-enrollment-edge", "kind": "enrollment", "reasonCode": "ENROLLMENT_EXPIRED", "changedFields": ["enrollment.state"], "enrollmentTransition": "pending->expired", "terminalEnrollmentReuse": false, "evidence": ["AUTHORITATIVE_EXPIRY"], "expected": "ENROLLMENT_TRANSITION_INVALID" }
+    ]
+  },
+  "temporalPolicy": {
+    "schema": "runtime-enrollment-temporal-policy-v2",
+    "contractVersion": 2,
+    "maxFutureSkewSeconds": 120,
+    "keyRegistryMaxAgeSeconds": 300,
+    "authoritativeClock": "SOFTLICENCE_TRUSTED_UTC",
+    "recoveryAuthorityTrueMeans": "CRYPTOGRAPHICALLY_VERIFIED_SEPARATELY_PINNED_AND_VALID_AT_AUTHORITATIVE_NOW",
+    "baseline": {
+      "mode": "first_acceptance",
+      "reasonCode": "INITIAL_ENROLLMENT",
+      "attemptCreatedAtUtc": "2026-08-22T16:00:03.000000Z",
+      "attemptCompletedAtUtc": "2026-08-22T16:00:04.000000Z",
+      "enrollmentIssuedAtUtc": "2026-08-22T16:00:01.000000Z",
+      "enrollmentExpiresAtUtc": "2026-08-22T17:00:01.000000Z",
+      "sameEnrollmentId": false,
+      "predecessorEnrollmentIssuedAtUtc": null,
+      "predecessorOccurredAtUtc": null,
+      "occurredAtUtc": "2026-08-22T16:00:02.000000Z",
+      "authoritativeNowUtc": "2026-08-22T16:00:05.000000Z",
+      "keyStatus": "active",
+      "keyActivatedAtUtc": "2026-08-22T15:00:00.000000Z",
+      "keyRetiredAtUtc": null,
+      "keyRevokedAtUtc": null,
+      "compromiseFromUtc": null,
+      "registryObservedAtUtc": "2026-08-22T16:00:00.000000Z",
+      "acceptedAtUtc": null,
+      "recoveryAuthority": false
+    },
+    "cases": [
+      { "name": "first-acceptance-valid", "overrides": {}, "expected": "ALLOWED" },
+      { "name": "attempt-time-inverted", "overrides": { "attemptCompletedAtUtc": "2026-08-22T16:00:02.999999Z" }, "expected": "ATTEMPT_TIME_INVERTED" },
+      { "name": "enrollment-expiry-equal-issued", "overrides": { "enrollmentExpiresAtUtc": "2026-08-22T16:00:01.000000Z" }, "expected": "ENROLLMENT_TIME_INVALID" },
+      { "name": "enrollment-issued-after-transition", "overrides": { "enrollmentIssuedAtUtc": "2026-08-22T16:00:02.000001Z" }, "expected": "ENROLLMENT_ISSUED_AFTER_TRANSITION" },
+      { "name": "retained-enrollment-issued-stable", "overrides": { "reasonCode": "APPROVED_RELEASE_ADVANCE", "sameEnrollmentId": true, "predecessorEnrollmentIssuedAtUtc": "2026-08-22T16:00:01.000000Z", "predecessorOccurredAtUtc": "2026-08-22T16:00:01.500000Z" }, "expected": "ALLOWED" },
+      { "name": "retained-enrollment-issued-changed", "overrides": { "reasonCode": "APPROVED_RELEASE_ADVANCE", "sameEnrollmentId": true, "predecessorEnrollmentIssuedAtUtc": "2026-08-22T16:00:00.000000Z", "predecessorOccurredAtUtc": "2026-08-22T16:00:01.500000Z" }, "expected": "ENROLLMENT_ISSUED_AT_CHANGED" },
+      { "name": "replacement-issued-before-predecessor", "overrides": { "reasonCode": "ENROLLMENT_REPLACED", "predecessorOccurredAtUtc": "2026-08-22T16:00:01.000000Z" }, "expected": "ENROLLMENT_ISSUED_BEFORE_PREDECESSOR" },
+      { "name": "transition-time-regression", "overrides": { "reasonCode": "APPROVED_RELEASE_ADVANCE", "sameEnrollmentId": true, "predecessorEnrollmentIssuedAtUtc": "2026-08-22T16:00:01.000000Z", "predecessorOccurredAtUtc": "2026-08-22T16:00:02.000000Z" }, "expected": "TRANSITION_TIME_REGRESSION" },
+      { "name": "future-skew-boundary", "overrides": { "occurredAtUtc": "2026-08-22T16:02:05.000000Z" }, "expected": "ALLOWED" },
+      { "name": "future-skew-exceeded", "overrides": { "occurredAtUtc": "2026-08-22T16:02:05.000001Z" }, "expected": "TRANSITION_TIME_FUTURE" },
+      { "name": "registry-freshness-boundary", "overrides": { "registryObservedAtUtc": "2026-08-22T15:55:05.000000Z" }, "expected": "ALLOWED" },
+      { "name": "registry-stale", "overrides": { "registryObservedAtUtc": "2026-08-22T15:55:04.999999Z" }, "expected": "KEY_REGISTRY_STALE" },
+      { "name": "registry-observation-future", "overrides": { "registryObservedAtUtc": "2026-08-22T16:00:05.000001Z" }, "expected": "KEY_REGISTRY_TIME_INVALID" },
+      { "name": "key-not-active", "overrides": { "keyActivatedAtUtc": "2026-08-22T16:00:02.000001Z" }, "expected": "SIGNING_KEY_NOT_ACTIVE" },
+      { "name": "acceptance-before-key-activation", "overrides": { "occurredAtUtc": "2026-08-22T16:01:00.000000Z", "keyActivatedAtUtc": "2026-08-22T16:01:00.000000Z" }, "expected": "SIGNING_KEY_NOT_ACTIVE" },
+      { "name": "retirement-backdating-first-acceptance", "overrides": { "occurredAtUtc": "2026-08-22T16:00:30.000000Z", "authoritativeNowUtc": "2026-08-22T16:02:00.000000Z", "keyStatus": "retired", "keyRetiredAtUtc": "2026-08-22T16:01:00.000000Z", "registryObservedAtUtc": "2026-08-22T16:01:59.000000Z" }, "expected": "SIGNING_KEY_RETIRED" },
+      { "name": "retired-historical-proof", "overrides": { "mode": "historical_evidence", "occurredAtUtc": "2026-08-22T16:00:30.000000Z", "authoritativeNowUtc": "2026-08-22T17:00:00.000000Z", "keyStatus": "retired", "keyRetiredAtUtc": "2026-08-22T16:01:00.000000Z", "acceptedAtUtc": "2026-08-22T16:00:40.000000Z" }, "expected": "HISTORICAL_PROOF_VALID" },
+      { "name": "historical-snapshot-after-acceptance", "overrides": { "mode": "historical_evidence", "occurredAtUtc": "2026-08-22T16:00:30.000000Z", "authoritativeNowUtc": "2026-08-22T17:00:00.000000Z", "registryObservedAtUtc": "2026-08-22T16:00:50.000000Z", "acceptedAtUtc": "2026-08-22T16:00:40.000000Z" }, "expected": "HISTORICAL_REGISTRY_AFTER_ACCEPTANCE" },
+      { "name": "historical-snapshot-freshness-boundary", "overrides": { "mode": "historical_evidence", "occurredAtUtc": "2026-08-22T16:00:30.000000Z", "authoritativeNowUtc": "2026-08-22T17:00:00.000000Z", "registryObservedAtUtc": "2026-08-22T16:00:00.000000Z", "acceptedAtUtc": "2026-08-22T16:05:00.000000Z" }, "expected": "HISTORICAL_PROOF_VALID" },
+      { "name": "historical-snapshot-stale-at-acceptance", "overrides": { "mode": "historical_evidence", "occurredAtUtc": "2026-08-22T16:00:30.000000Z", "authoritativeNowUtc": "2026-08-22T17:00:00.000000Z", "registryObservedAtUtc": "2026-08-22T16:00:00.000000Z", "acceptedAtUtc": "2026-08-22T16:05:00.000001Z" }, "expected": "HISTORICAL_REGISTRY_STALE_AT_ACCEPTANCE" },
+      { "name": "retired-historical-late-acceptance", "overrides": { "mode": "historical_evidence", "occurredAtUtc": "2026-08-22T16:00:30.000000Z", "authoritativeNowUtc": "2026-08-22T17:00:00.000000Z", "keyStatus": "retired", "keyRetiredAtUtc": "2026-08-22T16:01:00.000000Z", "acceptedAtUtc": "2026-08-22T16:01:00.000000Z" }, "expected": "SIGNING_KEY_RETIRED" },
+      { "name": "revocation-backdating-first-acceptance", "overrides": { "occurredAtUtc": "2026-08-22T16:00:10.000000Z", "authoritativeNowUtc": "2026-08-22T16:02:00.000000Z", "keyStatus": "revoked", "keyRevokedAtUtc": "2026-08-22T16:01:00.000000Z", "compromiseFromUtc": "2026-08-22T16:00:20.000000Z", "registryObservedAtUtc": "2026-08-22T16:01:59.000000Z" }, "expected": "SIGNING_KEY_REVOKED" },
+      { "name": "known-revocation-future-boundary", "overrides": { "occurredAtUtc": "2026-08-22T16:01:00.000000Z", "keyStatus": "active", "keyRevokedAtUtc": "2026-08-22T16:01:00.000000Z" }, "expected": "SIGNING_KEY_REVOKED" },
+      { "name": "revocation-compromise-interval", "overrides": { "mode": "historical_evidence", "occurredAtUtc": "2026-08-22T16:00:30.000000Z", "authoritativeNowUtc": "2026-08-22T17:00:00.000000Z", "keyStatus": "revoked", "keyRevokedAtUtc": "2026-08-22T16:01:00.000000Z", "compromiseFromUtc": "2026-08-22T16:00:20.000000Z", "acceptedAtUtc": "2026-08-22T16:00:40.000000Z" }, "expected": "SIGNING_KEY_COMPROMISED_INTERVAL" },
+      { "name": "historical-before-compromise", "overrides": { "mode": "historical_evidence", "occurredAtUtc": "2026-08-22T16:00:10.000000Z", "authoritativeNowUtc": "2026-08-22T17:00:00.000000Z", "keyStatus": "revoked", "keyRevokedAtUtc": "2026-08-22T16:01:00.000000Z", "compromiseFromUtc": "2026-08-22T16:00:20.000000Z", "acceptedAtUtc": "2026-08-22T16:00:15.000000Z" }, "expected": "HISTORICAL_PROOF_VALID" },
+      { "name": "recovery-authority-missing", "overrides": { "reasonCode": "RECOVERY_AUTHORIZED", "occurredAtUtc": "2026-08-22T16:01:30.000000Z", "authoritativeNowUtc": "2026-08-22T16:02:00.000000Z", "keyStatus": "revoked", "keyRevokedAtUtc": "2026-08-22T16:01:00.000000Z", "compromiseFromUtc": "2026-08-22T16:00:20.000000Z", "registryObservedAtUtc": "2026-08-22T16:01:59.000000Z" }, "expected": "RECOVERY_AUTHORITY_REQUIRED" },
+      { "name": "recovery-authority-valid", "overrides": { "reasonCode": "RECOVERY_AUTHORIZED", "occurredAtUtc": "2026-08-22T16:01:30.000000Z", "authoritativeNowUtc": "2026-08-22T16:02:00.000000Z", "keyStatus": "revoked", "keyRevokedAtUtc": "2026-08-22T16:01:00.000000Z", "compromiseFromUtc": "2026-08-22T16:00:20.000000Z", "registryObservedAtUtc": "2026-08-22T16:01:59.000000Z", "recoveryAuthority": true }, "expected": "ALLOWED" },
+      { "name": "recovery-authority-still-subject-to-future-skew", "overrides": { "reasonCode": "RECOVERY_AUTHORIZED", "occurredAtUtc": "2026-08-22T16:02:05.000001Z", "keyStatus": "revoked", "keyRevokedAtUtc": "2026-08-22T16:00:00.000000Z", "recoveryAuthority": true }, "expected": "TRANSITION_TIME_FUTURE" },
+      { "name": "recovery-authority-wrong-scope", "overrides": { "recoveryAuthority": true }, "expected": "RECOVERY_AUTHORITY_SCOPE_INVALID" }
+    ]
+  },
+  "scalarPolicy": {
+    "schema": "runtime-enrollment-scalar-policy-v2",
+    "contractVersion": 2,
+    "releaseVersion": {
+      "componentMaximum": 2147483647,
+      "componentMaximumText": "2147483647",
+      "componentMaximumDigits": 10,
+      "totalMinLength": 5,
+      "totalMaxLength": 32,
+      "comparisons": [
+        { "name": "numeric-minor-boundary", "predecessor": "2.3.9", "successor": "2.3.10", "expected": "ADVANCE" },
+        { "name": "numeric-equality", "predecessor": "2.3.10", "successor": "2.3.10", "expected": "EQUAL" },
+        { "name": "numeric-regression", "predecessor": "2.3.10", "successor": "2.3.9", "expected": "RELEASE_REGRESSION" }
+      ],
+      "cases": [
+        { "name": "minimum", "value": "0.0.0", "expected": "VALID" },
+        { "name": "leading-zero", "value": "01.2.3", "expected": "RELEASE_VERSION_FORMAT_INVALID" },
+        { "name": "maximum-components", "value": "2147483647.2147483647.2147483647", "expected": "VALID" },
+        { "name": "maximum-plus-one", "value": "2147483648.0.0", "expected": "RELEASE_VERSION_COMPONENT_OUT_OF_RANGE" },
+        { "name": "leading-space-no-trim", "value": " 2.3.10", "expected": "RELEASE_VERSION_FORMAT_INVALID" },
+        { "name": "trailing-space-no-trim", "value": "2.3.10 ", "expected": "RELEASE_VERSION_FORMAT_INVALID" },
+        { "name": "five-thousand-digit-component", "generatedComponent": { "digit": "9", "length": 5000, "suffix": ".0.0" }, "expected": "RELEASE_VERSION_LENGTH_INVALID" }
+      ]
+    },
+    "matrix": [
+      { "family": "schema", "fields": ["lineage.schema", "authorityRequest.schema", "generationPayload.schema", "signedGenerationStatement.schema", "discoveryAttempt.schema", "legacyV1Projection.schema"], "type": "string", "nullability": "required-non-null", "syntax": "exact root const", "comparison": "ordinal-exact", "refusal": "SCHEMA_IDENTIFIER_INVALID" },
+      { "family": "contractVersion", "fields": ["lineage.contractVersion", "authorityRequest.contractVersion", "generationPayload.contractVersion", "signedGenerationStatement.contractVersion", "discoveryAttempt.contractVersion", "legacyV1Projection.contractVersion"], "type": "integer", "nullability": "required-non-null", "syntax": "exact 2; legacy root exact 1", "comparison": "numeric-equality", "refusal": "CONTRACT_VERSION_UNSUPPORTED" },
+      { "family": "uuid", "fields": ["lineage.authorityLineageId", "lineage.productId", "authorityRequest.requestId", "authorityRequest.productId", "authorityRequest.expectedAuthorityLineageId", "authorityRequest.expectedCurrentGenerationId", "authorityRequest.expectedPredecessorGenerationId", "generationPayload.authorityLineageId", "generationPayload.authorityGenerationId", "generationPayload.previousGenerationId", "generationPayload.productId", "bindingAuthority.bindingId", "enrollmentAuthority.enrollmentId", "installationAuthority.installationId", "installationAuthority.seatId", "transition.requestId", "discoveryAttempt.attemptId", "discoveryAttempt.requestId", "discoveryAttempt.authorityLineageId", "discoveryAttempt.authorityGenerationId", "legacyV1Projection.productId"], "type": "string-or-declared-null", "nullability": "schema-specific-explicit-null", "syntax": "36 lowercase ASCII UUID v1-v8 RFC variant", "comparison": "ordinal-exact", "refusal": "IDENTIFIER_INVALID|NULLABILITY_INVALID" },
+      { "family": "provider", "fields": ["lineage.provider", "authorityRequest.provider", "generationPayload.provider", "legacyV1Projection.provider"], "type": "string", "nullability": "required-non-null", "syntax": "1..64 lowercase ASCII [a-z0-9._-]", "comparison": "ordinal-exact", "refusal": "PROVIDER_CODE_INVALID" },
+      { "family": "providerGrantRef", "fields": ["lineage.providerGrantRef", "authorityRequest.providerGrantRef", "generationPayload.providerGrantRef", "legacyV1Projection.providerGrantRef"], "type": "string", "nullability": "required-non-null", "syntax": "1..256 Unicode scalars excluding C0 DEL and surrogates", "comparison": "ordinal-exact-no-normalization", "refusal": "PROVIDER_GRANT_REF_INVALID" },
+      { "family": "releaseVersion", "fields": ["releaseAuthority.version"], "type": "string", "nullability": "required-non-null", "syntax": "5..32 ASCII numeric major.minor.patch; components 0..2147483647", "comparison": "numeric-tuple", "refusal": "RELEASE_VERSION_LENGTH_INVALID|RELEASE_VERSION_FORMAT_INVALID|RELEASE_VERSION_COMPONENT_OUT_OF_RANGE|RELEASE_REGRESSION" },
+      { "family": "sha256", "fields": ["releaseAuthority.artifactSetDigest", "bindingAuthority.hardwareIdDigest", "signedGenerationStatement.authorityDigest", "discoveryAttempt.requestDigest", "legacyV1Projection.authorityDigest"], "type": "string", "nullability": "required-non-null", "syntax": "64 lowercase ASCII hexadecimal", "comparison": "ordinal-exact", "refusal": "SHA256_INVALID|AUTHORITY_DIGEST_MISMATCH" },
+      { "family": "timestamp", "fields": ["lineage.createdAtUtc", "requestTransition.requestedAtUtc", "enrollmentAuthority.issuedAtUtc", "enrollmentAuthority.expiresAtUtc", "transition.occurredAtUtc", "discoveryAttempt.createdAtUtc", "discoveryAttempt.completedAtUtc"], "type": "string-or-declared-null", "nullability": "schema-specific-explicit-null", "syntax": "27 ASCII yyyy-MM-ddTHH:mm:ss.ffffffZ and real calendar", "comparison": "chronological-after-exact-parse", "refusal": "TIMESTAMP_INVALID|CALENDAR_INVALID|TEMPORAL_POLICY_CODE" },
+      { "family": "enrollmentState", "fields": ["enrollmentAuthority.state"], "type": "string", "nullability": "required-non-null", "syntax": "pending|active|revoked|expired", "comparison": "ordinal-exact", "refusal": "ENROLLMENT_STATE_INVALID" },
+      { "family": "keyId", "fields": ["keyAuthority.authorityKeyId", "signature.keyId"], "type": "string", "nullability": "required-non-null", "syntax": "1..128 lowercase ASCII [a-z0-9._-]", "comparison": "ordinal-exact", "refusal": "KEY_ID_INVALID" },
+      { "family": "securityEpoch", "fields": ["keyAuthority.securityEpoch"], "type": "integer", "nullability": "required-non-null", "syntax": "0..2147483647", "comparison": "numeric", "refusal": "SECURITY_EPOCH_INVALID|SECURITY_EPOCH_REGRESSION" },
+      { "family": "sequence", "fields": ["generationPayload.sequence"], "type": "integer", "nullability": "required-non-null", "syntax": "0..9007199254740991 canonical decimal JSON safe integer", "comparison": "numeric", "refusal": "GENERATION_SEQUENCE_INVALID" },
+      { "family": "transitionKind", "fields": ["transition.kind", "requestTransition.kind"], "type": "string", "nullability": "required-non-null", "syntax": "closed lowercase registry", "comparison": "ordinal-exact", "refusal": "TRANSITION_KIND_UNKNOWN" },
+      { "family": "reasonCode", "fields": ["transition.reasonCode", "requestTransition.reasonCode"], "type": "string", "nullability": "required-non-null", "syntax": "closed uppercase registry", "comparison": "ordinal-exact", "refusal": "TRANSITION_REASON_UNKNOWN" },
+      { "family": "signatureAlgorithm", "fields": ["signature.algorithm"], "type": "string", "nullability": "required-non-null", "syntax": "exact PS256", "comparison": "ordinal-exact", "refusal": "SIGNATURE_ALGORITHM_UNSUPPORTED" },
+      { "family": "signatureValue", "fields": ["signature.value"], "type": "string", "nullability": "required-non-null", "syntax": "342 canonical unpadded Base64Url characters for 256 bytes", "comparison": "ordinal-decode-reencode", "refusal": "BASE64URL_ALPHABET_INVALID|BASE64URL_LENGTH_INVALID|BASE64URL_ENCODING_INVALID|BASE64URL_NON_CANONICAL" },
+      { "family": "attemptStatus", "fields": ["discoveryAttempt.status"], "type": "string", "nullability": "required-non-null", "syntax": "accepted|refused", "comparison": "ordinal-exact", "refusal": "ATTEMPT_STATUS_INVALID" },
+      { "family": "errorCode", "fields": ["discoveryAttempt.errorCode"], "type": "string-or-null", "nullability": "accepted-null-refused-non-null", "syntax": "1..64 uppercase ASCII [A-Z0-9_]", "comparison": "ordinal-exact", "refusal": "ERROR_CODE_INVALID|ATTEMPT_RESULT_INVALID" },
+      { "family": "legacySource", "fields": ["legacyV1Projection.source"], "type": "string", "nullability": "required-non-null", "syntax": "exact legacy_projection", "comparison": "ordinal-exact", "refusal": "LEGACY_SOURCE_INVALID" }
+    ],
+    "boundaryCases": [
+      { "name": "schema-exact", "family": "schema", "value": "runtime-enrollment-authority-generation-v2", "expected": "VALID" },
+      { "name": "schema-wrong-case", "family": "schema", "value": "Runtime-enrollment-authority-generation-v2", "expected": "SCHEMA_IDENTIFIER_INVALID" },
+      { "name": "contract-version-v2", "family": "contractVersion", "value": 2, "expected": "VALID" },
+      { "name": "contract-version-unsupported", "family": "contractVersion", "value": 3, "expected": "CONTRACT_VERSION_UNSUPPORTED" },
+      { "name": "provider-lowercase", "family": "provider", "value": "softlicence", "expected": "VALID" },
+      { "name": "provider-uppercase", "family": "provider", "value": "Softlicence", "expected": "PROVIDER_CODE_INVALID" },
+      { "name": "provider-leading-space", "family": "provider", "value": " softlicence", "expected": "PROVIDER_CODE_INVALID" },
+      { "name": "provider-length-64", "family": "provider", "generatedValue": { "scalar": "a", "count": 64 }, "expected": "VALID" },
+      { "name": "provider-length-65", "family": "provider", "generatedValue": { "scalar": "a", "count": 65 }, "expected": "PROVIDER_CODE_INVALID" },
+      { "name": "uuid-lowercase", "family": "uuid", "value": "018f6fd4-8f31-7cc2-8d19-9e79c8b87a01", "expected": "VALID" },
+      { "name": "uuid-uppercase", "family": "uuid", "value": "018F6FD4-8F31-7CC2-8D19-9E79C8B87A01", "expected": "IDENTIFIER_INVALID" },
+      { "name": "uuid-length-35", "family": "uuid", "value": "18f6fd4-8f31-7cc2-8d19-9e79c8b87a01", "expected": "IDENTIFIER_INVALID" },
+      { "name": "uuid-version-9", "family": "uuid", "value": "018f6fd4-8f31-9cc2-8d19-9e79c8b87a01", "expected": "IDENTIFIER_INVALID" },
+      { "name": "uuid-variant-7", "family": "uuid", "value": "018f6fd4-8f31-7cc2-7d19-9e79c8b87a01", "expected": "IDENTIFIER_INVALID" },
+      { "name": "sha256-lowercase", "family": "sha256", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "expected": "VALID" },
+      { "name": "sha256-uppercase", "family": "sha256", "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "expected": "SHA256_INVALID" },
+      { "name": "sha256-length-63", "family": "sha256", "generatedValue": { "scalar": "a", "count": 63 }, "expected": "SHA256_INVALID" },
+      { "name": "sha256-length-65", "family": "sha256", "generatedValue": { "scalar": "a", "count": 65 }, "expected": "SHA256_INVALID" },
+      { "name": "timestamp-exact", "family": "timestamp", "value": "2026-08-22T16:00:00.000000Z", "expected": "VALID" },
+      { "name": "timestamp-lowercase-z", "family": "timestamp", "value": "2026-08-22T16:00:00.000000z", "expected": "TIMESTAMP_INVALID" },
+      { "name": "provider-ref-preserved", "family": "providerGrantRef", "value": " Grant:É ", "expected": "VALID" },
+      { "name": "provider-ref-empty", "family": "providerGrantRef", "value": "", "expected": "PROVIDER_GRANT_REF_INVALID" },
+      { "name": "provider-ref-astral-256", "family": "providerGrantRef", "generatedValue": { "scalar": "🚀", "count": 256 }, "expectedScalarCount": 256, "expectedUtf16CodeUnitCount": 512, "expected": "VALID" },
+      { "name": "provider-ref-astral-257", "family": "providerGrantRef", "generatedValue": { "scalar": "🚀", "count": 257 }, "expectedScalarCount": 257, "expectedUtf16CodeUnitCount": 514, "expected": "PROVIDER_GRANT_REF_INVALID" },
+      { "name": "provider-ref-c0", "family": "providerGrantRef", "value": "\u001f", "expected": "PROVIDER_GRANT_REF_INVALID" },
+      { "name": "provider-ref-del", "family": "providerGrantRef", "value": "\u007f", "expected": "PROVIDER_GRANT_REF_INVALID" },
+      { "name": "provider-ref-unpaired-surrogate", "family": "providerGrantRef", "generatedUtf16CodeUnit": "d800", "expected": "PROVIDER_GRANT_REF_INVALID" },
+      { "name": "enrollment-state-exact", "family": "enrollmentState", "value": "active", "expected": "VALID" },
+      { "name": "enrollment-state-unknown", "family": "enrollmentState", "value": "unknown", "expected": "ENROLLMENT_STATE_INVALID" },
+      { "name": "key-id-lowercase", "family": "keyId", "value": "softlicence-root-2026", "expected": "VALID" },
+      { "name": "key-id-uppercase", "family": "keyId", "value": "Softlicence-root-2026", "expected": "KEY_ID_INVALID" },
+      { "name": "key-id-length-128", "family": "keyId", "generatedValue": { "scalar": "k", "count": 128 }, "expected": "VALID" },
+      { "name": "key-id-length-129", "family": "keyId", "generatedValue": { "scalar": "k", "count": 129 }, "expected": "KEY_ID_INVALID" },
+      { "name": "security-epoch-zero", "family": "securityEpoch", "value": 0, "expected": "VALID" },
+      { "name": "security-epoch-negative", "family": "securityEpoch", "value": -1, "expected": "SECURITY_EPOCH_INVALID" },
+      { "name": "security-epoch-max", "family": "securityEpoch", "value": 2147483647, "expected": "VALID" },
+      { "name": "security-epoch-overflow", "family": "securityEpoch", "value": 2147483648, "expected": "SECURITY_EPOCH_INVALID" },
+      { "name": "sequence-zero", "family": "sequence", "value": 0, "expected": "VALID" },
+      { "name": "sequence-negative", "family": "sequence", "value": -1, "expected": "GENERATION_SEQUENCE_INVALID" },
+      { "name": "sequence-max-safe-integer", "family": "sequence", "value": 9007199254740991, "expected": "VALID" },
+      { "name": "sequence-unsafe-integer", "family": "sequence", "value": 9007199254740992, "expected": "GENERATION_SEQUENCE_INVALID" },
+      { "name": "transition-kind-exact", "family": "transitionKind", "value": "genesis", "expected": "VALID" },
+      { "name": "transition-kind-unknown", "family": "transitionKind", "value": "totally_unknown", "expected": "TRANSITION_KIND_UNKNOWN" },
+      { "name": "reason-uppercase", "family": "reasonCode", "value": "INITIAL_ENROLLMENT", "expected": "VALID" },
+      { "name": "reason-lowercase", "family": "reasonCode", "value": "initial_enrollment", "expected": "TRANSITION_REASON_UNKNOWN" },
+      { "name": "algorithm-exact", "family": "signatureAlgorithm", "value": "PS256", "expected": "VALID" },
+      { "name": "algorithm-lowercase", "family": "signatureAlgorithm", "value": "ps256", "expected": "SIGNATURE_ALGORITHM_UNSUPPORTED" },
+      { "name": "signature-value-length-342", "family": "signatureValue", "generatedValue": { "scalar": "A", "count": 342 }, "expected": "VALID" },
+      { "name": "signature-value-length-341", "family": "signatureValue", "generatedValue": { "scalar": "A", "count": 341 }, "expected": "BASE64URL_NON_CANONICAL" },
+      { "name": "status-exact", "family": "attemptStatus", "value": "accepted", "expected": "VALID" },
+      { "name": "status-uppercase", "family": "attemptStatus", "value": "ACCEPTED", "expected": "ATTEMPT_STATUS_INVALID" },
+      { "name": "error-code-uppercase", "family": "errorCode", "value": "LINEAGE_RESOLUTION_REFUSED", "expected": "VALID" },
+      { "name": "error-code-lowercase", "family": "errorCode", "value": "lineage_resolution_refused", "expected": "ERROR_CODE_INVALID" },
+      { "name": "error-code-length-64", "family": "errorCode", "generatedValue": { "scalar": "E", "count": 64 }, "expected": "VALID" },
+      { "name": "error-code-length-65", "family": "errorCode", "generatedValue": { "scalar": "E", "count": 65 }, "expected": "ERROR_CODE_INVALID" },
+      { "name": "legacy-source-exact", "family": "legacySource", "value": "legacy_projection", "expected": "VALID" },
+      { "name": "legacy-source-wrong-case", "family": "legacySource", "value": "LEGACY_PROJECTION", "expected": "LEGACY_SOURCE_INVALID" }
+    ],
+    "nullabilityCases": [
+      { "name": "seat-id-explicit-null", "target": "installationAuthority.seatId", "value": null, "expected": "VALID" },
+      { "name": "mandatory-product-id-null", "target": "generationPayload.productId", "value": null, "expected": "NULLABILITY_INVALID" },
+      { "name": "accepted-shape-valid", "target": "discoveryAttempt.outcome", "value": { "status": "accepted", "authorityLineageId": "018f6fd4-8f31-7cc2-8d19-9e79c8b87a01", "authorityGenerationId": "018f6fd4-aad1-7a27-91fe-fec30a9ff201", "errorCode": null }, "expected": "VALID" },
+      { "name": "accepted-lineage-null", "target": "discoveryAttempt.outcome", "value": { "status": "accepted", "authorityLineageId": null, "authorityGenerationId": "018f6fd4-aad1-7a27-91fe-fec30a9ff201", "errorCode": null }, "expected": "ACCEPTED_ATTEMPT_IDENTITY_INVALID" },
+      { "name": "accepted-generation-null", "target": "discoveryAttempt.outcome", "value": { "status": "accepted", "authorityLineageId": "018f6fd4-8f31-7cc2-8d19-9e79c8b87a01", "authorityGenerationId": null, "errorCode": null }, "expected": "ACCEPTED_ATTEMPT_IDENTITY_INVALID" },
+      { "name": "accepted-error-non-null", "target": "discoveryAttempt.outcome", "value": { "status": "accepted", "authorityLineageId": "018f6fd4-8f31-7cc2-8d19-9e79c8b87a01", "authorityGenerationId": "018f6fd4-aad1-7a27-91fe-fec30a9ff201", "errorCode": "UNEXPECTED" }, "expected": "ACCEPTED_ATTEMPT_IDENTITY_INVALID" },
+      { "name": "refused-shape-valid", "target": "discoveryAttempt.outcome", "value": { "status": "refused", "authorityLineageId": null, "authorityGenerationId": null, "errorCode": "LINEAGE_RESOLUTION_REFUSED" }, "expected": "VALID" },
+      { "name": "refused-generation-non-null", "target": "discoveryAttempt.outcome", "value": { "status": "refused", "authorityLineageId": null, "authorityGenerationId": "018f6fd4-aad1-7a27-91fe-fec30a9ff201", "errorCode": "LINEAGE_RESOLUTION_REFUSED" }, "expected": "REFUSED_ATTEMPT_SHAPE_INVALID" },
+      { "name": "refused-error-null", "target": "discoveryAttempt.outcome", "value": { "status": "refused", "authorityLineageId": null, "authorityGenerationId": null, "errorCode": null }, "expected": "REFUSED_ATTEMPT_SHAPE_INVALID" }
+    ]
+  },
+  "canonicalization": {
+    "payload": {
+      "schema": "runtime-enrollment-authority-generation-v2",
+      "contractVersion": 2,
+      "authorityLineageId": "018f6fd4-8f31-7cc2-8d19-9e79c8b87a01",
+      "authorityGenerationId": "018f6fd4-aad1-7a27-91fe-fec30a9ff201",
+      "previousGenerationId": null,
+      "sequence": 0,
+      "provider": "softlicence",
+      "productId": "018f6fd4-94b2-7f7e-8f47-13eb8aab8b11",
+      "providerGrantRef": "grant:tenant-a:café:🚀",
+      "release": {
+        "version": "2.3.445",
+        "artifactSetDigest": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "binding": {
+        "bindingId": "018f6fd4-bbc2-7467-a238-0bf114bb3101",
+        "hardwareIdDigest": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "enrollment": {
+        "enrollmentId": "018f6fd4-cbd3-7d7d-b8db-a905a7786201",
+        "state": "active",
+        "issuedAtUtc": "2026-08-22T16:00:01.000000Z",
+        "expiresAtUtc": null
+      },
+      "key": {
+        "authorityKeyId": "runtime-enrollment-ps256-2026-01",
+        "securityEpoch": 7
+      },
+      "installation": {
+        "installationId": "018f6fd4-dce4-7b2a-8202-5846e80d1301",
+        "seatId": "018f6fd4-edf5-7524-9c37-1ae1a3764401"
+      },
+      "transition": {
+        "kind": "genesis",
+        "reasonCode": "INITIAL_ENROLLMENT",
+        "requestId": "018f6fd4-fe06-75d7-ae93-b15d36ca5501",
+        "occurredAtUtc": "2026-08-22T16:00:02.000000Z"
+      }
+    },
+    "canonicalJson": "{\"schema\":\"runtime-enrollment-authority-generation-v2\",\"contractVersion\":2,\"authorityLineageId\":\"018f6fd4-8f31-7cc2-8d19-9e79c8b87a01\",\"authorityGenerationId\":\"018f6fd4-aad1-7a27-91fe-fec30a9ff201\",\"previousGenerationId\":null,\"sequence\":0,\"provider\":\"softlicence\",\"productId\":\"018f6fd4-94b2-7f7e-8f47-13eb8aab8b11\",\"providerGrantRef\":\"grant:tenant-a:café:🚀\",\"release\":{\"version\":\"2.3.445\",\"artifactSetDigest\":\"1111111111111111111111111111111111111111111111111111111111111111\"},\"binding\":{\"bindingId\":\"018f6fd4-bbc2-7467-a238-0bf114bb3101\",\"hardwareIdDigest\":\"2222222222222222222222222222222222222222222222222222222222222222\"},\"enrollment\":{\"enrollmentId\":\"018f6fd4-cbd3-7d7d-b8db-a905a7786201\",\"state\":\"active\",\"issuedAtUtc\":\"2026-08-22T16:00:01.000000Z\",\"expiresAtUtc\":null},\"key\":{\"authorityKeyId\":\"runtime-enrollment-ps256-2026-01\",\"securityEpoch\":7},\"installation\":{\"installationId\":\"018f6fd4-dce4-7b2a-8202-5846e80d1301\",\"seatId\":\"018f6fd4-edf5-7524-9c37-1ae1a3764401\"},\"transition\":{\"kind\":\"genesis\",\"reasonCode\":\"INITIAL_ENROLLMENT\",\"requestId\":\"018f6fd4-fe06-75d7-ae93-b15d36ca5501\",\"occurredAtUtc\":\"2026-08-22T16:00:02.000000Z\"}}",
+    "canonicalUtf8Hex": "7b22736368656d61223a2272756e74696d652d656e726f6c6c6d656e742d617574686f726974792d67656e65726174696f6e2d7632222c22636f6e747261637456657273696f6e223a322c22617574686f726974794c696e656167654964223a2230313866366664342d386633312d376363322d386431392d396537396338623837613031222c22617574686f7269747947656e65726174696f6e4964223a2230313866366664342d616164312d376132372d393166652d666563333061396666323031222c2270726576696f757347656e65726174696f6e4964223a6e756c6c2c2273657175656e6365223a302c2270726f7669646572223a22736f66746c6963656e6365222c2270726f647563744964223a2230313866366664342d393462322d376637652d386634372d313365623861616238623131222c2270726f76696465724772616e74526566223a226772616e743a74656e616e742d613a636166c3a93af09f9a80222c2272656c65617365223a7b2276657273696f6e223a22322e332e343435222c226172746966616374536574446967657374223a2231313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131227d2c2262696e64696e67223a7b2262696e64696e674964223a2230313866366664342d626263322d373436372d613233382d306266313134626233313031222c2268617264776172654964446967657374223a2232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232323232227d2c22656e726f6c6c6d656e74223a7b22656e726f6c6c6d656e744964223a2230313866366664342d636264332d376437642d623864622d613930356137373836323031222c227374617465223a22616374697665222c226973737565644174557463223a22323032362d30382d32325431363a30303a30312e3030303030305a222c22657870697265734174557463223a6e756c6c7d2c226b6579223a7b22617574686f726974794b65794964223a2272756e74696d652d656e726f6c6c6d656e742d70733235362d323032362d3031222c22736563757269747945706f6368223a377d2c22696e7374616c6c6174696f6e223a7b22696e7374616c6c6174696f6e4964223a2230313866366664342d646365342d376232612d383230322d353834366538306431333031222c22736561744964223a2230313866366664342d656466352d373532342d396333372d316165316133373634343031227d2c227472616e736974696f6e223a7b226b696e64223a2267656e65736973222c22726561736f6e436f6465223a22494e495449414c5f454e524f4c4c4d454e54222c22726571756573744964223a2230313866366664342d666530362d373564372d616539332d623135643336636135353031222c226f636375727265644174557463223a22323032362d30382d32325431363a30303a30322e3030303030305a227d7d",
+    "authorityDigest": "01c18f45c35263bef28814300bc38e8d903e9a5fd22ada4c8c094c21d0110402"
+  },
+  "unicodeVectors": [
+    {
+      "name": "composed",
+      "value": "café",
+      "scalarCount": 4,
+      "utf16CodeUnitCount": 4
+    },
+    {
+      "name": "decomposed",
+      "value": "café",
+      "scalarCount": 5,
+      "utf16CodeUnitCount": 5
+    },
+    {
+      "name": "astral",
+      "value": "grant:🚀",
+      "scalarCount": 7,
+      "utf16CodeUnitCount": 8
+    }
+  ],
+  "invalidUnicodeVectors": [
+    {
+      "name": "unpaired-high-surrogate",
+      "utf16CodeUnit": "d800",
+      "expectedCode": "UNPAIRED_UTF16_SURROGATE"
+    },
+    {
+      "name": "unpaired-low-surrogate",
+      "utf16CodeUnit": "dc00",
+      "expectedCode": "UNPAIRED_UTF16_SURROGATE"
+    }
+  ],
+  "jsonStringEscapeVectors": [
+    {
+      "name": "quote-and-backslash",
+      "value": "grant:\"quoted\"\\path",
+      "canonicalJsonString": "\"grant:\\\"quoted\\\"\\\\path\""
+    },
+    {
+      "name": "next-line-u0085",
+      "value": "grant::end",
+      "canonicalJsonString": "\"grant:\\u0085:end\""
+    },
+    {
+      "name": "line-separator-u2028",
+      "value": "grant: :end",
+      "canonicalJsonString": "\"grant:\\u2028:end\""
+    },
+    {
+      "name": "paragraph-separator-u2029",
+      "value": "grant: :end",
+      "canonicalJsonString": "\"grant:\\u2029:end\""
+    }
+  ],
+  "base64UrlInvalidVectors": [
+    {
+      "name": "padded-alias",
+      "mutation": "append-padding",
+      "value": "==",
+      "expectedCode": "BASE64URL_NON_CANONICAL"
+    },
+    {
+      "name": "standard-alphabet-alias",
+      "mutation": "replace-first-underscore",
+      "value": "/",
+      "expectedCode": "BASE64URL_ALPHABET_INVALID"
+    },
+    {
+      "name": "nonzero-pad-bits",
+      "mutation": "replace-last-character",
+      "value": "h",
+      "expectedCode": "BASE64URL_NON_CANONICAL"
+    }
+  ],
+  "base64UrlZeroPadBitsVector": {
+    "canonicalValue": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "nonCanonicalAlias": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+    "decodedByteCount": 256,
+    "decodedByteValue": 0,
+    "aliasExpectedCode": "BASE64URL_NON_CANONICAL"
+  },
+  "generationEscapeVectors": [
+    {
+      "name": "composed",
+      "providerGrantRef": "grant:café",
+      "canonicalJsonString": "\"grant:café\"",
+      "authorityDigest": "2791c79411dea4d3fda066c6fc044af2f6466dd12e5dbe7fb8758aa1ffddd192",
+      "signingInputSha256": "2a4dc2643d474feceabcfebb8c5c57758a8d30825896d856d5dec6e516a446a4"
+    },
+    {
+      "name": "decomposed",
+      "providerGrantRef": "grant:café",
+      "canonicalJsonString": "\"grant:café\"",
+      "authorityDigest": "65299e2d51de27375424c6c63ab0a43cae8212a4610b27eb98a15f274f4ad2ed",
+      "signingInputSha256": "648101098075c6be2f75e4683ebace2170df5e6dde0fe8ebf2a2b3b614efaf83"
+    },
+    {
+      "name": "astral",
+      "providerGrantRef": "grant:🚀",
+      "canonicalJsonString": "\"grant:🚀\"",
+      "authorityDigest": "b742ea71311a32b4303cdb165a4be8175f5a88999797fc3508408db69d80eabf",
+      "signingInputSha256": "6f7a6d1e9c08a2e39180962bb0ecad06073b83369ae1d911573fce38011871e5"
+    },
+    {
+      "name": "quote-and-backslash",
+      "providerGrantRef": "grant:\"quoted\"\\path",
+      "canonicalJsonString": "\"grant:\\\"quoted\\\"\\\\path\"",
+      "authorityDigest": "11892920f06e0ffa75335de2d225ebd4a49d2e5824554af781abbfa6588b5231",
+      "signingInputSha256": "0b27722e51506df2fac5c694c9c1436a7674eb92a0842e6b8b23541ecebcedbb"
+    },
+    {
+      "name": "next-line-u0085",
+      "providerGrantRef": "grant::end",
+      "canonicalJsonString": "\"grant:\\u0085:end\"",
+      "authorityDigest": "ab608db397c11a43a9c3bb2e664311d68a1518ab2d89547a6e2b1f2b694f7707",
+      "signingInputSha256": "02ad2eb87c258b8650151171e6d18b54494413f277c2a84c4dadfe05b9f8a616"
+    },
+    {
+      "name": "line-separator-u2028",
+      "providerGrantRef": "grant: :end",
+      "canonicalJsonString": "\"grant:\\u2028:end\"",
+      "authorityDigest": "68b93d33fb03c53e2b9ad0468fb503666781dae3ccc841c3ffe08570396fe853",
+      "signingInputSha256": "fcb12ac859faf9be7784f85e995e7d03d3741b21a8b536a1b77b1deebadd6c26"
+    },
+    {
+      "name": "paragraph-separator-u2029",
+      "providerGrantRef": "grant: :end",
+      "canonicalJsonString": "\"grant:\\u2029:end\"",
+      "authorityDigest": "0124aa5add674f2d553257392ccdc0415baba3ce6f0398938ec41dc53c1aa85c",
+      "signingInputSha256": "2e53192c62839b4df24dfb93d7377b2f088db812d4d6a7dce4447d7cf45925c7"
+    }
+  ],
+  "ps256": {
+    "domainHex": "542d49412d434f4e4e4543540052554e54494d452d454e524f4c4c4d454e5400415554484f524954592d47454e45524154494f4e005632",
+    "domainByteCount": 55,
+    "signingInputSha256": "eb9983bf9ab2d860f573ea4b00dd8f8bc7361c9d67db955830d07f616c23447e",
+    "publicKeySpkiBase64": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA7gAHSX+HOBnTm7bHQn6Qnru8Je8xZsuSULf2UBEkEBZgYzI/d3jkqRob/NRrNw4NfnMmccbPt+oYOTsrLcuOLBFeN34DZqFx2NKW4Eral76vPH5iwxFFSeXoXklOrIeUAIrugJ/CwaI86DWcuPeiId2cFPVtnfMRb2Fhk/s1BWY+acum2NcoQO912t36b0RwQUvGk/1kNxqcON7pbbW9L9lyu20DoLEd05uuSQnaCtpjRVZ47zLJDGRn4rdGTtnuv+cYdlg5+MqVeabf6JPhI5DUGccRu+dPblFjJ6LAMaFSsYKA0cqV6GwJVA5RBU6DoO3y6sd5b86XSfS+5ykVZQIDAQAB",
+    "publicKeyModulusBase64Url": "7gAHSX-HOBnTm7bHQn6Qnru8Je8xZsuSULf2UBEkEBZgYzI_d3jkqRob_NRrNw4NfnMmccbPt-oYOTsrLcuOLBFeN34DZqFx2NKW4Eral76vPH5iwxFFSeXoXklOrIeUAIrugJ_CwaI86DWcuPeiId2cFPVtnfMRb2Fhk_s1BWY-acum2NcoQO912t36b0RwQUvGk_1kNxqcON7pbbW9L9lyu20DoLEd05uuSQnaCtpjRVZ47zLJDGRn4rdGTtnuv-cYdlg5-MqVeabf6JPhI5DUGccRu-dPblFjJ6LAMaFSsYKA0cqV6GwJVA5RBU6DoO3y6sd5b86XSfS-5ykVZQ",
+    "publicKeyExponentBase64Url": "AQAB",
+    "signatureBase64Url": "yoqBwXPL0pmS2_XK8op3hdX_qnDzCGYNYjywLpu01YRq6NCYjiQ-n3-PaO6jD9nKtWeouNbkfOu_mWiVOsdmucwW3N8-q7YZqUYeWRCe0vdONsN4bEPu5aLoBWQDJAevpKwJh9Y0iC6_fZWVo5rMZNOJ06-kYNMwVl-pNa0DffUeYpHFqVw2yXA7u_mY-pnmTaZ1bLsJ6-JXh7rcqT1f2pmdFIK9xdYTWviN5jGn3RQ2NBRa2ryxBbRZ6ax0M8UAVQ9StLrPubFOkse39GA8sLmNm4QD9tAO2Zp9x2YowYs-BLU3NM6ukoutNPvlzYLzOcfGKzC8EnUlaORykL960A",
+    "signatureByteCount": 256,
+    "saltLength": 32
+  }
+}

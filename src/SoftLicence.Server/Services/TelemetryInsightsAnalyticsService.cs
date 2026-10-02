@@ -59,6 +59,7 @@ public sealed class TelemetryInsightsAnalyticsService
         var insights = new List<TelemetryInsightItem>();
         AddAuthFailures(insights, rows, top);
         AddStartupFailures(insights, rows, top);
+        AddUpdatePreflightFailures(insights, rows, top);
         AddCertPinningFailures(insights, rows, top);
         AddActivationFailures(insights, rows, top);
         AddQuotaOpportunities(insights, rows, top);
@@ -155,6 +156,59 @@ public sealed class TelemetryInsightsAnalyticsService
             matched,
             top,
             matched.Count));
+    }
+
+    private static void AddUpdatePreflightFailures(
+        List<TelemetryInsightItem> insights,
+        List<InsightTelemetryRow> rows,
+        int top)
+    {
+        var matched = rows
+            .Where(row => string.Equals(
+                row.EventName,
+                UpdatePreflightFailureAlertService.EventName,
+                StringComparison.Ordinal))
+            .Select(row => new
+            {
+                Row = row,
+                Properties = TelemetrySchemaRegistry.ParseProperties(row.PropertiesJson)
+            })
+            .Select(item => UpdatePreflightFailureAlertService.TryParseProperties(
+                    item.Properties,
+                    out var observation)
+                ? new { item.Row, Observation = observation }
+                : null)
+            .Where(item => item != null)
+            .Select(item => item!)
+            .ToList();
+
+        if (matched.Count == 0)
+            return;
+
+        insights.Add(new TelemetryInsightItem
+        {
+            Severity = "critical",
+            Category = "update-preflight",
+            Title = "UPD startup shells were presented",
+            Summary = $"{matched.Count} actual UPD shell presentations affected " +
+                $"{matched.Select(item => item.Row.HardwareId).Distinct(StringComparer.Ordinal).Count()} devices.",
+            Count = matched.Count,
+            UniqueDevices = matched.Select(item => item.Row.HardwareId).Distinct(StringComparer.Ordinal).Count(),
+            Score = matched.Count,
+            FirstSeenUtc = matched.Min(item => item.Row.Timestamp),
+            LastSeenUtc = matched.Max(item => item.Row.Timestamp),
+            Breakdown = matched
+                .GroupBy(item => string.Join(" | ",
+                    item.Observation.SupportCode,
+                    item.Observation.DecisionReason,
+                    item.Observation.CurrentVersion),
+                    StringComparer.Ordinal)
+                .OrderByDescending(group => group.Count())
+                .ThenBy(group => group.Key, StringComparer.Ordinal)
+                .Take(top)
+                .Select(group => new TelemetryToolCount { Name = group.Key, Count = group.Count() })
+                .ToList()
+        });
     }
 
     private static void AddActivationFailures(List<TelemetryInsightItem> insights, List<InsightTelemetryRow> rows, int top)

@@ -42,6 +42,10 @@ public sealed class AuditMiddlewareDistributionRedactionTests
     [InlineData("/api/internal/v1/distribution-license-bootstraps/issue")]
     [InlineData("/api/internal/v1/distribution-license-bootstraps/remint")]
     [InlineData("/api/internal/v1/distribution-license-bootstraps/recover")]
+    [InlineData("/api/internal/distribution-installation-bindings/hardware-authority")]
+    [InlineData("/api/internal/distribution-installation-bindings/hardware-authority/")]
+    [InlineData("/api/internal/v1/distribution-installation-bindings/source-authority/resolve")]
+    [InlineData("/api/internal/v1/distribution-installation-bindings/source-authority/resolve/")]
     public void LicenseBootstrapRoutes_AreClassifiedAsSensitive(string path)
     {
         var method = typeof(SoftLicence.Server.Middlewares.AuditMiddleware).GetMethod(
@@ -73,6 +77,28 @@ public sealed class AuditMiddlewareDistributionRedactionTests
         AssertRedacted(log, licenseId, entitlementRef);
     }
 
+    [Fact]
+    public async Task RuntimeSourceResolution_Success_DoesNotPersistHardwareOrLicenseIdentifiers()
+    {
+        const string path = "/api/internal/v1/distribution-installation-bindings/source-authority/resolve";
+        const string hardwareId = "EXACT-PRIVATE-HWID";
+        const string targetLicenseId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        const string sourceLicenseId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+        const string body = "{\"schema\":\"distribution-runtime-source-resolution-v1\",\"requestId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"productId\":\"12345678-1234-4234-9234-1234567890ab\",\"targetLicenseId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"hardwareId\":\"EXACT-PRIVATE-HWID\"}";
+        var bindings = new Mock<IDistributionInstallationBindingService>();
+        bindings.Setup(service => service.ResolveRuntimeSourceAsync(
+                ClientId, It.IsAny<DistributionRuntimeSourceResolutionRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new DistributionRuntimeSourceResolutionResponse(
+                "distribution-runtime-source-resolution-result-v1", "source", sourceLicenseId, "legacy"));
+        using var factory = CreateFactory(bindings.Object);
+
+        using var response = await PostJsonAsync(factory.CreateClient(), path, body);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var log = await WaitForLogAsync(factory.Services, path, StatusCodes.Status200OK);
+        AssertRedacted(log, hardwareId, targetLicenseId, sourceLicenseId);
+    }
+
     [Theory]
     [InlineData("/api/internal/v1/distribution-installation-bindings/finalize")]
     [InlineData("/api/internal/v1/distribution-installation-bindings/finalize/")]
@@ -81,12 +107,13 @@ public sealed class AuditMiddlewareDistributionRedactionTests
         const string licenseId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
         const string entitlementRef = "CfDJ8-sensitive-bearer-entitlement-reference";
         const string hardwareId = "TEST-HWID-ABCDEF012345";
+        const string sourceLicenseId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
         var executableHash = new string('a', 64);
         var nativeHash = new string('b', 64);
         var coreHash = new string('c', 64);
         var installerHash = new string('d', 64);
         var body = $$"""
-            {"schema":"distribution-installation-finalize-v1","requestId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","grantRef":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","handoffDigestSha256":"{{new string('e', 64)}}","handoffIssuedAtUtc":"2026-07-18T18:00:00.0000000Z","handoffExpiresAtUtc":"2026-07-18T20:00:00.0000000Z","downloadCompletedAtUtc":"2026-07-18T18:10:00.0000000Z","productId":"12345678-1234-4234-9234-1234567890ab","softLicenceLicenseId":"{{licenseId}}","entitlementRef":"{{entitlementRef}}","installationId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","hardwareId":"{{hardwareId}}","release":{"version":"2.2.844","installerFilename":"TiaConnect-Setup.exe","installerSha256":"{{installerHash}}"},"binaries":[{"key":"FP_EXE","sha256":"{{executableHash}}"},{"key":"FP_DLL","sha256":"{{nativeHash}}"},{"key":"FP_CORE","sha256":"{{coreHash}}"}]}
+            {"schema":"distribution-installation-finalize-v5","requestId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","grantRef":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","handoffDigestSha256":"{{new string('e', 64)}}","handoffIssuedAtUtc":"2026-07-18T18:00:00.0000000Z","handoffExpiresAtUtc":"2026-07-18T20:00:00.0000000Z","downloadCompletedAtUtc":"2026-07-18T18:10:00.0000000Z","productId":"12345678-1234-4234-9234-1234567890ab","softLicenceLicenseId":"{{licenseId}}","entitlementRef":"{{entitlementRef}}","installationId":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","hardwareId":"{{hardwareId}}","allowSameAuthorityRecovery":true,"legacyLicenseReplacement":{"schema":"distribution-legacy-license-replacement-v1","sourceLicenseId":"{{sourceLicenseId}}","targetLicenseId":"{{licenseId}}"},"release":{"version":"2.2.844","installerFilename":"TiaConnect-Setup.exe","installerSha256":"{{installerHash}}"},"binaries":[{"key":"FP_EXE","sha256":"{{executableHash}}"},{"key":"FP_DLL","sha256":"{{nativeHash}}"},{"key":"FP_CORE","sha256":"{{coreHash}}"}]}
             """;
         var bindings = new Mock<IDistributionInstallationBindingService>();
         bindings.Setup(service => service.FinalizeAsync(
@@ -98,7 +125,7 @@ public sealed class AuditMiddlewareDistributionRedactionTests
 
         Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
         var log = await WaitForLogAsync(factory.Services, path, StatusCodes.Status422UnprocessableEntity);
-        AssertRedacted(log, licenseId, entitlementRef, hardwareId, executableHash, nativeHash, coreHash, installerHash);
+        AssertRedacted(log, sourceLicenseId, licenseId, entitlementRef, hardwareId, executableHash, nativeHash, coreHash, installerHash);
     }
 
     [Theory]

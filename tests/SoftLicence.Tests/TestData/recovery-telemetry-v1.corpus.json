@@ -1,0 +1,222 @@
+{
+  "corpusVersion": "recovery-telemetry-v1",
+  "encoding": "utf-8-no-bom",
+  "canonicalPropertyOrder": ["schemaVersion", "productCode", "eventId", "recoveryRunId", "sequence", "occurredAtUtc", "clientVersion", "processRole", "stage", "outcome", "sourceVersion", "targetVersion", "verifiedRestoredVersion", "durationMs", "errorCode", "msiExitCode"],
+  "responseCorrelationId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+  "fixtures": [
+    {
+      "id": "P01_nominal_uac_complete",
+      "requestBytes": [
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000001\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000001\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:00:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\",\"sourceVersion\":\"2.3.404\",\"targetVersion\":\"2.3.278\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000002\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000001\",\"sequence\":2,\"occurredAtUtc\":\"2026-08-21T12:00:02.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"preflight\",\"outcome\":\"succeeded\",\"durationMs\":20}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000003\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000001\",\"sequence\":3,\"occurredAtUtc\":\"2026-08-21T12:00:03.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"confirmation\",\"outcome\":\"accepted\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000004\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000001\",\"sequence\":4,\"occurredAtUtc\":\"2026-08-21T12:00:04.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"process_stop\",\"outcome\":\"started\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000005\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000001\",\"sequence\":5,\"occurredAtUtc\":\"2026-08-21T12:00:05.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"process_stop\",\"outcome\":\"succeeded\",\"durationMs\":50}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000006\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000001\",\"sequence\":6,\"occurredAtUtc\":\"2026-08-21T12:00:06.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"backup\",\"outcome\":\"started\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000007\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000001\",\"sequence\":7,\"occurredAtUtc\":\"2026-08-21T12:00:07.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"backup\",\"outcome\":\"succeeded\",\"durationMs\":80}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000008\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000001\",\"sequence\":8,\"occurredAtUtc\":\"2026-08-21T12:00:08.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"elevation\",\"outcome\":\"requested\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000009\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000001\",\"sequence\":9,\"occurredAtUtc\":\"2026-08-21T12:00:09.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"elevation\",\"outcome\":\"accepted\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000010\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000001\",\"sequence\":10,\"occurredAtUtc\":\"2026-08-21T12:00:10.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"elevated_preflight\",\"outcome\":\"succeeded\",\"durationMs\":30}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000011\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000001\",\"sequence\":11,\"occurredAtUtc\":\"2026-08-21T12:00:11.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"rollback\",\"outcome\":\"started\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000012\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000001\",\"sequence\":12,\"occurredAtUtc\":\"2026-08-21T12:00:12.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"rollback\",\"outcome\":\"succeeded\",\"durationMs\":120000,\"msiExitCode\":0}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000013\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000001\",\"sequence\":13,\"occurredAtUtc\":\"2026-08-21T12:00:13.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"version_verification\",\"outcome\":\"succeeded\",\"targetVersion\":\"2.3.278\",\"verifiedRestoredVersion\":\"2.3.278\",\"durationMs\":100}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000014\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000001\",\"sequence\":14,\"occurredAtUtc\":\"2026-08-21T12:00:14.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"secure_commit\",\"outcome\":\"succeeded\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000015\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000001\",\"sequence\":15,\"occurredAtUtc\":\"2026-08-21T12:00:15.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"relaunch\",\"outcome\":\"attempted\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000016\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000001\",\"sequence\":16,\"occurredAtUtc\":\"2026-08-21T12:00:16.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"relaunch\",\"outcome\":\"succeeded\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000017\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000001\",\"sequence\":17,\"occurredAtUtc\":\"2026-08-21T12:00:17.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"terminal\",\"outcome\":\"completed\"}"
+      ],
+      "expectedHttp": [201, 201, 201, 201, 201, 201, 201, 201, 201, 201, 201, 201, 201, 201, 201, 201, 201],
+      "expectedBodyCodes": ["accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted"],
+      "persistenceDelta": {"runs": 1, "events": 17, "rejections": 0},
+      "runState": "completed",
+      "retryClassification": "delivered"
+    },
+    {
+      "id": "P02_already_elevated",
+      "requestBytes": [
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000021\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000002\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:01:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"run\",\"outcome\":\"started\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000022\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000002\",\"sequence\":2,\"occurredAtUtc\":\"2026-08-21T12:01:02.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"preflight\",\"outcome\":\"succeeded\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000023\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000002\",\"sequence\":3,\"occurredAtUtc\":\"2026-08-21T12:01:03.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"confirmation\",\"outcome\":\"skipped\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000024\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000002\",\"sequence\":4,\"occurredAtUtc\":\"2026-08-21T12:01:04.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"process_stop\",\"outcome\":\"skipped\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000025\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000002\",\"sequence\":5,\"occurredAtUtc\":\"2026-08-21T12:01:05.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"backup\",\"outcome\":\"skipped\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000026\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000002\",\"sequence\":6,\"occurredAtUtc\":\"2026-08-21T12:01:06.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"elevation\",\"outcome\":\"not_required\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000027\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000002\",\"sequence\":7,\"occurredAtUtc\":\"2026-08-21T12:01:07.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"elevated_preflight\",\"outcome\":\"succeeded\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000028\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000002\",\"sequence\":8,\"occurredAtUtc\":\"2026-08-21T12:01:08.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"rollback\",\"outcome\":\"started\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000029\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000002\",\"sequence\":9,\"occurredAtUtc\":\"2026-08-21T12:01:09.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"rollback\",\"outcome\":\"succeeded\",\"msiExitCode\":0}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000030\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000002\",\"sequence\":10,\"occurredAtUtc\":\"2026-08-21T12:01:10.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"version_verification\",\"outcome\":\"succeeded\",\"targetVersion\":\"2.3.278\",\"verifiedRestoredVersion\":\"2.3.278\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000031\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000002\",\"sequence\":11,\"occurredAtUtc\":\"2026-08-21T12:01:11.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"secure_commit\",\"outcome\":\"succeeded\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000032\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000002\",\"sequence\":12,\"occurredAtUtc\":\"2026-08-21T12:01:12.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"relaunch\",\"outcome\":\"skipped\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000033\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000002\",\"sequence\":13,\"occurredAtUtc\":\"2026-08-21T12:01:13.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"terminal\",\"outcome\":\"completed\"}"
+      ],
+      "expectedHttp": [201, 201, 201, 201, 201, 201, 201, 201, 201, 201, 201, 201, 201],
+      "expectedBodyCodes": ["accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted"],
+      "persistenceDelta": {"runs": 1, "events": 13, "rejections": 0},
+      "runState": "completed",
+      "retryClassification": "delivered"
+    },
+    {
+      "id": "P03_uac_cancelled",
+      "requestBytes": [
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000041\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000003\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:02:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000042\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000003\",\"sequence\":2,\"occurredAtUtc\":\"2026-08-21T12:02:02.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"preflight\",\"outcome\":\"succeeded\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000043\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000003\",\"sequence\":3,\"occurredAtUtc\":\"2026-08-21T12:02:03.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"confirmation\",\"outcome\":\"accepted\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000044\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000003\",\"sequence\":4,\"occurredAtUtc\":\"2026-08-21T12:02:04.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"process_stop\",\"outcome\":\"skipped\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000045\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000003\",\"sequence\":5,\"occurredAtUtc\":\"2026-08-21T12:02:05.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"backup\",\"outcome\":\"skipped\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000046\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000003\",\"sequence\":6,\"occurredAtUtc\":\"2026-08-21T12:02:06.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"elevation\",\"outcome\":\"requested\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000047\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000003\",\"sequence\":7,\"occurredAtUtc\":\"2026-08-21T12:02:07.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"elevation\",\"outcome\":\"cancelled\",\"errorCode\":\"uac_cancelled\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000048\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000003\",\"sequence\":8,\"occurredAtUtc\":\"2026-08-21T12:02:08.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"terminal\",\"outcome\":\"cancelled\",\"errorCode\":\"uac_cancelled\"}"
+      ],
+      "expectedHttp": [201, 201, 201, 201, 201, 201, 201, 201],
+      "expectedBodyCodes": ["accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted", "accepted"],
+      "persistenceDelta": {"runs": 1, "events": 8, "rejections": 0},
+      "runState": "cancelled",
+      "retryClassification": "delivered"
+    },
+    {
+      "id": "P04_msi_3010",
+      "requestBytes": ["{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000061\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000004\",\"sequence\":9,\"occurredAtUtc\":\"2026-08-21T12:03:09.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"rollback\",\"outcome\":\"succeeded\",\"msiExitCode\":3010}"],
+      "precondition": "valid run through rollback/started at sequence 8",
+      "expectedHttp": [201], "expectedBodyCodes": ["accepted"],
+      "persistenceDelta": {"runs": 0, "events": 1, "rejections": 0}, "runState": "active", "retryClassification": "delivered"
+    },
+    {
+      "id": "P05_relaunch_warning",
+      "requestBytes": ["{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000071\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000005\",\"sequence\":13,\"occurredAtUtc\":\"2026-08-21T12:04:13.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"relaunch\",\"outcome\":\"failed\",\"errorCode\":\"application_start_failed\"}", "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000072\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000005\",\"sequence\":14,\"occurredAtUtc\":\"2026-08-21T12:04:14.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"terminal\",\"outcome\":\"completed\"}"],
+      "precondition": "valid run through relaunch/attempted at sequence 12",
+      "expectedHttp": [201, 201], "expectedBodyCodes": ["accepted", "accepted"],
+      "persistenceDelta": {"runs": 0, "events": 2, "rejections": 0}, "runState": "completed", "retryClassification": "delivered"
+    },
+    {
+      "id": "P06_exact_replay",
+      "requestBytes": ["{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000081\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000006\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:05:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\"}", "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000081\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000006\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:05:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\"}"],
+      "expectedHttp": [201, 200], "expectedBodyCodes": ["accepted", "exact_replay"],
+      "persistenceDelta": {"runs": 1, "events": 1, "rejections": 0}, "runState": "active", "retryClassification": "delivered"
+    },
+    {
+      "id": "P07_concurrent_exact_replay",
+      "requestBytes": ["{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000091\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000007\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:06:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\"}"],
+      "concurrency": 8, "expectedHttpSet": [200, 201], "expectedBodyCodeSet": ["accepted", "exact_replay"],
+      "persistenceDelta": {"runs": 1, "events": 1, "rejections": 0}, "runState": "active", "retryClassification": "delivered"
+    },
+    {
+      "id": "P08_restart_resume",
+      "requestBytes": ["{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000101\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000008\",\"sequence\":2,\"occurredAtUtc\":\"2026-08-21T12:07:02.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"preflight\",\"outcome\":\"succeeded\"}"],
+      "precondition": "outbox restart with exact persisted run/started sequence 1 pending then delivered",
+      "expectedHttp": [201], "expectedBodyCodes": ["accepted"],
+      "persistenceDelta": {"runs": 0, "events": 1, "rejections": 0}, "runState": "active", "retryClassification": "delivered"
+    },
+    {
+      "id": "N01_sequence_gap",
+      "requestBytes": ["{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000111\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000009\",\"sequence\":3,\"occurredAtUtc\":\"2026-08-21T12:08:03.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"confirmation\",\"outcome\":\"accepted\"}"],
+      "precondition": "run/started sequence 1 exists and sequence 2 remains pending locally",
+      "expectedHttp": [409], "expectedBodyCodes": ["out_of_order"],
+      "persistenceDelta": {"runs": 0, "events": 0, "rejections": 1}, "runState": "active", "retryClassification": "retry_while_predecessor_pending"
+    },
+    {
+      "id": "N02_divergent_event_id",
+      "requestBytes": ["{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000121\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000010\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:09:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\"}", "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000121\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000010\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:09:02.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\"}"],
+      "expectedHttp": [201, 409], "expectedBodyCodes": ["accepted", "idempotency_conflict"],
+      "persistenceDelta": {"runs": 1, "events": 1, "rejections": 1}, "runState": "active", "retryClassification": "terminal_reject"
+    },
+    {
+      "id": "N03_divergent_run_sequence",
+      "requestBytes": ["{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000131\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000011\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:10:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\"}", "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000132\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000011\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:10:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\"}"],
+      "expectedHttp": [201, 409], "expectedBodyCodes": ["accepted", "idempotency_conflict"],
+      "persistenceDelta": {"runs": 1, "events": 1, "rejections": 1}, "runState": "active", "retryClassification": "terminal_reject"
+    },
+    {
+      "id": "N04_terminal_race",
+      "requestBytes": ["{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000141\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000012\",\"sequence\":14,\"occurredAtUtc\":\"2026-08-21T12:11:14.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"terminal\",\"outcome\":\"completed\"}", "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000142\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000012\",\"sequence\":14,\"occurredAtUtc\":\"2026-08-21T12:11:14.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"terminal\",\"outcome\":\"failed\",\"errorCode\":\"unexpected_failure\"}"],
+      "precondition": "valid run through relaunch/skipped sequence 13",
+      "concurrency": 2, "expectedHttpSet": [201, 409], "expectedBodyCodeSet": ["accepted", "terminal_conflict"],
+      "persistenceDelta": {"runs": 0, "events": 1, "rejections": 1}, "runState": "terminal", "retryClassification": "terminal_reject"
+    },
+    {
+      "id": "N05_completion_too_early",
+      "requestBytes": ["{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000151\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000013\",\"sequence\":10,\"occurredAtUtc\":\"2026-08-21T12:12:10.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"terminal\",\"outcome\":\"completed\"}"],
+      "precondition": "valid run through rollback/succeeded sequence 9",
+      "expectedHttp": [422], "expectedBodyCodes": ["invalid_transition"],
+      "persistenceDelta": {"runs": 0, "events": 0, "rejections": 1}, "runState": "active", "retryClassification": "terminal_reject"
+    },
+    {
+      "id": "N06_wrong_terminal_class",
+      "requestBytes": ["{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000161\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000014\",\"sequence\":3,\"occurredAtUtc\":\"2026-08-21T12:13:03.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"terminal\",\"outcome\":\"cancelled\",\"errorCode\":\"user_cancelled\"}"],
+      "precondition": "valid run through preflight/succeeded sequence 2",
+      "expectedHttp": [422], "expectedBodyCodes": ["invalid_transition"],
+      "persistenceDelta": {"runs": 0, "events": 0, "rejections": 1}, "runState": "active", "retryClassification": "terminal_reject"
+    },
+    {
+      "id": "N07_after_terminal",
+      "requestBytes": ["{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000171\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000015\",\"sequence\":15,\"occurredAtUtc\":\"2026-08-21T12:14:15.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"elevated\",\"stage\":\"relaunch\",\"outcome\":\"succeeded\"}"],
+      "precondition": "run already terminal at sequence 14",
+      "expectedHttp": [409], "expectedBodyCodes": ["terminal_conflict"],
+      "persistenceDelta": {"runs": 0, "events": 0, "rejections": 1}, "runState": "terminal", "retryClassification": "terminal_reject"
+    },
+    {
+      "id": "N08_string_canonicalization",
+      "requestBytes": ["{\"schemaVersion\":1,\"productCode\":\"tia_connect\",\"eventId\":\"00000000-0000-4000-8000-000000000181\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000016\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:15:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\"}", "{\"schemaVersion\":1,\"productCode\":\" TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000182\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000016\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:15:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\"}", "{\"schemaVersion\":1,\"productCode\":\"TİA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000183\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000016\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:15:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\"}"],
+      "expectedHttp": [400, 400, 400], "expectedBodyCodes": ["malformed_product_code", "malformed_product_code", "malformed_product_code"],
+      "persistenceDelta": {"runs": 0, "events": 0, "rejections": 3}, "runState": "absent", "retryClassification": "terminal_reject"
+    },
+    {
+      "id": "N09_identifier_version_time",
+      "requestBytes": ["{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000191\",\"recoveryRunId\":\"{10000000-0000-4000-8000-000000000017}\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:16:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\"}", "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000192\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000017\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:16:01.000000Z\",\"clientVersion\":\"02.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\"}", "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000193\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000017\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:16:01Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\"}"],
+      "expectedHttp": [400, 400, 400], "expectedBodyCodes": ["malformed_run_id", "invalid_field_value", "invalid_timestamp"],
+      "persistenceDelta": {"runs": 0, "events": 0, "rejections": 3}, "runState": "absent", "retryClassification": "terminal_reject"
+    },
+    {
+      "id": "N10_unknown_duplicate_null",
+      "requestBytes": ["{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000201\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000018\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:17:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\",\"extra\":true}", "{\"schemaVersion\":1,\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000202\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000018\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:17:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\"}", "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000203\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000018\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:17:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\",\"sourceVersion\":null}"],
+      "expectedHttp": [400, 400, 400], "expectedBodyCodes": ["unknown_field", "invalid_field_value", "invalid_field_value"],
+      "persistenceDelta": {"runs": 0, "events": 0, "rejections": 3}, "runState": "absent", "retryClassification": "terminal_reject"
+    },
+    {
+      "id": "N11_sensitive_fields",
+      "requestBytes": [
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000211\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000019\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:18:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\",\"hardwareId\":\"SENSITIVE_SENTINEL\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000212\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000019\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:18:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\",\"email\":\"SENSITIVE_SENTINEL\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000213\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000019\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:18:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\",\"licenseKey\":\"SENSITIVE_SENTINEL\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000214\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000019\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:18:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\",\"receiptId\":\"SENSITIVE_SENTINEL\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000215\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000019\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:18:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\",\"token\":\"SENSITIVE_SENTINEL\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000216\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000019\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:18:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\",\"signedUrl\":\"SENSITIVE_SENTINEL\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000217\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000019\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:18:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\",\"path\":\"SENSITIVE_SENTINEL\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000218\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000019\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:18:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\",\"userName\":\"SENSITIVE_SENTINEL\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000219\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000019\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:18:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\",\"ipAddress\":\"SENSITIVE_SENTINEL\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000220\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000019\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:18:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\",\"exception\":\"SENSITIVE_SENTINEL\"}",
+        "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000221\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000019\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:18:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\",\"stackTrace\":\"SENSITIVE_SENTINEL\"}"
+      ],
+      "expectedHttp": [400, 400, 400, 400, 400, 400, 400, 400, 400, 400, 400],
+      "expectedBodyCodes": ["unknown_field", "unknown_field", "unknown_field", "unknown_field", "unknown_field", "unknown_field", "unknown_field", "unknown_field", "unknown_field", "unknown_field", "unknown_field"],
+      "persistenceDelta": {"runs": 0, "events": 0, "rejections": 11}, "runState": "absent", "retryClassification": "terminal_reject",
+      "forbiddenPersistenceSentinel": "SENSITIVE_SENTINEL"
+    },
+    {
+      "id": "N12_oversized_malformed",
+      "requestBytes": ["{", "<4097-byte-utf8-body>"],
+      "byteMaterialization": {"<4097-byte-utf8-body>": {"asciiByte": "x", "count": 4097}},
+      "expectedHttp": [400, 413], "expectedBodyCodes": ["invalid_field_value", "payload_too_large"],
+      "persistenceDelta": {"runs": 0, "events": 0, "rejections": 2}, "runState": "absent", "retryClassification": "terminal_reject"
+    },
+    {
+      "id": "N13_outbox_bounds",
+      "requestBytes": ["{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000231\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000020\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:20:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\"}"],
+      "localScenarios": ["ttl_72_hours", "max_32_events_per_run", "max_64_runs", "max_512_events", "max_2097152_total_bytes", "max_65536_run_bytes", "whole_run_eviction", "corrupt_quarantine", "atomic_restart", "reparse_rejected"],
+      "expectedHttp": [], "expectedBodyCodes": [],
+      "persistenceDelta": {"runs": 0, "events": 0, "rejections": 0}, "runState": "local_only", "retryClassification": "recovery_result_unchanged"
+    },
+    {
+      "id": "N14_product_scope",
+      "requestBytes": ["{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000241\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000021\",\"sequence\":1,\"occurredAtUtc\":\"2026-08-21T12:21:01.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"run\",\"outcome\":\"started\"}"],
+      "authorizationScenarios": ["mono_product_own_timeline_allowed", "mono_product_cross_product_forbidden", "global_exact_product_required", "global_cross_product_forbidden"],
+      "expectedHttp": [201], "expectedBodyCodes": ["accepted"],
+      "persistenceDelta": {"runs": 1, "events": 1, "rejections": 0}, "runState": "active", "retryClassification": "delivered"
+    },
+    {
+      "id": "N15_postgresql_ordering",
+      "requestBytes": ["{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000251\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000022\",\"sequence\":2,\"occurredAtUtc\":\"2026-08-21T12:22:02.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"preflight\",\"outcome\":\"succeeded\"}", "{\"schemaVersion\":1,\"productCode\":\"TIA_CONNECT\",\"eventId\":\"00000000-0000-4000-8000-000000000252\",\"recoveryRunId\":\"10000000-0000-4000-8000-000000000022\",\"sequence\":3,\"occurredAtUtc\":\"2026-08-21T12:22:03.000000Z\",\"clientVersion\":\"2.3.404\",\"processRole\":\"unelevated\",\"stage\":\"confirmation\",\"outcome\":\"accepted\"}"],
+      "precondition": "run/started sequence 1 exists",
+      "concurrency": 2, "expectedHttpSet": [201, 409], "expectedBodyCodeSet": ["accepted", "out_of_order"],
+      "persistenceDelta": {"runs": 0, "events": 1, "rejections": 1}, "runState": "active", "retryClassification": "mixed"
+    }
+  ]
+}

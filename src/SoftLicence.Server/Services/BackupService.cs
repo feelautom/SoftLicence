@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using Npgsql;
 
@@ -9,6 +10,12 @@ namespace SoftLicence.Server.Services;
 public class BackupService
 {
     private const string DatabasePrefix = "softlicence_";
+    /// <summary>Identifies historical manifests that predate source-target binding.</summary>
+    private const string BackupManifestV1 = "softlicence-backup-manifest-v1";
+    /// <summary>Identifies manifests whose non-secret fields bind the artifact to one PostgreSQL target.</summary>
+    private const string BackupManifestV2 = "softlicence-backup-manifest-v2";
+    /// <summary>Domain separator for deterministic PostgreSQL target identity hashes.</summary>
+    private const string PostgreSqlTargetIdentitySchema = "postgresql-target-v1";
     private static readonly Regex ManagedDatabaseBackupNamePattern = new(
         "^softlicence_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{3}_[0-9a-f]{32}\\.dump$",
         RegexOptions.CultureInvariant);
@@ -76,6 +83,14 @@ public class BackupService
         _logger.LogInformation("Paire de clés pour {Product} sauvegardée sur Drive.", productName);
     }
 
+    /// <summary>
+    /// Streams one serialized PostgreSQL custom dump to remote storage, verifies the plaintext
+    /// size and SHA-256, then atomically publishes the dump and a v2 manifest bound to the exact
+    /// configured database target. Disabled and integration-test modes return without side effects.
+    /// Failed or cancelled attempts remove their partial and promoted artifacts before propagating;
+    /// retention failures are logged after successful publication and do not delete the valid backup.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels lock acquisition, processes, uploads, retries, or retention.</param>
     public async Task BackupDatabaseAsync(CancellationToken cancellationToken = default)
     {
         if (!await _settings.GetBoolSettingAsync("BackupSettings:Enabled", false)) return;
@@ -92,6 +107,7 @@ public class BackupService
             var timeout = TimeSpan.FromMinutes(Math.Clamp(
                 _config.GetValue("BackupSettings:TimeoutMinutes", 45), 1, 180));
             var attempts = Math.Clamp(_config.GetValue("BackupSettings:RetryCount", 3), 1, 5);
+            var sourceIdentity = BuildBackupSourceIdentity();
 
             for (var attempt = 1; attempt <= attempts; attempt++)
             {
@@ -114,12 +130,14 @@ public class BackupService
 
                     var manifest = JsonSerializer.SerializeToUtf8Bytes(new
                     {
-                        schema = "softlicence-backup-manifest-v1",
+                        schema = BackupManifestV2,
                         file = backupName,
                         sizeBytes = result.BytesTransferred,
                         sha256 = result.Sha256,
                         createdAtUtc = _timeProvider.GetUtcNow().UtcDateTime.ToString("O"),
-                        format = "postgresql-custom"
+                        format = "postgresql-custom",
+                        sourceDatabase = sourceIdentity.Database,
+                        sourceTargetSha256 = sourceIdentity.TargetSha256
                     });
                     await UploadBytesAsync(manifest, partialManifest, cancellationToken);
                     EnsureSuccess(await RunRcloneAsync(["moveto", partialManifest, finalManifest], cancellationToken), "backup_manifest_promotion_failed");
@@ -229,6 +247,13 @@ public class BackupService
         }
     }
 
+    /// <summary>
+    /// Lists published remote backups while excluding partial objects and managed dumps whose
+    /// canonical manifest is absent, malformed, inconsistent, or, for v2, bound to another exact
+    /// configured PostgreSQL target. Historical v1 managed manifests and legacy manually named
+    /// database files remain visible for backward compatibility. Remote listing failures propagate.
+    /// </summary>
+    /// <returns>Backup metadata ordered from newest to oldest.</returns>
     public async Task<List<BackupFile>> ListBackupsAsync()
     {
         var remote = GetRequiredSetting("BackupSettings:RcloneRemote");
@@ -380,6 +405,15 @@ public class BackupService
         }
     }
 
+    /// <summary>
+    /// Verifies that a managed dump has one canonical manifest whose artifact metadata is exact.
+    /// Historical v1 manifests remain listable; v2 manifests must additionally match the service's
+    /// configured database and target hash. Malformed or mismatched manifests fail closed.
+    /// </summary>
+    /// <param name="remote">Configured rclone remote prefix used to fetch the adjacent manifest.</param>
+    /// <param name="backup">Parsed managed dump entry whose exact file name and size must match.</param>
+    /// <param name="remotePaths">Ordinal set proving the adjacent manifest object was listed.</param>
+    /// <returns>True only when the manifest is canonical and all applicable source checks pass.</returns>
     private async Task<bool> HasValidPublishedManifestAsync(
         string remote,
         RemoteListingEntry backup,
@@ -403,10 +437,19 @@ public class BackupService
                 if (!names.Add(property.Name))
                     return false;
             }
-            if (!names.SetEquals(["schema", "file", "sizeBytes", "sha256", "createdAtUtc", "format"]))
+            if (!root.TryGetProperty("schema", out var schemaProperty)
+                || schemaProperty.ValueKind != JsonValueKind.String)
                 return false;
-            if (root.GetProperty("schema").GetString() != "softlicence-backup-manifest-v1"
-                || root.GetProperty("file").GetString() != Path.GetFileName(backup.Path)
+            var schema = schemaProperty.GetString();
+            var isV1 = string.Equals(schema, BackupManifestV1, StringComparison.Ordinal)
+                && names.SetEquals(["schema", "file", "sizeBytes", "sha256", "createdAtUtc", "format"]);
+            var isV2 = string.Equals(schema, BackupManifestV2, StringComparison.Ordinal)
+                && names.SetEquals([
+                    "schema", "file", "sizeBytes", "sha256", "createdAtUtc", "format",
+                    "sourceDatabase", "sourceTargetSha256"]);
+            if (!isV1 && !isV2)
+                return false;
+            if (root.GetProperty("file").GetString() != Path.GetFileName(backup.Path)
                 || root.GetProperty("format").GetString() != "postgresql-custom"
                 || !root.GetProperty("sizeBytes").TryGetInt64(out var manifestSize)
                 || manifestSize <= 0
@@ -416,6 +459,16 @@ public class BackupService
                     DateTimeStyles.RoundtripKind, out var createdAt)
                 || createdAt.Offset != TimeSpan.Zero)
                 return false;
+            if (isV2)
+            {
+                var expectedSource = BuildBackupSourceIdentity();
+                if (root.GetProperty("sourceDatabase").ValueKind != JsonValueKind.String
+                    || !string.Equals(root.GetProperty("sourceDatabase").GetString(), expectedSource.Database,
+                        StringComparison.Ordinal)
+                    || !string.Equals(root.GetProperty("sourceTargetSha256").GetString(), expectedSource.TargetSha256,
+                        StringComparison.Ordinal))
+                    return false;
+            }
             return true;
         }
         catch (JsonException)
@@ -444,7 +497,27 @@ public class BackupService
         value is { Length: 64 }
         && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
+    /// <summary>
+    /// Builds the non-secret, exact configured PostgreSQL target identity persisted in backup
+    /// manifests. Host names are compared using their protocol-defined case-insensitive form;
+    /// database names remain exact PostgreSQL identifiers.
+    /// </summary>
+    private BackupSourceIdentity BuildBackupSourceIdentity()
+    {
+        var builder = new NpgsqlConnectionStringBuilder(_connectionString);
+        var host = RequireConnectionValue(builder.Host).ToLowerInvariant();
+        var database = RequireConnectionValue(builder.Database);
+        var port = builder.Port.ToString(CultureInfo.InvariantCulture);
+        var canonicalTarget = string.Join('\n', PostgreSqlTargetIdentitySchema, host, port, database);
+        return new(database, Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalTarget))).ToLowerInvariant());
+    }
+
     private sealed record RemoteListingEntry(string Path, long SizeBytes, DateTimeOffset ModifiedAtUtc);
+
+    /// <summary>
+    /// Carries the non-secret database name and deterministic target hash written to v2 manifests.
+    /// </summary>
+    private sealed record BackupSourceIdentity(string Database, string TargetSha256);
 
     private BackupProcessSpec CreatePostgreSqlSpec(string fileName, IReadOnlyList<string> arguments)
     {

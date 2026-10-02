@@ -27,6 +27,8 @@ public sealed class DistributionS2SClientOptions
     public bool AllowRuntimeRecovery { get; set; }
     public bool AllowRuntimeUpgrade { get; set; }
     public bool AllowLicenseBootstrap { get; set; }
+    /// <summary>Allows the dedicated client to invoke provider-owned portal deactivation.</summary>
+    public bool AllowPortalDeactivation { get; set; }
     public DateTimeOffset? NotBeforeUtc { get; set; }
     public DateTimeOffset? NotAfterUtc { get; set; }
     public DateTimeOffset? RevokedAtUtc { get; set; }
@@ -75,6 +77,19 @@ public sealed class DistributionS2SOptionsValidator : IValidateOptions<Distribut
             }
             if (!IsValidPublicRsaKey(client.PublicKeyPem))
                 failures.Add("Distribution S2S public keys must be RSA public keys of at least 2048 bits.");
+        }
+
+        foreach (var identity in (options.Clients ?? []).GroupBy(client => client.ClientId, StringComparer.Ordinal))
+        {
+            if (identity.Any(client => client.AllowPortalDeactivation)
+                && identity.Any(client =>
+                    !client.AllowPortalDeactivation
+                    || client.AllowRuntimeRecovery
+                    || client.AllowRuntimeUpgrade
+                    || client.AllowLicenseBootstrap))
+            {
+                failures.Add("Portal deactivation requires one dedicated client identity across all key rotations.");
+            }
         }
 
         return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);
@@ -129,7 +144,8 @@ public sealed record DistributionS2SPrincipal(
     string KeyId,
     bool AllowRuntimeRecovery = false,
     bool AllowRuntimeUpgrade = false,
-    bool AllowLicenseBootstrap = false);
+    bool AllowLicenseBootstrap = false,
+    bool AllowPortalDeactivation = false);
 
 public interface IDistributionS2SAuthenticationService
 {
@@ -268,7 +284,8 @@ public sealed class DistributionS2SAuthenticationService : IDistributionS2SAuthe
             keyId,
             client.AllowRuntimeRecovery,
             client.AllowRuntimeUpgrade,
-            client.AllowLicenseBootstrap);
+            client.AllowLicenseBootstrap,
+            client.AllowPortalDeactivation);
     }
 
     public static string BuildSignaturePayload(

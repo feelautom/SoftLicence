@@ -93,18 +93,37 @@ Les licences et types de licences supportent le champ `AllowedVersions`.
 *   `1.*` : Uniquement les versions majeures 1.
 *   `2.1.0` : Uniquement cette version exacte.
 
-### Gestion des Abonnements (Renouvellement)
-Pour les types de licences marqués comme **Récurrent (Abonnement)**, vous pouvez prolonger la durée de validité via l'API d'administration.
+### Recurring subscription renewal
 
-**Endpoint** : `POST /api/admin/licenses/{licenseKey}/renew`  
-**Header** : `X-Admin-Secret: <VOTRE_SECRET>`  
-**Payload** :
+Use the provider-authenticated administration endpoint to extend a license whose type is marked as recurring.
+
+**Endpoint:** `POST /api/admin/licenses/{licenseKey}/renew`
+
+**Header:** `X-Admin-Secret: <YOUR_SECRET>`
+
+**Payload:**
 ```json
 {
-  "TransactionId": "STRIPE_ID_12345",
-  "Reference": "COMMANDE_#99"
+  "transactionId": "STRIPE_ID_12345",
+  "reference": "ORDER_#99",
+  "targetExpirationUtc": "2027-01-31T00:00:00Z"
 }
 ```
+
+`targetExpirationUtc` must be UTC and is mutually exclusive with `daysToAdd`. If neither is present, the license type's default duration applies.
+
+The transaction identifier is opaque and exact. The server binds it to a versioned SHA-256 fingerprint of the complete canonical request, including optional-property presence. Only an identical retry returns the frozen result. Changing or omitting a reference, duration, or exact target returns HTTP `409` with `transaction_payload_conflict`.
+
+Historical renewal rows that predate the fingerprint cannot prove request equality. They fail closed with HTTP `409`:
+
+```json
+{
+  "error": "legacy_transaction_unverified",
+  "retryable": false
+}
+```
+
+There is no compatibility window and no fingerprint backfill for historical rows.
 
 ## 🛡️ Forteresse : Sécurité Active & Anti-Bot
 

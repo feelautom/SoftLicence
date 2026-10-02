@@ -1,0 +1,145 @@
+@using Microsoft.EntityFrameworkCore
+@using SoftLicence.Server.Data
+@using SoftLicence.Server.Services
+@inject IDbContextFactory<LicenseDbContext> DbFactory
+@inject AuthService Auth
+@inject TimeZoneService TZ
+@inject IStringLocalizer<SharedResource> L
+@inject ILogger<LicenseExtensionDialog> Logger
+
+@* One two-stage modal owns one immutable confirmation. Neither input nor review can write licence data. *@
+<div class="modal fade show d-block" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="extension-title" style="background: rgba(0,0,0,0.6)">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content bg-dark text-white border-secondary">
+            <div class="modal-header">
+                <h5 id="extension-title" class="modal-title">@L["Licenses_ExtensionTitle"]</h5>
+            </div>
+            <div class="modal-body">
+                <p><strong>@License.CustomerName</strong><br />@License.CustomerEmail<br />@License.Type?.Slug</p>
+                <p>@L["Licenses_ExtensionCurrent"] : @FormatDate(License.ExpirationDate)</p>
+                @if (command is null)
+                {
+                    <label for="extension-days" class="form-label">@L["Licenses_ExtensionDays"]</label>
+                    <input id="extension-days" class="form-control bg-dark text-white" type="text" inputmode="numeric"
+                           maxlength="4" autocomplete="off" @bind="daysText" @bind:event="oninput" />
+                    <small class="text-muted">@L["Licenses_ExtensionRange"]</small>
+                }
+                else
+                {
+                    <p>@L["Licenses_ExtensionDays"] : <strong>@command.Days</strong></p>
+                    <p>@L["Licenses_ExtensionPreview"] : <strong>@FormatDate(previewUtc)</strong></p>
+                    @* Use an alert container: the global paragraph color overrides Bootstrap's contrasting text. *@
+                    <div class="alert alert-info">@L["Licenses_ExtensionClock"]</div>
+                }
+                @if (errorKey is not null)
+                {
+                    <div class="alert alert-danger" role="alert">@L[errorKey]</div>
+                }
+                @if (outcomeUnknown && command is not null)
+                {
+                    <small>@L["Licenses_ExtensionReference"] : @command.OperationId</small>
+                }
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline-secondary" disabled="@(busy || outcomeUnknown)" @onclick="CancelAsync">@L["Common_Cancel"]</button>
+                @if (command is null)
+                {
+                    <button class="btn btn-primary" @onclick="Prepare">@L["Licenses_ExtensionReview"]</button>
+                }
+                else
+                {
+                    <button class="btn btn-success" disabled="@(busy || terminalRefusal)" @onclick="ConfirmAsync">@L[outcomeUnknown ? "Licenses_ExtensionRetry" : "Licenses_ExtensionConfirm"]</button>
+                }
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    /// <summary>Read-only preview selected by the parent. Fresh authority is rechecked under database locks.</summary>
+    [Parameter, EditorRequired] public License License { get; set; } = default!;
+    /// <summary>Reloads the list after a confirmed result, including idempotent recovery.</summary>
+    [Parameter] public EventCallback Applied { get; set; }
+    /// <summary>Closes the dialog without a write; unavailable while a result is unknown.</summary>
+    [Parameter] public EventCallback Canceled { get; set; }
+
+    /// <summary>Untrusted display input; parsed only through the strict ASCII duration contract.</summary>
+    private string daysText = "";
+    /// <summary>Resource key for the explicit business outcome or the preserved unknown result.</summary>
+    private string? errorKey;
+    /// <summary>Immutable operation retained across retries; null means review has not happened.</summary>
+    private AdminLicenseExtensionService.Command? command;
+    /// <summary>Display estimate only; the service owns the final confirmation instant.</summary>
+    private DateTime? previewUtc;
+    /// <summary>Suppresses concurrent UI callbacks while awaiting the service or parent refresh.</summary>
+    private bool busy;
+    /// <summary>Prevents abandoning an unconfirmed outcome and accidentally issuing a fresh operation.</summary>
+    private bool outcomeUnknown;
+    /// <summary>Closes confirmation after success, cancellation or a known refusal.</summary>
+    private bool terminalRefusal;
+
+    /// <summary>Formats the local display with seconds and the corresponding UTC instant.</summary>
+    private string FormatDate(DateTime? value) => value.HasValue
+        ? $"{TZ.ToLocal(value.Value):dd/MM/yyyy HH:mm:ss} ({value.Value:yyyy-MM-dd HH:mm:ss} UTC)" : "—";
+
+    /// <summary>Validates and freezes one confirmation without contacting persistence.</summary>
+    private void Prepare()
+    {
+        if (command is not null || busy) return;
+        if (!AdminLicenseExtensionService.TryParseDays(daysText, out var days))
+        {
+            errorKey = "Licenses_ExtensionInvalidDays";
+            return;
+        }
+        errorKey = null;
+        previewUtc = License.ExpirationDate is DateTime expiry
+            ? AdminLicenseExtensionService.CalculateExpirationUtc(expiry, DateTime.UtcNow, days) : null;
+        if (previewUtc is null)
+        {
+            errorKey = "Licenses_ExtensionExpirationOutOfRange";
+            return;
+        }
+        command = new(Guid.NewGuid(), License.Id, License.AuthorityVersion, days);
+    }
+
+    /// <summary>Cancellation never calls the extension service or creates an audit row.</summary>
+    private async Task CancelAsync()
+    {
+        if (busy || outcomeUnknown) return;
+        command = null;
+        terminalRefusal = true;
+        await Canceled.InvokeAsync();
+    }
+
+    /// <summary>Confirms once using current server authentication; unknown outcomes retry the same immutable operation.</summary>
+    private async Task ConfirmAsync()
+    {
+        if (busy || terminalRefusal || command is null) return;
+        busy = true;
+        try
+        {
+            var actor = (await Auth.GetAuthenticationStateAsync()).User;
+            var result = await new AdminLicenseExtensionService(DbFactory, TimeProvider.System).ConfirmAsync(command, actor);
+            outcomeUnknown = false;
+            if (result.Code == "Applied")
+            {
+                // Keep the guard closed even if the parent refresh fails after a successful commit.
+                terminalRefusal = true;
+                await Applied.InvokeAsync();
+            }
+            else
+            {
+                terminalRefusal = true;
+                errorKey = "Licenses_Extension" + result.Code;
+            }
+        }
+        catch (Exception error)
+        {
+            Logger.LogError(error, "Admin extension outcome unavailable. Operation {OperationId}, licence {LicenseId}", command.OperationId, command.LicenseId);
+            outcomeUnknown = true;
+            terminalRefusal = false;
+            errorKey = "Licenses_ExtensionUnknown";
+        }
+        finally { busy = false; }
+    }
+}

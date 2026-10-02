@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 
@@ -14,16 +15,167 @@ public sealed class SoftLicenceAnalyticsClient
 
     private readonly HttpClient _httpClient;
     private readonly SoftLicenceMcpOptions _options;
+    private readonly ISoftLicenceCallerCredentials _credentials;
     private readonly McpResultStore _resultStore;
 
+    /// <summary>
+    /// Reads a bounded, product-scoped page from the durable pre-download decision registry. Exact
+    /// selectors are encoded without text normalization; provider failures and cancellation propagate.
+    /// </summary>
+    public async Task<JsonElement> GetRuntimeDistributionHardwareDecisionsAsync(
+        string? requestId, Guid? licenseId, string? hardwareIdHash, string? outcome,
+        DateTime? fromUtc, DateTime? toUtc, int take, int offset,
+        string? productId, string? productName, CancellationToken cancellationToken)
+    {
+        return await GetAnalyticsAsync("support/runtime-distribution-hardware-decisions",
+            new Dictionary<string, string?>
+            {
+                ["requestId"] = requestId,
+                ["licenseId"] = licenseId?.ToString("D"),
+                ["hardwareIdHash"] = hardwareIdHash,
+                ["outcome"] = outcome,
+                ["fromUtc"] = fromUtc?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture),
+                ["toUtc"] = toUtc?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture),
+                ["take"] = take.ToString(CultureInfo.InvariantCulture),
+                ["offset"] = offset.ToString(CultureInfo.InvariantCulture),
+                ["productId"] = productId,
+                ["productName"] = productName
+            }, cancellationToken);
+    }
+
+    /// <summary>Reads a bounded decision page through existing Analytics credentials without normalizing opaque selectors.</summary>
+    /// <remarks>The server enforces product scope and exact target validation. Null query values are omitted; supplied values are percent-encoded unchanged. Existing transport cancellation, provider error projection and oversized-result handling apply. No licensing command is issued.</remarks>
+    public async Task<JsonElement> GetLicenseDecisionsAsync(
+        Guid? licenseId, string? hardwareId, string? requestId, int take, int offset,
+        string? productId, string? productName, CancellationToken cancellationToken)
+    {
+        return await GetLicenseDecisionsCoreAsync(licenseId, hardwareId, requestId, take, offset,
+            productId, productName, cancellationToken, protectOversized: true);
+    }
+
+    /// <summary>Reads the decision page with explicit control over final MCP artifact delivery.</summary>
+    /// <remarks>Composed diagnostics disable intermediate artifact delivery so they can validate the provider JSON before protecting their own final result.</remarks>
+    private async Task<JsonElement> GetLicenseDecisionsCoreAsync(
+        Guid? licenseId, string? hardwareId, string? requestId, int take, int offset,
+        string? productId, string? productName, CancellationToken cancellationToken,
+        bool protectOversized)
+    {
+        var query = new Dictionary<string, string?>
+        {
+            ["licenseId"] = licenseId?.ToString("D"), ["hardwareId"] = hardwareId,
+            ["requestId"] = requestId, ["take"] = take.ToString(CultureInfo.InvariantCulture),
+            ["offset"] = offset.ToString(CultureInfo.InvariantCulture),
+            ["productId"] = productId, ["productName"] = productName
+        };
+        var builder = new UriBuilder($"{_options.GetBaseUrl()}/api/analytics/support/license-decisions")
+        {
+            Query = string.Join("&", query.Where(item => item.Value != null)
+                .Select(item => $"{Uri.EscapeDataString(item.Key)}={Uri.EscapeDataString(item.Value!)}"))
+        };
+        using var request = new HttpRequestMessage(HttpMethod.Get, builder.Uri);
+        request.Headers.Add("X-Analytics-Key", _credentials.GetApiKey());
+        return await SendJsonAsync(request, cancellationToken, protectOversized);
+    }
+
+    /// <summary>Builds one exact request-scoped Runtime authority diagnostic from stored provider evidence.</summary>
+    /// <remarks>The decision row supplies the only HWID allowed to seed security correlation. Historical candidate payloads are never reconstructed; absence is reported explicitly. Existing authorization and result-size protection remain in force.</remarks>
+    public async Task<JsonElement> GetRuntimeEnrollmentAuthorityDiagnosticAsync(
+        string requestId, string? productId, string? productName, CancellationToken cancellationToken)
+    {
+        var decisions = await GetCompleteLicenseDecisionsAsync(
+            requestId, productId, productName, cancellationToken);
+        var decisionItems = decisions.GetProperty("items");
+        var submittedHardwareIds = new HashSet<string>(StringComparer.Ordinal);
+        var storedCandidateSelectionAvailable = decisionItems.GetArrayLength() > 0;
+        var decisionEvidenceComplete = decisionItems.GetArrayLength() > 0;
+        foreach (var item in decisionItems.EnumerateArray())
+        {
+            if (!item.TryGetProperty("parseStatus", out var parseStatus)
+                || parseStatus.ValueKind != JsonValueKind.String
+                || parseStatus.GetString() != "available"
+                || !item.TryGetProperty("decision", out var decision)
+                || decision.ValueKind != JsonValueKind.Object)
+            {
+                decisionEvidenceComplete = false;
+                continue;
+            }
+            if (!decision.TryGetProperty("submittedHardwareId", out var hardware)
+                || hardware.ValueKind != JsonValueKind.String
+                || !ValidExactText(hardware.GetString(), 512))
+                decisionEvidenceComplete = false;
+            else submittedHardwareIds.Add(hardware.GetString()!);
+            if (!decision.TryGetProperty("replacementCandidates", out var candidates)
+                || candidates.ValueKind != JsonValueKind.Array)
+                storedCandidateSelectionAvailable = false;
+        }
+        storedCandidateSelectionAvailable = decisionEvidenceComplete && storedCandidateSelectionAvailable;
+        var exactHardwareId = decisionEvidenceComplete && submittedHardwareIds.Count == 1
+            ? submittedHardwareIds.Single() : null;
+        JsonElement? security = exactHardwareId == null ? null : await GetSecurityCaseSnapshotCoreAsync(
+            null, null, exactHardwareId, null, null, null, null, null,
+            true, 100, productId, productName, cancellationToken,
+            protectOversized: false, exactHardwareOnly: true);
+        var result = JsonSerializer.SerializeToElement(new
+        {
+            schema = "runtime-enrollment-authority-diagnostic-v1",
+            requestId,
+            generatedAtUtc = DateTime.UtcNow,
+            decisions,
+            exactHardwareId,
+            decisionEvidenceComplete,
+            security,
+            candidateSelection = new
+            {
+                historicalPayloadAvailable = storedCandidateSelectionAvailable,
+                classification = storedCandidateSelectionAvailable ? "stored" : "not_observed",
+                limitation = storedCandidateSelectionAvailable ? null
+                    : "Historical replacement candidate payloads are not reconstructed from later binding state."
+            },
+            guarantees = new[]
+            {
+                "exact_request_id",
+                "provider_stored_decision_only",
+                "exact_hardware_id_from_decision_only",
+                "no_new_licensing_decision"
+            },
+            readOnly = true
+        }, JsonOptions);
+        return await _resultStore.DeliverAsync(result, cancellationToken);
+    }
+
+    /// <summary>Reads one bounded atomic provider snapshot before deriving a unique hardware identity.</summary>
+    private async Task<JsonElement> GetCompleteLicenseDecisionsAsync(
+        string requestId, string? productId, string? productName, CancellationToken cancellationToken)
+    {
+        var snapshot = await GetAnalyticsAsync("support/license-decisions/request-snapshot",
+            new Dictionary<string, string?>
+            {
+                ["requestId"] = requestId, ["productId"] = productId, ["productName"] = productName
+            }, cancellationToken, protectOversized: false);
+        if (snapshot.ValueKind != JsonValueKind.Object
+            || !snapshot.TryGetProperty("complete", out var complete) || complete.ValueKind != JsonValueKind.True
+            || !snapshot.TryGetProperty("requestId", out var returnedRequestId)
+            || returnedRequestId.ValueKind != JsonValueKind.String
+            || !string.Equals(returnedRequestId.GetString(), requestId, StringComparison.Ordinal)
+            || !snapshot.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
+            throw new InvalidOperationException("SoftLicence decision diagnostic returned an incomplete request snapshot.");
+        return snapshot;
+    }
+
+    /// <summary>
+    /// Creates a client for one tool call. <paramref name="credentials"/> defaults to the stdio
+    /// environment; the HTTP mode injects the caller's request headers instead (TKT-001169).
+    /// </summary>
     public SoftLicenceAnalyticsClient(
         HttpClient httpClient,
         IOptions<SoftLicenceMcpOptions> options,
-        McpResultStore? resultStore = null)
+        McpResultStore? resultStore = null,
+        ISoftLicenceCallerCredentials? credentials = null)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _resultStore = resultStore ?? new McpResultStore(options);
+        _credentials = credentials ?? new OptionsCallerCredentials(options);
     }
 
     public async Task<JsonElement> GetCurrentProductAsync(CancellationToken cancellationToken)
@@ -34,6 +186,41 @@ public sealed class SoftLicenceAnalyticsClient
     public async Task<JsonElement> ListProductsAsync(CancellationToken cancellationToken)
     {
         return await GetAnalyticsAsync("products", new Dictionary<string, string?>(), cancellationToken);
+    }
+
+    /// <summary>
+    /// Gets one ordered Recovery timeline while preserving exact product selector and run identifier bytes in the query contract.
+    /// </summary>
+    public async Task<JsonElement> GetRecoveryTimelineAsync(
+        string recoveryRunId,
+        string? productId,
+        string? productName,
+        CancellationToken cancellationToken)
+    {
+        return await GetRecoveryAnalyticsAsync($"runs/{Uri.EscapeDataString(recoveryRunId)}", new Dictionary<string, string?>
+        {
+            ["productId"] = productId,
+            ["productName"] = productName
+        }, cancellationToken);
+    }
+
+    /// <summary>
+    /// Gets bounded product-scoped Recovery ingestion rejections without raw request data.
+    /// </summary>
+    public async Task<JsonElement> GetRecoveryRejectionsAsync(
+        string? recoveryRunId,
+        int take,
+        string? productId,
+        string? productName,
+        CancellationToken cancellationToken)
+    {
+        return await GetRecoveryAnalyticsAsync("rejections", new Dictionary<string, string?>
+        {
+            ["recoveryRunId"] = recoveryRunId,
+            ["take"] = take.ToString(CultureInfo.InvariantCulture),
+            ["productId"] = productId,
+            ["productName"] = productName
+        }, cancellationToken);
     }
 
     public async Task<JsonElement> GetTelemetryOverviewAsync(
@@ -211,7 +398,8 @@ public sealed class SoftLicenceAnalyticsClient
         int take,
         CancellationToken cancellationToken,
         string? productId = null,
-        string? productName = null)
+        string? productName = null,
+        bool exactSnapshot = false)
     {
         return await GetAnalyticsAsync("telemetry/machine-profile", new Dictionary<string, string?>
         {
@@ -219,6 +407,7 @@ public sealed class SoftLicenceAnalyticsClient
             ["days"] = days.ToString(),
             ["top"] = top.ToString(),
             ["take"] = take.ToString(),
+            ["exactSnapshot"] = exactSnapshot ? "true" : null,
             ["productId"] = productId,
             ["productName"] = productName
         }, cancellationToken);
@@ -741,7 +930,8 @@ public sealed class SoftLicenceAnalyticsClient
         string? productId = null,
         string? productName = null,
         bool includeSourceEvents = false,
-        bool protectOversized = true)
+        bool protectOversized = true,
+        bool exactHardwareId = false)
     {
         return await GetAnalyticsAsync("security/bans", new Dictionary<string, string?>
         {
@@ -753,6 +943,7 @@ public sealed class SoftLicenceAnalyticsClient
             ["licenseFragment"] = licenseFragment,
             ["includeInactive"] = includeInactive.ToString().ToLowerInvariant(),
             ["includeSourceEvents"] = includeSourceEvents ? "true" : null,
+            ["exactHardwareId"] = exactHardwareId ? "true" : null,
             ["take"] = take.ToString(),
             ["productId"] = productId,
             ["productName"] = productName
@@ -775,7 +966,8 @@ public sealed class SoftLicenceAnalyticsClient
         string? productId,
         string? productName,
         CancellationToken cancellationToken,
-        bool protectOversized = true)
+        bool protectOversized = true,
+        bool exactHardwareId = false)
     {
         return await GetAnalyticsAsync("security/canary-alerts", new Dictionary<string, string?>
         {
@@ -789,6 +981,7 @@ public sealed class SoftLicenceAnalyticsClient
             ["clientIp"] = clientIp,
             ["version"] = version,
             ["isBanned"] = isBanned?.ToString().ToLowerInvariant(),
+            ["exactHardwareId"] = exactHardwareId ? "true" : null,
             ["take"] = take.ToString(),
             ["offset"] = offset.ToString(),
             ["productId"] = productId,
@@ -824,10 +1017,41 @@ public sealed class SoftLicenceAnalyticsClient
         string? productName,
         CancellationToken cancellationToken)
     {
+        return await GetSecurityCaseSnapshotCoreAsync(
+            ticketRef, securityCaseId, hardwareId, componentHash, componentType, clientIp,
+            emailFragment, licenseFragment, includeInactive, take, productId, productName,
+            cancellationToken, protectOversized: true, exactHardwareOnly: false);
+    }
+
+    /// <summary>Builds a security snapshot while letting composed diagnostics retain the complete provider evidence.</summary>
+    /// <remarks>Public calls keep artifact protection. Internal composition requests raw JSON, validates every required source, and applies artifact delivery only to the final diagnostic.</remarks>
+    private async Task<JsonElement> GetSecurityCaseSnapshotCoreAsync(
+        string? ticketRef,
+        string? securityCaseId,
+        string? hardwareId,
+        string? componentHash,
+        string? componentType,
+        string? clientIp,
+        string? emailFragment,
+        string? licenseFragment,
+        bool includeInactive,
+        int take,
+        string? productId,
+        string? productName,
+        CancellationToken cancellationToken,
+        bool protectOversized,
+        bool exactHardwareOnly)
+    {
         var bans = await ListSecurityBansAsync(
             hardwareId, componentHash, componentType, clientIp, emailFragment, licenseFragment,
             includeInactive, take, cancellationToken, productId, productName,
-            includeSourceEvents: false, protectOversized: false);
+            includeSourceEvents: false, protectOversized: false, exactHardwareId: exactHardwareOnly);
+        EnsureAnalyticsArraySourceAvailable(bans, "security bans", "bans");
+        if (exactHardwareOnly)
+        {
+            EnsureCompleteArraySource(bans, "security bans", "bans", "recordsMatched", "recordsReturned");
+            EnsureExactHardwareArray(bans, "security bans", "resolvedHardwareIds", hardwareId!);
+        }
         var referenceOnly = string.IsNullOrWhiteSpace(hardwareId)
             && string.IsNullOrWhiteSpace(componentHash)
             && string.IsNullOrWhiteSpace(clientIp)
@@ -845,11 +1069,29 @@ public sealed class SoftLicenceAnalyticsClient
                 if (matches) referenceMatchedBans.Add(ban.Clone());
             }
         }
-        var effectiveBans = referenceOnly
+        var exactBanRows = exactHardwareOnly && hardwareId != null
+            ? ExactHardwareRows(bans, "security bans", "bans", hardwareId, ValidateExactBanRow, [
+                "banId", "targetType", "isActive", "bannedAtUtc", "expiresAtUtc", "hardwareId",
+                "correlatedHardwareIds", "componentType", "componentHashRedacted", "componentMatchType",
+                "componentMatchStrength", "isWeakComponentCorrelation", "banCategory", "matchType"])
+            : null;
+        if (exactBanRows != null && exactBanRows.Count != bans.GetProperty("bans").GetArrayLength())
+            throw new InvalidOperationException("SoftLicence exact security bans contain a foreign hardware identity.");
+        var effectiveBans = exactBanRows != null
+            ? JsonSerializer.SerializeToElement(new
+            {
+                recordsMatched = exactBanRows.Count,
+                recordsReturned = exactBanRows.Count,
+                resolvedHardwareIds = new[] { hardwareId },
+                bans = exactBanRows
+            }, JsonOptions)
+            : referenceOnly
             ? JsonSerializer.SerializeToElement(new { recordsMatched = referenceMatchedBans.Count, recordsReturned = referenceMatchedBans.Count, bans = referenceMatchedBans }, JsonOptions)
             : bans;
         var resolvedHwids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (bans.TryGetProperty("resolvedHardwareIds", out var resolvedElement)
+        if (exactHardwareOnly && hardwareId != null)
+            resolvedHwids.Add(hardwareId);
+        else if (bans.TryGetProperty("resolvedHardwareIds", out var resolvedElement)
             && resolvedElement.ValueKind == JsonValueKind.Array)
         {
             foreach (var item in resolvedElement.EnumerateArray())
@@ -869,6 +1111,7 @@ public sealed class SoftLicenceAnalyticsClient
                 var related = await ListSecurityBansAsync(null, hash, type, null, null, null, includeInactive, take,
                     cancellationToken, productId, productName,
                     includeSourceEvents: false, protectOversized: false);
+                EnsureAnalyticsArraySourceAvailable(related, "related security bans", "bans");
                 if (related.TryGetProperty("resolvedHardwareIds", out var relatedHwids) && relatedHwids.ValueKind == JsonValueKind.Array)
                     foreach (var item in relatedHwids.EnumerateArray())
                         if (!string.IsNullOrWhiteSpace(item.GetString())) resolvedHwids.Add(item.GetString()!);
@@ -893,9 +1136,26 @@ public sealed class SoftLicenceAnalyticsClient
             AddNode(machineNode, "machine", hwid);
             var canary = await ListSecurityCanaryAlertsAsync(
                 null, null, null, null, hwid, null, null, null, null, null,
-                take, 0, productId, productName, cancellationToken, protectOversized: false);
-            canaryByMachine.Add(new { hardwareId = hwid, result = canary });
-            if (canary.TryGetProperty("alerts", out var alerts) && alerts.ValueKind == JsonValueKind.Array)
+                exactHardwareOnly ? 200 : take, 0, productId, productName, cancellationToken,
+                protectOversized: false, exactHardwareId: exactHardwareOnly);
+            EnsureAnalyticsArraySourceAvailable(canary, "security Canary alerts", "alerts");
+            if (exactHardwareOnly)
+                EnsureCompleteArraySource(canary, "security Canary alerts", "alerts", "groupsMatched", "groupsReturned");
+            var exactAlerts = exactHardwareOnly ? ExactHardwareRows(canary, "security Canary alerts", "alerts", hwid, ValidateExactCanaryRow, [
+                "alertId", "hardwareId", "trigger", "severity", "evidenceCount", "firstSeenUtc",
+                "lastSeenUtc", "isHardwareBanned", "sourceKind"])
+                : null;
+            if (exactAlerts != null && exactAlerts.Count != canary.GetProperty("alerts").GetArrayLength())
+                throw new InvalidOperationException("SoftLicence exact Canary source contains a foreign hardware identity.");
+            var effectiveCanary = exactAlerts == null
+                ? canary : JsonSerializer.SerializeToElement(new
+                {
+                    groupsMatched = exactAlerts.Count,
+                    groupsReturned = exactAlerts.Count,
+                    alerts = exactAlerts
+                }, JsonOptions);
+            canaryByMachine.Add(new { hardwareId = hwid, result = effectiveCanary });
+            if (effectiveCanary.TryGetProperty("alerts", out var alerts) && alerts.ValueKind == JsonValueKind.Array)
             {
                 foreach (var alert in alerts.EnumerateArray())
                 {
@@ -906,11 +1166,34 @@ public sealed class SoftLicenceAnalyticsClient
                 }
             }
 
-            var profile = await GetSupportTelemetryProfileAsync(
-                hwid, null, null, null, null, 30, Math.Min(take, 50), cancellationToken, productId, productName,
-                protectOversized: false);
-            profilesByMachine.Add(new { hardwareId = hwid, result = profile });
-            if (profile.TryGetProperty("candidates", out var candidates) && candidates.ValueKind == JsonValueKind.Array)
+            var profile = exactHardwareOnly
+                ? await GetTelemetryMachineProfileAsync(hwid, 30, 20, 1000, cancellationToken,
+                    productId, productName, exactSnapshot: true)
+                : await GetSupportTelemetryProfileAsync(
+                    hwid, null, null, null, null, 30, Math.Min(take, 50), cancellationToken,
+                    productId, productName, protectOversized: false);
+            if (exactHardwareOnly)
+            {
+                if (profile.ValueKind != JsonValueKind.Object
+                    || !profile.TryGetProperty("hardwareId", out var profileHardware)
+                    || profileHardware.ValueKind != JsonValueKind.String
+                    || !string.Equals(profileHardware.GetString(), hwid, StringComparison.OrdinalIgnoreCase)
+                    || !profile.TryGetProperty("complete", out var complete) || complete.ValueKind != JsonValueKind.True
+                    || !profile.TryGetProperty("recordsAnalyzed", out var recordsAnalyzed)
+                    || recordsAnalyzed.ValueKind != JsonValueKind.Number
+                    || !recordsAnalyzed.TryGetInt32(out var analyzedCount)
+                    || !profile.TryGetProperty("recentRecords", out var recentRecords)
+                    || recentRecords.ValueKind != JsonValueKind.Array
+                    || analyzedCount != recentRecords.GetArrayLength()
+                    || !ExactInteger(profile, "days", 30)
+                    || recentRecords.EnumerateArray().Any(row => !ValidExactProfileRow(row))
+                    || !ValidExactProfileInterval(profile, analyzedCount, recentRecords))
+                    throw new InvalidOperationException("SoftLicence exact machine profile is unavailable or incomplete.");
+            }
+            else EnsureAnalyticsArraySourceAvailable(profile, "support telemetry profile", "candidates");
+            var effectiveProfile = exactHardwareOnly ? ProjectExactMachineProfile(profile) : profile;
+            profilesByMachine.Add(new { hardwareId = hwid, result = effectiveProfile });
+            if (effectiveProfile.TryGetProperty("candidates", out var candidates) && candidates.ValueKind == JsonValueKind.Array)
             {
                 foreach (var candidate in candidates.EnumerateArray())
                 {
@@ -1012,7 +1295,257 @@ public sealed class SoftLicenceAnalyticsClient
             correlatedSecurityCases = securityCaseRefs.OrderBy(v => v).ToList()
         }, JsonOptions);
 
-        return await _resultStore.DeliverAsync(snapshot, cancellationToken);
+        return protectOversized
+            ? await _resultStore.DeliverAsync(snapshot, cancellationToken)
+            : snapshot;
+    }
+
+    /// <summary>Rejects provider errors and contract drift before absence can be interpreted as negative security evidence.</summary>
+    private static void EnsureAnalyticsArraySourceAvailable(JsonElement source, string sourceName, string arrayProperty)
+    {
+        if (source.ValueKind != JsonValueKind.Object
+            || source.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.False
+            || !source.TryGetProperty(arrayProperty, out var rows)
+            || rows.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidOperationException($"SoftLicence {sourceName} source is unavailable or malformed.");
+        }
+    }
+
+    /// <summary>Requires exact snapshots to prove that the returned array is the entire matched population.</summary>
+    private static void EnsureCompleteArraySource(
+        JsonElement source, string sourceName, string arrayProperty,
+        string matchedProperty, string returnedProperty)
+    {
+        var rows = source.GetProperty(arrayProperty);
+        if (!source.TryGetProperty(matchedProperty, out var matched)
+            || matched.ValueKind != JsonValueKind.Number || !matched.TryGetInt32(out var matchedCount)
+            || !source.TryGetProperty(returnedProperty, out var returned)
+            || returned.ValueKind != JsonValueKind.Number || !returned.TryGetInt32(out var returnedCount)
+            || matchedCount != returnedCount || returnedCount != rows.GetArrayLength())
+            throw new InvalidOperationException($"SoftLicence {sourceName} source is incomplete or truncated.");
+    }
+
+    /// <summary>Requires an exact identity array to contain the requested HWID and no foreign value.</summary>
+    private static void EnsureExactHardwareArray(
+        JsonElement source, string sourceName, string arrayProperty, string hardwareId)
+    {
+        if (!source.TryGetProperty(arrayProperty, out var values)
+            || values.ValueKind != JsonValueKind.Array || values.GetArrayLength() == 0
+            || values.EnumerateArray().Any(value => value.ValueKind != JsonValueKind.String
+                || !string.Equals(value.GetString(), hardwareId, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException($"SoftLicence {sourceName} source contains a foreign hardware identity.");
+    }
+
+    /// <summary>Validates each exact provider row before projecting only its approved evidence fields.</summary>
+    private static List<JsonElement> ExactHardwareRows(
+        JsonElement source, string sourceName, string arrayProperty, string hardwareId,
+        Func<JsonElement, string, bool> validateRow, IReadOnlyCollection<string> allowedProperties)
+    {
+        var rows = source.GetProperty(arrayProperty).EnumerateArray().ToArray();
+        if (rows.Any(row => !validateRow(row, hardwareId)))
+            throw new InvalidOperationException($"SoftLicence exact {sourceName} source contains a malformed row.");
+        return rows
+            .Select(row => JsonSerializer.SerializeToElement(row.EnumerateObject()
+                .Where(property => allowedProperties.Contains(property.Name))
+                .ToDictionary(property => property.Name, property => property.Value.Clone()), JsonOptions))
+            .ToList();
+    }
+
+    /// <summary>Requires every exact ban row to carry typed identity, state, timestamp and target-specific evidence.</summary>
+    private static bool ValidateExactBanRow(JsonElement row, string hardwareId)
+    {
+        if (row.ValueKind != JsonValueKind.Object
+            || !ValidGuidString(row, "banId")
+            || !RequiredString(row, "targetType", 32, out var targetType)
+            || !Boolean(row, "isActive")
+            || !ValidDateString(row, "bannedAtUtc")
+            || !OptionalDateString(row, "expiresAtUtc")
+            || !RequiredString(row, "matchType", 128, out _)
+            || !OptionalKnownBanCategory(row)) return false;
+        if (targetType == "hardware_id")
+            return ExactString(row, "hardwareId", hardwareId);
+        if (targetType != "component"
+            || !RequiredString(row, "componentType", 32, out var componentType)
+            || !ValidRedactedComponentHash(row)
+            || !RequiredString(row, "componentMatchType", 32, out var componentMatchType)
+            || !RequiredString(row, "componentMatchStrength", 16, out var strength)
+            || !BooleanValue(row, "isWeakComponentCorrelation", out var isWeak)) return false;
+        var expectedWeak = componentType is "CPU" or "MB" or "BIOS" or "DISK" or "HOST";
+        var expectedStrength = expectedWeak ? "weak" : "strong";
+        return componentType is "FP_EXE" or "FP_DLL" or "FP_CORE" or "CPU" or "MB" or "BIOS" or "DISK" or "HOST"
+            && componentMatchType == componentType && strength == expectedStrength && isWeak == expectedWeak
+            && ExactStringArray(row, "correlatedHardwareIds", hardwareId);
+    }
+
+    /// <summary>Requires every exact Canary summary to carry typed identity, severity, interval, origin and ban state.</summary>
+    private static bool ValidateExactCanaryRow(JsonElement row, string hardwareId) =>
+        row.ValueKind == JsonValueKind.Object
+        && ValidGuidString(row, "alertId")
+        && ExactString(row, "hardwareId", hardwareId)
+        && RequiredString(row, "trigger", 100, out _)
+        && IntegerInRange(row, "severity", 1, 3)
+        && NonNegativeInteger(row, "evidenceCount")
+        && ValidOrderedDates(row, "firstSeenUtc", "lastSeenUtc")
+        && Boolean(row, "isHardwareBanned")
+        && RequiredString(row, "sourceKind", 32, out var sourceKind)
+        && sourceKind is "client_canary" or "server_incident";
+
+    /// <summary>Requires each counted exact telemetry record to match the provider's non-nullable public contract.</summary>
+    private static bool ValidExactProfileRow(JsonElement row) => row.ValueKind == JsonValueKind.Object
+        && ValidDateString(row, "timestampUtc")
+        && RequiredString(row, "type", 32, out var type)
+        && type is "Event" or "Diagnostic" or "Error"
+        && RequiredString(row, "eventName", 512, out _)
+        && RequiredString(row, "family", 128, out _)
+        && RequiredString(row, "appName", 256, out _)
+        && (!row.TryGetProperty("version", out var version)
+            || version.ValueKind == JsonValueKind.Null
+            || version.ValueKind == JsonValueKind.String && ValidExactText(version.GetString(), 128));
+
+    /// <summary>Requires top-level activity dates to equal the extrema of the complete recent-record population.</summary>
+    private static bool ValidExactProfileInterval(JsonElement profile, int count, JsonElement records)
+    {
+        if (count == 0)
+            return NullDate(profile, "firstActivityUtc") && NullDate(profile, "lastActivityUtc");
+        if (!TryDate(profile, "firstActivityUtc", out var first)
+            || !TryDate(profile, "lastActivityUtc", out var last)) return false;
+        var timestamps = records.EnumerateArray().Select(row =>
+        {
+            row.GetProperty("timestampUtc").TryGetDateTimeOffset(out var value);
+            return value;
+        }).ToArray();
+        return first == timestamps.Min() && last == timestamps.Max();
+    }
+
+    /// <summary>Accepts only the closed hardware-ban category vocabulary, or absence for component bans.</summary>
+    private static bool OptionalKnownBanCategory(JsonElement row)
+    {
+        if (!row.TryGetProperty("banCategory", out var value) || value.ValueKind == JsonValueKind.Null)
+            return true;
+        return value.ValueKind == JsonValueKind.String && value.GetString() is
+            "quota_abuse" or "outdated_version" or "debugger" or "piracy" or "manual" or "dev_canary_quarantine";
+    }
+
+    /// <summary>Accepts only the canonical hexadecimal eight-ellipsis-eight redaction shape.</summary>
+    private static bool ValidRedactedComponentHash(JsonElement row)
+    {
+        if (!RequiredString(row, "componentHashRedacted", 19, out var value)) return false;
+        return value!.Length == 19 && value.AsSpan(8, 3).SequenceEqual("...")
+            && value.Take(8).Concat(value.Skip(11)).All(Uri.IsHexDigit);
+    }
+
+    /// <summary>Reads one bounded nonempty exact string without controls or edge whitespace.</summary>
+    private static bool RequiredString(JsonElement row, string property, int maximum, out string? value)
+    {
+        value = null;
+        if (!row.TryGetProperty(property, out var element) || element.ValueKind != JsonValueKind.String)
+            return false;
+        value = element.GetString();
+        return ValidExactText(value, maximum);
+    }
+
+    /// <summary>Requires one hardware string to equal the requested identity under the provider's case-insensitive contract.</summary>
+    private static bool ExactString(JsonElement row, string property, string expected) =>
+        RequiredString(row, property, 512, out var value)
+        && string.Equals(value, expected, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Requires a nonempty hardware identity array containing no value outside the requested identity.</summary>
+    private static bool ExactStringArray(JsonElement row, string property, string expected) =>
+        row.TryGetProperty(property, out var values) && values.ValueKind == JsonValueKind.Array
+        && values.GetArrayLength() > 0 && values.EnumerateArray().All(value =>
+            value.ValueKind == JsonValueKind.String
+            && string.Equals(value.GetString(), expected, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Requires a JSON boolean property without coercion.</summary>
+    private static bool Boolean(JsonElement row, string property) =>
+        row.TryGetProperty(property, out var value)
+        && value.ValueKind is JsonValueKind.True or JsonValueKind.False;
+
+    /// <summary>Reads a JSON boolean property without coercion.</summary>
+    private static bool BooleanValue(JsonElement row, string property, out bool value)
+    {
+        value = false;
+        if (!row.TryGetProperty(property, out var element)
+            || element.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return false;
+        value = element.GetBoolean();
+        return true;
+    }
+
+    /// <summary>Requires one nonnegative Int32 counter.</summary>
+    private static bool NonNegativeInteger(JsonElement row, string property) =>
+        row.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.Number
+        && value.TryGetInt32(out var number) && number >= 0;
+
+    /// <summary>Requires one Int32 value inside the closed contract range.</summary>
+    private static bool IntegerInRange(JsonElement row, string property, int minimum, int maximum) =>
+        row.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.Number
+        && value.TryGetInt32(out var number) && number >= minimum && number <= maximum;
+
+    /// <summary>Requires one exact Int32 contract value.</summary>
+    private static bool ExactInteger(JsonElement row, string property, int expected) =>
+        row.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.Number
+        && value.TryGetInt32(out var number) && number == expected;
+
+    /// <summary>Requires one canonical dashed GUID-shaped string.</summary>
+    private static bool ValidGuidString(JsonElement row, string property) =>
+        RequiredString(row, property, 36, out var value)
+        && Guid.TryParseExact(value, "D", out var parsed) && parsed != Guid.Empty
+        && string.Equals(value, parsed.ToString("D"), StringComparison.Ordinal)
+        && value![14] is >= '1' and <= '5'
+        && value[19] is '8' or '9' or 'a' or 'b';
+
+    /// <summary>Rejects empty, oversized, controlled or edge-whitespace text without normalizing evidence.</summary>
+    private static bool ValidExactText(string? value, int maximum) => value is { Length: > 0 }
+        && value.Length <= maximum && !value.Any(char.IsControl)
+        && !char.IsWhiteSpace(value[0]) && !char.IsWhiteSpace(value[^1]);
+
+    /// <summary>Requires one parseable JSON date-time string.</summary>
+    private static bool ValidDateString(JsonElement row, string property) =>
+        row.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
+        && value.TryGetDateTimeOffset(out _);
+
+    /// <summary>Reads one required date-time string without coercion.</summary>
+    private static bool TryDate(JsonElement row, string property, out DateTimeOffset value)
+    {
+        value = default;
+        return row.TryGetProperty(property, out var element) && element.ValueKind == JsonValueKind.String
+            && element.TryGetDateTimeOffset(out value);
+    }
+
+    /// <summary>Requires an explicit null date property for an empty complete profile.</summary>
+    private static bool NullDate(JsonElement row, string property) =>
+        row.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.Null;
+
+    /// <summary>Accepts an absent/null date or requires a parseable JSON date-time string.</summary>
+    private static bool OptionalDateString(JsonElement row, string property) =>
+        !row.TryGetProperty(property, out var value) || value.ValueKind == JsonValueKind.Null
+        || value.ValueKind == JsonValueKind.String && value.TryGetDateTimeOffset(out _);
+
+    /// <summary>Requires a parseable inclusive first/last interval.</summary>
+    private static bool ValidOrderedDates(JsonElement row, string firstProperty, string lastProperty) =>
+        row.TryGetProperty(firstProperty, out var first) && first.ValueKind == JsonValueKind.String
+        && first.TryGetDateTimeOffset(out var firstValue)
+        && row.TryGetProperty(lastProperty, out var last) && last.ValueKind == JsonValueKind.String
+        && last.TryGetDateTimeOffset(out var lastValue) && firstValue <= lastValue;
+
+    /// <summary>Projects the exact machine profile without forwarding future telemetry fields.</summary>
+    private static JsonElement ProjectExactMachineProfile(JsonElement profile)
+    {
+        var properties = new HashSet<string>([
+            "hardwareId", "days", "recordsAnalyzed", "complete", "firstActivityUtc", "lastActivityUtc"
+        ], StringComparer.Ordinal);
+        var result = profile.EnumerateObject()
+            .Where(property => properties.Contains(property.Name))
+            .ToDictionary(property => property.Name, property => property.Value.Clone());
+        result["recentRecords"] = JsonSerializer.SerializeToElement(profile.GetProperty("recentRecords")
+            .EnumerateArray().Where(row => row.ValueKind == JsonValueKind.Object)
+            .Select(row => row.EnumerateObject().Where(property => new[]
+                { "timestampUtc", "type", "eventName", "family", "appName", "version" }
+                .Contains(property.Name, StringComparer.Ordinal))
+                .ToDictionary(property => property.Name, property => property.Value.Clone()))
+            .ToArray(), JsonOptions);
+        return JsonSerializer.SerializeToElement(result, JsonOptions);
     }
 
     public async Task<JsonElement> GetSecurityBanDetailsAsync(
@@ -1077,7 +1610,7 @@ public sealed class SoftLicenceAnalyticsClient
     {
         const string operation = "create_security_hardware_ban";
         const string endpoint = "/api/admin/banned-hwids";
-        if (!_options.TryGetAdminSecret(out var adminSecret, out var errorCode, out var errorMessage))
+        if (!_credentials.TryGetAdminSecret(out var adminSecret, out var errorCode, out var errorMessage))
             return await DeliverAdminCredentialErrorAsync(operation, endpoint, errorCode, errorMessage, cancellationToken);
 
         var resolvedExpiresAt = ResolveExpiresAt(expiresAt, durationDays);
@@ -1133,7 +1666,7 @@ public sealed class SoftLicenceAnalyticsClient
     {
         const string operation = "unban_security_hardware_ban";
         var endpoint = $"/api/admin/banned-hwids/{banId:D}";
-        if (!_options.TryGetAdminSecret(out var adminSecret, out var errorCode, out var errorMessage))
+        if (!_credentials.TryGetAdminSecret(out var adminSecret, out var errorCode, out var errorMessage))
             return await DeliverAdminCredentialErrorAsync(operation, endpoint, errorCode, errorMessage, cancellationToken);
 
         var uri = BuildRootedUri($"api/admin/banned-hwids/{banId:D}", new Dictionary<string, string?>
@@ -1175,7 +1708,7 @@ public sealed class SoftLicenceAnalyticsClient
     {
         const string operation = "create_security_component_ban";
         const string endpoint = "/api/admin/banned-components";
-        if (!_options.TryGetAdminSecret(out var adminSecret, out var errorCode, out var errorMessage))
+        if (!_credentials.TryGetAdminSecret(out var adminSecret, out var errorCode, out var errorMessage))
             return await DeliverAdminCredentialErrorAsync(operation, endpoint, errorCode, errorMessage, cancellationToken);
 
         var resolvedExpiresAt = ResolveExpiresAt(expiresAt, durationDays);
@@ -1233,7 +1766,7 @@ public sealed class SoftLicenceAnalyticsClient
     {
         const string operation = "unban_security_component_ban";
         var endpoint = $"/api/admin/banned-components/{banId:D}";
-        if (!_options.TryGetAdminSecret(out var adminSecret, out var errorCode, out var errorMessage))
+        if (!_credentials.TryGetAdminSecret(out var adminSecret, out var errorCode, out var errorMessage))
             return await DeliverAdminCredentialErrorAsync(operation, endpoint, errorCode, errorMessage, cancellationToken);
 
         var uri = BuildRootedUri($"api/admin/banned-components/{banId:D}", new Dictionary<string, string?>
@@ -1358,7 +1891,7 @@ public sealed class SoftLicenceAnalyticsClient
                 reviewStatus
             }, options: JsonOptions)
         };
-        request.Headers.Add("X-Analytics-Key", _options.GetApiKey());
+        request.Headers.Add("X-Analytics-Key", _credentials.GetApiKey());
 
         return await SendJsonAsync(request, cancellationToken);
     }
@@ -1371,9 +1904,26 @@ public sealed class SoftLicenceAnalyticsClient
     {
         var uri = BuildRootedUri($"api/analytics/{path}", query);
         using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-        request.Headers.Add("X-Analytics-Key", _options.GetApiKey());
+        request.Headers.Add("X-Analytics-Key", _credentials.GetApiKey());
 
         return await SendJsonAsync(request, cancellationToken, protectOversized);
+    }
+
+    /// <summary>
+    /// Calls the Recovery analytics surface without the legacy product-name alias normalization used by generic analytics.
+    /// </summary>
+    private async Task<JsonElement> GetRecoveryAnalyticsAsync(
+        string path,
+        IReadOnlyDictionary<string, string?> query,
+        CancellationToken cancellationToken)
+    {
+        var builder = new UriBuilder($"{_options.GetBaseUrl()}/api/analytics/recovery/{path.TrimStart('/')}");
+        builder.Query = string.Join("&", query
+            .Where(item => item.Value is not null)
+            .Select(item => $"{Uri.EscapeDataString(item.Key)}={Uri.EscapeDataString(item.Value!)}"));
+        using var request = new HttpRequestMessage(HttpMethod.Get, builder.Uri);
+        request.Headers.Add("X-Analytics-Key", _credentials.GetApiKey());
+        return await SendJsonAsync(request, cancellationToken);
     }
 
     private async Task<JsonElement> GetLlmTipFeedbackAsync(
@@ -1383,7 +1933,7 @@ public sealed class SoftLicenceAnalyticsClient
     {
         var uri = BuildRootedUri($"api/llm-tips-feedback/{path}", query);
         using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-        request.Headers.Add("X-Analytics-Key", _options.GetApiKey());
+        request.Headers.Add("X-Analytics-Key", _credentials.GetApiKey());
 
         return await SendJsonAsync(request, cancellationToken);
     }
@@ -1393,13 +1943,25 @@ public sealed class SoftLicenceAnalyticsClient
         CancellationToken cancellationToken,
         bool protectOversized = true)
     {
-        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        using var response = await _httpClient.SendAsync(
+            request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         if (response.StatusCode == HttpStatusCode.Unauthorized)
-            throw new InvalidOperationException("SoftLicence analytics API rejected SOFTLICENCE_API_KEY.");
+        {
+            // Name the endpoint and relay the server text so the client sees why (TKT-001168).
+            // Servers before TKT-001168 also answer 401 when a valid key lacks the endpoint scope.
+            var unauthorizedBody = Encoding.UTF8.GetString(
+                await ReadBoundedResponseBytesAsync(response.Content, cancellationToken)).Trim();
+            throw new InvalidOperationException(
+                $"SoftLicence analytics API rejected SOFTLICENCE_API_KEY (HTTP 401 on {request.RequestUri?.AbsolutePath}"
+                + (unauthorizedBody.Length == 0 ? ")" : $": {Truncate(unauthorizedBody, 300)})")
+                + ". The key is missing, unknown, inactive or expired, or (older servers) lacks the scope required by this "
+                + "endpoint, e.g. security:read for security tools.");
+        }
 
         if (!response.IsSuccessStatusCode)
         {
-            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
+            var errorBody = Encoding.UTF8.GetString(
+                await ReadBoundedResponseBytesAsync(response.Content, cancellationToken));
             if (TryGetProductSelectorError(errorBody, out var errorCode, out var message))
             {
                 var selectorError = await BuildProductSelectorErrorAsync(
@@ -1417,13 +1979,40 @@ public sealed class SoftLicenceAnalyticsClient
 
         if (protectOversized)
         {
-            var json = await response.Content.ReadAsStringAsync(cancellationToken);
+            var json = Encoding.UTF8.GetString(
+                await ReadBoundedResponseBytesAsync(response.Content, cancellationToken));
             return await _resultStore.DeliverJsonAsync(json, cancellationToken);
         }
 
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+        var bytes = await ReadBoundedResponseBytesAsync(response.Content, cancellationToken);
+        using var document = JsonDocument.Parse(bytes);
         return document.RootElement.Clone();
+    }
+
+    /// <summary>Rejects declared and streamed response bodies before JSON parsing can consume unbounded memory.</summary>
+    private async Task<byte[]> ReadBoundedResponseBytesAsync(
+        HttpContent content, CancellationToken cancellationToken)
+    {
+        const int absoluteMaximum = 16 * 1024 * 1024;
+        var maximum = Math.Clamp(_options.AnalyticsResponseMaxBytes, 1024, absoluteMaximum);
+        if (content.Headers.ContentLength is > 0 and var declared && declared > maximum)
+            throw new InvalidOperationException("SoftLicence analytics response exceeds the safe transport byte bound.");
+
+        await using var input = await content.ReadAsStreamAsync(cancellationToken);
+        using var output = new MemoryStream(content.Headers.ContentLength is > 0 and var length
+            ? checked((int)length) : Math.Min(maximum, 81920));
+        var buffer = new byte[81920];
+        var total = 0;
+        while (true)
+        {
+            var read = await input.ReadAsync(buffer, cancellationToken);
+            if (read == 0) break;
+            total = checked(total + read);
+            if (total > maximum)
+                throw new InvalidOperationException("SoftLicence analytics response exceeds the safe transport byte bound.");
+            output.Write(buffer, 0, read);
+        }
+        return output.ToArray();
     }
 
     private async Task<JsonElement> SendAdminJsonAsync(
@@ -1431,8 +2020,10 @@ public sealed class SoftLicenceAnalyticsClient
         CancellationToken cancellationToken,
         bool returnStructuredError = false)
     {
-        using var response = await _httpClient.SendAsync(request, cancellationToken);
-        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        using var response = await _httpClient.SendAsync(
+            request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        var body = Encoding.UTF8.GetString(
+            await ReadBoundedResponseBytesAsync(response.Content, cancellationToken));
         if (!response.IsSuccessStatusCode)
         {
             var errorCode = response.StatusCode switch
@@ -1524,14 +2115,15 @@ public sealed class SoftLicenceAnalyticsClient
         {
             var uri = BuildRootedUri("api/analytics/products", new Dictionary<string, string?>());
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-            request.Headers.Add("X-Analytics-Key", _options.GetApiKey());
+            request.Headers.Add("X-Analytics-Key", _credentials.GetApiKey());
 
-            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            using var response = await _httpClient.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             if (!response.IsSuccessStatusCode)
                 return null;
 
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            var bytes = await ReadBoundedResponseBytesAsync(response.Content, cancellationToken);
+            using var document = JsonDocument.Parse(bytes);
             return document.RootElement.Clone();
         }
         catch (OperationCanceledException)

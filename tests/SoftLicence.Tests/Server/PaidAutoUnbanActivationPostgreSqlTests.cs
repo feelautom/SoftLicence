@@ -171,7 +171,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var bindingId = Guid.NewGuid();
         var enrollmentId = Guid.NewGuid();
         var eligibleBanId = Guid.NewGuid();
-        var hardwareId = "PAID-AUTO-UNBAN-" + Guid.NewGuid().ToString("N").ToUpperInvariant();
+        var hardwareId = Guid.NewGuid().ToString("N")[..16].ToUpperInvariant();
         var appName = "Paid activation " + Guid.NewGuid().ToString("N");
         var licenseKey = "PAID-" + Guid.NewGuid().ToString("N").ToUpperInvariant();
         var now = DateTime.UtcNow;
@@ -239,7 +239,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 {
                     Id = Guid.NewGuid(),
                     LicenseId = targetLicenseId,
-                    HardwareId = "OCCUPIED-" + Guid.NewGuid().ToString("N").ToUpperInvariant(),
+                    HardwareId = Guid.NewGuid().ToString("N")[..16].ToUpperInvariant(),
                     IsActive = true,
                     FirstActivatedAt = now.AddDays(-3),
                     LastCheckInAt = now.AddDays(-1)
@@ -394,6 +394,17 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 .SingleAsync());
     }
 
+    /// <summary>
+    /// Waits until another PostgreSQL session is blocked on one of the hardware-ban advisory locks of
+    /// <paramref name="hardwareId"/>, proving that a concurrent ban writer is serialized behind the
+    /// activation holding them. Since the digest serialization of 2026-09-12, writers take the canonical
+    /// digest lock (<c>hardware-ban-digest|</c> lowercase SHA-256 of the uppercase HWID) before the
+    /// historical <c>hardware-ban-v1|</c> raw lock, so a waiter normally appears on the digest key; both
+    /// namespaces are observed so the proof does not depend on that acquisition order.
+    /// </summary>
+    /// <param name="connectionString">An administrator connection able to read <c>pg_locks</c>.</param>
+    /// <param name="hardwareId">The raw HWID whose ban locks are observed.</param>
+    /// <exception cref="TimeoutException">No waiter appeared within about ten seconds.</exception>
     private static async Task WaitForHardwareBanWaiterAsync(string connectionString, string hardwareId)
     {
         await using var observer = new NpgsqlConnection(connectionString);
@@ -403,7 +414,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             await using var command = observer.CreateCommand();
             command.CommandText = """
                 WITH target AS (
-                    SELECT pg_catalog.hashtextextended(@lock_name, 999095)::bigint AS key
+                    SELECT pg_catalog.hashtextextended(name, 999095)::bigint AS key
+                    FROM unnest(ARRAY[@digest_lock_name, @legacy_lock_name]) AS name
                 )
                 SELECT count(*)
                 FROM pg_catalog.pg_locks AS held
@@ -417,7 +429,9 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                   AND held.objsubid = 1
                   AND NOT held.granted;
                 """;
-            command.Parameters.AddWithValue("lock_name", $"hardware-ban-v1|{hardwareId.ToUpperInvariant()}");
+            command.Parameters.AddWithValue(
+                "digest_lock_name", $"hardware-ban-digest|{SecurityService.ComputeHardwareBanDigest(hardwareId)}");
+            command.Parameters.AddWithValue("legacy_lock_name", $"hardware-ban-v1|{hardwareId.ToUpperInvariant()}");
             if (Convert.ToInt32(await command.ExecuteScalarAsync()) >= 1)
                 return;
             await Task.Delay(50);

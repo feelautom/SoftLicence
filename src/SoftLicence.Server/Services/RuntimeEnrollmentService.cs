@@ -43,6 +43,20 @@ public sealed class RuntimeEnrollmentException(
 
 public interface IRuntimeEnrollmentService
 {
+    /// <summary>Prepares exact server-owned recovery payload bytes under the current authority head lock.</summary>
+    Task<RuntimeEnrollmentAuthorityRecoveryPreparationResult> PrepareAuthorityRecoveryV2Async(
+        string clientId, string transportKeyId, Guid attemptId, ReadOnlyMemory<byte> exactBody,
+        CancellationToken cancellationToken = default);
+    /// <summary>Finalizes one authenticated recovery preparation with its detached recovery signature.</summary>
+    Task<RuntimeEnrollmentAuthorityV2OperationResult> FinalizeAuthorityRecoveryV2Async(
+        string clientId, string transportKeyId, Guid attemptId, ReadOnlyMemory<byte> exactBody,
+        string preparationToken, string recoveryKeyId, string recoverySignature,
+        CancellationToken cancellationToken = default);
+    /// <summary>Issues or replays one authenticated v2 authority generation from exact request bytes.</summary>
+    Task<RuntimeEnrollmentAuthorityV2OperationResult> IssueAuthorityGenerationV2Async(
+        string clientId, string transportKeyId, Guid attemptId, ReadOnlyMemory<byte> exactBody,
+        string? recoveryKeyId, string? recoverySignature,
+        CancellationToken cancellationToken = default);
     Task<RuntimeEnrollmentOperationResult<RuntimeEnrollmentPrepareResponse>> PrepareAsync(
         string clientId,
         string exactBodyDigest,
@@ -55,6 +69,16 @@ public interface IRuntimeEnrollmentService
         RuntimeEnrollmentRefreshRequest request,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Activates one pending enrollment after verifying its exact challenge-bound client proof.
+    /// </summary>
+    /// <param name="routeEnrollmentId">Enrollment identifier selected by the authenticated route.</param>
+    /// <param name="exactBodyDigest">Lowercase SHA-256 digest of the exact Confirm request bytes.</param>
+    /// <param name="request">Validated protocol and enrollment identity supplied by the client.</param>
+    /// <param name="proof">Signed proof headers bound to the request digest and enrollment challenge.</param>
+    /// <param name="clientAddress">Optional client address used only for bounded quota enforcement.</param>
+    /// <param name="cancellationToken">Cancels the operation before the authority transaction commits.</param>
+    /// <returns>The active enrollment response and whether the exact signed request was replayed.</returns>
     Task<RuntimeEnrollmentOperationResult<RuntimeEnrollmentConfirmResponse>> ConfirmAsync(
         Guid routeEnrollmentId,
         string exactBodyDigest,
@@ -74,6 +98,7 @@ public interface IRuntimeEnrollmentService
         IPAddress? clientAddress,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Issues or replays a proof-bound capability only within current paid authority, without refreshing replay TTL.</summary>
     Task<RuntimeEnrollmentOperationResult<RuntimeEnrollmentCapabilityResponse>> CreateCapabilityAsync(
         Guid routeEnrollmentId,
         string exactBodyDigest,
@@ -102,6 +127,15 @@ public interface IRuntimeEnrollmentService
         Guid routeEnrollmentId,
         string exactBodyDigest,
         CanaryPingRequest request,
+        RuntimeProofHeaders proof,
+        IPAddress? clientAddress,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Processes one authenticated security lock report (TKT-001177).</summary>
+    Task<RuntimeEnrollmentOperationResult<SecurityLockVerdictResponse>> ProcessSecurityLockReportAsync(
+        Guid routeEnrollmentId,
+        string exactBodyDigest,
+        SecurityLockReportRequest request,
         RuntimeProofHeaders proof,
         IPAddress? clientAddress,
         CancellationToken cancellationToken = default);
@@ -147,9 +181,25 @@ public interface IRuntimeEnrollmentService
         RuntimeWebSetupUpgradeRelayRequest request,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Verifies the signed Runtime identity and returns a closed, non-authorizing identity confirmation.
+    /// </summary>
+    /// <param name="clientId">The authenticated Distribution client identifier.</param>
+    /// <param name="request">The exact signed reinstall-authority request.</param>
+    /// <param name="cancellationToken">The token used to cancel database and cryptographic work.</param>
+    /// <returns>The identity-only v1 provider assertion bound to the verified Runtime scope.</returns>
+    /// <exception cref="RuntimeEnrollmentException">
+    /// The request, Runtime identity, binding authority, licence, seat, version, or provider state is invalid.
+    /// </exception>
+    /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
     Task<RuntimeReinstallAuthorityResponse> AuthorizeReinstallAsync(
         string clientId,
         RuntimeReinstallAuthorityRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<RuntimeReinstallSourceResolutionResponse> ResolveReinstallSourceAuthorityAsync(
+        string clientId,
+        RuntimeReinstallSourceResolutionRequest request,
         CancellationToken cancellationToken = default);
 
     Task<RuntimeEnrollmentOperationResult<RuntimeLicenseBootstrapResultResponse>> RedeemLicenseBootstrapAsync(
@@ -161,7 +211,33 @@ public interface IRuntimeEnrollmentService
         CancellationToken cancellationToken = default);
 }
 
-public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
+/// <summary>Owns the exact frozen HTTP response for a v2 authority issuance or semantic replay.</summary>
+public sealed class RuntimeEnrollmentAuthorityV2OperationResult
+{
+    private readonly byte[] exactResponseBody;
+    /// <summary>Copies one terminal response.</summary>
+    public RuntimeEnrollmentAuthorityV2OperationResult(int statusCode, ReadOnlySpan<byte> response, bool idempotent)
+    { StatusCode = statusCode; exactResponseBody = response.ToArray(); Idempotent = idempotent; }
+    /// <summary>Gets the terminal HTTP status.</summary>
+    public int StatusCode { get; }
+    /// <summary>Gets whether the bytes came from an exact stored replay.</summary>
+    public bool Idempotent { get; }
+    /// <summary>Gets a defensive copy of the exact response bytes.</summary>
+    public byte[] ExactResponseBody => [.. exactResponseBody];
+}
+
+/// <summary>Owns the exact recovery payload and signed short-lived preparation token response.</summary>
+public sealed class RuntimeEnrollmentAuthorityRecoveryPreparationResult
+{
+    private readonly byte[] exactResponseBody;
+    /// <summary>Copies the exact public preparation response bytes.</summary>
+    internal RuntimeEnrollmentAuthorityRecoveryPreparationResult(byte[] response)
+    { exactResponseBody = [.. response]; }
+    /// <summary>Gets a defensive copy of the exact response bytes.</summary>
+    public byte[] ExactResponseBody => [.. exactResponseBody];
+}
+
+public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
 {
     public const string ProtocolVersion = "runtime-enrollment-v1";
     public const string PrepareSchema = "runtime-enrollment-prepare-v1";
@@ -207,10 +283,19 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
     public const string WebSetupUpgradeUse = "runtime-enrollment-websetup-upgrade";
     public const string ReinstallAuthoritySchema = "runtime-enrollment-reinstall-authority-v1";
     public const string ReinstallAuthorityV2Schema = "runtime-enrollment-reinstall-authority-v2";
+    public const string ReinstallSourceResolutionSchema = "distribution-runtime-reinstall-source-resolution-v1";
+    /// <summary>Names the additive request schema that negotiates signed authority provenance.</summary>
+    public const string ReinstallSourceResolutionV2Schema = "distribution-runtime-reinstall-source-resolution-v2";
+    public const string ReinstallSourceResolutionResponseSchema = "distribution-runtime-reinstall-source-resolution-result-v1";
+    /// <summary>Names the additive response schema carrying optional provider-issued provenance.</summary>
+    public const string ReinstallSourceResolutionV2ResponseSchema = "distribution-runtime-reinstall-source-resolution-result-v2";
+    public const string ReinstallDiscoveryAuthoritySchema = "runtime-enrollment-reinstall-authority-v2";
     public const string ReinstallAuthorityLegacyV2Schema = ReinstallAuthorityV2Schema;
-    public const string ReinstallAuthorityResponseSchema = "runtime-enrollment-reinstall-authority-response-v1";
+    public const string ReinstallAuthorityResponseSchema = RuntimeReinstallAuthorityV1Producer.ResponseSchema;
     public const string LicenseBootstrapSchema = "runtime-license-bootstrap-v1";
     public const string LicenseBootstrapResponseSchema = "runtime-license-bootstrap-result-v1";
+    /// <summary>Server-only diagnostic for a validly parsed proof outside the accepted clock window.</summary>
+    public const string ProofClockSkewDiagnosticCode = "runtime_proof_clock_skew";
     private const int CriticalRecoveryReceiptTtlHours = 24;
     private const string UtcFormat = "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'";
     private static readonly Regex LowerUuidPattern = new(
@@ -265,7 +350,15 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
     private readonly CanaryAckService? _canaryAck;
     private readonly ISignedLicenseFileService? _signedLicenseFiles;
     private readonly IDataProtector? _distributionEntitlementProtector;
+    /// <summary>Optional v2 coordinator; absence preserves startup compatibility while v2 is disabled.</summary>
+    private readonly RuntimeEnrollmentAuthorityV2Coordinator? _authorityV2;
+    /// <summary>Host shutdown cancels the awaited five-second history-only finalization; HTTP cancellation does not.</summary>
+    private readonly CancellationToken _historyApplicationStopping;
+    /// <summary>Emits only bounded decision/persistence diagnostics, never tokens or request bodies.</summary>
+    private readonly ILogger<RuntimeEnrollmentService>? _historyLogger;
 
+    /// <summary>Creates the Runtime authority service with existing scoped factories and optional bounded decision-history shutdown/logging dependencies.</summary>
+    /// <remarks>Factories and cryptography remain caller-owned. History uses the existing lease transaction; no background work or fallback transaction is created. Optional dependencies preserve isolated-service callers while DI supplies host lifetime in the server.</remarks>
     public RuntimeEnrollmentService(
         IDbContextFactory<LicenseDbContext> dbFactory,
         IRuntimeEnrollmentAuthorityService authority,
@@ -274,7 +367,10 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
         IOptions<RuntimeEnrollmentOptions> options,
         CanaryAckService? canaryAck = null,
         ISignedLicenseFileService? signedLicenseFiles = null,
-        IDataProtectionProvider? dataProtectionProvider = null)
+        IDataProtectionProvider? dataProtectionProvider = null,
+        RuntimeEnrollmentAuthorityV2Coordinator? authorityV2 = null,
+        IHostApplicationLifetime? applicationLifetime = null,
+        ILogger<RuntimeEnrollmentService>? historyLogger = null)
     {
         _dbFactory = dbFactory;
         _authority = authority;
@@ -285,8 +381,150 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
         _signedLicenseFiles = signedLicenseFiles;
         _distributionEntitlementProtector = dataProtectionProvider?.CreateProtector(
             DistributionInstallationBindingService.EntitlementPurpose);
+        _authorityV2 = authorityV2;
+        _historyApplicationStopping = applicationLifetime?.ApplicationStopping ?? CancellationToken.None;
+        _historyLogger = historyLogger;
     }
 
+    /// <inheritdoc />
+    public async Task<RuntimeEnrollmentAuthorityV2OperationResult> IssueAuthorityGenerationV2Async(
+        string clientId, string transportKeyId, Guid attemptId, ReadOnlyMemory<byte> exactBody,
+        string? recoveryKeyId, string? recoverySignature,
+        CancellationToken cancellationToken = default)
+    {
+        if (_options.Mode != "enabled" || _options.AuthorityGenerationV2.Mode != "enabled" || _authorityV2 is null)
+            throw new RuntimeEnrollmentException(
+                "RUNTIME_ENROLLMENT_UNSUPPORTED", StatusCodes.Status503ServiceUnavailable,
+                "AUTHORITY_V2_UNAVAILABLE");
+        var prepared = _authorityV2.Prepare(
+            clientId, transportKeyId, attemptId, exactBody.Span, recoveryKeyId, recoverySignature);
+        if (prepared.Request.Transition.Kind == "recovery")
+            throw new RuntimeEnrollmentException(
+                "RUNTIME_ENROLLMENT_DENIED", StatusCodes.Status403Forbidden,
+                "RECOVERY_PREPARATION_REQUIRED");
+        return await ExecuteAuthorityPreparedAsync(prepared, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<RuntimeEnrollmentAuthorityRecoveryPreparationResult> PrepareAuthorityRecoveryV2Async(
+        string clientId, string transportKeyId, Guid attemptId, ReadOnlyMemory<byte> exactBody,
+        CancellationToken cancellationToken = default)
+    {
+        if (_options.Mode != "enabled" || _options.AuthorityGenerationV2.Mode != "enabled" || _authorityV2 is null)
+            throw new RuntimeEnrollmentException(
+                "RUNTIME_ENROLLMENT_UNSUPPORTED", StatusCodes.Status503ServiceUnavailable,
+                "AUTHORITY_V2_UNAVAILABLE");
+        var coordinator = _authorityV2!;
+        var prepared = coordinator.PrepareRecovery(clientId, transportKeyId, attemptId, exactBody.Span);
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        await using var lease = await _authority.AcquireMutationAsync(db, prepared.BindingId, cancellationToken);
+        var result = await coordinator.PrepareRecoveryAmbientAsync(db, prepared, cancellationToken);
+        await lease.CommitAsync(cancellationToken);
+        var response = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            schema = "runtime-enrollment-authority-recovery-preparation-v2",
+            payloadUtf8Base64Url = EncodeBase64Url(result.CanonicalPayloadUtf8),
+            preparationToken = result.Token,
+            expiresAtUtc = result.ExpiresAtUtc.ToString(
+                "yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'", CultureInfo.InvariantCulture)
+        });
+        return new(response);
+    }
+
+    /// <inheritdoc />
+    public Task<RuntimeEnrollmentAuthorityV2OperationResult> FinalizeAuthorityRecoveryV2Async(
+        string clientId, string transportKeyId, Guid attemptId, ReadOnlyMemory<byte> exactBody,
+        string preparationToken, string recoveryKeyId, string recoverySignature,
+        CancellationToken cancellationToken = default)
+    {
+        if (_options.Mode != "enabled" || _options.AuthorityGenerationV2.Mode != "enabled" || _authorityV2 is null)
+            throw new RuntimeEnrollmentException(
+                "RUNTIME_ENROLLMENT_UNSUPPORTED", StatusCodes.Status503ServiceUnavailable,
+                "AUTHORITY_V2_UNAVAILABLE");
+        var coordinator = _authorityV2!;
+        var replayProbe = coordinator.PrepareRecoveryFinalization(
+            clientId, transportKeyId, attemptId, exactBody.Span,
+            preparationToken, recoveryKeyId, recoverySignature, authorizeCurrentToken: false);
+        return ExecuteAuthorityRecoveryFinalizationAsync(
+            replayProbe, exactBody, preparationToken, recoveryKeyId, recoverySignature,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Returns a committed exact attempt before current token authorization; every new attempt then
+    /// validates the complete preparation and uses the ordinary atomic execution path.
+    /// </summary>
+    private async Task<RuntimeEnrollmentAuthorityV2OperationResult> ExecuteAuthorityRecoveryFinalizationAsync(
+        RuntimeEnrollmentAuthorityV2Prepared replayProbe, ReadOnlyMemory<byte> exactBody,
+        string preparationToken, string recoveryKeyId, string recoverySignature,
+        CancellationToken cancellationToken)
+    {
+        var coordinator = _authorityV2!;
+        await using (var db = await _dbFactory.CreateDbContextAsync(cancellationToken))
+        await using (var lease = await _authority.AcquireMutationAsync(
+            db, replayProbe.BindingId, cancellationToken))
+        {
+            var replay = await coordinator.ResolveExactAttemptAmbientAsync(
+                db, replayProbe, cancellationToken);
+            if (replay is not null)
+            {
+                await lease.CommitAsync(cancellationToken);
+                return replay;
+            }
+        }
+        var authorized = coordinator.PrepareRecoveryFinalization(
+            replayProbe.ClientId, replayProbe.TransportKeyId, replayProbe.AttemptId,
+            exactBody.Span, preparationToken, recoveryKeyId, recoverySignature);
+        return await ExecuteAuthorityPreparedAsync(authorized, cancellationToken);
+    }
+
+    /// <summary>Owns the complete bounded transaction retry envelope for one frozen v2 operation.</summary>
+    private async Task<RuntimeEnrollmentAuthorityV2OperationResult> ExecuteAuthorityPreparedAsync(
+        RuntimeEnrollmentAuthorityV2Prepared prepared, CancellationToken cancellationToken)
+    {
+        var coordinator = _authorityV2!;
+        for (var attempt = 0; attempt < _options.MaximumTransactionAttempts; attempt++)
+        {
+            try
+            {
+                await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+                await using var lease = await _authority.AcquireMutationAsync(db, prepared.BindingId, cancellationToken);
+                var result = await coordinator.ExecuteAmbientAsync(db, prepared, cancellationToken);
+                await lease.CommitAsync(cancellationToken);
+                return result;
+            }
+            catch (Exception exception) when (exception is RuntimeEnrollmentAuthorityTransactionInvalidatedException
+                || IsRetryable(exception))
+            {
+                if (attempt + 1 >= _options.MaximumTransactionAttempts)
+                {
+                    await using var readDb = await _dbFactory.CreateDbContextAsync(cancellationToken);
+                    await using var readLease = await _authority.AcquireMutationAsync(
+                        readDb, prepared.BindingId, cancellationToken);
+                    var resolved = await coordinator.ResolveAfterRollbackAmbientAsync(
+                        readDb, prepared, cancellationToken);
+                    await readLease.CommitAsync(cancellationToken);
+                    return resolved;
+                }
+                await Task.Delay(Random.Shared.Next(20, 80) * (attempt + 1), cancellationToken);
+            }
+        }
+        throw new RuntimeEnrollmentException(
+            "RUNTIME_ENROLLMENT_TEMPORARILY_UNAVAILABLE", StatusCodes.Status503ServiceUnavailable);
+    }
+
+    /// <summary>
+    /// Verifies the signed Runtime identity under its authority lease and returns only a
+    /// non-authorizing identity confirmation bound to the exact verified scope.
+    /// </summary>
+    /// <param name="clientId">The authenticated Distribution client identifier.</param>
+    /// <param name="request">The exact signed reinstall-authority request.</param>
+    /// <param name="cancellationToken">The token used to cancel database and cryptographic work.</param>
+    /// <returns>The identity-only v1 provider assertion bound to the verified Runtime scope.</returns>
+    /// <exception cref="RuntimeEnrollmentException">
+    /// The request, Runtime identity, binding authority, licence, seat, version, or provider state is invalid.
+    /// </exception>
+    /// <exception cref="OperationCanceledException">The operation was canceled.</exception>
     public async Task<RuntimeReinstallAuthorityResponse> AuthorizeReinstallAsync(
         string clientId,
         RuntimeReinstallAuthorityRequest request,
@@ -395,20 +633,24 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
             await db.SaveChangesAsync(cancellationToken);
         }
 
-        var sourceLicense = await db.Licenses.AsNoTracking()
+        var sourceLicense = await db.Licenses.AsNoTracking().Include(candidate => candidate.Product)
             .SingleAsync(candidate => candidate.Id == binding.LicenseId, cancellationToken);
         var sourceActiveSeatCount = await db.LicenseSeats.AsNoTracking().CountAsync(
             candidate => candidate.LicenseId == binding.LicenseId && candidate.IsActive,
             cancellationToken);
-        var sourceLicenseEligible = sourceLicense.IsActive
+        var sourceLicenseWouldPermitReinstall = sourceLicense.IsActive
             && sourceLicense.RevokedAt == null
             && (!sourceLicense.ExpirationDate.HasValue || sourceLicense.ExpirationDate.Value > now.UtcDateTime)
+            && sourceLicense.Product != null
             && sourceLicense.MaxSeats > 0
-            && sourceActiveSeatCount <= sourceLicense.MaxSeats;
-        var response = new RuntimeReinstallAuthorityResponse(
-            ReinstallAuthorityResponseSchema,
+            && sourceActiveSeatCount <= sourceLicense.MaxSeats
+            && IsVersionAllowed(binding.Version, sourceLicense.AllowedVersions)
+            && !IsVersionBelow(binding.Version, sourceLicense.Product?.MinimumAllowedVersion);
+        var decision = RuntimeReinstallAuthorityV1DecisionPolicy.Classify(
+            sourceLicenseWouldPermitReinstall);
+        var response = RuntimeReinstallAuthorityV1Producer.Produce(new RuntimeReinstallAuthorityV1Scope(
             ProtocolVersion,
-            sourceLicenseEligible ? "authorized" : "identity_confirmed",
+            decision,
             validated.RequestId.ToString("D"),
             validated.BootstrapId.ToString("D"),
             enrollment.ProductId.ToString("D"),
@@ -421,9 +663,121 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
             binding.GrantRef,
             binding.SubjectRefDigestSha256!,
             binding.LicenseId.ToString("D"),
-            binding.LicenseSeatId.ToString("D"));
+            binding.LicenseSeatId.ToString("D")));
         await lease.CommitAsync(cancellationToken);
         return response;
+    }
+
+    /// <summary>
+    /// Resolves a missing Website source from the provider-owned active Runtime enrollment and
+    /// verifies the exact WebSetup discovery proof before returning bounded lineage identifiers.
+    /// The operation is read-only and deliberately permits an ineligible modern source licence:
+    /// replacement eligibility remains governed by the later target-finalization authority.
+    /// </summary>
+    public async Task<RuntimeReinstallSourceResolutionResponse> ResolveReinstallSourceAuthorityAsync(
+        string clientId,
+        RuntimeReinstallSourceResolutionRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureEnabled();
+        var validated = ValidateReinstallSourceResolution(request);
+        var responseSchema = validated.IsV2
+            ? ReinstallSourceResolutionV2ResponseSchema
+            : ReinstallSourceResolutionResponseSchema;
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        var enrollment = await db.RuntimeEnrollments
+            .SingleOrDefaultAsync(candidate => candidate.Id == validated.EnrollmentId, cancellationToken);
+        if (enrollment == null)
+            return NoReinstallSource(validated.RequestId, responseSchema);
+
+        await using var lease = await _authority.AcquireAsync(db, enrollment.BindingId, cancellationToken);
+        await _keyRegistry.ValidateConfiguredKeysAsync(db, cancellationToken);
+        enrollment = await LoadEnrollmentForUpdateAsync(db, validated.EnrollmentId, cancellationToken);
+        if (enrollment.State != "ACTIVE"
+            || enrollment.ClientId != clientId
+            || enrollment.ProductId != validated.ProductId
+            || enrollment.InstallationId != validated.InstallationId
+            || enrollment.ReleaseVersion != validated.ReleaseVersion
+            || enrollment.KeyThumbprint != validated.KeyThumbprint
+            || enrollment.SecurityEpoch != validated.SecurityEpoch)
+            return NoReinstallSource(validated.RequestId, responseSchema);
+
+        var binding = await db.DistributionInstallationBindings
+            .SingleAsync(candidate => candidate.Id == enrollment.BindingId, cancellationToken);
+        var authorityRequest = new ReinstallAuthorityValidated(
+            validated.RequestId, validated.ProductId, validated.BootstrapId,
+            validated.InstallationId, validated.EnrollmentId, validated.ReleaseVersion,
+            validated.KeyThumbprint, validated.SecurityEpoch, true, binding.GrantRef, null,
+            binding.SubjectRefDigestSha256, validated.Challenge, validated.Signature);
+        ReinstallAuthorityClassification classification;
+        try
+        {
+            classification = await ClassifyAndValidateV2ReinstallAuthorityAsync(
+                db, enrollment, binding, clientId, authorityRequest,
+                lease.AuthorityEpoch, await DatabaseNowAsync(db, cancellationToken), cancellationToken);
+            VerifyReinstallDiscoveryProof(enrollment, validated);
+        }
+        catch (RuntimeEnrollmentException exception) when (
+            exception.ErrorCode is "reinstall_authority_ineligible" or "reinstall_signature_invalid")
+        {
+            return NoReinstallSource(validated.RequestId, responseSchema);
+        }
+
+        var authority = validated.IsV2
+            ? await ResolveReinstallSourceAuthorityProvenanceAsync(db, binding, cancellationToken)
+            : null;
+        await lease.CommitAsync(cancellationToken);
+        return new RuntimeReinstallSourceResolutionResponse(
+            responseSchema,
+            "source",
+            validated.RequestId.ToString("D"),
+            enrollment.LicenseId.ToString("D"),
+            classification == ReinstallAuthorityClassification.ModernComplete ? "modern" : "legacy",
+            binding.GrantRef,
+            binding.Id.ToString("D"),
+            binding.SubjectRefDigestSha256,
+            authority);
+    }
+
+    /// <summary>Returns the negotiated bounded none result without authority material.</summary>
+    private static RuntimeReinstallSourceResolutionResponse NoReinstallSource(
+        Guid requestId,
+        string responseSchema) =>
+        new(responseSchema, "none", requestId.ToString("D"),
+            null, null, null, null, null, null);
+
+    /// <summary>
+    /// Resolves only an entitlement-v4 provider-issued generation. Older authorities remain valid
+    /// source results but deliberately carry no synthetic or digest-derived provenance.
+    /// </summary>
+    private static async Task<RuntimeReinstallSourceAuthorityProvenance?>
+        ResolveReinstallSourceAuthorityProvenanceAsync(
+            LicenseDbContext db,
+            DistributionInstallationBinding binding,
+            CancellationToken cancellationToken)
+    {
+        var entitlement = await db.DistributionEntitlements.AsNoTracking()
+            .SingleOrDefaultAsync(candidate => candidate.Id == binding.EntitlementId, cancellationToken);
+        if (entitlement is not
+            {
+                ContractVersion: 4,
+                AuthorityLineageId: { } authorityLineageId,
+                AuthorityGenerationId: { } authorityGenerationId
+            })
+            return null;
+
+        var generation = await db.RuntimeEnrollmentAuthorityGenerations.AsNoTracking()
+            .SingleOrDefaultAsync(candidate =>
+                candidate.AuthorityLineageId == authorityLineageId
+                && candidate.AuthorityGenerationId == authorityGenerationId,
+                cancellationToken);
+        if (generation is null || generation.SignedStatementUtf8.Length is < 1 or > 3569)
+            throw ReinstallAuthorityIneligible("v2_authority_generation_projection_invalid");
+
+        return new RuntimeReinstallSourceAuthorityProvenance(
+            authorityLineageId.ToString("D"),
+            authorityGenerationId.ToString("D"),
+            EncodeBase64Url(generation.SignedStatementUtf8));
     }
 
     /// <summary>
@@ -513,14 +867,10 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
                 throw ReinstallAuthorityIneligible();
             }
         }
-        else if (ownership is { Source: "issue_v3" }
+        else if (ownership != null
             && ownership.ClientId == clientId
-            && entitlement is
-            {
-                ContractVersion: 3,
-                State: "finalized",
-                FinalizedAtUtc: not null
-            }
+            && entitlement is { State: "finalized", FinalizedAtUtc: not null }
+            && IsMatchingModernIssueSource(entitlement.ContractVersion, ownership.Source)
             && entitlement.ClientId == clientId
             && entitlement.ProductId == binding.ProductId
             && entitlement.LicenseId == binding.LicenseId
@@ -766,7 +1116,7 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
         var entitlement = await db.DistributionEntitlements.AsNoTracking()
             .SingleOrDefaultAsync(row => row.Id == binding.EntitlementId, cancellationToken)
             ?? throw Reject("bootstrap_ineligible");
-        if (entitlement.ContractVersion != 3
+        if (!IsModernEntitlementContractVersion(entitlement.ContractVersion)
             || entitlement.State != "finalized"
             || entitlement.ExpiresAtUtc <= now.UtcDateTime
             || entitlement.ClientId != enrollment.ClientId
@@ -1040,6 +1390,13 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
         }, cancellationToken);
     }
 
+    /// <summary>Issues the versioned transition and records authenticated licence-transfer decisions. Replays revalidate current installation authority while tolerating unrelated global epoch advances.</summary>
+    /// <param name="clientId">Existing authenticated S2S client; binding/enrollment ownership is checked without new authorization rules.</param>
+    /// <param name="exactBodyDigest">Validated lowercase SHA256 of the exact request bytes, preserving existing replay semantics.</param>
+    /// <param name="request">Existing versioned upgrade or licence-transfer request. Claimed source/target UUIDs alone cannot own history.</param>
+    /// <param name="cancellationToken">Cancels work before decision; captured refusal finalization uses a separate5s host-linked token.</param>
+    /// <remarks>Request validation, lock order and frozen replay bytes are unchanged; replay additionally revalidates current enrollment authority. Source history requires the authenticated binding's exact licence/product link and remains identity-only until complete target entitlement matching. Target history then replaces source attribution once. Distinct early-source and later-business savepoints preserve the original source-seat/nonce rollback boundary; Clear is terminal on this private context and the lease retains no entities. Unconfirmed persistence returns existing authority_unavailable503; commit acknowledgement loss is indeterminate. Invalid target entitlement retains the wrapper's generic500 with internal refusal reason stored separately. Successful exact replay adds no event and no historical backfill.</remarks>
+
     public async Task<RuntimeEnrollmentOperationResult<RuntimeWebSetupTransitionIssuedResponse>> IssueWebSetupTransitionAsync(
         string clientId,
         string exactBodyDigest,
@@ -1100,6 +1457,26 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
                 || enrollment.State != "ACTIVE")
                 throw Reject("websetup_transition_ineligible");
 
+            // Establish history ownership from the authenticated binding's exact database
+            // licence/product link, never from the caller's claimed source or target UUID.
+            LicenseDecisionSnapshot? identityHistory = null;
+            var identityHistoryPhase = "runtime_transfer_from_source_target_unestablished";
+            RuntimeTransferHistoryObservation? transferHistory = null;
+            var historyCommitStarted = false;
+            if (isLicenseTransfer)
+            {
+                var sourceIdentity = await db.Licenses.AsNoTracking()
+                    .Where(candidate => candidate.Id == binding.LicenseId && candidate.ProductId == binding.ProductId)
+                    .Select(candidate => new { candidate.Id, candidate.ProductId }).SingleOrDefaultAsync(cancellationToken);
+                if (sourceIdentity != null)
+                {
+                    identityHistory = new(sourceIdentity.ProductId, sourceIdentity.Id, null, lease.AuthorityEpoch,
+                        null, null, null, null, null, null, false, null, "authenticated_source_identity_only");
+                    await db.Database.CurrentTransaction!.CreateSavepointAsync(RuntimeSourceHistorySavepoint, cancellationToken);
+                }
+            }
+            try
+            {
             var replay = await db.RuntimeEnrollmentWebSetupTransitionRequests.AsNoTracking()
                 .SingleOrDefaultAsync(row => row.ClientId == clientId && row.Operation == "issue"
                     && row.RequestId == requestId.ToString("D"), cancellationToken);
@@ -1113,6 +1490,9 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
                 if (transition.State != "ISSUED" || transition.ExpiresAtUtc <= now.UtcDateTime
                     || !WebSetupTransitionMatches(transition, clientId, binding, enrollment, request, lease.AuthorityEpoch))
                     throw Gone("websetup_transition_expired");
+                // The global epoch is not an installation revision. Re-read current rights
+                // before returning an older reservation, including a completed v2 transfer.
+                await ValidateEnrollmentAuthorityAsync(db, enrollment, now, cancellationToken);
                 var bytes = OpenWebSetupTransitionIssueResponse(replay);
                 try
                 {
@@ -1168,110 +1548,162 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
                 || IsVersionBelow(request.TargetVersion!, license.Product?.MinimumAllowedVersion))
                 throw Reject("version_not_allowed");
 
-            if (isLicenseTransfer)
+            try
             {
-                if (await db.RuntimeCriticalIncidents.AsNoTracking().AnyAsync(
-                    incident => incident.BindingId == binding.Id && incident.State == "OPEN",
-                    cancellationToken))
-                    throw Reject("websetup_transition_ineligible");
-                if (_distributionEntitlementProtector == null)
-                    throw Unavailable();
-                var entitlement = await DistributionInstallationBindingService.ReadEntitlementAsync(
-                    db, _distributionEntitlementProtector, request.TargetEntitlementRef!, clientId,
-                    productId, now, cancellationToken);
-                if (entitlement.ContractVersion != 3
-                    || entitlement.LicenseId != effectiveLicenseId
-                    || entitlement.GrantRefDigestSha256 != Sha256(request.TargetGrantRef!)
-                    || entitlement.SubjectRefDigestSha256 != Sha256(request.TargetSubjectRef!))
-                    throw Reject("websetup_transition_ineligible");
+                if (isLicenseTransfer)
+                {
+                    if (await db.RuntimeCriticalIncidents.AsNoTracking().AnyAsync(
+                        incident => incident.BindingId == binding.Id && incident.State == "OPEN",
+                        cancellationToken))
+                        throw Reject("websetup_transition_ineligible");
+                    if (_distributionEntitlementProtector == null)
+                        throw Unavailable();
+                    var entitlement = await DistributionInstallationBindingService.ReadEntitlementAsync(
+                        db, _distributionEntitlementProtector, request.TargetEntitlementRef!, clientId,
+                        productId, now, cancellationToken);
+                    if (!IsModernEntitlementContractVersion(entitlement.ContractVersion)
+                        || entitlement.LicenseId != effectiveLicenseId
+                        || entitlement.GrantRefDigestSha256 != Sha256(request.TargetGrantRef!)
+                        || entitlement.SubjectRefDigestSha256 != Sha256(request.TargetSubjectRef!))
+                        throw Reject("websetup_transition_ineligible");
 
-                if (effectiveLicenseId == binding.LicenseId)
-                    throw Reject("websetup_transition_ineligible");
-                if (string.Equals(request.SourceSubjectRef, request.TargetSubjectRef, StringComparison.Ordinal))
-                    throw Reject("websetup_transition_ineligible");
-                var sourceLicenseId = binding.LicenseId;
-                var sourceSeat = await db.LicenseSeats.SingleAsync(
-                    candidate => candidate.Id == binding.LicenseSeatId, cancellationToken);
-                sourceSeat.IsActive = false;
-                sourceSeat.UnlinkedAt = now.UtcDateTime;
-                var targetSeat = await EnsureRuntimeTransferSeatAsync(
-                    db, license, sourceLicenseId, sourceSeat.HardwareId, request.TargetVersion!, clientId,
-                    now, cancellationToken);
-                binding.LicenseId = effectiveLicenseId;
-                binding.LicenseSeatId = targetSeat.Id;
-                binding.EntitlementId = entitlement.EntitlementId;
-                binding.GrantRef = request.TargetGrantRef!;
-                binding.GrantRefDigestSha256 = Sha256(request.TargetGrantRef!);
-                binding.SubjectRefDigestSha256 = Sha256(request.TargetSubjectRef!);
-                enrollment.LicenseId = effectiveLicenseId;
-                enrollment.LicenseSeatId = targetSeat.Id;
-                enrollment.SubjectRefDigestSha256 = binding.SubjectRefDigestSha256;
-                var entitlementRow = await db.DistributionEntitlements.SingleAsync(
-                    candidate => candidate.Id == entitlement.EntitlementId, cancellationToken);
-                entitlementRow.State = "finalized";
-                entitlementRow.FinalizedAtUtc = now.UtcDateTime;
-            }
+                    // Target ownership replaces source ownership only after the complete
+                    // entitlement match. This read-only attribution never adds an auth rule.
+                    if (identityHistory != null && license.ProductId == productId)
+                    {
+                        identityHistory = LicenseDecisionHistoryWriter.CaptureObserved(license, now, null,
+                            "runtime_authority_locks", lease.AuthorityEpoch);
+                        identityHistoryPhase = "runtime_license_transfer";
+                    }
+                    if (effectiveLicenseId == binding.LicenseId)
+                        throw Reject("websetup_transition_ineligible");
+                    if (string.Equals(request.SourceSubjectRef, request.TargetSubjectRef, StringComparison.Ordinal))
+                        throw Reject("websetup_transition_ineligible");
+                    var sourceLicenseId = binding.LicenseId;
+                    var sourceSeat = await db.LicenseSeats.SingleAsync(
+                        candidate => candidate.Id == binding.LicenseSeatId, cancellationToken);
+                    transferHistory = new RuntimeTransferHistoryObservation(
+                        LicenseDecisionHistoryWriter.CaptureObserved(license, now, sourceSeat.HardwareId,
+                            "runtime_authority_locks", lease.AuthorityEpoch), sourceSeat.HardwareId);
+                    // All existing authority/binding/row locks already precede this point.
+                    // This checkpoint precedes EF source-seat mutation AND SealAsync's SQL nonce reservation.
+                    await db.Database.CurrentTransaction!.CreateSavepointAsync(RuntimeHistorySavepoint, cancellationToken);
+                    sourceSeat.IsActive = false;
+                    sourceSeat.UnlinkedAt = now.UtcDateTime;
+                    var targetSeat = await EnsureRuntimeTransferSeatAsync(
+                        db, license, sourceLicenseId, sourceSeat.HardwareId, request.TargetVersion!, clientId,
+                        now, cancellationToken, transferHistory);
+                    binding.LicenseId = effectiveLicenseId;
+                    binding.LicenseSeatId = targetSeat.Id;
+                    binding.EntitlementId = entitlement.EntitlementId;
+                    binding.GrantRef = request.TargetGrantRef!;
+                    binding.GrantRefDigestSha256 = Sha256(request.TargetGrantRef!);
+                    binding.SubjectRefDigestSha256 = Sha256(request.TargetSubjectRef!);
+                    enrollment.LicenseId = effectiveLicenseId;
+                    enrollment.LicenseSeatId = targetSeat.Id;
+                    enrollment.SubjectRefDigestSha256 = binding.SubjectRefDigestSha256;
+                    var entitlementRow = await db.DistributionEntitlements.SingleAsync(
+                        candidate => candidate.Id == entitlement.EntitlementId, cancellationToken);
+                    entitlementRow.State = "finalized";
+                    entitlementRow.FinalizedAtUtc = now.UtcDateTime;
+                }
 
-            var capabilityBytes = RandomNumberGenerator.GetBytes(32);
-            var capability = EncodeBase64Url(capabilityBytes);
-            CryptographicOperations.ZeroMemory(capabilityBytes);
-            var transitionId = Guid.NewGuid();
-            var expiresAt = now.AddSeconds(120);
-            var transitionRow = new RuntimeEnrollmentWebSetupTransition
-            {
-                Id = transitionId,
-                ClientId = clientId,
-                ProductId = productId,
-                BindingId = binding.Id,
-                EnrollmentId = enrollment.Id,
-                InstallationId = enrollment.InstallationId,
-                SourceVersion = request.SourceVersion!,
-                TargetVersion = request.TargetVersion!,
-                TargetInstallerFilename = request.TargetInstallerFilename!,
-                TargetInstallerSha256 = request.TargetInstallerSha256!,
-                CapabilityDigestSha256 = Sha256(capability),
-                SourceSecurityEpoch = enrollment.SecurityEpoch,
-                AuthorityEpoch = lease.AuthorityEpoch,
-                State = "ISSUED",
-                IssuedAtUtc = now.UtcDateTime,
-                ExpiresAtUtc = expiresAt.UtcDateTime
-            };
-            var response = new RuntimeWebSetupTransitionIssuedResponse(
-                WebSetupTransitionCapabilitySchema, ProtocolVersion, transitionId.ToString("D"), capability,
-                FormatUtc(expiresAt.UtcDateTime));
-            var responseBytes = JsonSerializer.SerializeToUtf8Bytes(response, JsonOptions);
-            var ownerReference = WebSetupTransitionIssueResponseReference(clientId, requestId, transitionId);
-            var envelope = await _crypto.SealAsync(db, "websetup-transition-response", transitionId, 1,
-                responseBytes, ownerReference, cancellationToken);
-            db.RuntimeEnrollmentWebSetupTransitions.Add(transitionRow);
-            db.RuntimeEnrollmentWebSetupTransitionRequests.Add(new RuntimeEnrollmentWebSetupTransitionRequest
-            {
-                ClientId = clientId,
-                RequestId = requestId.ToString("D"),
-                Operation = "issue",
-                PayloadDigestSha256 = exactBodyDigest,
-                TransitionId = transitionId,
-                ExactResponseCiphertext = Encoding.ASCII.GetBytes(envelope.Ciphertext),
-                ResponseKeyId = envelope.KeyId,
-                CreatedAtUtc = now.UtcDateTime,
-                ExpiresAtUtc = expiresAt.UtcDateTime
-            });
-            await db.SaveChangesAsync(cancellationToken);
-            if (isLicenseTransfer)
-            {
-                var upgradedAuthorityEpoch = await CurrentAuthorityEpochAsync(db, cancellationToken);
-                if (upgradedAuthorityEpoch <= lease.AuthorityEpoch)
-                    throw Unavailable();
-                enrollment.AuthorityEpoch = upgradedAuthorityEpoch;
-                transitionRow.AuthorityEpoch = upgradedAuthorityEpoch;
+                var capabilityBytes = RandomNumberGenerator.GetBytes(32);
+                var capability = EncodeBase64Url(capabilityBytes);
+                CryptographicOperations.ZeroMemory(capabilityBytes);
+                var transitionId = Guid.NewGuid();
+                // DOC-510: WebSetup persists this reservation before MSI. Thirty minutes covers the
+                // bounded install/restart window while keeping an abandoned capability short-lived.
+                var expiresAt = now.AddMinutes(30);
+                var transitionRow = new RuntimeEnrollmentWebSetupTransition
+                {
+                    Id = transitionId,
+                    ClientId = clientId,
+                    ProductId = productId,
+                    BindingId = binding.Id,
+                    EnrollmentId = enrollment.Id,
+                    InstallationId = enrollment.InstallationId,
+                    SourceVersion = request.SourceVersion!,
+                    TargetVersion = request.TargetVersion!,
+                    TargetInstallerFilename = request.TargetInstallerFilename!,
+                    TargetInstallerSha256 = request.TargetInstallerSha256!,
+                    CapabilityDigestSha256 = Sha256(capability),
+                    SourceSecurityEpoch = enrollment.SecurityEpoch,
+                    AuthorityEpoch = lease.AuthorityEpoch,
+                    State = "ISSUED",
+                    IssuedAtUtc = now.UtcDateTime,
+                    ExpiresAtUtc = expiresAt.UtcDateTime
+                };
+                var response = new RuntimeWebSetupTransitionIssuedResponse(
+                    WebSetupTransitionCapabilitySchema, ProtocolVersion, transitionId.ToString("D"), capability,
+                    FormatUtc(expiresAt.UtcDateTime));
+                var responseBytes = JsonSerializer.SerializeToUtf8Bytes(response, JsonOptions);
+                var ownerReference = WebSetupTransitionIssueResponseReference(clientId, requestId, transitionId);
+                var envelope = await _crypto.SealAsync(db, "websetup-transition-response", transitionId, 1,
+                    responseBytes, ownerReference, cancellationToken);
+                db.RuntimeEnrollmentWebSetupTransitions.Add(transitionRow);
+                db.RuntimeEnrollmentWebSetupTransitionRequests.Add(new RuntimeEnrollmentWebSetupTransitionRequest
+                {
+                    ClientId = clientId,
+                    RequestId = requestId.ToString("D"),
+                    Operation = "issue",
+                    PayloadDigestSha256 = exactBodyDigest,
+                    TransitionId = transitionId,
+                    ExactResponseCiphertext = Encoding.ASCII.GetBytes(envelope.Ciphertext),
+                    ResponseKeyId = envelope.KeyId,
+                    CreatedAtUtc = now.UtcDateTime,
+                    ExpiresAtUtc = expiresAt.UtcDateTime
+                });
+                if (transferHistory != null)
+                    await AddRuntimeTransferDecisionAsync(db, transferHistory, request, clientId, exactBodyDigest,
+                        "accepted", "accepted", StatusCodes.Status201Created, now, cancellationToken);
                 await db.SaveChangesAsync(cancellationToken);
+                if (isLicenseTransfer)
+                {
+                    var upgradedAuthorityEpoch = await CurrentAuthorityEpochAsync(db, cancellationToken);
+                    if (upgradedAuthorityEpoch <= lease.AuthorityEpoch)
+                        throw Unavailable();
+                    enrollment.AuthorityEpoch = upgradedAuthorityEpoch;
+                    transitionRow.AuthorityEpoch = upgradedAuthorityEpoch;
+                    await db.SaveChangesAsync(cancellationToken);
+                }
+                historyCommitStarted = true;
+                await lease.CommitAsync(cancellationToken);
+                return new RuntimeEnrollmentOperationResult<RuntimeWebSetupTransitionIssuedResponse>(
+                    response, false, responseBytes);
             }
-            await lease.CommitAsync(cancellationToken);
-            return new RuntimeEnrollmentOperationResult<RuntimeWebSetupTransitionIssuedResponse>(
-                response, false, responseBytes);
+            catch (RuntimeEnrollmentException exception) when (transferHistory != null
+                && !historyCommitStarted && exception.StatusCode < 500)
+            {
+                await PersistRuntimeTransferRefusalAsync(db, lease, transferHistory, request, clientId,
+                    exactBodyDigest, exception, now);
+                throw;
+            }
+            }
+            catch (RuntimeEnrollmentException exception) when (identityHistory != null && transferHistory == null
+                && !historyCommitStarted && exception.StatusCode < 500)
+            {
+                await PersistRuntimeIdentityRefusalAsync(db, lease, identityHistory, identityHistoryPhase,
+                    request, clientId, exactBodyDigest, exception.ErrorCode, null, exception.StatusCode, now);
+                throw;
+            }
+            catch (DistributionOperationException exception) when (identityHistory != null && transferHistory == null
+                && !historyCommitStarted)
+            {
+                // The existing Runtime HTTP wrapper maps this exception to generic500.
+                // Preserve it and distinguish the observed internal refusal in ReasonCode.
+                await PersistRuntimeIdentityRefusalAsync(db, lease, identityHistory, identityHistoryPhase,
+                    request, clientId, exactBodyDigest, "internal_error", exception.ErrorCode, 500, now);
+                throw;
+            }
         }, cancellationToken);
     }
 
+    /// <summary>
+    /// Consumes a signed WebSetup transition after validating current installation authority
+    /// and both release baselines under mutation locks. Historical global epochs are allowed
+    /// because another installation can advance them; future epochs and binding changes fail.
+    /// </summary>
     public async Task<RuntimeEnrollmentOperationResult<RuntimeWebSetupUpgradeResponse>> UpgradeFromWebSetupAsync(
         string clientId,
         string keyId,
@@ -1348,7 +1780,7 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
             try { await ValidateEnrollmentAuthorityAsync(db, enrollment, now, cancellationToken); }
             catch (RuntimeEnrollmentException exception) when (exception.StatusCode == StatusCodes.Status422UnprocessableEntity)
             {
-                await CommitInvalidationAsync(db, lease, enrollment, exception.ErrorCode, now, cancellationToken);
+                await CommitInvalidationAsync(db, lease, enrollment, exception, now, cancellationToken);
                 throw;
             }
             var binding = await LoadBindingForUpdateAsync(db, enrollment.BindingId, cancellationToken);
@@ -1361,7 +1793,7 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
                 || binding.ProductId != validated.ProductId
                 || binding.InstallationId != transition.InstallationId
                 || binding.Version != transition.SourceVersion
-                || transition.AuthorityEpoch != lease.AuthorityEpoch)
+                || transition.AuthorityEpoch > lease.AuthorityEpoch)
                 throw Conflict("websetup_transition_binding_changed");
 
             var license = await db.Licenses.AsNoTracking().Include(candidate => candidate.Product)
@@ -1537,7 +1969,7 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
             }
             catch (RuntimeEnrollmentException exception) when (exception.StatusCode == StatusCodes.Status422UnprocessableEntity)
             {
-                await CommitInvalidationAsync(db, lease, enrollment, exception.ErrorCode, now, cancellationToken);
+                await CommitInvalidationAsync(db, lease, enrollment, exception, now, cancellationToken);
                 throw;
             }
             if (enrollment.State != "ACTIVE"
@@ -1667,6 +2099,13 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
         }, cancellationToken);
     }
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// A successful intergeneration Confirm also advances one coherent active hardware alias from
+    /// the terminal direct predecessor to this enrollment. The alias update shares the enrollment
+    /// activation transaction; missing or disabled aliases are unchanged and unsafe evidence fails
+    /// through the existing Confirm conflict contract.
+    /// </remarks>
     public async Task<RuntimeEnrollmentOperationResult<RuntimeEnrollmentConfirmResponse>> ConfirmAsync(
         Guid routeEnrollmentId,
         string exactBodyDigest,
@@ -1708,7 +2147,7 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
             }
             catch (RuntimeEnrollmentException exception) when (exception.StatusCode == StatusCodes.Status422UnprocessableEntity)
             {
-                await CommitInvalidationAsync(db, lease, enrollment, exception.ErrorCode, now, cancellationToken);
+                await CommitInvalidationAsync(db, lease, enrollment, exception, now, cancellationToken);
                 throw;
             }
             if (enrollment.State != "PENDING")
@@ -1730,6 +2169,7 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
             enrollment.ActivatedAtUtc = now.UtcDateTime;
             enrollment.ChallengeConsumedAtUtc = now.UtcDateTime;
             enrollment.AuthorityEpoch = lease.AuthorityEpoch;
+            await RepointHardwareAuthorityAliasAfterConfirmAsync(db, enrollment, cancellationToken);
             await db.SaveChangesAsync(cancellationToken);
             await lease.CommitAsync(cancellationToken);
             return new RuntimeEnrollmentOperationResult<RuntimeEnrollmentConfirmResponse>(response, false, responseBytes);
@@ -1739,6 +2179,8 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
     /// <summary>
     /// Atomically replaces the current legacy seat identity with its deterministic V2 identity
     /// after proving the active Runtime enrollment and every linked server-side authority row.
+    /// Explicitly released historical rights of the same licence and subject are terminalized
+    /// in this transaction before the unchanged competing-authority guard is evaluated.
     /// </summary>
     /// <param name="routeEnrollmentId">Canonical enrollment identifier from the request path.</param>
     /// <param name="exactBodyDigest">SHA-256 digest of the exact request body bytes.</param>
@@ -1862,6 +2304,8 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
                     && candidate.License!.ProductId == license.ProductId
                     && candidate.HardwareId.ToUpper() == validated.HardwareIdV2)
                 .AnyAsync(cancellationToken);
+            await SeatRuntimeReleaseAuthority.ReconcileHistoricalAsync(
+                db, binding, stableHash, now.UtcDateTime, cancellationToken);
             var competingBinding = await db.DistributionInstallationBindings.AsNoTracking().AnyAsync(candidate =>
                 candidate.Id != binding.Id && candidate.ProductId == license.ProductId
                 && candidate.State == "active" && candidate.HardwareIdHash == stableHash, cancellationToken);
@@ -1889,17 +2333,51 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
                     alias.LicenseId == license.Id
                     && alias.LegacyHardwareIdSha256 == legacyHash,
                     cancellationToken);
+                // An alias of another seat, another machine or disabled by an operator is a real
+                // conflict and keeps refusing.
                 if (existingAlias != null
                     && (!existingAlias.IsActive
                         || existingAlias.ProductId != license.ProductId
                         || existingAlias.LicenseSeatId != seat.Id
-                        || existingAlias.RuntimeEnrollmentId != enrollment.Id
+                        || existingAlias.CanonicalHardwareIdSha256 != stableHash))
+                {
+                    throw Conflict("hardware_authority_migration_conflict");
+                }
+                // TEMP-FAIL-OPEN(TKT-001262) ALIAS-REPOINT: the strict rule is that an alias must
+                // already identify the current binding and enrollment. Finalize is known to rotate
+                // those rows without moving the alias, which made valid clients fail later with
+                // hardware_authority_rejected (SUP-000040). Franck requested that this known data/code
+                // defect no longer block customers: the signed migration transaction repoints the same
+                // product/license/seat/machine alias and logs every repair. Analyse every occurrence,
+                // correct the producer, restore the strict decision, then remove this marker. Alias
+                // epochs are authenticated minimums; lower values remain valid, while a higher value is
+                // an observable regression that is temporarily repaired here instead of being refused.
+                if (existingAlias != null
+                    && (existingAlias.RuntimeEnrollmentId != enrollment.Id
                         || existingAlias.BindingId != binding.Id
-                        || existingAlias.CanonicalHardwareIdSha256 != stableHash
                         || existingAlias.SecurityEpoch > committedSecurityEpoch
                         || existingAlias.AuthorityEpoch > lease.AuthorityEpoch))
                 {
-                    throw Conflict("hardware_authority_migration_conflict");
+                    _historyLogger?.LogWarning(
+                        "TEMP-FAIL-OPEN(TKT-001262) ALIAS-REPOINT Hardware authority alias {AliasId} repointed during migration: licence {LicenseId}, seat {LicenseSeatId}, binding {PreviousBindingId} -> {BindingId}, enrollment {PreviousEnrollmentId} -> {EnrollmentId}, security epoch {PreviousSecurityEpoch} -> {SecurityEpoch}, authority epoch {PreviousAuthorityEpoch} -> {AuthorityEpoch}, previous migration request {PreviousMigrationRequestId} -> {RequestId}.",
+                        existingAlias.Id,
+                        license.Id,
+                        seat.Id,
+                        existingAlias.BindingId,
+                        binding.Id,
+                        existingAlias.RuntimeEnrollmentId,
+                        enrollment.Id,
+                        existingAlias.SecurityEpoch,
+                        committedSecurityEpoch,
+                        existingAlias.AuthorityEpoch,
+                        lease.AuthorityEpoch,
+                        existingAlias.MigrationRequestId,
+                        validated.RequestId);
+                    existingAlias.RuntimeEnrollmentId = enrollment.Id;
+                    existingAlias.BindingId = binding.Id;
+                    existingAlias.MigrationRequestId = validated.RequestId;
+                    existingAlias.SecurityEpoch = committedSecurityEpoch;
+                    existingAlias.AuthorityEpoch = lease.AuthorityEpoch;
                 }
                 if (existingAlias == null)
                 {
@@ -1992,6 +2470,12 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
         }, cancellationToken);
     }
 
+    /// <summary>
+    /// Issues or replays a proof-bound capability under the existing authority lease. Current license
+    /// validity is checked for both paths after classification locks. Ordinary licenses retain the
+    /// exact 120-second client contract; identified paid passes additionally require a coherent paid
+    /// horizon and cannot outlive it. Replays retain their original bytes and never refresh TTL.
+    /// </summary>
     public async Task<RuntimeEnrollmentOperationResult<RuntimeEnrollmentCapabilityResponse>> CreateCapabilityAsync(
         Guid routeEnrollmentId,
         string exactBodyDigest,
@@ -2022,13 +2506,22 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
                 throw Conflict("security_epoch_mismatch");
             var existing = await FindProofReplayAsync<RuntimeEnrollmentCapabilityResponse>(
                 db, enrollment, "capability", validated.Proof, exactBodyDigest, cancellationToken);
+            var now = await DatabaseNowAsync(db, cancellationToken);
             if (existing != null)
             {
+                var paidExpiry = await LoadCapabilityPaidExpiryAsync(db, enrollment, cancellationToken);
+                now = await DatabaseNowAsync(db, cancellationToken);
+                // Recheck after any classification lock wait: historical proof success cannot bypass current authority.
+                await ValidateEnrollmentAuthorityAsync(db, enrollment, now, cancellationToken);
+                if (enrollment.State != "ACTIVE") throw Reject("enrollment_inactive");
+                if (!DateTimeOffset.TryParse(existing.Response.ExpiresAtUtc, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var replayExpiry)
+                    || !RuntimeEnrollmentCryptoService.IsCapabilityReplayCurrent(now, replayExpiry, paidExpiry))
+                    throw Conflict("capability_expired");
                 await lease.CommitAsync(cancellationToken);
                 return new RuntimeEnrollmentOperationResult<RuntimeEnrollmentCapabilityResponse>(
                     existing.Response, true, existing.ExactBytes);
             }
-            var now = await DatabaseNowAsync(db, cancellationToken);
             await ReserveQuotasAsync(db, now,
                 [("capability-binding", preflight.BindingId.ToString("D"), 60),
                  ("capability-credential", preflight.EnrollmentId.ToString("D"), 30),
@@ -2037,13 +2530,17 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
             VerifyProof(preflight, "capability", exactBodyDigest, validated.Proof,
                 challengeRequired: false, validated.Audience);
             ValidateProofTime(validated.Proof.SentAtUtc, now);
+            DateTimeOffset? licenseExpiry;
             try
             {
+                licenseExpiry = await LoadCapabilityPaidExpiryAsync(db, enrollment, cancellationToken);
+                now = await DatabaseNowAsync(db, cancellationToken);
+                ValidateProofTime(validated.Proof.SentAtUtc, now);
                 await ValidateEnrollmentAuthorityAsync(db, enrollment, now, cancellationToken);
             }
             catch (RuntimeEnrollmentException exception) when (exception.StatusCode == StatusCodes.Status422UnprocessableEntity)
             {
-                await CommitInvalidationAsync(db, lease, enrollment, exception.ErrorCode, now, cancellationToken);
+                await CommitInvalidationAsync(db, lease, enrollment, exception, now, cancellationToken);
                 throw;
             }
             if (enrollment.State != "ACTIVE")
@@ -2052,19 +2549,22 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
             var binding = await LoadBindingForUpdateAsync(db, enrollment.BindingId, cancellationToken);
             ValidateCapabilityBinding(enrollment, binding, validated);
 
+            // Null deliberately preserves exp-iat=120 for ordinary clients, even near commercial expiry.
+            // Identified passes have a locked, coherent paid horizon and never fall back to ordinary TTL.
+            var capabilityExpiry = RuntimeEnrollmentCryptoService.BoundCapabilityExpiry(now, licenseExpiry);
             var tokenJti = Guid.NewGuid().ToString("D");
             var token = validated.IsLegacy
                 ? _crypto.SignLegacyCapability(
                     enrollment.Id, enrollment.Epoch, enrollment.SecurityEpoch,
                     validated.Audience, validated.Scopes,
-                    enrollment.PublicKeySpkiSha256, now, tokenJti)
+                    enrollment.PublicKeySpkiSha256, now, tokenJti, capabilityExpiry)
                 : _crypto.SignCapability(
                     enrollment.Id, enrollment.Epoch, enrollment.SecurityEpoch,
                     enrollment.InstallationId, enrollment.ReleaseVersion, validated.SessionId!, validated.Binaries!,
                     validated.Audience, validated.Scopes,
-                    enrollment.PublicKeySpkiSha256, now, tokenJti);
+                    enrollment.PublicKeySpkiSha256, now, tokenJti, capabilityExpiry);
             var response = new RuntimeEnrollmentCapabilityResponse(
-                CapabilityResponseSchema, ProtocolVersion, token, FormatUtc(now.AddSeconds(120).UtcDateTime));
+                CapabilityResponseSchema, ProtocolVersion, token, FormatUtc(capabilityExpiry.UtcDateTime));
             var responseBytes = JsonSerializer.SerializeToUtf8Bytes(response, JsonOptions);
             var envelope = await _crypto.SealAsync(db, "capability-response", validated.Proof.Jti,
                 enrollment.Epoch, responseBytes,
@@ -2076,6 +2576,48 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
             await lease.CommitAsync(cancellationToken);
             return new RuntimeEnrollmentOperationResult<RuntimeEnrollmentCapabilityResponse>(response, false, responseBytes);
         }, cancellationToken);
+    }
+
+    /// <summary>
+    /// Returns a coherent paid-pass horizon, or null for an ordinary license's historical 120-second
+    /// capability contract. The caller must hold the existing global authority lease and re-read DB time
+    /// and current eligibility after this method, because classification can wait on row locks.
+    /// </summary>
+    /// <remarks>
+    /// Lock order is the existing global/binding lease, enrollment, license, type, then paid identity.
+    /// FOR SHARE also stabilizes LicenseTypeId and type fields omitted from the authority epoch triggers.
+    /// The existing paid issuer takes the exclusive global authority lock before creating/changing ledger
+    /// identity, so absence of an ordinary license's ledger cannot race that writer. Slug comparison uses
+    /// the established ordinal-ignore-case policy in memory; UUID predicates remain exact, indexed PG
+    /// lookups. A ledger survives type renaming/reassignment as a pass signal. Missing or divergent pass
+    /// authority is rejected, never converted into an unrestricted ordinary capability. No data is repaired.
+    /// </remarks>
+    private static async Task<DateTimeOffset?> LoadCapabilityPaidExpiryAsync(LicenseDbContext db,
+        RuntimeEnrollment enrollment, CancellationToken cancellationToken)
+    {
+        var license = await db.Licenses.FromSqlInterpolated($"""
+            SELECT * FROM public."Licenses"
+            WHERE "Id" = {enrollment.LicenseId} AND "ProductId" = {enrollment.ProductId}
+            FOR SHARE
+            """).AsNoTracking().SingleAsync(cancellationToken);
+        var type = await db.LicenseTypes.FromSqlInterpolated($"""
+            SELECT * FROM public."LicenseTypes" WHERE "Id" = {license.LicenseTypeId} FOR SHARE
+            """).AsNoTracking().SingleAsync(cancellationToken);
+        var pass = await db.PersonalDayPasses.FromSqlInterpolated($"""
+            SELECT * FROM public."PersonalDayPasses"
+            WHERE "ProductId" = {enrollment.ProductId} AND "LicenseId" = {license.Id}
+            FOR SHARE
+            """).AsNoTracking().SingleOrDefaultAsync(cancellationToken);
+        // TIA-CONNECT-PRO is also the ordinary paid type. Only an existing ledger opts the
+        // licence into paid-period expiry; the slug alone must never change ordinary Runtime TTL.
+        if (pass is null) return null;
+
+        // Once a ledger exists, every authority field must agree before paid time is issued.
+        if (!PersonalDayPassPolicy.IsPassType(type.Slug) || type.ProductId != enrollment.ProductId
+            || type.IsFree || !type.IsRecurring || type.AllowAnonymous || type.EnforceSingleUsePerHardwareId
+            || !license.ExpirationDate.HasValue || license.ExpirationDate.Value != pass.PaidThroughUtc)
+            throw Reject("authority_ineligible");
+        return new DateTimeOffset(pass.PaidThroughUtc);
     }
 
     public async Task<RuntimeEnrollmentOperationResult<RuntimeMilestoneAckResponse>> RecordMilestoneAsync(
@@ -2105,7 +2647,7 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
             }
             catch (RuntimeEnrollmentException exception) when (exception.StatusCode == StatusCodes.Status422UnprocessableEntity)
             {
-                await CommitInvalidationAsync(db, lease, enrollment, exception.ErrorCode, now, cancellationToken);
+                await CommitInvalidationAsync(db, lease, enrollment, exception, now, cancellationToken);
                 throw;
             }
             if (enrollment.State != "ACTIVE")
@@ -2330,7 +2872,7 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
             }
             catch (RuntimeEnrollmentException exception) when (exception.StatusCode == StatusCodes.Status422UnprocessableEntity)
             {
-                await CommitInvalidationAsync(db, lease, enrollment, exception.ErrorCode, now, cancellationToken);
+                await CommitInvalidationAsync(db, lease, enrollment, exception, now, cancellationToken);
                 throw;
             }
             if (enrollment.State != "ACTIVE")
@@ -2974,18 +3516,274 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
         await ValidateBindingRowsAsync(db, binding, now, cancellationToken);
     }
 
+    /// <summary>
+    /// Advances one authenticated hardware alias only when Confirm has established the complete
+    /// successor Runtime generation. Missing or deliberately disabled aliases remain unchanged;
+    /// active ambiguous or cross-boundary evidence fails through Confirm's existing public conflict.
+    /// </summary>
+    /// <param name="db">The authority-lease context that owns the Confirm transaction.</param>
+    /// <param name="enrollment">The proof-verified successor enrollment already marked active in memory.</param>
+    /// <param name="cancellationToken">Cancels the operation before the Confirm transaction commits.</param>
+    private async Task RepointHardwareAuthorityAliasAfterConfirmAsync(
+        LicenseDbContext db,
+        RuntimeEnrollment enrollment,
+        CancellationToken cancellationToken)
+    {
+        var successor = await LoadBindingForUpdateAsync(db, enrollment.BindingId, cancellationToken);
+        if (successor.SupersededBindingId is not { } predecessorId)
+            return;
+
+        var predecessor = await LoadBindingForUpdateAsync(db, predecessorId, cancellationToken);
+        var predecessorEnrollments = db.Database.IsNpgsql()
+            ? await db.RuntimeEnrollments.FromSqlInterpolated($"""
+                SELECT * FROM public."RuntimeEnrollments"
+                WHERE "BindingId" = {predecessorId}
+                ORDER BY "Id" FOR UPDATE
+                """).ToListAsync(cancellationToken)
+            : await db.RuntimeEnrollments.Where(candidate => candidate.BindingId == predecessorId)
+                .OrderBy(candidate => candidate.Id)
+                .ToListAsync(cancellationToken);
+        var aliases = db.Database.IsNpgsql()
+            ? await db.HardwareAuthorityAliases.FromSqlInterpolated($"""
+                SELECT * FROM public."HardwareAuthorityAliases"
+                WHERE "BindingId" = {predecessorId}
+                   OR "RuntimeEnrollmentId" IN (
+                       SELECT "Id" FROM public."RuntimeEnrollments" WHERE "BindingId" = {predecessorId})
+                ORDER BY "Id" FOR UPDATE
+                """).ToListAsync(cancellationToken)
+            : await db.HardwareAuthorityAliases.Where(candidate =>
+                    candidate.BindingId == predecessorId
+                    || predecessorEnrollments.Select(source => source.Id)
+                        .Contains(candidate.RuntimeEnrollmentId))
+                .OrderBy(candidate => candidate.Id)
+                .ToListAsync(cancellationToken);
+        var activeAliases = aliases.Where(candidate =>
+                candidate.IsActive && !candidate.DisabledAtUtc.HasValue)
+            .ToList();
+        if (activeAliases.Count == 0)
+            return;
+        if (activeAliases.Count != 1)
+        {
+            const string ambiguityDiagnosticCode = "confirm_alias_ambiguous";
+            LogConfirmAliasRefusal(
+                ambiguityDiagnosticCode, predecessor, successor, enrollment, null, null, activeAliases.Count);
+            throw ConfirmAliasConflict(ambiguityDiagnosticCode);
+        }
+
+        var alias = activeAliases[0];
+        var predecessorEnrollment = predecessorEnrollments.SingleOrDefault(candidate =>
+            candidate.Id == alias.RuntimeEnrollmentId);
+        var finalizeOwnerRows = await db.DistributionBindingRequests.AsNoTracking()
+            .Where(candidate =>
+                (candidate.BindingId == predecessor.Id || candidate.BindingId == successor.Id)
+                && candidate.Operation == "finalize_binding")
+            .Select(candidate => new { candidate.BindingId, candidate.ClientId })
+            .Distinct()
+            .ToListAsync(cancellationToken);
+        var predecessorOwners = finalizeOwnerRows.Where(candidate =>
+                candidate.BindingId == predecessor.Id)
+            .Select(candidate => candidate.ClientId)
+            .ToList();
+        var successorOwners = finalizeOwnerRows.Where(candidate =>
+                candidate.BindingId == successor.Id)
+            .Select(candidate => candidate.ClientId)
+            .ToList();
+        var diagnosticCode = ConfirmAliasInvariantFailure(
+            alias,
+            predecessor,
+            predecessorEnrollment,
+            successor,
+            enrollment,
+            predecessorOwners,
+            successorOwners);
+        if (diagnosticCode != null)
+        {
+            LogConfirmAliasRefusal(
+                diagnosticCode,
+                predecessor,
+                successor,
+                enrollment,
+                alias,
+                predecessorEnrollment,
+                activeAliases.Count);
+            throw ConfirmAliasConflict(diagnosticCode);
+        }
+
+        alias.BindingId = successor.Id;
+        alias.RuntimeEnrollmentId = enrollment.Id;
+        alias.SecurityEpoch = enrollment.SecurityEpoch;
+        alias.AuthorityEpoch = enrollment.AuthorityEpoch;
+    }
+
+    /// <summary>
+    /// Returns the first stable server-only diagnostic for an unsafe predecessor alias graph.
+    /// The allowlisted order is lineage, authority boundary, predecessor binding terminal state,
+    /// predecessor enrollment terminal state, generation continuity, authenticated owner continuity,
+    /// then monotonic epochs. This helper is pure: its caller owns the Confirm transaction and must
+    /// hold the predecessor, successor, enrollment and candidate-alias row locks for the supplied snapshot.
+    /// </summary>
+    /// <param name="alias">The single active alias selected under the direct predecessor row locks.</param>
+    /// <param name="predecessor">The locked binding declared as the successor's direct predecessor.</param>
+    /// <param name="predecessorEnrollment">The locked enrollment referenced by the selected alias, or <see langword="null"/> when lineage is missing.</param>
+    /// <param name="successor">The locked successor binding being confirmed.</param>
+    /// <param name="enrollment">The locked successor enrollment after signed Confirm proof validation.</param>
+    /// <param name="predecessorOwners">Distinct authenticated S2S client owners recorded for successful predecessor Finalize requests.</param>
+    /// <param name="successorOwners">Distinct authenticated S2S client owners recorded for successful successor Finalize requests.</param>
+    /// <returns>The first allowlisted internal diagnostic code, or <see langword="null"/> when every invariant is coherent.</returns>
+    private static string? ConfirmAliasInvariantFailure(
+        HardwareAuthorityAlias alias,
+        DistributionInstallationBinding predecessor,
+        RuntimeEnrollment? predecessorEnrollment,
+        DistributionInstallationBinding successor,
+        RuntimeEnrollment enrollment,
+        IReadOnlyList<string> predecessorOwners,
+        IReadOnlyList<string> successorOwners)
+    {
+        if (predecessorEnrollment == null
+            || successor.SupersededBindingId != predecessor.Id
+            || alias.BindingId != predecessor.Id
+            || predecessorEnrollment.BindingId != predecessor.Id)
+            return "confirm_alias_lineage_mismatch";
+        if (alias.ProductId != successor.ProductId
+            || alias.LicenseId != successor.LicenseId
+            || alias.LicenseSeatId != successor.LicenseSeatId
+            || alias.CanonicalHardwareIdSha256 != successor.HardwareIdHash
+            || predecessor.ProductId != successor.ProductId
+            || predecessor.LicenseId != successor.LicenseId
+            || predecessor.LicenseSeatId != successor.LicenseSeatId
+            || predecessor.HardwareIdHash != successor.HardwareIdHash
+            || predecessorEnrollment.ProductId != successor.ProductId
+            || predecessorEnrollment.LicenseId != successor.LicenseId
+            || predecessorEnrollment.LicenseSeatId != successor.LicenseSeatId
+            || predecessorEnrollment.HardwareIdHash != successor.HardwareIdHash
+            || enrollment.BindingId != successor.Id
+            || enrollment.ProductId != successor.ProductId
+            || enrollment.LicenseId != successor.LicenseId
+            || enrollment.LicenseSeatId != successor.LicenseSeatId
+            || enrollment.HardwareIdHash != successor.HardwareIdHash)
+            return "confirm_alias_boundary_mismatch";
+        if (successor.State != "active"
+            || predecessor.State != "invalidated"
+            || predecessor.InvalidationReason != "installation_superseded")
+            return "confirm_alias_predecessor_terminal_mismatch";
+        if (predecessorEnrollment.State != "INVALIDATED"
+            || predecessorEnrollment.InvalidationReason != "binding_superseded")
+            return "confirm_alias_enrollment_terminal_mismatch";
+        if (predecessor.SubjectRefDigestSha256 != successor.SubjectRefDigestSha256
+            || predecessorEnrollment.InstallationId != predecessor.InstallationId
+            || predecessorEnrollment.HandoffDigestSha256 != predecessor.HandoffDigestSha256
+            || predecessorEnrollment.SubjectRefDigestSha256 != successor.SubjectRefDigestSha256
+            || predecessorEnrollment.ReleaseVersion != predecessor.Version
+            || enrollment.InstallationId != successor.InstallationId
+            || enrollment.HandoffDigestSha256 != successor.HandoffDigestSha256
+            || enrollment.SubjectRefDigestSha256 != successor.SubjectRefDigestSha256
+            || enrollment.ReleaseVersion != successor.Version)
+            return "confirm_alias_generation_mismatch";
+        if (predecessorEnrollment.ClientId != enrollment.ClientId
+            || predecessorOwners.Count != 1
+            || successorOwners.Count != 1
+            || predecessorOwners[0] != enrollment.ClientId
+            || successorOwners[0] != enrollment.ClientId)
+            return "confirm_alias_owner_mismatch";
+        if (enrollment.SecurityEpoch != successor.InitialSecurityEpoch
+            || enrollment.SecurityEpoch <= predecessorEnrollment.SecurityEpoch
+            || enrollment.SecurityEpoch < alias.SecurityEpoch
+            || enrollment.AuthorityEpoch < predecessorEnrollment.AuthorityEpoch
+            || enrollment.AuthorityEpoch < alias.AuthorityEpoch)
+            return "confirm_alias_epoch_mismatch";
+        return null;
+    }
+
+    /// <summary>
+    /// Logs one bounded server-side warning for a refused alias repoint. The event contains only the
+    /// allowlisted diagnostic, internal GUIDs, bounded states and reasons, alias count and epochs; it
+    /// deliberately excludes raw hardware identifiers, hashes, proof bodies, challenges and key material.
+    /// Logging is optional and does not alter the caller-owned Confirm transaction or row locks.
+    /// </summary>
+    /// <param name="diagnosticCode">Stable allowlisted internal reason selected by invariant evaluation.</param>
+    /// <param name="predecessor">Locked direct-predecessor binding whose bounded state is logged.</param>
+    /// <param name="successor">Locked successor binding whose bounded state is logged.</param>
+    /// <param name="enrollment">Locked successor enrollment whose safe identifier and epochs are logged.</param>
+    /// <param name="alias">Selected locked alias, or <see langword="null"/> when ambiguity prevented selection.</param>
+    /// <param name="predecessorEnrollment">Selected locked predecessor enrollment, or <see langword="null"/> when absent or ambiguous.</param>
+    /// <param name="activeAliasCount">Number of active predecessor-scoped aliases observed under lock.</param>
+    private void LogConfirmAliasRefusal(
+        string diagnosticCode,
+        DistributionInstallationBinding predecessor,
+        DistributionInstallationBinding successor,
+        RuntimeEnrollment enrollment,
+        HardwareAuthorityAlias? alias,
+        RuntimeEnrollment? predecessorEnrollment,
+        int activeAliasCount) =>
+        _historyLogger?.LogWarning(
+            "Runtime Confirm alias repoint refused {DiagnosticCode}: predecessor binding {PredecessorBindingId} state {PredecessorBindingState}/{PredecessorBindingReason}, successor binding {SuccessorBindingId} state {SuccessorBindingState}, successor enrollment {SuccessorEnrollmentId}, active predecessor aliases {ActiveAliasCount}, selected alias {AliasId}, predecessor enrollment {PredecessorEnrollmentId} state {PredecessorEnrollmentState}/{PredecessorEnrollmentReason}, epochs alias {AliasSecurityEpoch}/{AliasAuthorityEpoch}, predecessor {PredecessorSecurityEpoch}/{PredecessorAuthorityEpoch}, successor {SuccessorSecurityEpoch}/{SuccessorAuthorityEpoch}.",
+            diagnosticCode,
+            predecessor.Id,
+            predecessor.State,
+            predecessor.InvalidationReason ?? "none",
+            successor.Id,
+            successor.State,
+            enrollment.Id,
+            activeAliasCount,
+            alias?.Id.ToString("D") ?? "none",
+            predecessorEnrollment?.Id.ToString("D") ?? "none",
+            predecessorEnrollment?.State ?? "none",
+            predecessorEnrollment?.InvalidationReason ?? "none",
+            alias?.SecurityEpoch ?? -1,
+            alias?.AuthorityEpoch ?? -1,
+            predecessorEnrollment?.SecurityEpoch ?? -1,
+            predecessorEnrollment?.AuthorityEpoch ?? -1,
+            enrollment.SecurityEpoch,
+            enrollment.AuthorityEpoch);
+
+    /// <summary>
+    /// Creates Confirm's stable public conflict while retaining one allowlisted server-only diagnostic.
+    /// The client-visible error remains <c>enrollment_conflict</c> with HTTP 409; the diagnostic is kept
+    /// separate for trusted server logs and tests and must never contain user-controlled evidence.
+    /// </summary>
+    /// <param name="diagnosticCode">Stable allowlisted internal reason for the refusal.</param>
+    /// <returns>A public 409 enrollment conflict carrying the private diagnostic code separately.</returns>
+    private static RuntimeEnrollmentException ConfirmAliasConflict(string diagnosticCode) =>
+        new("enrollment_conflict", StatusCodes.Status409Conflict, diagnosticCode);
+
+    /// <summary>
+    /// Persists the terminal outcome of a Runtime authority refusal (HTTP 422) for a live
+    /// enrollment, then commits the caller's authority lease so the refusal is durable before the
+    /// caller rethrows it. A live enrollment becomes <c>INVALIDATED</c> with the refusal reason,
+    /// the database instant and the lease authority epoch.
+    /// </summary>
+    /// <param name="db">The lease-scoped context that loaded <paramref name="enrollment"/> for update.</param>
+    /// <param name="lease">The held Runtime authority lease; it is committed on success.</param>
+    /// <param name="enrollment">The locked enrollment whose authority was refused.</param>
+    /// <param name="refusal">The public refusal plus any bounded server-only terminal reason.</param>
+    /// <param name="now">The database clock of the current attempt.</param>
+    /// <param name="cancellationToken">Cancels persistence; the lease then rolls back on disposal.</param>
+    /// <remarks>
+    /// An enrollment that is already terminal keeps its first terminal reason, instant and epoch:
+    /// that record is the audit and recovery evidence (for example a portal seat release's
+    /// <c>seat_released</c>, which a later reinstallation must be able to prove). Only the lease is
+    /// committed in that case; the caller still rethrows the refusal to the client.
+    /// </remarks>
     private static async Task CommitInvalidationAsync(
         LicenseDbContext db,
         RuntimeAuthorityLease lease,
         RuntimeEnrollment enrollment,
-        string reason,
+        RuntimeEnrollmentException refusal,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        enrollment.State = "INVALIDATED";
-        enrollment.InvalidatedAtUtc = now.UtcDateTime;
-        enrollment.InvalidationReason = reason;
-        enrollment.AuthorityEpoch = lease.AuthorityEpoch;
+        // Callers validate authority before checking enrollment state, so a stale client call on an
+        // already terminal credential reaches this point. Overwriting it destroyed the seat_released
+        // evidence and permanently blocked the customer's reinstallation (TKT-001198).
+        if (enrollment.State is "ACTIVE" or "PENDING")
+        {
+            enrollment.State = "INVALIDATED";
+            enrollment.InvalidatedAtUtc = now.UtcDateTime;
+            enrollment.InvalidationReason = refusal.DiagnosticCode == "version_ineligible"
+                ? "version_ineligible"
+                : refusal.ErrorCode;
+            enrollment.AuthorityEpoch = lease.AuthorityEpoch;
+        }
         await db.SaveChangesAsync(cancellationToken);
         await lease.CommitAsync(cancellationToken);
     }
@@ -2997,53 +3795,14 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
         CancellationToken cancellationToken,
         bool allowIneligibleSourceLicense = false)
     {
-        var license = await db.Licenses.AsNoTracking().Include(candidate => candidate.Product)
-            .SingleOrDefaultAsync(candidate => candidate.Id == binding.LicenseId, cancellationToken);
-        var seat = await db.LicenseSeats.AsNoTracking()
-            .SingleOrDefaultAsync(candidate => candidate.Id == binding.LicenseSeatId, cancellationToken);
-        if (license == null || seat == null
-            || license.ProductId != binding.ProductId
-            || (!allowIneligibleSourceLicense && (!license.IsActive || license.RevokedAt != null
-                || (license.ExpirationDate.HasValue && license.ExpirationDate.Value <= now.UtcDateTime)
-                || license.MaxSeats < 1))
-            || !seat.IsActive || seat.LicenseId != license.Id
-            || Sha256(seat.HardwareId) != binding.HardwareIdHash
-            || (!allowIneligibleSourceLicense
-                && (!IsVersionAllowed(binding.Version, license.AllowedVersions)
-                    || IsVersionBelow(binding.Version, license.Product?.MinimumAllowedVersion))))
-            throw Reject("authority_ineligible");
-
-        var activeSeatCount = await db.LicenseSeats.AsNoTracking()
-            .CountAsync(candidate => candidate.LicenseId == license.Id && candidate.IsActive, cancellationToken);
-        if (!allowIneligibleSourceLicense && activeSeatCount > license.MaxSeats)
-            throw Reject("authority_ineligible");
-        var canonicalHardwareId = seat.HardwareId.ToUpperInvariant();
-        var hardwareBanned = await db.BannedHardwareIds.AsNoTracking().AnyAsync(ban =>
-            ban.IsActive && (ban.ProductId == null || ban.ProductId == binding.ProductId)
-            && (ban.ExpiresAt == null || ban.ExpiresAt > now.UtcDateTime)
-            && ban.HardwareId.ToUpper() == canonicalHardwareId, cancellationToken);
-        if (hardwareBanned)
-            throw Reject("authority_ineligible");
-        var componentBans = await db.BannedComponents.AsNoTracking().Where(ban =>
-            ban.IsActive && (ban.ProductId == null || ban.ProductId == binding.ProductId)
-            && (ban.ExpiresAt == null || ban.ExpiresAt > now.UtcDateTime))
-            .Select(ban => new { ban.ComponentType, ban.ComponentHash }).ToListAsync(cancellationToken);
-        var evidence = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["FP_EXE"] = binding.ExecutableSha256,
-            ["FP_DLL"] = binding.NativeDllSha256,
-            ["FP_CORE"] = binding.CoreSha256
-        };
-        if (componentBans.Any(ban => evidence.TryGetValue(ban.ComponentType, out var hash)
-            && string.Equals(ApprovedBinaryService.NormalizeSha256(ban.ComponentHash), hash,
-                StringComparison.OrdinalIgnoreCase)))
-            throw Reject("authority_ineligible");
-        var baselines = await db.ApprovedBinaries.AsNoTracking().Where(row =>
-            row.ProductId == binding.ProductId && row.Version == binding.Version).ToListAsync(cancellationToken);
-        if (baselines.Count != evidence.Count || baselines.Any(row =>
-            row.Source != ApprovedBinaryService.ReleaseSource
-            || !evidence.TryGetValue(row.Key, out var expected)
-            || !string.Equals(row.Hash, expected, StringComparison.OrdinalIgnoreCase)))
+        var eligibility = await RuntimeBindingEligibilityEvaluator.EvaluateAsync(
+            db, binding, now, allowIneligibleSourceLicense, cancellationToken);
+        if (eligibility == RuntimeBindingEligibility.VersionIneligible)
+            throw new RuntimeEnrollmentException(
+                "authority_ineligible",
+                StatusCodes.Status422UnprocessableEntity,
+                "version_ineligible");
+        if (eligibility != RuntimeBindingEligibility.Eligible)
             throw Reject("authority_ineligible");
     }
 
@@ -3051,6 +3810,7 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
     /// Moves the current hardware to the user-selected eligible license while the source binding
     /// remains locked. The caller deactivates the source seat in the same transaction first.
     /// </summary>
+    /// <remarks>Preserves all existing predicates and lock assumptions. When supplied, the observation receives the exact daily-count query value before its predicate; no post-refusal reread is allowed. The caller owns rollback of pending source/target changes on failure.</remarks>
     private static async Task<LicenseSeat> EnsureRuntimeTransferSeatAsync(
         LicenseDbContext db,
         License targetLicense,
@@ -3059,7 +3819,8 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
         string targetVersion,
         string clientId,
         DateTimeOffset now,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        RuntimeTransferHistoryObservation? historyObservation = null)
     {
         var activeSeat = targetLicense.Seats.SingleOrDefault(candidate =>
             candidate.IsActive && string.Equals(candidate.HardwareId, hardwareId, StringComparison.Ordinal));
@@ -3100,6 +3861,8 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
             var activationsToday = await db.LicenseSeats.AsNoTracking().CountAsync(candidate =>
                 candidate.LicenseId == targetLicense.Id && candidate.FirstActivatedAt >= dayStart,
                 cancellationToken);
+            if (historyObservation != null)
+                historyObservation.Snapshot = historyObservation.Snapshot with { ActivationsToday = activationsToday };
             if (activationsToday >= maxActivationsPerDay)
                 throw Reject("activation_rate_limited");
         }
@@ -3393,7 +4156,9 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
         }
     }
 
-    private async Task<T> ExecuteWithRetriesAsync<T>(Func<Task<T>> action, CancellationToken cancellationToken)
+    private async Task<T> ExecuteWithRetriesAsync<T>(
+        Func<Task<T>> action, CancellationToken cancellationToken,
+        string exhaustionCode = "authority_unavailable")
     {
         for (var attempt = 0; attempt < _options.MaximumTransactionAttempts; attempt++)
         {
@@ -3405,18 +4170,33 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
             {
                 if (attempt + 1 >= _options.MaximumTransactionAttempts)
                     throw new RuntimeEnrollmentException(
-                        "authority_unavailable", StatusCodes.Status503ServiceUnavailable);
+                        exhaustionCode, StatusCodes.Status503ServiceUnavailable);
                 await Task.Delay(Random.Shared.Next(20, 80) * (attempt + 1), cancellationToken);
             }
         }
-        throw new RuntimeEnrollmentException("authority_unavailable", StatusCodes.Status503ServiceUnavailable);
+        throw new RuntimeEnrollmentException(exhaustionCode, StatusCodes.Status503ServiceUnavailable);
     }
 
     private static bool IsRetryable(Exception exception)
     {
         for (Exception? current = exception; current != null; current = current.InnerException)
-            if (current is PostgresException postgres && postgres.SqlState is "40001" or "40P01" or "55P03")
-                return true;
+            if (current is PostgresException postgres)
+            {
+                if (postgres.SqlState is "40001" or "40P01" or "55P03") return true;
+                if (postgres.SqlState == PostgresErrorCodes.UniqueViolation
+                    && postgres.ConstraintName is "PK_REAuthorityLineages"
+                        or "UX_REAuthorityLineages_Provider_ProductId_GrantRef_SeatId"
+                        or "PK_REAuthorityGenerations"
+                        or "AK_REAuthorityGenerations_LineageId_GenerationId"
+                        or "AK_REAuthorityGenerations_LineageId_GenerationId_Sequence"
+                        or "AK_REAuthorityGenerations_GenerationId_RequestId"
+                        or "AK_REAuthorityGenerations_LineageId_GenerationId_RequestId"
+                        or "UX_REAuthorityGenerations_LineageId_Sequence"
+                        or "UX_REAuthorityGenerations_LineageId_PredecessorId"
+                        or "UX_REAuthorityRequests_RequestId_LineageId_GenerationId"
+                        or "PK_REAuthorityRequests"
+                        or "PK_REAuthorityAttempts") return true;
+            }
         return false;
     }
 
@@ -3792,6 +4572,81 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
             request.Challenge!, request.Signature!);
     }
 
+    private static ReinstallSourceResolutionValidated ValidateReinstallSourceResolution(
+        RuntimeReinstallSourceResolutionRequest request)
+    {
+        var isV2 = request.Schema == ReinstallSourceResolutionV2Schema;
+        if (request.ExtensionData is { Count: > 0 }
+            || (!isV2 && request.Schema != ReinstallSourceResolutionSchema)
+            || !TryUuid(request.RequestId, out var requestId)
+            || !TryUuid(request.ProductId, out var productId)
+            || !TryUuid(request.BootstrapId, out var bootstrapId)
+            || !TryUuid(request.InstallationId, out var installationId)
+            || !TryUuid(request.EnrollmentId, out var enrollmentId)
+            || !TryUuid(request.AttemptId, out var attemptId)
+            || request.ReleaseVersion is not { Length: >= 1 and <= 64 }
+            || !ReleaseVersionPattern.IsMatch(request.ReleaseVersion)
+            || !Base64Url43Pattern.IsMatch(request.KeyThumbprint ?? string.Empty)
+            || request.SecurityEpoch is null or < 1
+            || request.AuthoritySchema != ReinstallDiscoveryAuthoritySchema
+            || !IsCanonicalReinstallChallenge(request.Challenge)
+            || !SignaturePattern.IsMatch(request.Signature ?? string.Empty))
+            throw Invalid();
+        return new ReinstallSourceResolutionValidated(
+            requestId, productId, bootstrapId, installationId.ToString("D"), enrollmentId,
+            request.ReleaseVersion, request.KeyThumbprint!, request.SecurityEpoch.Value,
+            attemptId, request.AuthoritySchema, request.Challenge!, request.Signature!, isV2);
+    }
+
+    private void VerifyReinstallDiscoveryProof(
+        RuntimeEnrollment enrollment,
+        ReinstallSourceResolutionValidated request)
+    {
+        byte[] spki = [];
+        byte[]? signature = null;
+        try
+        {
+            spki = _crypto.Open(
+                "enrollment-spki", enrollment.Id, enrollment.Epoch,
+                enrollment.PublicKeySpkiKeyId, enrollment.PublicKeySpkiCiphertext,
+                EnrollmentFieldReference(enrollment.Id, "PublicKeySpkiCiphertext"));
+            signature = DecodeBase64Url(request.Signature);
+            using var rsa = RSA.Create();
+            rsa.ImportSubjectPublicKeyInfo(spki, out var consumed);
+            if (consumed != spki.Length || rsa.KeySize != 3072
+                || !rsa.VerifyData(
+                    Encoding.UTF8.GetBytes(BuildReinstallDiscoveryProofPayload(request)),
+                    signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pss))
+                throw new RuntimeEnrollmentException(
+                    "reinstall_signature_invalid", StatusCodes.Status403Forbidden);
+        }
+        catch (Exception exception) when (exception is CryptographicException or ArgumentException or FormatException)
+        {
+            throw new RuntimeEnrollmentException(
+                "reinstall_signature_invalid", StatusCodes.Status403Forbidden);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(spki);
+            if (signature != null)
+                CryptographicOperations.ZeroMemory(signature);
+        }
+    }
+
+    private static string BuildReinstallDiscoveryProofPayload(ReinstallSourceResolutionValidated request) =>
+        string.Join('\n',
+            "distribution-reinstall-discovery-proof-v1",
+            request.BootstrapId.ToString("D"),
+            request.RequestId.ToString("D"),
+            request.InstallationId,
+            request.EnrollmentId.ToString("D"),
+            request.ReleaseVersion,
+            request.KeyThumbprint,
+            request.SecurityEpoch.ToString(CultureInfo.InvariantCulture),
+            request.AttemptId.ToString("D"),
+            request.AuthoritySchema,
+            request.Challenge);
+
     private static string BuildReinstallProofPayload(ReinstallAuthorityValidated request)
     {
         var fields = new List<string>
@@ -4087,7 +4942,7 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
     {
         var skew = TimeSpan.FromSeconds(_options.ProofClockSkewSeconds);
         if (sentAt < now - skew || sentAt > now + skew)
-            throw AuthenticationFailed();
+            throw AuthenticationFailed(ProofClockSkewDiagnosticCode);
     }
 
     private static bool TryUuid(string? value, out Guid parsed)
@@ -4113,7 +4968,8 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
         return true;
     }
 
-    private static bool IsVersionAllowed(string version, string? allowedMask)
+    /// <summary>Applies the canonical Runtime semantic-version allow-mask contract.</summary>
+    internal static bool IsVersionAllowed(string version, string? allowedMask)
     {
         if (string.IsNullOrEmpty(allowedMask) || allowedMask == "*")
             return true;
@@ -4129,7 +4985,8 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
         return SemanticVersion.TryParse(allowedMask, out _) && version == allowedMask;
     }
 
-    private static bool IsVersionBelow(string current, string? minimum)
+    /// <summary>Returns whether a Runtime version is malformed or lower than the configured minimum.</summary>
+    internal static bool IsVersionBelow(string current, string? minimum)
     {
         if (string.IsNullOrWhiteSpace(minimum))
             return false;
@@ -4223,6 +5080,14 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
                 "authority_unavailable", StatusCodes.Status503ServiceUnavailable);
     }
 
+    /// <summary>Recognizes only persisted Distribution entitlement contracts with relational authority.</summary>
+    private static bool IsModernEntitlementContractVersion(int contractVersion) => contractVersion is 3 or 4;
+
+    /// <summary>Requires the persisted grant owner source to identify the exact modern entitlement contract.</summary>
+    private static bool IsMatchingModernIssueSource(int contractVersion, string source) =>
+        (contractVersion == 3 && string.Equals(source, "issue_v3", StringComparison.Ordinal))
+        || (contractVersion == 4 && string.Equals(source, "issue_v4", StringComparison.Ordinal));
+
     private static string Sha256(string value) =>
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
 
@@ -4254,6 +5119,11 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
         Guid transitionId) =>
         $"RuntimeEnrollmentWebSetupTransitionRequests:{clientId}:{requestId:D}:issue:{transitionId:D}:ExactResponseCiphertext";
 
+    /// <summary>
+    /// Matches the immutable reservation to its installation and request. The caller must
+    /// separately validate current authority under its lease: an issuance epoch is a global
+    /// historical watermark, not proof that this installation's rights remain unchanged.
+    /// </summary>
     private static bool WebSetupTransitionMatches(
         RuntimeEnrollmentWebSetupTransition transition,
         string clientId,
@@ -4275,7 +5145,7 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
             && binding.GrantRef == request.TargetGrantRef
             && binding.SubjectRefDigestSha256 == Sha256(request.TargetSubjectRef!))
         && transition.SourceSecurityEpoch == enrollment.SecurityEpoch
-        && transition.AuthorityEpoch == authorityEpoch;
+        && transition.AuthorityEpoch <= authorityEpoch;
 
     private static bool FixedDigestEquals(string left, string right)
     {
@@ -4320,6 +5190,8 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
         new("invalid_request", StatusCodes.Status400BadRequest);
     private static RuntimeEnrollmentException AuthenticationFailed() =>
         new("authentication_failed", StatusCodes.Status401Unauthorized);
+    private static RuntimeEnrollmentException AuthenticationFailed(string diagnosticCode) =>
+        new("authentication_failed", StatusCodes.Status401Unauthorized, diagnosticCode);
     private static RuntimeEnrollmentException Reject(string error) =>
         new(error, StatusCodes.Status422UnprocessableEntity);
     private static RuntimeEnrollmentException Conflict(string error) =>
@@ -4355,6 +5227,20 @@ public sealed class RuntimeEnrollmentService : IRuntimeEnrollmentService
         string? SubjectRefDigestSha256,
         string Challenge,
         string Signature);
+    private sealed record ReinstallSourceResolutionValidated(
+        Guid RequestId,
+        Guid ProductId,
+        Guid BootstrapId,
+        string InstallationId,
+        Guid EnrollmentId,
+        string ReleaseVersion,
+        string KeyThumbprint,
+        int SecurityEpoch,
+        Guid AttemptId,
+        string AuthoritySchema,
+        string Challenge,
+        string Signature,
+        bool IsV2);
     private enum ReinstallAuthorityClassification
     {
         LegacyIncomplete,

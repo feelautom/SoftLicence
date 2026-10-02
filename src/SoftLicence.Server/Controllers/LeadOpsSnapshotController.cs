@@ -28,14 +28,14 @@ public sealed class LeadOpsSnapshotController(
         [FromQuery] string? productName = null,
         CancellationToken cancellationToken = default)
     {
-        var auth = await apiKeyAuth.ValidateAsync(
-            analyticsKey ?? "",
+        var auth = await apiKeyAuth.ValidateForRequestAsync(
+            HttpContext,
+            analyticsKey,
             AnalyticsApiKeyScopes.TelemetryRead,
-            HttpContext.Connection.RemoteIpAddress?.ToString(),
             cancellationToken);
 
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         limit = Math.Clamp(limit, 1, MaxLimit);
         var resolvedOffset = ResolveOffset(limit, page, offset, cursor, after);

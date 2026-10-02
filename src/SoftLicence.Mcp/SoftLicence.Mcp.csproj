@@ -8,8 +8,14 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- HTTP mode (TKT-001169): the same binary serves MCP over Streamable HTTP inside the VPN-only container. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.8" />
     <PackageReference Include="ModelContextProtocol" Version="1.4.1" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.4.1" />
   </ItemGroup>
 
 </Project>

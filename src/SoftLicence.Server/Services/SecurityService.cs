@@ -576,6 +576,27 @@ public class SecurityService
         DeferredNotification? Notification);
 
     /// <summary>
+    /// Applies the single paid-license eligibility policy shared by activation and pre-download
+    /// distribution. It rejects inactive, revoked, expired, free, trial, student, and unknown types.
+    /// </summary>
+    public static bool IsPaidLicenseEligibleForAutoUnban(License license, DateTime now)
+    {
+        if (!license.IsActive || license.RevokedAt is not null
+            || license.ExpirationDate is DateTime expiration && now > expiration
+            || license.Type?.IsFree == true) return false;
+        var slug = license.Type?.Slug?.Trim().ToUpperInvariant();
+        return !string.IsNullOrWhiteSpace(slug)
+            && slug is not ("FREEMIUM" or "TRIAL" or "FREE" or "STUDENT");
+    }
+
+    /// <summary>
+    /// Returns true only when every supplied active ban is exactly quota abuse or outdated version;
+    /// null, unknown, permanent, manual, quarantine, or mixed ineligible collections fail closed.
+    /// </summary>
+    public static bool AreAllHardwareBansAutoUnbannable(IEnumerable<BannedHardwareId> bans) =>
+        bans.All(ban => BannedHardwareId.Categories.IsAutoUnbannable(ban.BanCategory));
+
+    /// <summary>
     /// Stages an eligible paid-license auto-unban in the caller's activation transaction.
     /// The caller owns SaveChanges, commit/rollback, and deferred notification delivery.
     /// </summary>
@@ -606,8 +627,7 @@ public class SecurityService
             return new(false, true, null);
         }
 
-        var hasIneligible = activeBans.Any(b =>
-            !Data.BannedHardwareId.Categories.IsAutoUnbannable(b.BanCategory));
+        var hasIneligible = !AreAllHardwareBansAutoUnbannable(activeBans);
         if (hasIneligible)
         {
             _logger.LogInformation(
@@ -664,9 +684,60 @@ public class SecurityService
         }
     }
 
-    private static async Task AcquireHardwareBanMutationAsync(
+    /// <summary>
+    /// Serializes one canonical HWID mutation inside the caller-owned transaction. The digest lock is
+    /// acquired before the legacy raw-identity lock so digest-only preflight and every writer share the
+    /// same authority even when no ban row exists yet.
+    /// </summary>
+    internal static async Task AcquireHardwareBanMutationAsync(
         LicenseDbContext db,
         string hardwareId)
+    {
+        var canonicalHardwareId = CanonicalizeHardwareId(hardwareId);
+        await AcquireHardwareBanMutationKeysAsync(db,
+            [HardwareBanDigestLockKey(ComputeHardwareBanDigest(canonicalHardwareId)),
+                HardwareBanLegacyLockKey(canonicalHardwareId)]);
+    }
+
+    /// <summary>
+    /// Serializes a digest-only decision before any matching-ban read. Writers acquire this exact key
+    /// first, so insertion, reactivation, reclassification, and unban cannot cross the decision window.
+    /// </summary>
+    internal static Task AcquireHardwareBanDigestMutationAsync(LicenseDbContext db, string hardwareIdHash)
+    {
+        if (!IsCanonicalHardwareDigest(hardwareIdHash))
+            throw new ArgumentException("hardware_id_hash_invalid: expected lowercase SHA-256.", nameof(hardwareIdHash));
+        return AcquireHardwareBanMutationKeysAsync(db, [HardwareBanDigestLockKey(hardwareIdHash)]);
+    }
+
+    /// <summary>
+    /// Locks all canonical digest identities before all legacy raw identities in ordinal order. This
+    /// deterministic order protects dual legacy/stable observations without lock inversion.
+    /// </summary>
+    internal static Task AcquireHardwareBanMutationsAsync(LicenseDbContext db, IEnumerable<string> hardwareIds)
+    {
+        var canonicalHardwareIds = hardwareIds.Select(CanonicalizeHardwareId)
+            .Distinct(StringComparer.Ordinal).OrderBy(value => value, StringComparer.Ordinal).ToArray();
+        var keys = canonicalHardwareIds.Select(ComputeHardwareBanDigest)
+            .Distinct(StringComparer.Ordinal).OrderBy(value => value, StringComparer.Ordinal)
+            .Select(HardwareBanDigestLockKey)
+            .Concat(canonicalHardwareIds.Select(HardwareBanLegacyLockKey));
+        return AcquireHardwareBanMutationKeysAsync(db, keys);
+    }
+
+    /// <summary>Computes the provider's lowercase SHA-256 identity from one canonical uppercase HWID.</summary>
+    internal static string ComputeHardwareBanDigest(string hardwareId) => Convert.ToHexString(
+        SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(CanonicalizeHardwareId(hardwareId))))
+        .ToLowerInvariant();
+
+    /// <summary>
+    /// Acquires each supplied advisory transaction lock in caller-defined order on PostgreSQL.
+    /// Relational callers must already own a transaction; non-relational providers remain no-op test
+    /// substitutes. A five-second lock timeout and thirty-second statement timeout fail closed.
+    /// </summary>
+    private static async Task AcquireHardwareBanMutationKeysAsync(
+        LicenseDbContext db,
+        IEnumerable<string> lockKeys)
     {
         if (!db.Database.IsRelational()) return;
         if (db.Database.CurrentTransaction == null)
@@ -674,12 +745,33 @@ public class SecurityService
                 "The hardware-ban authority lock requires the caller's active transaction.");
         if (!db.Database.IsNpgsql()) return;
 
-        var lockKey = $"hardware-ban-v1|{CanonicalizeHardwareId(hardwareId)}";
         await db.Database.ExecuteSqlRawAsync(
             "SET LOCAL lock_timeout = '5000ms'; SET LOCAL statement_timeout = '30000ms';");
-        await db.Database.ExecuteSqlInterpolatedAsync(
-            $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, {HardwareBanLockSalt}))");
+        foreach (var lockKey in lockKeys)
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, {HardwareBanLockSalt}))");
     }
+
+    /// <summary>
+    /// Accepts only the lowercase 64-character ASCII hexadecimal representation emitted by the
+    /// hardware authority, preventing alternate textual identities from selecting different locks.
+    /// </summary>
+    private static bool IsCanonicalHardwareDigest(string value) => value.Length == 64
+        && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    /// <summary>
+    /// Builds the versioned advisory-lock namespace for one already validated canonical digest.
+    /// This key must remain identical between digest-only readers and raw-HWID writers.
+    /// </summary>
+    private static string HardwareBanDigestLockKey(string hardwareIdHash) =>
+        $"hardware-ban-digest|{hardwareIdHash}";
+
+    /// <summary>
+    /// Builds the historical advisory-lock namespace for one canonical uppercase raw HWID.
+    /// Writers retain this lock after the digest lock to serialize legacy raw-identity operations.
+    /// </summary>
+    private static string HardwareBanLegacyLockKey(string canonicalHardwareId) =>
+        $"hardware-ban-v1|{canonicalHardwareId}";
 
     private static string CanonicalizeHardwareId(string hardwareId) => hardwareId.ToUpperInvariant();
 

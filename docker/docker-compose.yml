@@ -75,6 +75,49 @@ services:
       - RuntimeEnrollment__CapabilitySigning__Keys__2__PublicKeyPem=${RuntimeEnrollment__CapabilitySigning__Keys__2__PublicKeyPem:-}
       - RuntimeEnrollment__CapabilitySigning__Keys__2__PrivateKeyPem=${RuntimeEnrollment__CapabilitySigning__Keys__2__PrivateKeyPem:-}
       - RuntimeEnrollment__CapabilitySigning__Keys__2__RetainUntilUtc=${RuntimeEnrollment__CapabilitySigning__Keys__2__RetainUntilUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__ActiveSigningKeyId=${RuntimeEnrollment__AuthorityGenerationSigning__ActiveSigningKeyId:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__RegistrySnapshotId=${RuntimeEnrollment__AuthorityGenerationSigning__RegistrySnapshotId:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__RegistrySnapshotVersion=${RuntimeEnrollment__AuthorityGenerationSigning__RegistrySnapshotVersion:-0}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__KeyId=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__KeyId:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__Purpose=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__Purpose:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__Domain=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__Domain:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__ContractVersion=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__ContractVersion:-2}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__Status=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__Status:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__PublicKeyPem=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__PublicKeyPem:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__PrivateKeyPem=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__PrivateKeyPem:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__ActivatedAtUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__ActivatedAtUtc:-0001-01-01T00:00:00.0000000+00:00}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__RetiredAtUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__RetiredAtUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__RevokedAtUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__RevokedAtUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__RevocationReason=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__RevocationReason:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__CompromiseFromUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__CompromiseFromUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__KeyId=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__KeyId:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__Purpose=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__Purpose:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__Domain=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__Domain:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__ContractVersion=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__ContractVersion:-2}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__Status=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__Status:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__PublicKeyPem=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__PublicKeyPem:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__PrivateKeyPem=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__PrivateKeyPem:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__ActivatedAtUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__ActivatedAtUtc:-0001-01-01T00:00:00.0000000+00:00}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__RetiredAtUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__RetiredAtUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__RevokedAtUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__RevokedAtUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__RevocationReason=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__RevocationReason:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__CompromiseFromUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__CompromiseFromUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__KeyId=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__KeyId:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__Purpose=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__Purpose:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__Domain=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__Domain:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__ContractVersion=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__ContractVersion:-2}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__Status=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__Status:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__PublicKeyPem=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__PublicKeyPem:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__PrivateKeyPem=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__PrivateKeyPem:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__ActivatedAtUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__ActivatedAtUtc:-0001-01-01T00:00:00.0000000+00:00}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__RetiredAtUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__RetiredAtUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__RevokedAtUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__RevokedAtUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__RevocationReason=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__RevocationReason:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__CompromiseFromUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__CompromiseFromUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationV2__Mode=${RuntimeEnrollment__AuthorityGenerationV2__Mode:-off}
+      - RuntimeEnrollment__AuthorityGenerationV2__RegistryAuthoritySpkiBase64=${RuntimeEnrollment__AuthorityGenerationV2__RegistryAuthoritySpkiBase64:-}
+      - RuntimeEnrollment__AuthorityGenerationV2__RegistrySnapshotSignatureBase64Url=${RuntimeEnrollment__AuthorityGenerationV2__RegistrySnapshotSignatureBase64Url:-}
+      - RuntimeEnrollment__AuthorityGenerationV2__RegistryObservedAtUtc=${RuntimeEnrollment__AuthorityGenerationV2__RegistryObservedAtUtc:-}
       - RuntimeEnrollment__Encryption__ActiveKeyId=${RuntimeEnrollment__Encryption__ActiveKeyId:-}
       - RuntimeEnrollment__Encryption__Keys__0__KeyId=${RuntimeEnrollment__Encryption__Keys__0__KeyId:-}
       - RuntimeEnrollment__Encryption__Keys__0__KeyBase64=${RuntimeEnrollment__Encryption__Keys__0__KeyBase64:-}
@@ -153,6 +196,49 @@ services:
       - RuntimeEnrollment__CapabilitySigning__Keys__2__PublicKeyPem=${RuntimeEnrollment__CapabilitySigning__Keys__2__PublicKeyPem:-}
       - RuntimeEnrollment__CapabilitySigning__Keys__2__PrivateKeyPem=${RuntimeEnrollment__CapabilitySigning__Keys__2__PrivateKeyPem:-}
       - RuntimeEnrollment__CapabilitySigning__Keys__2__RetainUntilUtc=${RuntimeEnrollment__CapabilitySigning__Keys__2__RetainUntilUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__ActiveSigningKeyId=${RuntimeEnrollment__AuthorityGenerationSigning__ActiveSigningKeyId:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__RegistrySnapshotId=${RuntimeEnrollment__AuthorityGenerationSigning__RegistrySnapshotId:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__RegistrySnapshotVersion=${RuntimeEnrollment__AuthorityGenerationSigning__RegistrySnapshotVersion:-0}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__KeyId=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__KeyId:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__Purpose=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__Purpose:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__Domain=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__Domain:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__ContractVersion=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__ContractVersion:-2}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__Status=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__Status:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__PublicKeyPem=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__PublicKeyPem:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__PrivateKeyPem=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__PrivateKeyPem:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__ActivatedAtUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__ActivatedAtUtc:-0001-01-01T00:00:00.0000000+00:00}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__RetiredAtUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__RetiredAtUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__RevokedAtUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__RevokedAtUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__RevocationReason=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__RevocationReason:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__CompromiseFromUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__0__CompromiseFromUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__KeyId=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__KeyId:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__Purpose=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__Purpose:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__Domain=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__Domain:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__ContractVersion=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__ContractVersion:-2}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__Status=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__Status:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__PublicKeyPem=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__PublicKeyPem:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__PrivateKeyPem=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__PrivateKeyPem:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__ActivatedAtUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__ActivatedAtUtc:-0001-01-01T00:00:00.0000000+00:00}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__RetiredAtUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__RetiredAtUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__RevokedAtUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__RevokedAtUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__RevocationReason=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__RevocationReason:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__CompromiseFromUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__1__CompromiseFromUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__KeyId=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__KeyId:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__Purpose=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__Purpose:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__Domain=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__Domain:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__ContractVersion=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__ContractVersion:-2}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__Status=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__Status:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__PublicKeyPem=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__PublicKeyPem:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__PrivateKeyPem=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__PrivateKeyPem:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__ActivatedAtUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__ActivatedAtUtc:-0001-01-01T00:00:00.0000000+00:00}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__RetiredAtUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__RetiredAtUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__RevokedAtUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__RevokedAtUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__RevocationReason=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__RevocationReason:-}
+      - RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__CompromiseFromUtc=${RuntimeEnrollment__AuthorityGenerationSigning__Keys__2__CompromiseFromUtc:-}
+      - RuntimeEnrollment__AuthorityGenerationV2__Mode=${RuntimeEnrollment__AuthorityGenerationV2__Mode:-off}
+      - RuntimeEnrollment__AuthorityGenerationV2__RegistryAuthoritySpkiBase64=${RuntimeEnrollment__AuthorityGenerationV2__RegistryAuthoritySpkiBase64:-}
+      - RuntimeEnrollment__AuthorityGenerationV2__RegistrySnapshotSignatureBase64Url=${RuntimeEnrollment__AuthorityGenerationV2__RegistrySnapshotSignatureBase64Url:-}
+      - RuntimeEnrollment__AuthorityGenerationV2__RegistryObservedAtUtc=${RuntimeEnrollment__AuthorityGenerationV2__RegistryObservedAtUtc:-}
       - RuntimeEnrollment__Encryption__ActiveKeyId=${RuntimeEnrollment__Encryption__ActiveKeyId:-}
       - RuntimeEnrollment__Encryption__Keys__0__KeyId=${RuntimeEnrollment__Encryption__Keys__0__KeyId:-}
       - RuntimeEnrollment__Encryption__Keys__0__KeyBase64=${RuntimeEnrollment__Encryption__Keys__0__KeyBase64:-}
@@ -205,9 +291,14 @@ services:
       - BUGTRACE_BASE_URL=${BUGTRACE_BASE_URL:-}
       - BUGTRACE_PROJECT_TOKEN=${BUGTRACE_PROJECT_TOKEN:-}
       - BUGTRACE_PROJECT_ID=${BUGTRACE_PROJECT_ID:-}
+      # Dedicated Desktop support relay: public TIAConnect product identity, not a credential.
+      - BUGTRACE_SUPPORT_PRODUCT_ID=808648bc-a4b9-4f71-bcb1-b7c7e67ca98e
+      - BUGTRACE_SUPPORT_PROJECT_TOKEN=${BUGTRACE_SUPPORT_PROJECT_TOKEN:-}
       - FORCE_DB_RESET=false
     restart: unless-stopped
     deploy:
+      # The automatic BugTrace outbox uses process-local coordination and must remain single-replica.
+      replicas: 1
       resources:
         limits:
           cpus: "0.75"

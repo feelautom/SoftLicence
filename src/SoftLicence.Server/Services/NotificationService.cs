@@ -5,6 +5,8 @@ using System.Net.Http.Json;
 
 namespace SoftLicence.Server.Services;
 
+public sealed record NotificationDeliveryResult(int Configured, int Delivered, int Failed);
+
 public class NotificationService
 {
     private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
@@ -24,8 +26,14 @@ public class NotificationService
         public const string LicenseRevoked = "License.Revoked";
         public const string SystemStartup = "System.Startup";
         public const string TelemetryRejected = "Telemetry.Rejected";
+        /// <summary>An UPD-100x startup shell was actually presented to a Desktop user.</summary>
+        public const string UpdatePreflightFailureShown = "Update.PreflightFailureShown";
         public const string ActivationIncident = "Activation.Incident";
         public const string ActivationRecovered = "Activation.Recovered";
+        /// <summary>New security lock of level 3 or more (TKT-001177), sent with the full dossier.</summary>
+        public const string SecurityLockReported = "Security.LockReported";
+        /// <summary>Permanent hardware ban issued by the lock system (TKT-001177).</summary>
+        public const string SecurityLockBanned = "Security.LockBanned";
     }
 
     public static readonly Dictionary<string, string> AvailableTriggers = new()
@@ -40,8 +48,11 @@ public class NotificationService
         { Triggers.LicenseRevoked, "🚫 Licence Révoquée" },
         { Triggers.SystemStartup, "🚀 Démarrage Serveur" },
         { Triggers.TelemetryRejected, "⚠️ Télémétrie rejetée" },
+        { Triggers.UpdatePreflightFailureShown, "⚠️ Blocage de démarrage UPD affiché" },
         { Triggers.ActivationIncident, "⚠️ Incident activation" },
-        { Triggers.ActivationRecovered, "✅ Activation rétablie" }
+        { Triggers.ActivationRecovered, "✅ Activation rétablie" },
+        { Triggers.SecurityLockReported, "🔒 Verrou de sécurité à examiner" },
+        { Triggers.SecurityLockBanned, "⛔ Verrou : matériel banni" }
     };
 
     public NotificationService(IDbContextFactory<LicenseDbContext> dbFactory, ILogger<NotificationService> logger, IHttpClientFactory httpFactory)
@@ -57,6 +68,17 @@ public class NotificationService
         _ = Task.Run(async () => await SendWebhooksAsync(trigger, title, message, data));
     }
 
+    /// <summary>
+    /// Delivers a notification through configured webhooks and returns an exact provider outcome.
+    /// Durable callers use this overload before marking their notification claim as sent.
+    /// </summary>
+    public virtual Task<NotificationDeliveryResult> NotifyAsync(
+        string trigger,
+        string title,
+        string message,
+        object? data = null) =>
+        SendWebhooksAsync(trigger, title, message, data);
+
     private string GetEmojiForTrigger(string trigger) => trigger switch
     {
         Triggers.SecurityIpBanned => "no_entry",
@@ -69,13 +91,23 @@ public class NotificationService
         Triggers.LicenseRevoked => "no_entry_sign",
         Triggers.SystemStartup => "rocket",
         Triggers.TelemetryRejected => "warning",
+        Triggers.UpdatePreflightFailureShown => "warning",
         Triggers.ActivationIncident => "warning",
         Triggers.ActivationRecovered => "white_check_mark",
+        Triggers.SecurityLockReported => "lock",
+        Triggers.SecurityLockBanned => "no_entry",
         _ => "bell"
     };
 
-    private async Task SendWebhooksAsync(string trigger, string title, string message, object? data)
+    private async Task<NotificationDeliveryResult> SendWebhooksAsync(
+        string trigger,
+        string title,
+        string message,
+        object? data)
     {
+        var configured = 0;
+        var delivered = 0;
+        var failed = 0;
         try
         {
             using var db = await _dbFactory.CreateDbContextAsync();
@@ -87,7 +119,7 @@ public class NotificationService
                 .Where(w => w.IsEnabled && w.EnabledEvents.Contains(trigger))
                 .ToListAsync();
 
-            if (!webhooks.Any()) return;
+            if (!webhooks.Any()) return new NotificationDeliveryResult(0, 0, 0);
 
             var client = _httpFactory.CreateClient();
             var payload = new
@@ -102,8 +134,11 @@ public class NotificationService
             foreach (var hook in webhooks)
             {
                 // Double vérification précise (au cas où "Security.IpBanned" matcherait "Security.IpBannedv2")
-                var events = hook.EnabledEvents.Split(',', StringSplitOptions.RemoveEmptyEntries);
-                if (!events.Contains(trigger)) continue;
+                var events = hook.EnabledEvents.Split(
+                    ',',
+                    StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                if (!events.Contains(trigger, StringComparer.Ordinal)) continue;
+                configured++;
 
                 try
                 {
@@ -117,34 +152,41 @@ public class NotificationService
                         query["tags"] = GetEmojiForTrigger(trigger);
                         if (trigger.StartsWith("Security", StringComparison.Ordinal)
                             || trigger.StartsWith("Activation.", StringComparison.Ordinal)
-                            || trigger.StartsWith("Telemetry.", StringComparison.Ordinal)) query["priority"] = "4";
+                            || trigger.StartsWith("Telemetry.", StringComparison.Ordinal)
+                            || trigger.StartsWith("Update.", StringComparison.Ordinal)) query["priority"] = "4";
                         
                         uriBuilder.Query = query.ToString();
                         
                         // Envoi en texte brut (le corps du message est ce qui s'affiche sur le téléphone)
-                        await client.PostAsync(uriBuilder.ToString(), new StringContent(message));
+                        using var response = await client.PostAsync(uriBuilder.ToString(), new StringContent(message));
+                        response.EnsureSuccessStatusCode();
                     }
                     else
                     {
                         // Webhook Standard (JSON)
-                        await client.PostAsJsonAsync(hook.Url, payload);
+                        using var response = await client.PostAsJsonAsync(hook.Url, payload);
+                        response.EnsureSuccessStatusCode();
                     }
 
                     hook.LastTriggeredAt = DateTime.UtcNow;
                     hook.LastError = null;
+                    delivered++;
                 }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Echec webhook {Name} ({Url})", hook.Name, hook.Url);
                     hook.LastError = ex.Message;
+                    failed++;
                 }
             }
 
             await db.SaveChangesAsync();
+            return new NotificationDeliveryResult(configured, delivered, failed);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Erreur globale notification");
+            return new NotificationDeliveryResult(configured, delivered, Math.Max(1, failed));
         }
     }
 }

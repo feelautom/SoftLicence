@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Net.Http.Json;
 using System.Collections.Concurrent;
+using System.Collections.Frozen;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -10,6 +11,10 @@ using SoftLicence.Server.Models;
 
 namespace SoftLicence.Server.Services;
 
+/// <summary>
+/// Persists public telemetry and applies bounded server-side observations, alerts, and security
+/// transitions without treating client-provided event names as authorization evidence.
+/// </summary>
 public class TelemetryService
 {
     private const int MaxPersistentCertPinningHardwareIdLength = 256;
@@ -22,6 +27,8 @@ public class TelemetryService
     private readonly SettingsService _settings;
     private readonly CertPinningBugTraceAlertService? _certPinningBugTraceAlerts;
     private readonly CertPinningDailyAlertService? _certPinningDailyAlerts;
+    private readonly UpdatePreflightFailureAlertService? _updatePreflightFailureAlerts;
+    private readonly NotificationService? _notifications;
     private readonly FreemiumAbuseBugTraceAlertService? _freemiumAbuseBugTraceAlerts;
     private readonly ActivationIncidentService? _activationIncidents;
     private readonly SecurityIncidentService? _securityIncidents;
@@ -32,6 +39,12 @@ public class TelemetryService
     private const string FloodSuppressionEnabledSetting = "TelemetryFloodSuppressionEnabled";
     private const string FloodSuppressionWindowMinutesSetting = "TelemetryFloodSuppressionWindowMinutes";
     private const string FloodSuppressionThresholdSetting = "TelemetryFloodSuppressionThreshold";
+    /// <summary>
+    /// Contains lifecycle protocol identifiers that must never create or lift an outdated-version
+    /// hardware ban on their own. Entries use exact ordinal equality so variants remain fail-closed.
+    /// </summary>
+    private static readonly FrozenSet<string> OutdatedVersionEnforcementNeutralEvents =
+        new[] { "Uninstall_Upgrade" }.ToFrozenSet(StringComparer.Ordinal);
 
     public TelemetryService(
         IDbContextFactory<LicenseDbContext> dbFactory,
@@ -46,7 +59,9 @@ public class TelemetryService
         ActivationIncidentService? activationIncidents = null,
         SecurityIncidentService? securityIncidents = null,
         ApprovedBinaryService? approvedBinaries = null,
-        CertPinningDailyAlertService? certPinningDailyAlerts = null)
+        CertPinningDailyAlertService? certPinningDailyAlerts = null,
+        UpdatePreflightFailureAlertService? updatePreflightFailureAlerts = null,
+        NotificationService? notifications = null)
     {
         _dbFactory = dbFactory;
         _logger = logger;
@@ -57,6 +72,8 @@ public class TelemetryService
         _settings = settings;
         _certPinningBugTraceAlerts = certPinningBugTraceAlerts;
         _certPinningDailyAlerts = certPinningDailyAlerts;
+        _updatePreflightFailureAlerts = updatePreflightFailureAlerts;
+        _notifications = notifications;
         _freemiumAbuseBugTraceAlerts = freemiumAbuseBugTraceAlerts;
         _activationIncidents = activationIncidents;
         _securityIncidents = securityIncidents;
@@ -65,6 +82,20 @@ public class TelemetryService
             Microsoft.Extensions.Logging.Abstractions.NullLogger<ApprovedBinaryService>.Instance);
     }
 
+    /// <summary>
+    /// Stores one telemetry event, evaluates bounded incident signals, and applies eligible
+    /// outdated-version hardware-ban transitions after the event has been persisted.
+    /// </summary>
+    /// <param name="req">
+    /// Client telemetry. Event names are protocol identifiers and are not trimmed, recased, or
+    /// Unicode-normalized before security classification.
+    /// </param>
+    /// <param name="ip">The server-observed client IP address, or <see langword="null"/> when unavailable.</param>
+    /// <remarks>
+    /// Public telemetry remains untrusted. Enforcement-neutral lifecycle events only suppress the
+    /// outdated-version ban and unban decision for that event; they grant no licence or feature authority.
+    /// Best-effort observation failures are logged and do not roll back an already persisted event.
+    /// </remarks>
     public async Task SaveEventAsync(TelemetryEventRequest req, string? ip = null)
     {
         using var db = await _dbFactory.CreateDbContextAsync();
@@ -122,6 +153,7 @@ public class TelemetryService
         }
 
         MaybeAlertCertPinningFailure(productId, req, ip, geo?.Isp, receivedAtUtc);
+        MaybeAlertUpdatePreflightFailure(productId, req, receivedAtUtc);
         MaybeCreateCertPinningBugTraceTicket(productId, req, ip, geo?.Isp);
         MaybeCreateFreemiumAbuseBugTraceTicket(productId, req);
 
@@ -235,8 +267,11 @@ public class TelemetryService
             }
         }
 
-        // Auto-ban/unban logic for outdated versions below product minimum
-        if (productId.HasValue && !string.IsNullOrEmpty(req.Version))
+        // A valid upgrade runs the old uninstaller by design. Its exact lifecycle event must not
+        // create a transient threat or lift an existing ban before the new application proves usage.
+        if (productId.HasValue
+            && !string.IsNullOrEmpty(req.Version)
+            && !IsOutdatedVersionEnforcementNeutralEvent(req.EventName))
         {
             try
             {
@@ -730,6 +765,83 @@ public class TelemetryService
         _ = _certPinningBugTraceAlerts.HandleAsync(req, ip, isp, productId);
     }
 
+    /// <summary>
+    /// Records every valid presentation in the durable aggregate and schedules at most one configured
+    /// webhook/ntfy notification for the same signature in each 30-minute UTC window.
+    /// </summary>
+    private void MaybeAlertUpdatePreflightFailure(
+        Guid? productId,
+        TelemetryEventRequest request,
+        DateTime observedAtUtc)
+    {
+        if (!productId.HasValue || _updatePreflightFailureAlerts == null || _notifications == null)
+            return;
+        if (!UpdatePreflightFailureAlertService.TryParse(request, out var observation))
+            return;
+
+        _ = Task.Run(async () =>
+        {
+            UpdatePreflightFailureAlertClaim? claim = null;
+            try
+            {
+                claim = await _updatePreflightFailureAlerts.RecordAndClaimAsync(
+                    productId.Value,
+                    observation,
+                    observedAtUtc);
+                if (!claim.ShouldNotify || !claim.ClaimId.HasValue)
+                    return;
+
+                var delivery = await _notifications.NotifyAsync(
+                    NotificationService.Triggers.UpdatePreflightFailureShown,
+                    $"Blocage {observation.SupportCode} affiché",
+                    $"{request.AppName} {observation.CurrentVersion} · {observation.DecisionReason} · " +
+                    $"canal {observation.SelectedChannel} · étape {observation.PresentationStage}",
+                    new
+                    {
+                        observation.SupportCode,
+                        observation.CurrentVersion,
+                        observation.LatestVersion,
+                        observation.DecisionReason,
+                        observation.SelectedChannel,
+                        observation.ReconciliationOutcome,
+                        observation.PresentationStage,
+                        claim.OccurrenceCount,
+                        claim.WindowStartUtc,
+                        claim.WindowEndUtc
+                    });
+                if (delivery.Delivered == 0)
+                    throw new InvalidOperationException(
+                        delivery.Configured == 0
+                            ? "upd_preflight_notification_target_missing"
+                            : "upd_preflight_notification_delivery_failed");
+                await _updatePreflightFailureAlerts.MarkNotificationSentAsync(
+                    claim.AggregateId,
+                    claim.ClaimId.Value,
+                    DateTime.UtcNow);
+            }
+            catch (Exception ex)
+            {
+                if (claim?.ClaimId is Guid claimId)
+                {
+                    try
+                    {
+                        await _updatePreflightFailureAlerts.ReleaseNotificationClaimAsync(
+                            claim.AggregateId,
+                            claimId);
+                    }
+                    catch (Exception releaseException)
+                    {
+                        _logger.LogError(
+                            releaseException,
+                            "Failed to release Update_PreflightFailureShown notification claim {ClaimId}",
+                            claimId);
+                    }
+                }
+                _logger.LogWarning(ex, "Failed to process Update_PreflightFailureShown alert");
+            }
+        });
+    }
+
     private void MaybeCreateFreemiumAbuseBugTraceTicket(Guid? productId, TelemetryEventRequest req)
     {
         if (!productId.HasValue || _freemiumAbuseBugTraceAlerts == null)
@@ -894,7 +1006,8 @@ public class TelemetryService
         return eventName.Contains("Security", StringComparison.OrdinalIgnoreCase)
             || eventName.Contains("Integrity", StringComparison.OrdinalIgnoreCase)
             || string.Equals(eventName, "CertPinningFailed", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(eventName, "CertPinningRecovered", StringComparison.OrdinalIgnoreCase);
+            || string.Equals(eventName, "CertPinningRecovered", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(eventName, UpdatePreflightFailureAlertService.EventName, StringComparison.Ordinal);
     }
 
     private static DateTime FloorToWindow(DateTime utc, int windowMinutes)
@@ -924,6 +1037,18 @@ public class TelemetryService
             return cur < min;
         return string.Compare(current, minimum, StringComparison.Ordinal) < 0;
     }
+
+    /// <summary>
+    /// Determines whether one exact lifecycle protocol identifier must be neutral to both automatic
+    /// outdated-version ban and unban authority.
+    /// </summary>
+    /// <param name="eventName">The unmodified client event identifier, or <see langword="null"/>.</param>
+    /// <returns>
+    /// <see langword="true"/> only for a documented exact allowlist entry; wrong-case, whitespace,
+    /// Unicode, and unknown variants return <see langword="false"/> and remain fail-closed.
+    /// </returns>
+    private static bool IsOutdatedVersionEnforcementNeutralEvent(string? eventName) =>
+        eventName is not null && OutdatedVersionEnforcementNeutralEvents.Contains(eventName);
 
     private static string ShortHash(string hash) =>
         hash.Length <= 12 ? hash : hash[..12] + "...";

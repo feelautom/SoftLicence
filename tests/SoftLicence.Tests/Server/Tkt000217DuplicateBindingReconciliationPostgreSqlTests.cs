@@ -10,6 +10,10 @@ namespace SoftLicence.Tests.Server;
 
 public sealed class Tkt000217DuplicateBindingReconciliationPostgreSqlTests
 {
+    /// <summary>
+    /// Verifies the existing reconciliation wrapper accepts the target-bound v2 manifest shape and
+    /// forwards its canonical UTC backup timestamp without weakening historical v1 compatibility.
+    /// </summary>
     [Fact]
     public async Task PowerShellWrapper_PwshAcceptsCanonicalUtcTimestampFromRealManifestShape()
     {
@@ -26,9 +30,10 @@ public sealed class Tkt000217DuplicateBindingReconciliationPostgreSqlTests
             await File.WriteAllBytesAsync(artifactPath, artifactBytes);
             var artifactSha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(artifactBytes)).ToLowerInvariant();
             var createdAtText = DateTimeOffset.UtcNow.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+            var sourceTargetSha256 = TargetSha256("local-test", "5432", "local-test");
             var manifestPath = artifactPath + ".manifest.json";
             await File.WriteAllTextAsync(manifestPath, $$"""
-                {"schema":"softlicence-backup-manifest-v1","file":"{{dumpName}}","sizeBytes":{{artifactBytes.Length}},"sha256":"{{artifactSha256}}","createdAtUtc":"{{createdAtText}}","format":"postgresql-custom"}
+                {"schema":"softlicence-backup-manifest-v2","file":"{{dumpName}}","sizeBytes":{{artifactBytes.Length}},"sha256":"{{artifactSha256}}","createdAtUtc":"{{createdAtText}}","format":"postgresql-custom","sourceDatabase":"local-test","sourceTargetSha256":"{{sourceTargetSha256}}"}
                 """);
 
             var result = await RunWrapperCoreAsync(
@@ -63,6 +68,17 @@ public sealed class Tkt000217DuplicateBindingReconciliationPostgreSqlTests
         {
             temporaryDirectory.Delete(recursive: true);
         }
+    }
+
+    /// <summary>
+    /// Produces the same deterministic non-secret target hash as the backup service and wrappers.
+    /// Host case is normalized because PostgreSQL host names are case-insensitive; database text is exact.
+    /// </summary>
+    private static string TargetSha256(string host, string port, string database)
+    {
+        var canonical = $"postgresql-target-v1\n{host.ToLowerInvariant()}\n{port}\n{database}";
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
     }
 
     [Fact]

@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 
 namespace SoftLicence.Server.Data
 {
+    /// <summary>Maps licensing authority, provenance and audit persistence, including additive paid-pass evidence.</summary>
     public class LicenseDbContext : DbContext
     {
         private readonly ILogger<LicenseDbContext>? _logger;
@@ -37,6 +38,12 @@ namespace SoftLicence.Server.Data
             }
         }
 
+        /// <summary>Stable paid-pass identities; current license authority is reconciled under PostgreSQL locks.</summary>
+        public DbSet<PersonalDayPass> PersonalDayPasses { get; set; }
+        /// <summary>Exact confirmed-payment evidence, independent of transport event identifiers.</summary>
+        public DbSet<PersonalDayPassPayment> PersonalDayPassPayments { get; set; }
+        /// <summary>Historical operation receipts, never a substitute for current ownership/version readback.</summary>
+        public DbSet<PersonalDayPassOperation> PersonalDayPassOperations { get; set; }
         public DbSet<Product> Products { get; set; }
         public DbSet<License> Licenses { get; set; }
         public DbSet<AccessLog> AccessLogs { get; set; }
@@ -49,7 +56,14 @@ namespace SoftLicence.Server.Data
         public DbSet<TelemetryError> TelemetryErrors { get; set; }
         public DbSet<TelemetryFloodSuppressionCounter> TelemetryFloodSuppressionCounters { get; set; }
         public DbSet<TelemetryCertPinningDailyAlert> TelemetryCertPinningDailyAlerts { get; set; }
+        public DbSet<TelemetryUpdatePreflightAlert> TelemetryUpdatePreflightAlerts { get; set; }
         public DbSet<TelemetryIngestionRejection> TelemetryIngestionRejections { get; set; }
+        /// <summary>Gets or sets dedicated Recovery run projections.</summary>
+        public DbSet<RecoveryTelemetryRun> RecoveryTelemetryRuns { get; set; }
+        /// <summary>Gets or sets immutable accepted Recovery events.</summary>
+        public DbSet<RecoveryTelemetryEvent> RecoveryTelemetryEvents { get; set; }
+        /// <summary>Gets or sets bounded privacy-safe Recovery rejections.</summary>
+        public DbSet<RecoveryTelemetryRejection> RecoveryTelemetryRejections { get; set; }
         public DbSet<ActivationIncident> ActivationIncidents { get; set; }
         public DbSet<LicenseRenewal> LicenseRenewals { get; set; }
         public DbSet<LicenseProvisioningRequest> LicenseProvisioningRequests { get; set; }
@@ -74,11 +88,15 @@ namespace SoftLicence.Server.Data
         public DbSet<ApprovedBinary> ApprovedBinaries { get; set; }
         public DbSet<ApprovedBinaryRegistration> ApprovedBinaryRegistrations { get; set; }
         public DbSet<DistributionS2SNonce> DistributionS2SNonces { get; set; }
+        /// <summary>Gets provider-owned portal-deactivation idempotency terminals.</summary>
+        public DbSet<PortalDeactivationOperation> PortalDeactivationOperations { get; set; }
         public DbSet<DistributionBindingRequest> DistributionBindingRequests { get; set; }
         public DbSet<DistributionInstallationBinding> DistributionInstallationBindings { get; set; }
         public DbSet<DistributionBindingInvalidation> DistributionBindingInvalidations { get; set; }
         public DbSet<DistributionGrantOwnership> DistributionGrantOwnerships { get; set; }
         public DbSet<DistributionEntitlement> DistributionEntitlements { get; set; }
+        /// <summary>Gets provider-owned, privacy-bounded pre-download hardware decisions.</summary>
+        public DbSet<RuntimeDistributionHardwareDecision> RuntimeDistributionHardwareDecisions { get; set; }
         public DbSet<DistributionLicenseBootstrapAuthorization> DistributionLicenseBootstrapAuthorizations { get; set; }
         public DbSet<DistributionLicenseBootstrapCapability> DistributionLicenseBootstrapCapabilities { get; set; }
         public DbSet<DistributionLicenseBootstrapRequest> DistributionLicenseBootstrapRequests { get; set; }
@@ -88,6 +106,11 @@ namespace SoftLicence.Server.Data
         public DbSet<RuntimeEnrollmentRequest> RuntimeEnrollmentRequests { get; set; }
         public DbSet<RuntimeEnrollmentProofNonce> RuntimeEnrollmentProofNonces { get; set; }
         public DbSet<RuntimeCanaryProofNonce> RuntimeCanaryProofNonces { get; set; }
+        public DbSet<SecurityLockReport> SecurityLockReports { get; set; }
+        public DbSet<SecurityLockReportNonce> SecurityLockReportNonces { get; set; }
+        public DbSet<SecurityLockEnforcementPolicy> SecurityLockEnforcementPolicies { get; set; }
+        /// <summary>Gets durable per-channel security-lock alert deliveries.</summary>
+        public DbSet<SecurityLockAlertDelivery> SecurityLockAlertDeliveries { get; set; }
         public DbSet<RuntimeMilestoneSession> RuntimeMilestoneSessions { get; set; }
         public DbSet<RuntimeMilestone> RuntimeMilestones { get; set; }
         public DbSet<RuntimeCriticalIncident> RuntimeCriticalIncidents { get; set; }
@@ -96,6 +119,38 @@ namespace SoftLicence.Server.Data
         public DbSet<RuntimeEnrollmentQuota> RuntimeEnrollmentQuotas { get; set; }
         public DbSet<RuntimeEnrollmentCredentialMutex> RuntimeEnrollmentCredentialMutexes { get; set; }
         public DbSet<RuntimeEnrollmentAuthorityState> RuntimeEnrollmentAuthorityStates { get; set; }
+        public DbSet<RuntimeEnrollmentAuthorityLineage> RuntimeEnrollmentAuthorityLineages { get; set; }
+        public DbSet<RuntimeEnrollmentAuthorityGeneration> RuntimeEnrollmentAuthorityGenerations { get; set; }
+        public DbSet<RuntimeEnrollmentAuthorityRequest> RuntimeEnrollmentAuthorityRequests { get; set; }
+        public DbSet<RuntimeEnrollmentAuthorityAttempt> RuntimeEnrollmentAuthorityAttempts { get; set; }
+        /// <summary>Gets the immutable public Runtime authority key-registry snapshots.</summary>
+        public DbSet<RuntimeAuthorityKeyRegistrySnapshot> RuntimeAuthorityKeyRegistrySnapshots { get; set; }
+        /// <summary>Gets the sole durable current head of each public Runtime authority key registry.</summary>
+        public DbSet<RuntimeAuthorityKeyRegistryHead> RuntimeAuthorityKeyRegistryHeads { get; set; }
+        /// <summary>Gets semantic S2S readbacks bound to immutable public snapshot bodies.</summary>
+        public DbSet<RuntimeAuthorityKeyRegistryReadback> RuntimeAuthorityKeyRegistryReadbacks { get; set; }
+        /// <summary>Gets or sets immutable composite-key recovery authorization terminals.</summary>
+        public DbSet<RuntimeSeatRecoveryAuthorization> RuntimeSeatRecoveryAuthorizations { get; set; }
+        /// <summary>Gets or sets provider-owned recovery seat reservations.</summary>
+        public DbSet<RuntimeSeatRecoveryReservation> RuntimeSeatRecoveryReservations { get; set; }
+        /// <summary>Gets or sets recovery lifecycle envelopes around immutable v2 generations.</summary>
+        public DbSet<RuntimeSeatRecoveryAuthority> RuntimeSeatRecoveryAuthorities { get; set; }
+        /// <summary>Provider-protected one-shot key preparations for Runtime recovery.</summary>
+        public DbSet<RuntimeSeatRecoveryKeyPreparation> RuntimeSeatRecoveryKeyPreparations { get; set; }
+        /// <summary>Immutable key-confirmation terminals used for exact replay.</summary>
+        public DbSet<RuntimeSeatRecoveryKeyConfirmation> RuntimeSeatRecoveryKeyConfirmations { get; set; }
+        /// <summary>Immutable PROVED receipts consumed only by later activation work.</summary>
+        public DbSet<RuntimeSeatRecoveryProofReceipt> RuntimeSeatRecoveryProofReceipts { get; set; }
+        public DbSet<RuntimeSeatRecoveryActivationReceipt> RuntimeSeatRecoveryActivationReceipts { get; set; }
+        /// <summary>Gets or sets versioned commercial ownership authority.</summary>
+        public DbSet<RuntimeRecoveryCommercialOwnership> RuntimeRecoveryCommercialOwnerships { get; set; }
+        /// <summary>Gets or sets provider-owned commercial subjects scoped by exact product UUID.</summary>
+        public DbSet<RuntimeRecoveryCommercialSubject> RuntimeRecoveryCommercialSubjects { get; set; }
+        /// <summary>Gets or sets frozen provider ownership-transition command terminals.</summary>
+        public DbSet<RuntimeRecoveryCommercialOwnershipCommand> RuntimeRecoveryCommercialOwnershipCommands { get; set; }
+        public DbSet<RuntimeSeatRecoveryRevokedClaimNonce> RuntimeSeatRecoveryRevokedClaimNonces { get; set; }
+        /// <summary>Gets or sets exact recovery grant ownership bindings.</summary>
+        public DbSet<RuntimeRecoveryGrantOwnership> RuntimeRecoveryGrantOwnerships { get; set; }
         public DbSet<RuntimeEnrollmentEncryptionNonce> RuntimeEnrollmentEncryptionNonces { get; set; }
         public DbSet<RuntimeEnrollmentKeyRegistry> RuntimeEnrollmentKeyRegistries { get; set; }
         public DbSet<CanaryAckKeyRegistry> CanaryAckKeyRegistries { get; set; }
@@ -107,8 +162,16 @@ namespace SoftLicence.Server.Data
         public DbSet<HardwareAuthorityAlias> HardwareAuthorityAliases { get; set; }
 
         /// <inheritdoc />
+        /// <summary>Configures entity ownership and constraints, including additive paid-pass evidence, nullable decision lookup columns and exact-key deduplication; legacy null rows remain independent and no data is backfilled.</summary>
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
+            ConfigurePersonalDayPass(modelBuilder);
+            // The database trigger rotates this token for all writers, including older deployments.
+            // It is not a global EF concurrency token: conditional callers explicitly compare it
+            // under a row lock, leaving unrelated legacy update contracts unchanged.
+            modelBuilder.Entity<License>().Property(l => l.AuthorityVersion)
+                .HasDefaultValueSql("gen_random_uuid()")
+                .ValueGeneratedOnAddOrUpdate();
             modelBuilder.Entity<Product>()
                 .HasIndex(p => p.Name)
                 .IsUnique();
@@ -116,6 +179,12 @@ namespace SoftLicence.Server.Data
             modelBuilder.Entity<License>()
                 .HasIndex(l => l.LicenseKey)
                 .IsUnique();
+
+            // PostgreSQL requires an explicit unique principal key for the product-qualified
+            // ownership FK; the global License.Id key alone cannot prove same-product coherence.
+            modelBuilder.Entity<License>()
+                .HasAlternateKey(l => new { l.ProductId, l.Id })
+                .HasName("AK_Licenses_ProductId_Id");
 
             modelBuilder.Entity<License>()
                 .HasOne(l => l.Product)
@@ -153,6 +222,47 @@ namespace SoftLicence.Server.Data
                 .HasIndex(s => new { s.LicenseId, s.HardwareId })
                 .IsUnique()
                 .HasFilter("\"IsActive\" = true");
+
+            modelBuilder.Entity<PortalDeactivationOperation>(entity =>
+            {
+                entity.HasKey(operation => operation.RequestId);
+                entity.Property(operation => operation.RequestId).ValueGeneratedNever();
+                entity.Property(operation => operation.ClientId).HasMaxLength(64).IsRequired();
+                entity.Property(operation => operation.RequestFingerprintSha256).HasMaxLength(64).IsRequired();
+                entity.Property(operation => operation.HardwareId).HasMaxLength(200).IsRequired();
+                entity.Property(operation => operation.Reason).HasMaxLength(32).IsRequired();
+                entity.Property(operation => operation.Outcome).HasMaxLength(32).IsRequired();
+                entity.HasIndex(operation => operation.LicenseId);
+                entity.HasOne<License>()
+                    .WithMany()
+                    .HasForeignKey(operation => new { operation.ProductId, operation.LicenseId })
+                    .HasPrincipalKey(license => new { license.ProductId, license.Id })
+                    .OnDelete(DeleteBehavior.Restrict);
+                entity.ToTable(table =>
+                {
+                    table.HasCheckConstraint(
+                        "CK_PortalDeactivationOperations_RequestFingerprintSha256",
+                        Database.IsNpgsql()
+                            ? "length(\"RequestFingerprintSha256\") = 64 AND \"RequestFingerprintSha256\" ~ '^[0-9a-f]{64}$'"
+                            : "length(\"RequestFingerprintSha256\") = 64");
+                    table.HasCheckConstraint(
+                        "CK_PortalDeactivationOperations_ClientId",
+                        Database.IsNpgsql()
+                            ? "\"ClientId\" ~ '^[a-z0-9][a-z0-9._-]{2,63}$'"
+                            : "length(\"ClientId\") BETWEEN 3 AND 64");
+                    table.HasCheckConstraint(
+                        "CK_PortalDeactivationOperations_HardwareId",
+                        Database.IsNpgsql()
+                            ? "\"HardwareId\" ~ '^[A-Z0-9][A-Z0-9:_-]{4,199}$'"
+                            : "length(\"HardwareId\") BETWEEN 5 AND 200");
+                    table.HasCheckConstraint(
+                        "CK_PortalDeactivationOperations_Reason",
+                        "\"Reason\" IN ('settings_button', 'subscription_termination', 'uninstall')");
+                    table.HasCheckConstraint(
+                        "CK_PortalDeactivationOperations_Outcome",
+                        "\"Outcome\" IN ('deactivated', 'already_inactive')");
+                });
+            });
 
             modelBuilder.Entity<HardwareAuthorityAlias>()
                 .HasIndex(alias => new { alias.LicenseId, alias.LegacyHardwareIdSha256 })
@@ -205,7 +315,8 @@ namespace SoftLicence.Server.Data
                         "\"SecurityEpoch\" >= 1 AND \"AuthorityEpoch\" >= 0");
                     table.HasCheckConstraint(
                         "CK_HardwareAuthorityAliases_State",
-                        "(\"IsActive\" AND \"DisabledAtUtc\" IS NULL) OR (NOT \"IsActive\" AND \"DisabledAtUtc\" IS NOT NULL)");
+                        "(\"IsActive\" AND \"DisabledAtUtc\" IS NULL AND \"DisabledReason\" IS NULL) OR " +
+                        "(NOT \"IsActive\" AND \"DisabledAtUtc\" IS NOT NULL AND \"DisabledReason\" IS NOT NULL)");
                 });
 
             // Index de performance sur les colonnes fréquemment requêtées
@@ -251,15 +362,44 @@ namespace SoftLicence.Server.Data
                 .Property(r => r.TransactionId)
                 .HasMaxLength(256);
 
+            modelBuilder.Entity<LicenseRenewal>()
+                .Property(r => r.RequestFingerprint)
+                .HasMaxLength(64);
+
             modelBuilder.Entity<LicenseProvisioningRequest>()
                 .HasIndex(r => new { r.ProductId, r.Reference })
                 .IsUnique();
+
+            modelBuilder.Entity<LicenseProvisioningRequest>()
+                .HasIndex(r => r.Reference)
+                .IsUnique()
+                .HasFilter("\"AuthorityProvenance\" = 'PROVIDER_ADMIN_API_V1'")
+                .HasDatabaseName("UX_LicenseProvisioningRequests_ProviderReference");
+
+            modelBuilder.Entity<LicenseProvisioningRequest>()
+                .ToTable(table => table.HasCheckConstraint(
+                    "CK_LicenseProvisioningRequests_CommercialAuthority",
+                    "(\"CommercialSubjectId\" IS NULL AND \"AuthorityProvenance\" IS NULL) OR " +
+                    "(\"CommercialSubjectId\" IS NOT NULL AND \"AuthorityProvenance\" = 'PROVIDER_ADMIN_API_V1')"));
+
+            modelBuilder.Entity<LicenseProvisioningRequest>()
+                .Property(r => r.AuthorityProvenance)
+                .HasColumnType("varchar(32)")
+                .UseCollation("C");
 
             modelBuilder.Entity<LicenseProvisioningRequest>()
                 .HasOne(r => r.Product)
                 .WithMany()
                 .HasForeignKey(r => r.ProductId)
                 .OnDelete(DeleteBehavior.Restrict);
+
+            modelBuilder.Entity<LicenseProvisioningRequest>()
+                .HasOne(r => r.CommercialSubject)
+                .WithMany()
+                .HasForeignKey(r => new { r.ProductId, r.CommercialSubjectId })
+                .HasPrincipalKey(subject => new { subject.ProductId, subject.Id })
+                .OnDelete(DeleteBehavior.NoAction)
+                .HasConstraintName("FK_LicenseProvisioningRequests_CommercialSubjects_ProductId_SubjectId");
 
             modelBuilder.Entity<License>()
                 .HasOne(l => l.ProvisioningRequest)
@@ -329,8 +469,86 @@ namespace SoftLicence.Server.Data
                 .Property(a => a.LastCertificateIssuer)
                 .HasMaxLength(512);
 
+            modelBuilder.Entity<TelemetryUpdatePreflightAlert>(alert =>
+            {
+                alert.HasOne(item => item.Product)
+                    .WithMany()
+                    .HasForeignKey(item => item.ProductId)
+                    .OnDelete(DeleteBehavior.Cascade);
+                alert.HasIndex(item => new { item.ProductId, item.SignatureSha256, item.WindowStartUtc })
+                    .IsUnique();
+                alert.HasIndex(item => new { item.ProductId, item.LastSeenUtc });
+                alert.Property(item => item.SignatureSha256).HasMaxLength(64).IsFixedLength();
+                alert.Property(item => item.SupportCode).HasMaxLength(16);
+                alert.Property(item => item.CurrentVersion).HasMaxLength(64);
+                alert.Property(item => item.LatestVersion).HasMaxLength(64);
+                alert.Property(item => item.DecisionReason).HasMaxLength(64);
+                alert.Property(item => item.SelectedChannel).HasMaxLength(64);
+                alert.Property(item => item.ReconciliationOutcome).HasMaxLength(64);
+                alert.Property(item => item.LastPresentationStage).HasMaxLength(16);
+                alert.ToTable(table => table.HasCheckConstraint(
+                    "CK_TelemetryUpdatePreflightAlerts_SignatureSha256",
+                    Database.IsNpgsql()
+                        ? "length(\"SignatureSha256\") = 64 AND \"SignatureSha256\" ~ '^[0-9a-f]{64}$'"
+                        : "length(\"SignatureSha256\") = 64"));
+            });
+
             modelBuilder.Entity<TelemetryIngestionRejection>()
                 .HasIndex(r => new { r.TimestampUtc, r.ValidationCode });
+
+            modelBuilder.Entity<RecoveryTelemetryRun>(run =>
+            {
+                run.HasIndex(item => new { item.ProductId, item.RecoveryRunId }).IsUnique();
+                run.HasIndex(item => new { item.ProductId, item.UpdatedAtUtc });
+                run.Property(item => item.LastStage).HasMaxLength(32);
+                run.Property(item => item.LastOutcome).HasMaxLength(16);
+                run.Property(item => item.Status).HasMaxLength(16);
+                run.Property(item => item.ErrorCode).HasMaxLength(64);
+                run.Property(item => item.SourceVersion).HasMaxLength(17);
+                run.Property(item => item.TargetVersion).HasMaxLength(17);
+                run.Property(item => item.VerifiedRestoredVersion).HasMaxLength(17);
+                run.HasOne(item => item.Product).WithMany().HasForeignKey(item => item.ProductId).OnDelete(DeleteBehavior.Cascade);
+                run.ToTable(table =>
+                {
+                    table.HasCheckConstraint("CK_RecoveryTelemetryRuns_LastSequence", "\"LastSequence\" >= 1 AND \"LastSequence\" <= 32");
+                    table.HasCheckConstraint("CK_RecoveryTelemetryRuns_Status", "\"Status\" IN ('incomplete', 'completed', 'failed', 'cancelled')");
+                });
+            });
+
+            modelBuilder.Entity<RecoveryTelemetryEvent>(telemetryEvent =>
+            {
+                telemetryEvent.HasIndex(item => new { item.ProductId, item.EventId }).IsUnique();
+                telemetryEvent.HasIndex(item => new { item.ProductId, item.RecoveryRunId, item.Sequence }).IsUnique();
+                telemetryEvent.HasIndex(item => new { item.ProductId, item.RecoveryRunId })
+                    .IsUnique().HasFilter("\"IsTerminal\" = true");
+                telemetryEvent.HasIndex(item => new { item.ProductId, item.ReceivedAtUtc });
+                telemetryEvent.Property(item => item.PayloadSha256).HasMaxLength(64).IsFixedLength();
+                telemetryEvent.Property(item => item.ClientVersion).HasMaxLength(17);
+                telemetryEvent.Property(item => item.ProcessRole).HasMaxLength(16);
+                telemetryEvent.Property(item => item.Stage).HasMaxLength(32);
+                telemetryEvent.Property(item => item.Outcome).HasMaxLength(16);
+                telemetryEvent.Property(item => item.SourceVersion).HasMaxLength(17);
+                telemetryEvent.Property(item => item.TargetVersion).HasMaxLength(17);
+                telemetryEvent.Property(item => item.VerifiedRestoredVersion).HasMaxLength(17);
+                telemetryEvent.Property(item => item.ErrorCode).HasMaxLength(64);
+                telemetryEvent.HasOne(item => item.Run).WithMany(item => item.Events).HasForeignKey(item => item.RunId).OnDelete(DeleteBehavior.Cascade);
+                telemetryEvent.ToTable(table =>
+                {
+                    table.HasCheckConstraint("CK_RecoveryTelemetryEvents_Sequence", "\"Sequence\" >= 1 AND \"Sequence\" <= 32");
+                    table.HasCheckConstraint("CK_RecoveryTelemetryEvents_PayloadSha256",
+                        Database.IsNpgsql()
+                            ? "length(\"PayloadSha256\") = 64 AND \"PayloadSha256\" ~ '^[0-9a-f]{64}$'"
+                            : "length(\"PayloadSha256\") = 64");
+                });
+            });
+
+            modelBuilder.Entity<RecoveryTelemetryRejection>(rejection =>
+            {
+                rejection.HasIndex(item => new { item.ProductId, item.ReceivedAtUtc });
+                rejection.HasIndex(item => new { item.ProductId, item.RecoveryRunId, item.ReceivedAtUtc });
+                rejection.Property(item => item.Code).HasMaxLength(32);
+                rejection.HasOne(item => item.Product).WithMany().HasForeignKey(item => item.ProductId).OnDelete(DeleteBehavior.Cascade);
+            });
 
             modelBuilder.Entity<ActivationIncident>()
                 .HasOne(i => i.Product)
@@ -361,6 +579,18 @@ namespace SoftLicence.Server.Data
                 .WithMany(l => l.History)
                 .HasForeignKey(h => h.LicenseId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            // Nullable additive indexes preserve legacy rows. Exact digest equality deduplicates
+            // decision writes; operation lookup stays scoped to the owning licence, not telemetry.
+            modelBuilder.Entity<LicenseHistory>().HasIndex(h => h.DecisionKey).IsUnique();
+            modelBuilder.Entity<LicenseHistory>().HasIndex(h => h.LicenseId);
+            modelBuilder.Entity<LicenseHistory>().HasIndex(h => new { h.LicenseId, h.DecisionOperationId });
+            // Exact nullable metadata supports targeted reads without scanning raw Details or reconstructing old events.
+            modelBuilder.Entity<LicenseHistory>().HasIndex(h => h.DecisionOperationId);
+            modelBuilder.Entity<LicenseHistory>().HasIndex(h => h.DecisionCorrelationId);
+            modelBuilder.Entity<LicenseHistory>().HasIndex(h => h.DecisionSubmittedHardwareId);
+            modelBuilder.Entity<LicenseHistory>().HasIndex(h => h.DecisionResolvedHardwareId);
+            modelBuilder.Entity<LicenseHistory>().HasIndex(h => h.DecisionCorrelatedHardwareId);
 
             // Paramètres personnalisés par type de licence — clé unique par type
             modelBuilder.Entity<LicenseTypeCustomParam>()
@@ -626,7 +856,7 @@ namespace SoftLicence.Server.Data
                         "\"Epoch\" = 1");
                     table.HasCheckConstraint(
                         "CK_DistributionBindingInvalidations_Reason",
-                        "\"Reason\" IN ('account_closed', 'fraud_flagged', 'grant_revoked', 'security_lockdown')");
+                        "\"Reason\" IN ('account_closed', 'fraud_flagged', 'grant_revoked', 'security_lockdown', 'seat_released')");
                 });
 
             modelBuilder.Entity<DistributionGrantOwnership>()
@@ -644,7 +874,7 @@ namespace SoftLicence.Server.Data
             modelBuilder.Entity<DistributionGrantOwnership>()
                 .ToTable(table => table.HasCheckConstraint(
                     "CK_DistributionGrantOwnerships_Source",
-                    "\"Source\" IN ('issue_v2', 'issue_v3', 'finalize_v1')"));
+                    "\"Source\" IN ('issue_v2', 'issue_v3', 'issue_v4', 'finalize_v1')"));
 
             modelBuilder.Entity<DistributionEntitlement>()
                 .HasIndex(entitlement => new { entitlement.ProductId, entitlement.GrantRefDigestSha256 })
@@ -656,13 +886,59 @@ namespace SoftLicence.Server.Data
                 .HasOne<License>().WithMany().HasForeignKey(entitlement => entitlement.LicenseId)
                 .OnDelete(DeleteBehavior.Restrict);
             modelBuilder.Entity<DistributionEntitlement>()
+                .HasOne<RuntimeEnrollmentAuthorityGeneration>().WithMany()
+                .HasForeignKey(entitlement => new { entitlement.AuthorityLineageId, entitlement.AuthorityGenerationId })
+                .HasPrincipalKey(generation => new { generation.AuthorityLineageId, generation.AuthorityGenerationId })
+                .OnDelete(DeleteBehavior.Restrict)
+                .HasConstraintName("FK_Tkt000686_DistributionEntitlements_REAuthorityGeneration");
+            if (Database.IsNpgsql())
+            {
+                modelBuilder.Entity<DistributionEntitlement>()
+                    .Property(entitlement => entitlement.ArtifactSetDigestSha256)
+                    .UseCollation("C");
+            }
+            modelBuilder.Entity<DistributionEntitlement>()
                 .ToTable(table =>
                 {
-                    table.HasCheckConstraint("CK_DistributionEntitlements_ContractVersion", "\"ContractVersion\" = 3");
+                    table.HasCheckConstraint("CK_DistributionEntitlements_ContractVersion", "\"ContractVersion\" IN (3, 4)");
                     table.HasCheckConstraint("CK_DistributionEntitlements_State", "\"State\" IN ('issued', 'finalized', 'expired', 'revoked')");
                     table.HasCheckConstraint("CK_DistributionEntitlements_Times", "\"IssuedAtUtc\" < \"ExpiresAtUtc\"");
                     table.HasCheckConstraint("CK_DistributionEntitlements_Digests", "length(\"GrantRefDigestSha256\") = 64 AND length(\"SubjectRefDigestSha256\") = 64");
+                    table.HasCheckConstraint("CK_Tkt000686_DistributionEntitlements_AuthorityShape", "(\"ContractVersion\" = 3 AND \"AuthorityLineageId\" IS NULL AND \"AuthorityGenerationId\" IS NULL AND \"ArtifactSetDigestSha256\" IS NULL) OR (\"ContractVersion\" = 4 AND \"AuthorityLineageId\" IS NOT NULL AND \"AuthorityGenerationId\" IS NOT NULL AND \"ArtifactSetDigestSha256\" IS NOT NULL)");
+                    table.HasCheckConstraint("CK_Tkt000686_DistributionEntitlements_ArtifactDigest",
+                        Database.IsNpgsql()
+                            ? "\"ArtifactSetDigestSha256\" IS NULL OR (octet_length(\"ArtifactSetDigestSha256\") = 64 AND \"ArtifactSetDigestSha256\" ~ '^[0-9a-f]{64}$')"
+                            : "\"ArtifactSetDigestSha256\" IS NULL OR length(\"ArtifactSetDigestSha256\") = 64");
                 });
+
+            modelBuilder.Entity<RuntimeDistributionHardwareDecision>()
+                .HasIndex(decision => new { decision.ClientId, decision.RequestId })
+                .IsUnique();
+            modelBuilder.Entity<RuntimeDistributionHardwareDecision>()
+                .HasIndex(decision => new { decision.ProductId, decision.CreatedAtUtc });
+            modelBuilder.Entity<RuntimeDistributionHardwareDecision>()
+                .HasIndex(decision => new { decision.ProductId, decision.LicenseId, decision.CreatedAtUtc });
+            modelBuilder.Entity<RuntimeDistributionHardwareDecision>()
+                .HasIndex(decision => new { decision.ProductId, decision.HardwareIdHash, decision.CreatedAtUtc });
+            modelBuilder.Entity<RuntimeDistributionHardwareDecision>()
+                .HasOne<Product>().WithMany().HasForeignKey(decision => decision.ProductId)
+                .OnDelete(DeleteBehavior.Restrict);
+            if (Database.IsNpgsql())
+            {
+                modelBuilder.Entity<RuntimeDistributionHardwareDecision>().ToTable(table =>
+                {
+                    table.HasCheckConstraint("CK_RuntimeDistributionHardwareDecisions_Digests",
+                        "\"PayloadDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"GrantRefDigestSha256\" ~ '^[0-9a-f]{64}$' AND (\"HardwareIdHash\" IS NULL OR \"HardwareIdHash\" ~ '^[0-9a-f]{64}$') AND (\"InstallationIdHash\" IS NULL OR \"InstallationIdHash\" ~ '^[0-9a-f]{64}$')");
+                    table.HasCheckConstraint("CK_RuntimeDistributionHardwareDecisions_Outcome",
+                        "\"Outcome\" IN ('accepted', 'auto-unbanned', 'refused')");
+                    table.HasCheckConstraint("CK_RuntimeDistributionHardwareDecisions_AuthorityMode",
+                        "\"AuthorityMode\" IN ('server-derived', 'known-enrollment', 'digest-revalidation', 'alias-recognized')");
+                    table.HasCheckConstraint("CK_RuntimeDistributionHardwareDecisions_AutoUnbanCount",
+                        "\"AutoUnbannedCount\" >= 0");
+                    table.HasCheckConstraint("CK_RuntimeDistributionHardwareDecisions_AttemptCount",
+                        "\"AttemptCount\" >= 1");
+                });
+            }
 
             modelBuilder.Entity<DistributionLicenseBootstrapAuthorization>()
                 .HasIndex(authorization => new { authorization.BindingId, authorization.RuntimeEnrollmentId })
@@ -894,6 +1170,74 @@ namespace SoftLicence.Server.Data
             modelBuilder.Entity<RuntimeCanaryProofNonce>()
                 .HasIndex(nonce => nonce.ExpiresAtUtc);
 
+            // TKT-001177: security lock reports, one-use proof nonces and the per-cause buffer zone.
+            modelBuilder.Entity<SecurityLockReport>(entity =>
+            {
+                entity.HasIndex(report => new { report.EnrollmentId, report.LockId }).IsUnique();
+                entity.HasIndex(report => new { report.State, report.LastReportedUtc });
+                entity.HasIndex(report => report.HardwareId);
+                entity.HasOne(report => report.Enrollment)
+                    .WithMany()
+                    .HasForeignKey(report => report.EnrollmentId)
+                    .OnDelete(DeleteBehavior.Cascade);
+                entity.ToTable(table =>
+                {
+                    table.HasCheckConstraint("CK_SecurityLockReports_Level", "\"Level\" BETWEEN 0 AND 5");
+                    table.HasCheckConstraint("CK_SecurityLockReports_State",
+                        "\"State\" IN ('OPEN', 'RELEASED', 'BANNED')");
+                    table.HasCheckConstraint("CK_SecurityLockReports_LastVerdict",
+                        "\"LastVerdict\" IN ('MAINTAIN', 'RELEASE', 'BAN')");
+                    table.HasCheckConstraint("CK_SecurityLockReports_AdminDecision",
+                        "\"AdminDecision\" IS NULL OR \"AdminDecision\" IN ('RELEASE', 'BAN')");
+                    table.HasCheckConstraint("CK_SecurityLockReports_Modes",
+                        "\"ClientMode\" IN ('NOT_APPLICABLE', 'SHADOW', 'REVIEW', 'ENFORCE') AND \"EffectiveMode\" IN ('NOT_APPLICABLE', 'SHADOW', 'REVIEW', 'ENFORCE')");
+                    table.HasCheckConstraint("CK_SecurityLockReports_CanonicalIds",
+                        Database.IsNpgsql()
+                            ? "\"LockId\" ~ '^[0-9a-f]{32}$' AND \"EvidenceDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"Cause\" ~ '^[A-Z][A-Z0-9_]*$' AND \"HardwareId\" ~ '^[A-Z0-9_.-]+$'"
+                            : "length(\"LockId\") = 32 AND length(\"EvidenceDigestSha256\") = 64");
+                });
+            });
+
+            modelBuilder.Entity<SecurityLockReportNonce>(entity =>
+            {
+                entity.HasKey(nonce => new { nonce.EnrollmentId, nonce.Jti });
+                entity.HasIndex(nonce => nonce.ExpiresAtUtc);
+                entity.HasOne<RuntimeEnrollment>()
+                    .WithMany()
+                    .HasForeignKey(nonce => nonce.EnrollmentId)
+                    .OnDelete(DeleteBehavior.Cascade);
+            });
+
+            modelBuilder.Entity<SecurityLockEnforcementPolicy>(entity =>
+            {
+                entity.HasKey(policy => new { policy.ProductId, policy.Cause });
+                entity.ToTable(table => table.HasCheckConstraint("CK_SecurityLockEnforcementPolicies_Mode",
+                    "\"Mode\" IN ('SHADOW', 'REVIEW', 'ENFORCE')"));
+            });
+
+            modelBuilder.Entity<SecurityLockAlertDelivery>(entity =>
+            {
+                entity.HasIndex(delivery => new { delivery.State, delivery.NextAttemptUtc });
+                entity.HasIndex(delivery => new
+                    { delivery.SecurityLockReportId, delivery.Trigger, delivery.Channel, delivery.TargetDigestSha256 }).IsUnique();
+                entity.HasOne(delivery => delivery.SecurityLockReport)
+                    .WithMany()
+                    .HasForeignKey(delivery => delivery.SecurityLockReportId)
+                    .OnDelete(DeleteBehavior.Cascade);
+                entity.ToTable(table =>
+                {
+                    table.HasCheckConstraint("CK_SecurityLockAlertDeliveries_Channel",
+                        "\"Channel\" IN ('EMAIL', 'WEBHOOK')");
+                    table.HasCheckConstraint("CK_SecurityLockAlertDeliveries_State",
+                        "\"State\" IN ('PENDING', 'PROCESSING', 'SENT', 'SKIPPED', 'FAILED', 'UNKNOWN')");
+                    table.HasCheckConstraint("CK_SecurityLockAlertDeliveries_Attempts", "\"AttemptCount\" >= 0");
+                    table.HasCheckConstraint("CK_SecurityLockAlertDeliveries_TargetDigest",
+                        Database.IsNpgsql()
+                            ? "\"TargetDigestSha256\" ~ '^[0-9a-f]{64}$'"
+                            : "length(\"TargetDigestSha256\") = 64");
+                });
+            });
+
             modelBuilder.Entity<RuntimeMilestoneSession>()
                 .HasKey(session => new { session.EnrollmentId, session.SessionId });
 
@@ -1104,6 +1448,614 @@ namespace SoftLicence.Server.Data
                     table.HasCheckConstraint("CK_RuntimeEnrollmentAuthorityStates_Epoch", "\"Epoch\" >= 0");
                 });
 
+            modelBuilder.Entity<RuntimeEnrollmentAuthorityLineage>(entity =>
+            {
+                entity.ToTable("RuntimeEnrollmentAuthorityLineages", table =>
+                {
+                    table.HasCheckConstraint("CK_REAuthorityLineages_Provider",
+                        "octet_length(\"Provider\") BETWEEN 1 AND 64 AND \"Provider\" ~ '^[a-z0-9][a-z0-9._-]{0,63}$'");
+                    table.HasCheckConstraint("CK_REAuthorityLineages_GrantRef",
+                        "octet_length(\"ProviderGrantRef\") BETWEEN 1 AND 1536 AND \"ProviderGrantRefScalarCount\" BETWEEN 1 AND 256");
+                    table.HasCheckConstraint("CK_REAuthorityLineages_HeadSequence", "\"HeadSequence\" >= 0");
+                });
+                entity.HasKey(item => item.AuthorityLineageId).HasName("PK_REAuthorityLineages");
+                entity.Property(item => item.Provider).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ProviderGrantRef).HasColumnType("varchar(1536)").UseCollation("C");
+                entity.HasIndex(item => new
+                    { item.Provider, item.ProductId, item.ProviderGrantRef, item.LicenseSeatId })
+                    .IsUnique().HasDatabaseName("UX_REAuthorityLineages_Provider_ProductId_GrantRef_SeatId");
+                entity.HasOne(item => item.HeadGeneration)
+                    .WithMany()
+                    .HasForeignKey(item => new { item.AuthorityLineageId, item.HeadGenerationId, item.HeadSequence })
+                    .HasPrincipalKey(item => new { item.AuthorityLineageId, item.AuthorityGenerationId, item.Sequence })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_REAuthorityLineages_REAuthorityGenerations_Head");
+            });
+
+            modelBuilder.Entity<RuntimeEnrollmentAuthorityGeneration>(entity =>
+            {
+                entity.ToTable("RuntimeEnrollmentAuthorityGenerations", table =>
+                {
+                    table.HasCheckConstraint("CK_REAuthorityGenerations_Sequence",
+                        "(\"Sequence\" = 0 AND \"PreviousGenerationId\" IS NULL) OR (\"Sequence\" > 0 AND \"PreviousGenerationId\" IS NOT NULL)");
+                    table.HasCheckConstraint("CK_REAuthorityGenerations_PayloadBytes",
+                        "octet_length(\"CanonicalPayloadUtf8\") BETWEEN 1 AND 2895");
+                    table.HasCheckConstraint("CK_REAuthorityGenerations_StatementBytes",
+                        "octet_length(\"SignedStatementUtf8\") BETWEEN 1 AND 3569");
+                    table.HasCheckConstraint("CK_RuntimeEnrollmentAuthorityGenerations_AuthorityDigest",
+                        "octet_length(\"AuthorityDigest\") = 64 AND \"AuthorityDigest\" ~ '^[0-9a-f]{64}$'");
+                    table.HasCheckConstraint("CK_REAuthorityGenerations_Algorithm", "\"SignatureAlgorithm\" = 'PS256'");
+                    table.HasCheckConstraint("CK_REAuthorityGenerations_KeyId",
+                        "octet_length(\"SignatureKeyId\") BETWEEN 1 AND 128 AND \"SignatureKeyId\" ~ '^[a-z0-9][a-z0-9._-]{0,127}$'");
+                    table.HasCheckConstraint("CK_REAuthorityGenerations_Signature",
+                        "octet_length(\"SignatureValue\") = 342 AND \"SignatureValue\" !~ '[^A-Za-z0-9_-]'");
+                });
+                entity.HasKey(item => item.AuthorityGenerationId).HasName("PK_REAuthorityGenerations");
+                entity.HasAlternateKey(item => new { item.AuthorityLineageId, item.AuthorityGenerationId })
+                    .HasName("AK_REAuthorityGenerations_LineageId_GenerationId");
+                entity.HasAlternateKey(item => new { item.AuthorityLineageId, item.AuthorityGenerationId, item.Sequence })
+                    .HasName("AK_REAuthorityGenerations_LineageId_GenerationId_Sequence");
+                entity.HasAlternateKey(item => new { item.AuthorityGenerationId, item.RequestId })
+                    .HasName("AK_REAuthorityGenerations_GenerationId_RequestId");
+                entity.HasAlternateKey(item => new
+                    { item.AuthorityLineageId, item.AuthorityGenerationId, item.RequestId })
+                    .HasName("AK_REAuthorityGenerations_LineageId_GenerationId_RequestId");
+                entity.Property(item => item.CanonicalPayloadUtf8).HasColumnType("bytea");
+                entity.Property(item => item.SignedStatementUtf8).HasColumnType("bytea");
+                entity.Property(item => item.AuthorityDigest).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.SignatureAlgorithm).HasColumnType("varchar(16)").UseCollation("C");
+                entity.Property(item => item.SignatureKeyId).HasColumnType("varchar(128)").UseCollation("C");
+                entity.Property(item => item.SignatureValue).HasColumnType("varchar(342)").UseCollation("C");
+                entity.HasIndex(item => new { item.AuthorityLineageId, item.Sequence })
+                    .IsUnique().HasDatabaseName("UX_REAuthorityGenerations_LineageId_Sequence");
+                entity.HasIndex(item => new { item.AuthorityLineageId, item.PreviousGenerationId })
+                    .IsUnique().HasFilter("\"PreviousGenerationId\" IS NOT NULL")
+                    .HasDatabaseName("UX_REAuthorityGenerations_LineageId_PredecessorId");
+                entity.HasOne(item => item.Lineage)
+                    .WithMany(item => item.Generations)
+                    .HasForeignKey(item => item.AuthorityLineageId)
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_REAuthorityGenerations_REAuthorityLineages_Lineage");
+                entity.HasOne(item => item.PreviousGeneration)
+                    .WithMany()
+                    .HasForeignKey(item => new { item.AuthorityLineageId, item.PreviousGenerationId })
+                    .HasPrincipalKey(item => new { item.AuthorityLineageId, item.AuthorityGenerationId })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_REAuthorityGenerations_REAuthorityGenerations_Predecessor");
+            });
+
+            modelBuilder.Entity<RuntimeAuthorityKeyRegistrySnapshot>(entity =>
+            {
+                entity.ToTable("RuntimeAuthorityKeyRegistrySnapshots", table =>
+                {
+                    table.HasCheckConstraint("CK_RAKRSnapshots_RegistryId",
+                        @"""RegistryId"" = 'runtime-enrollment-authority-generation-v2'");
+                    table.HasCheckConstraint("CK_RAKRSnapshots_Version", @"""SnapshotVersion"" > 0");
+                    table.HasCheckConstraint("CK_RAKRSnapshots_Digests",
+                        @"""MetadataDigestSha256"" ~ '^[0-9a-f]{64}$' AND ""RegistryAuthenticationInputDigestSha256"" ~ '^[0-9a-f]{64}$' AND ""ExactResponseBodySha256"" ~ '^[0-9a-f]{64}$'");
+                    table.HasCheckConstraint("CK_RAKRSnapshots_State",
+                        @"""PublicationState"" IN ('current','superseded','revoked')");
+                    table.HasCheckConstraint("CK_RAKRSnapshots_ObservedAtUtc",
+                        @"""ObservedAtUtc"" ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{7}\+00:00$'");
+                    table.HasCheckConstraint("CK_RAKRSnapshots_Revocation",
+                        @"(""PublicationState"" = 'revoked' AND ""RevokedAtUtc"" IS NOT NULL) OR (""PublicationState"" <> 'revoked' AND ""RevokedAtUtc"" IS NULL)");
+                    table.HasCheckConstraint("CK_RAKRSnapshots_ResponseBytes",
+                        @"octet_length(""ExactResponseBody"") BETWEEN 1 AND 16384");
+                    table.HasCheckConstraint("CK_RAKRSnapshots_Signature",
+                        @"length(""RegistrySignatureBase64Url"") = 342 AND ""RegistrySignatureBase64Url"" !~ '[^A-Za-z0-9_-]'");
+                });
+                entity.HasKey(item => item.SnapshotId);
+                entity.Property(item => item.SnapshotId).HasColumnType("varchar(128)").UseCollation("C");
+                entity.Property(item => item.RegistryId).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.MetadataDigestSha256).HasColumnType("char(64)").UseCollation("C");
+                entity.Property(item => item.RegistryAuthenticationInputDigestSha256).HasColumnType("char(64)").UseCollation("C");
+                entity.Property(item => item.ObservedAtUtc).HasColumnType("varchar(33)").UseCollation("C");
+                entity.Property(item => item.PublicationState).HasColumnType("varchar(16)").UseCollation("C");
+                entity.Property(item => item.ExactResponseBodySha256).HasColumnType("char(64)").UseCollation("C");
+                entity.Property(item => item.RegistrySignatureBase64Url).HasColumnType("varchar(342)").UseCollation("C");
+                entity.HasAlternateKey(item => new
+                {
+                    item.RegistryId,
+                    item.SnapshotId,
+                    item.SnapshotVersion,
+                    item.MetadataDigestSha256,
+                    item.RegistryAuthenticationInputDigestSha256,
+                    item.PublicationState
+                }).HasName("AK_RAKRSnapshots_Registry_Snapshot_Version_Metadata_Authentication_State");
+                entity.HasAlternateKey(item => new { item.SnapshotId, item.ExactResponseBodySha256 })
+                    .HasName("AK_RAKRSnapshots_Snapshot_ResponseBodyDigest");
+                entity.HasIndex(item => new { item.RegistryId, item.SnapshotVersion }).IsUnique();
+                entity.HasIndex(item => new { item.RegistryId, item.MetadataDigestSha256 }).IsUnique();
+                entity.HasIndex(item => item.RegistryId).IsUnique().HasFilter(@"""PublicationState"" = 'current'")
+                    .HasDatabaseName("UX_RAKRSnapshots_OneCurrentPerRegistry");
+            });
+
+            modelBuilder.Entity<RuntimeAuthorityKeyRegistryHead>(entity =>
+            {
+                entity.ToTable("RuntimeAuthorityKeyRegistryHeads", table =>
+                {
+                    table.HasCheckConstraint("CK_RAKRHeads_RegistryId",
+                        @"""RegistryId"" = 'runtime-enrollment-authority-generation-v2'");
+                    table.HasCheckConstraint("CK_RAKRHeads_Version", @"""CurrentSnapshotVersion"" > 0");
+                    table.HasCheckConstraint("CK_RAKRHeads_Digests",
+                        @"""CurrentMetadataDigestSha256"" ~ '^[0-9a-f]{64}$' AND ""CurrentRegistryAuthenticationInputDigestSha256"" ~ '^[0-9a-f]{64}$'");
+                    table.HasCheckConstraint("CK_RAKRHeads_State", @"""CurrentPublicationState"" = 'current'");
+                });
+                entity.HasKey(item => item.RegistryId);
+                entity.Property(item => item.RegistryId).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.CurrentSnapshotId).HasColumnType("varchar(128)").UseCollation("C");
+                entity.Property(item => item.CurrentMetadataDigestSha256).HasColumnType("char(64)").UseCollation("C");
+                entity.Property(item => item.CurrentRegistryAuthenticationInputDigestSha256).HasColumnType("char(64)").UseCollation("C");
+                entity.Property(item => item.CurrentPublicationState).HasColumnType("varchar(16)").UseCollation("C");
+                entity.HasOne<RuntimeAuthorityKeyRegistrySnapshot>().WithMany()
+                    .HasForeignKey(item => new
+                    {
+                        item.RegistryId,
+                        item.CurrentSnapshotId,
+                        item.CurrentSnapshotVersion,
+                        item.CurrentMetadataDigestSha256,
+                        item.CurrentRegistryAuthenticationInputDigestSha256,
+                        item.CurrentPublicationState
+                    })
+                    .HasPrincipalKey(item => new
+                    {
+                        item.RegistryId,
+                        item.SnapshotId,
+                        item.SnapshotVersion,
+                        item.MetadataDigestSha256,
+                        item.RegistryAuthenticationInputDigestSha256,
+                        item.PublicationState
+                    })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RAKRHeads_RAKRSnapshots_CurrentTuple");
+            });
+
+            modelBuilder.Entity<RuntimeAuthorityKeyRegistryReadback>(entity =>
+            {
+                entity.ToTable("RuntimeAuthorityKeyRegistryReadbacks", table =>
+                {
+                    table.HasCheckConstraint("CK_RAKRReadbacks_ClientId",
+                        @"length(""ClientId"") BETWEEN 1 AND 64");
+                    table.HasCheckConstraint("CK_RAKRReadbacks_Digests",
+                        @"""RequestDigestSha256"" ~ '^[0-9a-f]{64}$' AND ""ExactResponseBodySha256"" ~ '^[0-9a-f]{64}$'");
+                });
+                entity.HasKey(item => new { item.ClientId, item.RequestId });
+                entity.Property(item => item.ClientId).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.RequestDigestSha256).HasColumnType("char(64)").UseCollation("C");
+                entity.Property(item => item.SnapshotId).HasColumnType("varchar(128)").UseCollation("C");
+                entity.Property(item => item.ExactResponseBodySha256).HasColumnType("char(64)").UseCollation("C");
+                entity.HasOne<RuntimeAuthorityKeyRegistrySnapshot>().WithMany()
+                    .HasForeignKey(item => new { item.SnapshotId, item.ExactResponseBodySha256 })
+                    .HasPrincipalKey(item => new { item.SnapshotId, item.ExactResponseBodySha256 })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RAKRReadbacks_RAKRSnapshots_Body");
+            });
+
+            modelBuilder.Entity<RuntimeEnrollmentAuthorityRequest>(entity =>
+            {
+                entity.ToTable("RuntimeEnrollmentAuthorityRequests", table =>
+                {
+                    table.HasCheckConstraint("CK_RuntimeEnrollmentAuthorityRequests_RequestDigest",
+                        "octet_length(\"RequestDigest\") = 64 AND \"RequestDigest\" ~ '^[0-9a-f]{64}$'");
+                    table.HasCheckConstraint("CK_REAuthorityRequests_ResultCode", "\"ResultCode\" IN ('ACCEPTED', 'REFUSED')");
+                    table.HasCheckConstraint("CK_REAuthorityRequests_TerminalShape", "(\"ResultCode\" = 'ACCEPTED' AND \"AuthorityLineageId\" IS NOT NULL AND \"AuthorityGenerationId\" IS NOT NULL AND \"ErrorCode\" IS NULL AND \"HttpStatusCode\" = 200) OR (\"ResultCode\" = 'REFUSED' AND \"AuthorityLineageId\" IS NULL AND \"AuthorityGenerationId\" IS NULL AND \"ErrorCode\" IS NOT NULL AND \"HttpStatusCode\" IN (400, 403, 409, 503))");
+                    table.HasCheckConstraint("CK_REAuthorityRequests_ResponseBytes", "octet_length(\"ExactResponseUtf8\") BETWEEN 1 AND 8192");
+                    table.HasCheckConstraint("CK_REAuthorityRequests_Chronology", "\"CreatedAtUtc\" <= \"CompletedAtUtc\"");
+                    table.HasCheckConstraint("CK_REAuthorityRequests_ErrorCode", "\"ErrorCode\" IS NULL OR (octet_length(\"ErrorCode\") BETWEEN 1 AND 64 AND \"ErrorCode\" ~ '^[A-Z0-9_]+$')");
+                    table.HasCheckConstraint("CK_REAuthorityRequests_HttpStatus", "\"HttpStatusCode\" IN (200, 400, 403, 409, 503)");
+                });
+                entity.HasKey(item => item.RequestId).HasName("PK_REAuthorityRequests");
+                entity.Property(item => item.RequestDigest).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ResultCode).HasColumnType("varchar(8)").UseCollation("C");
+                entity.Property(item => item.ErrorCode).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ExactResponseUtf8).HasColumnType("bytea");
+                entity.HasIndex(item => new { item.AuthorityGenerationId, item.RequestId })
+                    .HasDatabaseName("IX_REAuthorityRequests_GenerationId_RequestId");
+                entity.HasIndex(item => new
+                    { item.AuthorityLineageId, item.AuthorityGenerationId, item.RequestId })
+                    .HasDatabaseName("IX_REAuthorityRequests_LineageId_GenerationId_RequestId");
+                entity.HasIndex(item => new
+                    { item.RequestId, item.AuthorityLineageId, item.AuthorityGenerationId })
+                    .IsUnique().HasDatabaseName("UX_REAuthorityRequests_RequestId_LineageId_GenerationId");
+                entity.HasOne(item => item.Generation)
+                    .WithMany()
+                    .HasForeignKey(item =>
+                        new { item.AuthorityLineageId, item.AuthorityGenerationId, item.RequestId })
+                    .HasPrincipalKey(item =>
+                        new { item.AuthorityLineageId, item.AuthorityGenerationId, item.RequestId })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_REAuthorityRequests_REAuthorityGenerations_Result");
+            });
+
+            modelBuilder.Entity<RuntimeEnrollmentAuthorityAttempt>(entity =>
+            {
+                entity.ToTable("RuntimeEnrollmentAuthorityAttempts", table =>
+                {
+                    table.HasCheckConstraint("CK_REAuthorityAttempts_RequestDigest", "octet_length(\"RequestDigest\") = 64 AND \"RequestDigest\" ~ '^[0-9a-f]{64}$'");
+                    table.HasCheckConstraint("CK_REAuthorityAttempts_Status", "\"Status\" IN ('ACCEPTED', 'REFUSED')");
+                    table.HasCheckConstraint("CK_REAuthorityAttempts_TerminalShape", "(\"Status\" = 'ACCEPTED' AND \"AuthorityLineageId\" IS NOT NULL AND \"AuthorityGenerationId\" IS NOT NULL AND \"ErrorCode\" IS NULL AND \"HttpStatusCode\" = 200) OR (\"Status\" = 'REFUSED' AND \"AuthorityLineageId\" IS NULL AND \"AuthorityGenerationId\" IS NULL AND \"ErrorCode\" IS NOT NULL AND \"HttpStatusCode\" IN (400, 403, 409, 503))");
+                    table.HasCheckConstraint("CK_REAuthorityAttempts_ResponseBytes", "octet_length(\"ExactResponseUtf8\") BETWEEN 1 AND 8192");
+                    table.HasCheckConstraint("CK_REAuthorityAttempts_Chronology", "\"CreatedAtUtc\" <= \"CompletedAtUtc\"");
+                    table.HasCheckConstraint("CK_REAuthorityAttempts_ErrorCode", "\"ErrorCode\" IS NULL OR (octet_length(\"ErrorCode\") BETWEEN 1 AND 64 AND \"ErrorCode\" ~ '^[A-Z0-9_]+$')");
+                    table.HasCheckConstraint("CK_REAuthorityAttempts_HttpStatus", "\"HttpStatusCode\" IN (200, 400, 403, 409, 503)");
+                });
+                entity.HasKey(item => item.AttemptId).HasName("PK_REAuthorityAttempts");
+                entity.Property(item => item.RequestDigest).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.Status).HasColumnType("varchar(8)").UseCollation("C");
+                entity.Property(item => item.ErrorCode).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ExactResponseUtf8).HasColumnType("bytea");
+                entity.HasIndex(item => item.RequestId).HasDatabaseName("IX_REAuthorityAttempts_RequestId");
+                entity.HasIndex(item => new
+                    { item.RequestId, item.AuthorityLineageId, item.AuthorityGenerationId })
+                    .HasDatabaseName("IX_REAuthorityAttempts_RequestId_LineageId_GenerationId");
+                entity.HasAnnotation("RuntimeEnrollment:CompositeRequestResultForeignKey",
+                    "RequestId,AuthorityLineageId,AuthorityGenerationId|NO ACTION");
+                entity.HasOne(item => item.Request).WithMany().HasForeignKey(item => item.RequestId)
+                    .OnDelete(DeleteBehavior.NoAction).HasConstraintName("FK_REAuthorityAttempts_REAuthorityRequests_Request");
+            });
+
+            modelBuilder.Entity<RuntimeSeatRecoveryAuthorization>(entity =>
+            {
+                entity.ToTable("RuntimeSeatRecoveryAuthorizations", table =>
+                {
+                    table.HasCheckConstraint("CK_RSRA_RequestDigest", "octet_length(\"RequestDigestSha256\") = 64 AND \"RequestDigestSha256\" ~ '^[0-9a-f]{64}$'");
+                    table.HasCheckConstraint("CK_RSRA_RecoveryDigest", "octet_length(\"RecoveryDigestSha256\") = 64 AND \"RecoveryDigestSha256\" ~ '^[0-9a-f]{64}$'");
+                    table.HasCheckConstraint("CK_RSRA_Decision", "\"Decision\" IN ('AUTHORIZED', 'REFUSED')");
+                    table.HasCheckConstraint("CK_RSRA_ResponseBytes", "octet_length(\"ExactResponseUtf8\") BETWEEN 1 AND 16384");
+                    table.HasCheckConstraint("CK_RSRA_RequestBytes", "octet_length(\"CanonicalRequestUtf8\") BETWEEN 1 AND 4096");
+                    table.HasCheckConstraint("CK_RSRA_TerminalShape", "(\"Decision\" = 'AUTHORIZED' AND \"ReservationRef\" IS NOT NULL AND \"ErrorCode\" IS NULL AND \"HttpStatusCode\" = 200) OR (\"Decision\" = 'REFUSED' AND \"ReservationRef\" IS NULL AND \"ErrorCode\" IS NOT NULL AND \"HttpStatusCode\" IN (400,403,409,410))");
+                });
+                entity.HasKey(item => new { item.AuthenticatedClientId, item.RequestId });
+                entity.HasAlternateKey(item => new
+                    { item.AuthenticatedClientId, item.RequestId, item.RecoveryOperationRef });
+                entity.Property(item => item.AuthenticatedClientId).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.RequestDigestSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.RecoveryDigestSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.Decision).HasColumnType("varchar(16)").UseCollation("C");
+                entity.Property(item => item.ContentType).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ErrorCode).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.CanonicalRequestUtf8).HasColumnType("bytea");
+                entity.Property(item => item.ExactResponseUtf8).HasColumnType("bytea");
+                // Terminal outcomes are client-command scoped; only authorized resource tables own
+                // global operation uniqueness, allowing a second client to freeze its own refusal.
+                entity.HasIndex(item => item.RecoveryOperationRef);
+                entity.HasIndex(item => item.ReservationRef).IsUnique().HasFilter("\"ReservationRef\" IS NOT NULL");
+            });
+
+            modelBuilder.Entity<RuntimeSeatRecoveryReservation>(entity =>
+            {
+                entity.ToTable("RuntimeSeatRecoveryReservations", table =>
+                {
+                    table.HasCheckConstraint("CK_RSRR_State", "\"State\" IN ('RESERVED','COMMITTED','ABANDONED')");
+                    table.HasCheckConstraint("CK_RSRR_Chronology", "\"CreatedAtUtc\" < \"ExpiresAtUtc\"");
+                });
+                entity.HasKey(item => item.ReservationRef);
+                entity.HasAlternateKey(item => new { item.ReservationRef, item.LicenseSeatId })
+                    .HasName("AK_RuntimeSeatRecoveryReservations_ReservationRef_LicenseSeatId");
+                entity.Property(item => item.AuthenticatedClientId).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ProviderGrantRef).HasColumnType("varchar(1536)").UseCollation("C");
+                entity.Property(item => item.State).HasColumnType("varchar(16)").UseCollation("C");
+                entity.HasIndex(item => item.RecoveryOperationRef).IsUnique();
+                entity.HasIndex(item => item.LicenseSeatId).IsUnique().HasFilter("\"State\" = 'RESERVED'")
+                    .HasDatabaseName("UX_RSRR_OneReservedPerSeat");
+                entity.HasOne<RuntimeSeatRecoveryAuthorization>().WithOne()
+                    .HasPrincipalKey<RuntimeSeatRecoveryAuthorization>(item => new
+                        { item.AuthenticatedClientId, item.RequestId, item.RecoveryOperationRef })
+                    .HasForeignKey<RuntimeSeatRecoveryReservation>(item => new
+                        { item.AuthenticatedClientId, item.RequestId, item.RecoveryOperationRef })
+                    .OnDelete(DeleteBehavior.NoAction);
+                entity.HasOne<License>().WithMany().HasForeignKey(item => item.LicenseId).OnDelete(DeleteBehavior.NoAction);
+                entity.HasOne<LicenseSeat>().WithMany().HasForeignKey(item => item.LicenseSeatId).OnDelete(DeleteBehavior.NoAction);
+            });
+
+            modelBuilder.Entity<RuntimeSeatRecoveryAuthority>(entity =>
+            {
+                entity.ToTable("RuntimeSeatRecoveryAuthorities", table =>
+                {
+                    table.HasCheckConstraint("CK_RSRAuthority_State", "\"State\" IN ('PREPARED','ACTIVE','ABANDONED','SUPERSEDED')");
+                    table.HasCheckConstraint("CK_RSRAuthority_PreviousState", "\"PreviousAuthorityState\" IN ('ACTIVE','SUPERSEDED')");
+                    table.HasCheckConstraint("CK_RSRAuthority_Digests", "\"HardwareIdDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"ArtifactSetDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"PublicKeySpkiSha256\" ~ '^[0-9a-f]{64}$' AND \"SubjectRefDigestSha256\" ~ '^[0-9a-f]{64}$'");
+                });
+                entity.HasKey(item => item.ReservationRef);
+                entity.HasIndex(item => item.AuthorityGenerationId).IsUnique();
+                entity.HasIndex(item => new { item.AuthorityLineageId, item.AuthorityGenerationId }).IsUnique()
+                    .HasDatabaseName("UX_RSRAuthorities_NewLineageGeneration");
+                entity.HasIndex(item => new
+                    { item.PreviousAuthorityLineageId, item.PreviousAuthorityGenerationId })
+                    .HasDatabaseName("IX_RSRAuthorities_PreviousLineageGeneration");
+                entity.HasIndex(item => item.BindingId).IsUnique();
+                entity.HasIndex(item => item.EnrollmentId).IsUnique();
+                entity.HasIndex(item => item.LicenseSeatId).IsUnique().HasFilter("\"State\" = 'ACTIVE'")
+                    .HasDatabaseName("UX_RSRAuthorities_OneActivePerSeat");
+                entity.Property(item => item.HardwareIdDigestSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ReleaseVersion).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ArtifactSetDigestSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.PublicKeySpkiSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.KeyThumbprint).HasColumnType("varchar(43)").UseCollation("C");
+                entity.Property(item => item.State).HasColumnType("varchar(16)").UseCollation("C");
+                entity.Property(item => item.PreviousAuthorityState).HasColumnType("varchar(16)").UseCollation("C");
+                entity.Property(item => item.SubjectRefDigestSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.HasOne<RuntimeSeatRecoveryReservation>().WithOne()
+                    .HasForeignKey<RuntimeSeatRecoveryAuthority>(item => new
+                        { item.ReservationRef, item.LicenseSeatId })
+                    .HasPrincipalKey<RuntimeSeatRecoveryReservation>(item => new
+                        { item.ReservationRef, item.LicenseSeatId })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RSRAuthorities_RSRReservations_ReservationRef_LicenseSeatId");
+                entity.HasOne<RuntimeEnrollmentAuthorityGeneration>().WithOne()
+                    .HasForeignKey<RuntimeSeatRecoveryAuthority>(item => new
+                        { item.AuthorityLineageId, item.AuthorityGenerationId })
+                    .HasPrincipalKey<RuntimeEnrollmentAuthorityGeneration>(item => new
+                        { item.AuthorityLineageId, item.AuthorityGenerationId })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RSRAuthorities_REAuthorityGenerations_New");
+                entity.HasOne<RuntimeEnrollmentAuthorityGeneration>().WithMany()
+                    .HasForeignKey(item => new
+                        { item.PreviousAuthorityLineageId, item.PreviousAuthorityGenerationId })
+                    .HasPrincipalKey(item => new
+                        { item.AuthorityLineageId, item.AuthorityGenerationId })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RSRAuthorities_REAuthorityGenerations_Previous");
+            });
+
+            modelBuilder.Entity<RuntimeSeatRecoveryActivationReceipt>(entity =>
+            {
+                entity.ToTable("RuntimeSeatRecoveryActivationReceipts", table =>
+                {
+                    table.HasCheckConstraint("CK_RSRActivation_Digests",
+                        "\"ActivationRequestDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"RequestDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"ConfirmationRequestSha256\" ~ '^[0-9a-f]{64}$'");
+                    table.HasCheckConstraint("CK_RSRActivation_RequestBytes",
+                        "octet_length(\"CanonicalRequestUtf8\") = 524");
+                    table.HasCheckConstraint("CK_RSRActivation_ResponseBytes",
+                        "octet_length(\"ExactResponseUtf8\") BETWEEN 1 AND 8192");
+                    table.HasCheckConstraint("CK_RSRActivation_State", "\"State\" IN ('COMMITTED','REFUSED')");
+                    table.HasCheckConstraint("CK_RSRActivation_TerminalShape",
+                        "(\"State\" = 'COMMITTED' AND \"HttpStatusCode\" = 200 AND \"ErrorCode\" IS NULL) OR (\"State\" = 'REFUSED' AND \"HttpStatusCode\" IN (409,410) AND \"ErrorCode\" IN ('activation_conflict','activation_expired'))");
+                    table.HasCheckConstraint("CK_RSRActivation_ContentType",
+                        "\"ContentType\" = 'application/json; charset=utf-8'");
+                });
+                entity.HasKey(item => new { item.AuthenticatedClientId, item.RequestId });
+                entity.Property(item => item.AuthenticatedClientId).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ActivationRequestDigestSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.CanonicalRequestUtf8).HasColumnType("bytea");
+                entity.Property(item => item.RequestDigestSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ConfirmationRequestSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.State).HasColumnType("varchar(16)").UseCollation("C");
+                entity.Property(item => item.ContentType).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ErrorCode).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ExactResponseUtf8).HasColumnType("bytea");
+                entity.HasIndex(item => new { item.AuthenticatedClientId, item.PrepareRef }).IsUnique()
+                    .HasDatabaseName("UX_RSRActivation_Client_PrepareRef");
+                entity.HasIndex(item => item.ReservationRef).IsUnique();
+                entity.HasOne<RuntimeSeatRecoveryProofReceipt>().WithOne()
+                    .HasForeignKey<RuntimeSeatRecoveryActivationReceipt>(item => new
+                        { item.AuthenticatedClientId, item.PrepareRef })
+                    .OnDelete(DeleteBehavior.NoAction);
+                entity.HasOne<RuntimeSeatRecoveryReservation>().WithOne()
+                    .HasForeignKey<RuntimeSeatRecoveryActivationReceipt>(item => item.ReservationRef)
+                    .OnDelete(DeleteBehavior.NoAction);
+            });
+
+            modelBuilder.Entity<RuntimeSeatRecoveryKeyPreparation>(entity =>
+            {
+                entity.ToTable("RuntimeSeatRecoveryKeyPreparations", table =>
+                {
+                    table.HasCheckConstraint("CK_RSRKP_Digests",
+                        "\"RequestDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"PublicKeySpkiSha256\" ~ '^[0-9a-f]{64}$' AND \"ChallengeDigestSha256\" ~ '^[0-9a-f]{64}$'");
+                    table.HasCheckConstraint("CK_RSRKP_Chronology",
+                        "\"CreatedAtUtc\" < \"ExpiresAtUtc\" AND (\"ChallengeConsumedAtUtc\" IS NULL OR \"ChallengeConsumedAtUtc\" >= \"CreatedAtUtc\")");
+                    table.HasCheckConstraint("CK_RSRKP_Audience",
+                        "\"ConfirmAudience\" = 'softlicence:runtime-identity-recovery:confirm:v1'");
+                    table.HasCheckConstraint("CK_RSRKP_RequestBytes",
+                        "octet_length(\"CanonicalRequestUtf8\") BETWEEN 1 AND 4096");
+                    table.HasCheckConstraint("CK_RSRKP_ResponseBytes",
+                        "octet_length(\"ExactResponseUtf8\") BETWEEN 1 AND 8192");
+                });
+                entity.HasKey(item => new { item.AuthenticatedClientId, item.PrepareRef });
+                entity.HasAlternateKey(item => new
+                    { item.AuthenticatedClientId, item.RequestId, item.RecoveryOperationRef })
+                    .HasName("AK_RSRKP_Client_Request_Recovery");
+                entity.Property(item => item.AuthenticatedClientId).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.RequestDigestSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.PublicKeySpkiSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.PublicKeySpkiCiphertext).HasColumnType("text").UseCollation("C");
+                entity.Property(item => item.PublicKeySpkiKeyId).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ChallengeDigestSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ChallengeCiphertext).HasColumnType("text").UseCollation("C");
+                entity.Property(item => item.ChallengeKeyId).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ConfirmAudience).HasColumnType("varchar(96)").UseCollation("C");
+                entity.Property(item => item.CanonicalRequestUtf8).HasColumnType("bytea");
+                entity.Property(item => item.ExactResponseUtf8).HasColumnType("bytea");
+                entity.HasIndex(item => item.ReservationRef).IsUnique();
+                entity.HasIndex(item => item.EnrollmentId).IsUnique();
+                entity.HasIndex(item => item.AuthorityGenerationId).IsUnique();
+                entity.HasOne<RuntimeSeatRecoveryAuthorization>().WithOne()
+                    .HasPrincipalKey<RuntimeSeatRecoveryAuthorization>(item => new
+                        { item.AuthenticatedClientId, item.RequestId, item.RecoveryOperationRef })
+                    .HasForeignKey<RuntimeSeatRecoveryKeyPreparation>(item => new
+                        { item.AuthenticatedClientId, item.RequestId, item.RecoveryOperationRef })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RSRKP_RSRAuthorizations_Client_Request_Recovery");
+                entity.HasOne<RuntimeSeatRecoveryReservation>().WithOne()
+                    .HasForeignKey<RuntimeSeatRecoveryKeyPreparation>(item => item.ReservationRef)
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RSRKP_RSRReservations_ReservationRef");
+            });
+
+            modelBuilder.Entity<RuntimeSeatRecoveryKeyConfirmation>(entity =>
+            {
+                entity.ToTable("RuntimeSeatRecoveryKeyConfirmations", table =>
+                {
+                    table.HasCheckConstraint("CK_RSRKC_Digest", "\"ConfirmationRequestSha256\" ~ '^[0-9a-f]{64}$'");
+                    table.HasCheckConstraint("CK_RSRKC_State", "\"State\" IN ('PROVED','REFUSED')");
+                    table.HasCheckConstraint("CK_RSRKC_RequestBytes", "octet_length(\"CanonicalRequestUtf8\") BETWEEN 1 AND 4096");
+                    table.HasCheckConstraint("CK_RSRKC_ResponseBytes", "octet_length(\"ExactResponseUtf8\") BETWEEN 1 AND 8192");
+                    table.HasCheckConstraint("CK_RSRKC_TerminalShape",
+                        "(\"State\" = 'PROVED' AND \"HttpStatusCode\" = 200 AND \"ErrorCode\" IS NULL) OR (\"State\" = 'REFUSED' AND \"HttpStatusCode\" IN (403,409,410) AND \"ErrorCode\" IS NOT NULL)");
+                });
+                entity.HasKey(item => new { item.AuthenticatedClientId, item.PrepareRef });
+                entity.Property(item => item.AuthenticatedClientId).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ConfirmationRequestSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.State).HasColumnType("varchar(16)").UseCollation("C");
+                entity.Property(item => item.ContentType).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ErrorCode).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.CanonicalRequestUtf8).HasColumnType("bytea");
+                entity.Property(item => item.ExactResponseUtf8).HasColumnType("bytea");
+                entity.HasOne<RuntimeSeatRecoveryKeyPreparation>().WithOne()
+                    .HasForeignKey<RuntimeSeatRecoveryKeyConfirmation>(item => new
+                        { item.AuthenticatedClientId, item.PrepareRef })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RSRKC_RSRKeyPreparations_Client_Prepare");
+            });
+
+            modelBuilder.Entity<RuntimeSeatRecoveryProofReceipt>(entity =>
+            {
+                entity.ToTable("RuntimeSeatRecoveryProofReceipts", table =>
+                {
+                    table.HasCheckConstraint("CK_RSRPR_State", "\"State\" = 'PROVED'");
+                    table.HasCheckConstraint("CK_RSRPR_Digests",
+                        "\"RequestDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"PublicKeySpkiSha256\" ~ '^[0-9a-f]{64}$' AND \"ConfirmationRequestSha256\" ~ '^[0-9a-f]{64}$'");
+                    table.HasCheckConstraint("CK_RSRPR_ExpiryMinimum",
+                        "\"ExpiresAtUtc\" = LEAST(\"PreparationExpiresAtUtc\", \"ReservationExpiresAtUtc\")");
+                    table.HasCheckConstraint("CK_RSRPR_Chronology", "\"ProvedAtUtc\" < \"ExpiresAtUtc\"");
+                });
+                entity.HasKey(item => new { item.AuthenticatedClientId, item.PrepareRef });
+                entity.Property(item => item.AuthenticatedClientId).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.RequestDigestSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.PublicKeySpkiSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ConfirmationRequestSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.State).HasColumnType("varchar(16)").UseCollation("C");
+                entity.HasIndex(item => item.ReservationRef).IsUnique();
+                entity.HasIndex(item => item.AuthorityGenerationId).IsUnique();
+                entity.HasOne<RuntimeSeatRecoveryKeyConfirmation>().WithOne()
+                    .HasForeignKey<RuntimeSeatRecoveryProofReceipt>(item => new
+                        { item.AuthenticatedClientId, item.PrepareRef })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RSRPR_RSRKeyConfirmations_Client_Prepare");
+                entity.HasOne<RuntimeSeatRecoveryReservation>().WithOne()
+                    .HasForeignKey<RuntimeSeatRecoveryProofReceipt>(item => item.ReservationRef)
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RSRPR_RSRReservations_ReservationRef");
+            });
+
+            modelBuilder.Entity<RuntimeRecoveryCommercialOwnership>(entity =>
+            {
+                entity.ToTable("RuntimeRecoveryCommercialOwnerships", table =>
+                {
+                    table.HasCheckConstraint("CK_RRCO_State", "\"State\" IN ('PENDING_TRANSFER','ACTIVE','TRANSFERRED','REVOKED')");
+                    table.HasCheckConstraint("CK_RRCO_Ended", "(\"State\" = 'ACTIVE' AND \"EndedAtUtc\" IS NULL) OR (\"State\" <> 'ACTIVE' AND \"EndedAtUtc\" IS NOT NULL)");
+                    table.HasCheckConstraint("CK_RRCO_Previous_NotSelf", "\"PreviousOwnershipId\" IS NULL OR \"PreviousOwnershipId\" <> \"Id\"");
+                });
+                entity.HasKey(item => item.Id);
+                entity.HasAlternateKey(item => new { item.ProductId, item.LicenseId, item.Id })
+                    .HasName("AK_RRCO_ProductId_LicenseId_Id");
+                entity.Property(item => item.State).HasColumnType("varchar(24)").UseCollation("C");
+                entity.HasIndex(item => new { item.ProductId, item.LicenseId }).IsUnique()
+                    .HasFilter("\"State\" = 'ACTIVE'").HasDatabaseName("UX_RRCO_OneActiveOwner");
+                entity.HasIndex(item => new { item.ProductId, item.LicenseId, item.PreviousOwnershipId })
+                    .HasDatabaseName("IX_RRCO_PreviousOwnership");
+                entity.HasOne<Product>().WithMany()
+                    .HasForeignKey(item => item.ProductId)
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RRCO_Products_ProductId");
+                entity.HasOne<License>().WithMany()
+                    .HasForeignKey(item => new { item.ProductId, item.LicenseId })
+                    .HasPrincipalKey(item => new { item.ProductId, item.Id })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RRCO_Licenses_ProductId_LicenseId");
+                entity.HasOne<RuntimeRecoveryCommercialSubject>().WithMany()
+                    .HasForeignKey(item => new { item.ProductId, item.OwnerSubjectId })
+                    .HasPrincipalKey(item => new { item.ProductId, item.Id })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RRCO_CommercialSubjects_ProductId_OwnerSubjectId");
+                entity.HasOne<RuntimeRecoveryCommercialOwnership>().WithMany()
+                    .HasForeignKey(item => new { item.ProductId, item.LicenseId, item.PreviousOwnershipId })
+                    .HasPrincipalKey(item => new { item.ProductId, item.LicenseId, item.Id })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RRCO_Previous_ProductId_LicenseId_OwnershipId");
+            });
+
+            modelBuilder.Entity<RuntimeRecoveryCommercialSubject>(entity =>
+            {
+                entity.ToTable("RuntimeRecoveryCommercialSubjects");
+                entity.HasKey(item => new { item.ProductId, item.Id });
+                entity.HasOne(item => item.Product).WithMany()
+                    .HasForeignKey(item => item.ProductId)
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RRCS_Products_ProductId");
+            });
+
+            modelBuilder.Entity<RuntimeRecoveryCommercialOwnershipCommand>(entity =>
+            {
+                entity.ToTable("RuntimeRecoveryCommercialOwnershipCommands", table =>
+                {
+                    table.HasCheckConstraint("CK_RRCOC_Operation",
+                        "\"Operation\" IN ('TRANSFER_OWNERSHIP','REVOKE_OWNERSHIP')");
+                    table.HasCheckConstraint("CK_RRCOC_RequestDigest",
+                        "octet_length(\"RequestDigestSha256\") = 64 AND \"RequestDigestSha256\" ~ '^[0-9a-f]{64}$'");
+                    table.HasCheckConstraint("CK_RRCOC_ResultShape",
+                        "(\"Operation\" = 'TRANSFER_OWNERSHIP' AND \"TargetCommercialSubjectId\" IS NOT NULL AND \"ResultOwnershipId\" IS NOT NULL) OR " +
+                        "(\"Operation\" = 'REVOKE_OWNERSHIP' AND \"TargetCommercialSubjectId\" IS NULL AND \"ResultOwnershipId\" IS NULL)");
+                });
+                entity.HasKey(item => item.Id);
+                entity.Property(item => item.Operation).HasColumnType("varchar(32)").UseCollation("C");
+                entity.Property(item => item.RequestDigestSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.ResponseJson).HasColumnType("text").UseCollation("C");
+                entity.HasIndex(item => new { item.ProductId, item.LicenseId, item.ExpectedOwnershipId })
+                    .HasDatabaseName("IX_RRCOC_ExpectedOwnership");
+                entity.HasIndex(item => new { item.ProductId, item.LicenseId, item.ResultOwnershipId })
+                    .HasDatabaseName("IX_RRCOC_ResultOwnership");
+                entity.HasIndex(item => new { item.ProductId, item.TargetCommercialSubjectId })
+                    .HasDatabaseName("IX_RRCOC_TargetSubject");
+                entity.HasOne<Product>().WithMany()
+                    .HasForeignKey(item => item.ProductId)
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RRCOC_Products_ProductId");
+                entity.HasOne<License>().WithMany()
+                    .HasForeignKey(item => new { item.ProductId, item.LicenseId })
+                    .HasPrincipalKey(item => new { item.ProductId, item.Id })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RRCOC_Licenses_ProductId_LicenseId");
+                entity.HasOne<RuntimeRecoveryCommercialSubject>().WithMany()
+                    .HasForeignKey(item => new { item.ProductId, item.TargetCommercialSubjectId })
+                    .HasPrincipalKey(item => new { item.ProductId, item.Id })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RRCOC_TargetSubjects_ProductId_SubjectId");
+                entity.HasOne<RuntimeRecoveryCommercialOwnership>().WithMany()
+                    .HasForeignKey(item => new { item.ProductId, item.LicenseId, item.ExpectedOwnershipId })
+                    .HasPrincipalKey(item => new { item.ProductId, item.LicenseId, item.Id })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RRCOC_ExpectedOwnership_ProductId_LicenseId_Id");
+                entity.HasOne<RuntimeRecoveryCommercialOwnership>().WithMany()
+                    .HasForeignKey(item => new { item.ProductId, item.LicenseId, item.ResultOwnershipId })
+                    .HasPrincipalKey(item => new { item.ProductId, item.LicenseId, item.Id })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RRCOC_ResultOwnership_ProductId_LicenseId_Id");
+            });
+
+            modelBuilder.Entity<RuntimeSeatRecoveryRevokedClaimNonce>(entity =>
+            {
+                entity.ToTable("RuntimeSeatRecoveryRevokedClaimNonces");
+                entity.HasKey(item => item.Nonce);
+                entity.Property(item => item.ReasonCode).HasColumnType("varchar(64)").UseCollation("C");
+            });
+
+            modelBuilder.Entity<RuntimeRecoveryGrantOwnership>(entity =>
+            {
+                entity.ToTable("RuntimeRecoveryGrantOwnerships", table =>
+                    table.HasCheckConstraint("CK_RRGO_Digests", "\"ProviderGrantRefDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"RecoveryDigestSha256\" ~ '^[0-9a-f]{64}$'"));
+                entity.HasKey(item => new { item.ProductId, item.ProviderGrantRefDigestSha256 });
+                entity.Property(item => item.ProviderGrantRefDigestSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.AuthenticatedClientId).HasColumnType("varchar(64)").UseCollation("C");
+                entity.Property(item => item.RecoveryDigestSha256).HasColumnType("varchar(64)").UseCollation("C");
+                entity.HasIndex(item => item.RecoveryOperationRef).IsUnique();
+                entity.HasOne<RuntimeRecoveryCommercialOwnership>().WithMany()
+                    .HasForeignKey(item => new { item.ProductId, item.LicenseId, item.CommercialOwnershipId })
+                    .HasPrincipalKey(item => new { item.ProductId, item.LicenseId, item.Id })
+                    .OnDelete(DeleteBehavior.NoAction)
+                    .HasConstraintName("FK_RRGO_CommercialOwnership_ProductId_LicenseId_OwnershipId");
+            });
+
             modelBuilder.Entity<RuntimeEnrollmentEncryptionNonce>()
                 .HasKey(nonce => new { nonce.KeyId, nonce.Nonce });
 
@@ -1252,6 +2204,65 @@ namespace SoftLicence.Server.Data
                 .WithMany()
                 .HasForeignKey(t => t.ProductId)
                 .OnDelete(DeleteBehavior.SetNull);
+        }
+        /// <summary>
+        /// Maps additive paid-pass tables with scoped restrictive foreign keys, ordinal provider strings
+        /// and explicit paid-period checks. SQL checks enforce shape, while the controller owns atomic
+        /// chronology and append-only writes; these mappings do not claim SQL-trigger immutability.
+        /// </summary>
+        private void ConfigurePersonalDayPass(ModelBuilder modelBuilder)
+        {
+            // Stable pass and license identity prevent concurrent purchases creating a second key.
+            var pass = modelBuilder.Entity<PersonalDayPass>();
+            pass.HasKey(p => p.Id);
+            pass.HasIndex(p => new { p.ProductId, p.CommercialSubjectId }).IsUnique();
+            pass.HasIndex(p => p.LicenseId).IsUnique();
+            pass.Property(p => p.PaidThroughUtc).HasPrecision(3);
+            pass.Property(p => p.InitialPaidThroughUtc).HasPrecision(3);
+            pass.HasOne<License>().WithMany().HasForeignKey(p => new { p.ProductId, p.LicenseId })
+                .HasPrincipalKey(l => new { l.ProductId, l.Id }).OnDelete(DeleteBehavior.Restrict);
+            pass.HasOne<RuntimeRecoveryCommercialSubject>().WithMany()
+                .HasForeignKey(p => new { p.ProductId, p.CommercialSubjectId })
+                .HasPrincipalKey(s => new { s.ProductId, s.Id }).OnDelete(DeleteBehavior.Restrict);
+
+            // The provider tuple is unique across products: one payment cannot buy two passes.
+            var payment = modelBuilder.Entity<PersonalDayPassPayment>();
+            payment.HasKey(p => p.Id);
+            payment.HasOne<PersonalDayPass>().WithMany().HasForeignKey(p => p.PassId).OnDelete(DeleteBehavior.Restrict);
+            payment.HasIndex(p => new { p.Provider, p.ProviderAccount, p.Environment, p.PaymentId }).IsUnique();
+            payment.HasIndex(p => new { p.PassId, p.PaidAtUtc });
+            payment.Property(p => p.Provider).HasMaxLength(200).UseCollation("C");
+            payment.Property(p => p.ProviderAccount).HasMaxLength(200).UseCollation("C");
+            payment.Property(p => p.Environment).HasMaxLength(200).UseCollation("C");
+            payment.Property(p => p.PaymentId).HasMaxLength(200).UseCollation("C");
+            payment.Property(p => p.EvidenceDigest).HasMaxLength(64).UseCollation("C");
+            payment.Property(p => p.Currency).HasMaxLength(3).UseCollation("C");
+            payment.Property(p => p.Offer).HasMaxLength(20).UseCollation("C");
+            payment.Property(p => p.PaidAtUtc).HasPrecision(3);
+            payment.ToTable("PersonalDayPassPayments", table =>
+            {
+                // Required CLR members generate NOT NULL; checks never rely on SQL UNKNOWN rejection.
+                table.HasCheckConstraint("CK_PersonalDayPassPayments_Price", "\"MaxSeats\" BETWEEN 1 AND 10 AND \"Currency\" = 'eur' AND ((\"Offer\" = 'day_pass' AND \"DurationSeconds\" = 86400 AND \"AmountMinor\" = (CASE WHEN \"PrioritySupport\" THEN 1140 ELSE 1000 END) * \"MaxSeats\") OR (\"Offer\" = 'subscription' AND NOT \"PrioritySupport\" AND \"DurationSeconds\" BETWEEN 86400 AND 31622400 AND \"AmountMinor\" > 0))");
+                table.HasCheckConstraint("CK_PersonalDayPassPayments_Digest", "length(\"EvidenceDigest\") = 64");
+                table.HasCheckConstraint("CK_PersonalDayPassPayments_Identity", "length(\"Provider\") > 0 AND length(\"ProviderAccount\") > 0 AND length(\"Environment\") > 0 AND length(\"PaymentId\") > 0");
+            });
+
+            // Historical periods are immutable through this store even when the current projection changes.
+            var operation = modelBuilder.Entity<PersonalDayPassOperation>();
+            operation.HasKey(o => o.Id);
+            operation.HasOne<PersonalDayPassPayment>().WithMany().HasForeignKey(o => o.PaymentId).OnDelete(DeleteBehavior.Restrict);
+            operation.Property(o => o.RequestDigest).HasMaxLength(64).UseCollation("C");
+            operation.Property(o => o.PeriodStartsAtUtc).HasPrecision(3);
+            operation.Property(o => o.PeriodExpiresAtUtc).HasPrecision(3);
+            operation.Property(o => o.PaidThroughUtc).HasPrecision(3);
+            operation.ToTable("PersonalDayPassOperations", table =>
+            {
+                // Other model providers remain usable for existing tests; paid-pass writes themselves require PG.
+                table.HasCheckConstraint("CK_PersonalDayPassOperations_Period", Database.IsNpgsql()
+                    ? "\"PeriodExpiresAtUtc\" >= \"PeriodStartsAtUtc\" + interval '1 day' AND \"PeriodExpiresAtUtc\" <= \"PeriodStartsAtUtc\" + interval '366 days' AND \"PaidThroughUtc\" >= \"PeriodExpiresAtUtc\""
+                    : "julianday(\"PeriodExpiresAtUtc\") >= julianday(\"PeriodStartsAtUtc\") + 1 AND julianday(\"PeriodExpiresAtUtc\") <= julianday(\"PeriodStartsAtUtc\") + 366 AND julianday(\"PaidThroughUtc\") >= julianday(\"PeriodExpiresAtUtc\")");
+                table.HasCheckConstraint("CK_PersonalDayPassOperations_Digest", "length(\"RequestDigest\") = 64");
+            });
         }
     }
 }

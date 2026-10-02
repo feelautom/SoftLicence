@@ -14,6 +14,7 @@ namespace SoftLicence.Server.Services;
 
 public sealed record RuntimeEncryptedValue(string Ciphertext, string KeyId);
 
+/// <summary>Runtime cryptographic envelope and signing boundary; capability expiry can be bounded by current paid authority.</summary>
 public interface IRuntimeEnrollmentCryptoService
 {
     string ActiveSigningKeyId { get; }
@@ -30,6 +31,7 @@ public interface IRuntimeEnrollmentCryptoService
     byte[] Open(
         string ownerType, Guid ownerId, int enrollmentEpoch, string keyId, string ciphertext, string ownerReference);
 
+    /// <summary>Signs a bound capability; optional authoritative expiry can only shorten the 120-second maximum.</summary>
     string SignCapability(
         Guid enrollmentId,
         int enrollmentEpoch,
@@ -42,8 +44,9 @@ public interface IRuntimeEnrollmentCryptoService
         IReadOnlyList<string> scopes,
         string publicKeySpkiSha256,
         DateTimeOffset issuedAtUtc,
-        string tokenJti);
+        string tokenJti, DateTimeOffset? expiresAtUtc = null);
 
+    /// <summary>Signs the historical claim shape with the same optional authoritative expiry bound.</summary>
     string SignLegacyCapability(
         Guid enrollmentId,
         int enrollmentEpoch,
@@ -52,7 +55,7 @@ public interface IRuntimeEnrollmentCryptoService
         IReadOnlyList<string> scopes,
         string publicKeySpkiSha256,
         DateTimeOffset issuedAtUtc,
-        string tokenJti);
+        string tokenJti, DateTimeOffset? expiresAtUtc = null);
 
     string SignRecovery(RuntimeCriticalRecoveryResponse response);
 
@@ -60,6 +63,7 @@ public interface IRuntimeEnrollmentCryptoService
     string SignWebSetupUpgrade(RuntimeWebSetupUpgradeResponse response);
 }
 
+/// <summary>Owns runtime signing/encryption key material and exact wire encodings, including paid-expiry-bounded capabilities.</summary>
 public sealed class RuntimeEnrollmentCryptoService : IRuntimeEnrollmentCryptoService, IDisposable
 {
     private const byte EnvelopeVersion = 1;
@@ -164,6 +168,7 @@ public sealed class RuntimeEnrollmentCryptoService : IRuntimeEnrollmentCryptoSer
         }
     }
 
+    /// <summary>Signs installation-bound claims, preserving exact identifiers and refusing a rounded expiry at or before issuance.</summary>
     public string SignCapability(
         Guid enrollmentId,
         int enrollmentEpoch,
@@ -176,12 +181,13 @@ public sealed class RuntimeEnrollmentCryptoService : IRuntimeEnrollmentCryptoSer
         IReadOnlyList<string> scopes,
         string publicKeySpkiSha256,
         DateTimeOffset issuedAtUtc,
-        string tokenJti)
+        string tokenJti, DateTimeOffset? expiresAtUtc = null)
         => SignCapabilityCore(
             false, enrollmentId, enrollmentEpoch, securityEpoch,
             installationId, releaseVersion, sessionId, binaries,
-            audience, scopes, publicKeySpkiSha256, issuedAtUtc, tokenJti);
+            audience, scopes, publicKeySpkiSha256, issuedAtUtc, tokenJti, expiresAtUtc);
 
+    /// <summary>Signs the legacy claim set without adding installation claims; the supplied expiry only shortens its lifetime.</summary>
     public string SignLegacyCapability(
         Guid enrollmentId,
         int enrollmentEpoch,
@@ -190,12 +196,17 @@ public sealed class RuntimeEnrollmentCryptoService : IRuntimeEnrollmentCryptoSer
         IReadOnlyList<string> scopes,
         string publicKeySpkiSha256,
         DateTimeOffset issuedAtUtc,
-        string tokenJti)
+        string tokenJti, DateTimeOffset? expiresAtUtc = null)
         => SignCapabilityCore(
             true, enrollmentId, enrollmentEpoch, securityEpoch,
             null, null, null, null,
-            audience, scopes, publicKeySpkiSha256, issuedAtUtc, tokenJti);
+            audience, scopes, publicKeySpkiSha256, issuedAtUtc, tokenJti, expiresAtUtc);
 
+    /// <summary>
+    /// Signs PS256 claims with a whole-second expiry bounded by authoritative paid time. Null retains
+    /// the legacy 120-second maximum for existing direct callers. Invalid authority or an already
+    /// expired rounded deadline fails closed; signing never grants extra time through rounding.
+    /// </summary>
     private string SignCapabilityCore(
         bool legacy,
         Guid enrollmentId,
@@ -209,7 +220,7 @@ public sealed class RuntimeEnrollmentCryptoService : IRuntimeEnrollmentCryptoSer
         IReadOnlyList<string> scopes,
         string publicKeySpkiSha256,
         DateTimeOffset issuedAtUtc,
-        string tokenJti)
+        string tokenJti, DateTimeOffset? expiresAtUtc = null)
     {
         if (_options.Mode != "enabled")
             throw new RuntimeEnrollmentException("authority_unavailable", StatusCodes.Status503ServiceUnavailable);
@@ -226,6 +237,8 @@ public sealed class RuntimeEnrollmentCryptoService : IRuntimeEnrollmentCryptoSer
             writer.WriteEndObject();
         });
         var issuedAt = issuedAtUtc.ToUnixTimeSeconds();
+        var expiresAt = BoundCapabilityExpiry(issuedAtUtc, expiresAtUtc);
+        // Both response and signed token use this same floored instant, not independent TTL calculations.
         var payload = SerializeJson(writer =>
         {
             writer.WriteStartObject();
@@ -235,7 +248,7 @@ public sealed class RuntimeEnrollmentCryptoService : IRuntimeEnrollmentCryptoSer
             writer.WriteString("jti", tokenJti);
             writer.WriteNumber("iat", issuedAt);
             writer.WriteNumber("nbf", issuedAt);
-            writer.WriteNumber("exp", issuedAt + 120);
+            writer.WriteNumber("exp", expiresAt.ToUnixTimeSeconds());
             writer.WriteNumber("epoch", enrollmentEpoch);
             writer.WriteNumber("security_epoch", securityEpoch);
             if (!legacy)
@@ -276,6 +289,29 @@ public sealed class RuntimeEnrollmentCryptoService : IRuntimeEnrollmentCryptoSer
             CryptographicOperations.ZeroMemory(signature);
         }
     }
+
+    /// <summary>
+    /// Floors min(issuance+120 seconds, authoritative expiry) to JWT seconds. A sub-second remainder
+    /// which cannot form a future JWT deadline is refused, rather than rounded past paid authority.
+    /// </summary>
+    public static DateTimeOffset BoundCapabilityExpiry(DateTimeOffset issuedAtUtc, DateTimeOffset? authoritativeExpiryUtc)
+    {
+        var maximum = issuedAtUtc.AddSeconds(120);
+        var bound = authoritativeExpiryUtc.HasValue && authoritativeExpiryUtc.Value < maximum ? authoritativeExpiryUtc.Value : maximum;
+        var result = DateTimeOffset.FromUnixTimeSeconds(bound.ToUnixTimeSeconds());
+        if (result <= issuedAtUtc)
+            throw new RuntimeEnrollmentException("authority_ineligible", StatusCodes.Status422UnprocessableEntity);
+        return result;
+    }
+
+    /// <summary>
+    /// Accepts a frozen replay only while its whole-second JWT deadline is future and its receipt
+    /// does not exceed current paid authority. Legacy JSON could include fractional seconds after
+    /// the token's exp; flooring avoids returning such an already expired token during that fraction.
+    /// </summary>
+    public static bool IsCapabilityReplayCurrent(DateTimeOffset now, DateTimeOffset receiptExpiry,
+        DateTimeOffset? authoritativeExpiry) => receiptExpiry.ToUnixTimeSeconds() > now.ToUnixTimeSeconds()
+        && (!authoritativeExpiry.HasValue || receiptExpiry <= authoritativeExpiry.Value);
 
     public string SignRecovery(RuntimeCriticalRecoveryResponse response)
     {
@@ -450,6 +486,7 @@ public sealed class RuntimeEnrollmentCryptoService : IRuntimeEnrollmentCryptoSer
     /// <summary>Restricts envelope domain separation to the reviewed persistence owners.</summary>
     private static bool IsOwnerType(string value) => value is
         "enrollment-spki" or "enrollment-challenge" or "prepare-response" or "confirm-response"
+            or "recovery-key-spki" or "recovery-key-challenge"
             or "capability-response" or "canary-response" or "critical-recovery-response"
             or "recovery-refetch-response" or "milestone-response" or "upgrade-response"
             or "rollback-response" or "bootstrap-issue-response"

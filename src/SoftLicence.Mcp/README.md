@@ -180,6 +180,15 @@ ban composant acceptent `FP_EXE`, `FP_DLL`, `FP_CORE`, `CPU`, `MB`, `BIOS`, `DIS
 Les levées de ban exigent une raison opérateur explicite. Le snapshot de cas accepte
 `ticketRef` et `securityCaseId`, propage les HWID résolus vers Canary et les profils
 support, puis distingue les corrélations exactes des rapprochements probabilistes.
+Le diagnostic Runtime exact recroise toutes les identités indexées de la décision avec son JSON,
+refuse toute décision disponible sans HWID soumis canonique et valide chaque ligne bans, Canary et
+profil avant de la réduire à son allowlist. Une preuve partielle arrête donc la corrélation
+au lieu de devenir une absence de signal.
+Les hashes composants ne sont transmis que sous la forme hexadécimale `8...8`, et les dates
+d'activité du profil doivent correspondre aux extrêmes de ses événements complets.
+Le transport analytics applique également un plafond d'octets avant parsing, sur longueur
+déclarée comme sur flux chunked, y compris pour les sous-réponses composées, le repli de
+découverte produit et les réponses des mutations administrateur de sécurité.
 
 `get_telemetry_overview`, `get_telemetry_devices`, `get_telemetry_raw_sample`, `get_telemetry_insights` et
 `get_activation_failures`

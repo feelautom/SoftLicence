@@ -28,7 +28,11 @@ public sealed class DistributionS2SAuthenticationServiceTests : IDisposable
         var connectionString = $"Data Source=s2s-{Guid.NewGuid():N};Mode=Memory;Cache=Shared";
         _keepAlive = new SqliteConnection(connectionString);
         _keepAlive.Open();
-        _dbOptions = new DbContextOptionsBuilder<LicenseDbContext>().UseSqlite(connectionString).Options;
+        SqliteFullModelHarness.RegisterConnection(_keepAlive);
+        _dbOptions = new DbContextOptionsBuilder<LicenseDbContext>()
+            .UseSqlite(connectionString)
+            .AddInterceptors(SqliteFullModelHarness.ConnectionInterceptor, SqliteFullModelHarness.CommandInterceptor)
+            .Options;
         using var db = new LicenseDbContext(_dbOptions);
         db.Database.EnsureCreated();
     }

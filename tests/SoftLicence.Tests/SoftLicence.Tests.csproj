@@ -2,6 +2,8 @@
 
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
+    <!-- Preserve fail-closed test identity before package-generated build props are restored. -->
+    <IsTestProject>true</IsTestProject>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
@@ -24,10 +26,27 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Compile immutable tagged consumer source with a pinned .NET-compatible compiler, independent of the active SDK. -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\SoftLicence.SDK\SoftLicence.SDK.csproj" />
     <ProjectReference Include="..\..\src\SoftLicence.Server\SoftLicence.Server.csproj" />
     <ProjectReference Include="..\..\src\SoftLicence.Mcp\SoftLicence.Mcp.csproj" />
     <ProjectReference Include="..\Compatibility\BackupProcessHelper\BackupProcessHelper.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="TestData\recovery-telemetry-v1.corpus.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="TestData\runtime-enrollment-v2-reference-vectors.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="TestData\runtime-enrollment-softlicence-authority-manifest-v1-reference-vectors.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>

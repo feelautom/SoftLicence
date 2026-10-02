@@ -773,7 +773,7 @@ namespace SoftLicence.Server.Migrations
                         {
                             t.HasCheckConstraint("CK_DistributionBindingInvalidations_Epoch_One", "\"Epoch\" = 1");
 
-                            t.HasCheckConstraint("CK_DistributionBindingInvalidations_Reason", "\"Reason\" IN ('account_closed', 'fraud_flagged', 'grant_revoked', 'security_lockdown')");
+                            t.HasCheckConstraint("CK_DistributionBindingInvalidations_Reason", "\"Reason\" IN ('account_closed', 'fraud_flagged', 'grant_revoked', 'security_lockdown', 'seat_released')");
                         });
                 });
 
@@ -830,6 +830,17 @@ namespace SoftLicence.Server.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<string>("ArtifactSetDigestSha256")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid?>("AuthorityGenerationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("AuthorityLineageId")
+                        .HasColumnType("uuid");
+
                     b.Property<string>("ClientId")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -872,18 +883,24 @@ namespace SoftLicence.Server.Migrations
 
                     b.HasIndex("LicenseId");
 
+                    b.HasIndex("AuthorityLineageId", "AuthorityGenerationId");
+
                     b.HasIndex("ProductId", "GrantRefDigestSha256")
                         .IsUnique();
 
                     b.ToTable("DistributionEntitlements", t =>
                         {
-                            t.HasCheckConstraint("CK_DistributionEntitlements_ContractVersion", "\"ContractVersion\" = 3");
+                            t.HasCheckConstraint("CK_DistributionEntitlements_ContractVersion", "\"ContractVersion\" IN (3, 4)");
 
                             t.HasCheckConstraint("CK_DistributionEntitlements_Digests", "length(\"GrantRefDigestSha256\") = 64 AND length(\"SubjectRefDigestSha256\") = 64");
 
                             t.HasCheckConstraint("CK_DistributionEntitlements_State", "\"State\" IN ('issued', 'finalized', 'expired', 'revoked')");
 
                             t.HasCheckConstraint("CK_DistributionEntitlements_Times", "\"IssuedAtUtc\" < \"ExpiresAtUtc\"");
+
+                            t.HasCheckConstraint("CK_Tkt000686_DistributionEntitlements_ArtifactDigest", "\"ArtifactSetDigestSha256\" IS NULL OR (octet_length(\"ArtifactSetDigestSha256\") = 64 AND \"ArtifactSetDigestSha256\" ~ '^[0-9a-f]{64}$')");
+
+                            t.HasCheckConstraint("CK_Tkt000686_DistributionEntitlements_AuthorityShape", "(\"ContractVersion\" = 3 AND \"AuthorityLineageId\" IS NULL AND \"AuthorityGenerationId\" IS NULL AND \"ArtifactSetDigestSha256\" IS NULL) OR (\"ContractVersion\" = 4 AND \"AuthorityLineageId\" IS NOT NULL AND \"AuthorityGenerationId\" IS NOT NULL AND \"ArtifactSetDigestSha256\" IS NOT NULL)");
                         });
                 });
 
@@ -915,7 +932,7 @@ namespace SoftLicence.Server.Migrations
 
                     b.ToTable("DistributionGrantOwnerships", t =>
                         {
-                            t.HasCheckConstraint("CK_DistributionGrantOwnerships_Source", "\"Source\" IN ('issue_v2', 'issue_v3', 'finalize_v1')");
+                            t.HasCheckConstraint("CK_DistributionGrantOwnerships_Source", "\"Source\" IN ('issue_v2', 'issue_v3', 'issue_v4', 'finalize_v1')");
                         });
                 });
 
@@ -1374,6 +1391,10 @@ namespace SoftLicence.Server.Migrations
                     b.Property<DateTime?>("DisabledAtUtc")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("DisabledReason")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
 
@@ -1429,7 +1450,7 @@ namespace SoftLicence.Server.Migrations
 
                             t.HasCheckConstraint("CK_HardwareAuthorityAliases_ObservationCount", "\"ObservationCount\" >= 0");
 
-                            t.HasCheckConstraint("CK_HardwareAuthorityAliases_State", "(\"IsActive\" AND \"DisabledAtUtc\" IS NULL) OR (NOT \"IsActive\" AND \"DisabledAtUtc\" IS NOT NULL)");
+                            t.HasCheckConstraint("CK_HardwareAuthorityAliases_State", "(\"IsActive\" AND \"DisabledAtUtc\" IS NULL AND \"DisabledReason\" IS NULL) OR (NOT \"IsActive\" AND \"DisabledAtUtc\" IS NOT NULL AND \"DisabledReason\" IS NOT NULL)");
                         });
                 });
 
@@ -1533,6 +1554,11 @@ namespace SoftLicence.Server.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<Guid>("AuthorityVersion")
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("uuid")
+                        .HasDefaultValueSql("gen_random_uuid()");
+
                     b.Property<DateTime>("CreationDate")
                         .HasColumnType("timestamp with time zone");
 
@@ -1604,6 +1630,9 @@ namespace SoftLicence.Server.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasAlternateKey("ProductId", "Id")
+                        .HasName("AK_Licenses_ProductId_Id");
+
                     b.HasIndex("LicenseKey")
                         .IsUnique();
 
@@ -1632,6 +1661,30 @@ namespace SoftLicence.Server.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<string>("DecisionCorrelatedHardwareId")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("DecisionCorrelationId")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("DecisionKey")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("DecisionOperationId")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("DecisionResolvedHardwareId")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("DecisionSubmittedHardwareId")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
                     b.Property<string>("Details")
                         .HasColumnType("text");
 
@@ -1646,7 +1699,22 @@ namespace SoftLicence.Server.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("DecisionCorrelatedHardwareId");
+
+                    b.HasIndex("DecisionCorrelationId");
+
+                    b.HasIndex("DecisionKey")
+                        .IsUnique();
+
+                    b.HasIndex("DecisionOperationId");
+
+                    b.HasIndex("DecisionResolvedHardwareId");
+
+                    b.HasIndex("DecisionSubmittedHardwareId");
+
                     b.HasIndex("LicenseId");
+
+                    b.HasIndex("LicenseId", "DecisionOperationId");
 
                     b.ToTable("LicenseHistories");
                 });
@@ -1655,6 +1723,14 @@ namespace SoftLicence.Server.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AuthorityProvenance")
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)")
+                        .UseCollation("C");
+
+                    b.Property<Guid?>("CommercialSubjectId")
                         .HasColumnType("uuid");
 
                     b.Property<DateTime>("CreatedAt")
@@ -1675,10 +1751,20 @@ namespace SoftLicence.Server.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("Reference")
+                        .IsUnique()
+                        .HasDatabaseName("UX_LicenseProvisioningRequests_ProviderReference")
+                        .HasFilter("\"AuthorityProvenance\" = 'PROVIDER_ADMIN_API_V1'");
+
+                    b.HasIndex("ProductId", "CommercialSubjectId");
+
                     b.HasIndex("ProductId", "Reference")
                         .IsUnique();
 
-                    b.ToTable("LicenseProvisioningRequests");
+                    b.ToTable("LicenseProvisioningRequests", t =>
+                        {
+                            t.HasCheckConstraint("CK_LicenseProvisioningRequests_CommercialAuthority", "(\"CommercialSubjectId\" IS NULL AND \"AuthorityProvenance\" IS NULL) OR (\"CommercialSubjectId\" IS NOT NULL AND \"AuthorityProvenance\" = 'PROVIDER_ADMIN_API_V1')");
+                        });
                 });
 
             modelBuilder.Entity("SoftLicence.Server.Data.LicenseRenewal", b =>
@@ -1695,6 +1781,13 @@ namespace SoftLicence.Server.Migrations
 
                     b.Property<DateTime>("RenewalDate")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("RequestFingerprint")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<int?>("RequestFingerprintVersion")
+                        .HasColumnType("integer");
 
                     b.Property<DateTime?>("ResultingExpirationDate")
                         .HasColumnType("timestamp with time zone");
@@ -2033,6 +2126,174 @@ namespace SoftLicence.Server.Migrations
                     b.ToTable("LlmTipFeedbackTips");
                 });
 
+            modelBuilder.Entity("SoftLicence.Server.Data.PersonalDayPass", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("CommercialSubjectId")
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("CurrentPrioritySupport")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime?>("InitialPaidThroughUtc")
+                        .HasPrecision(3)
+                        .HasColumnType("timestamp(3) with time zone");
+
+                    b.Property<Guid>("LicenseId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("PaidThroughUtc")
+                        .HasPrecision(3)
+                        .HasColumnType("timestamp(3) with time zone");
+
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("LicenseId")
+                        .IsUnique();
+
+                    b.HasIndex("ProductId", "CommercialSubjectId")
+                        .IsUnique();
+
+                    b.HasIndex("ProductId", "LicenseId");
+
+                    b.ToTable("PersonalDayPasses");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.PersonalDayPassOperation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("PaidThroughUtc")
+                        .HasPrecision(3)
+                        .HasColumnType("timestamp(3) with time zone");
+
+                    b.Property<Guid>("PaymentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("PeriodExpiresAtUtc")
+                        .HasPrecision(3)
+                        .HasColumnType("timestamp(3) with time zone");
+
+                    b.Property<bool>("PeriodPrioritySupport")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime>("PeriodStartsAtUtc")
+                        .HasPrecision(3)
+                        .HasColumnType("timestamp(3) with time zone");
+
+                    b.Property<string>("RequestDigest")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("ResultAuthorityVersion")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PaymentId");
+
+                    b.ToTable("PersonalDayPassOperations", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_PersonalDayPassOperations_Digest", "length(\"RequestDigest\") = 64");
+
+                            t.HasCheckConstraint("CK_PersonalDayPassOperations_Period", "\"PeriodExpiresAtUtc\" >= \"PeriodStartsAtUtc\" + interval '1 day' AND \"PeriodExpiresAtUtc\" <= \"PeriodStartsAtUtc\" + interval '366 days' AND \"PaidThroughUtc\" >= \"PeriodExpiresAtUtc\"");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.PersonalDayPassPayment", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("AmountMinor")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)")
+                        .UseCollation("C");
+
+                    b.Property<int>("DurationSeconds")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Environment")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .UseCollation("C");
+
+                    b.Property<string>("EvidenceDigest")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .UseCollation("C");
+
+                    b.Property<int>("MaxSeats")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Offer")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .UseCollation("C");
+
+                    b.Property<DateTime>("PaidAtUtc")
+                        .HasPrecision(3)
+                        .HasColumnType("timestamp(3) with time zone");
+
+                    b.Property<Guid>("PassId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("PaymentId")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .UseCollation("C");
+
+                    b.Property<bool>("PrioritySupport")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Provider")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .UseCollation("C");
+
+                    b.Property<string>("ProviderAccount")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .UseCollation("C");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PassId", "PaidAtUtc");
+
+                    b.HasIndex("Provider", "ProviderAccount", "Environment", "PaymentId")
+                        .IsUnique();
+
+                    b.ToTable("PersonalDayPassPayments", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_PersonalDayPassPayments_Digest", "length(\"EvidenceDigest\") = 64");
+
+                            t.HasCheckConstraint("CK_PersonalDayPassPayments_Identity", "length(\"Provider\") > 0 AND length(\"ProviderAccount\") > 0 AND length(\"Environment\") > 0 AND length(\"PaymentId\") > 0");
+
+                            t.HasCheckConstraint("CK_PersonalDayPassPayments_Price", "\"MaxSeats\" BETWEEN 1 AND 10 AND \"Currency\" = 'eur' AND ((\"Offer\" = 'day_pass' AND \"DurationSeconds\" = 86400 AND \"AmountMinor\" = (CASE WHEN \"PrioritySupport\" THEN 1140 ELSE 1000 END) * \"MaxSeats\") OR (\"Offer\" = 'subscription' AND NOT \"PrioritySupport\" AND \"DurationSeconds\" BETWEEN 86400 AND 31622400 AND \"AmountMinor\" > 0))");
+                        });
+                });
+
             modelBuilder.Entity("SoftLicence.Server.Data.PiracySuspect", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2095,6 +2356,65 @@ namespace SoftLicence.Server.Migrations
                         .IsUnique();
 
                     b.ToTable("PiracySuspects");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.PortalDeactivationOperation", b =>
+                {
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ClientId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("HardwareId")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<Guid>("LicenseId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Outcome")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("RequestFingerprintSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.HasKey("RequestId");
+
+                    b.HasIndex("LicenseId");
+
+                    b.HasIndex("ProductId", "LicenseId");
+
+                    b.ToTable("PortalDeactivationOperations", t =>
+                        {
+                            t.HasCheckConstraint("CK_PortalDeactivationOperations_ClientId", "\"ClientId\" ~ '^[a-z0-9][a-z0-9._-]{2,63}$'");
+
+                            t.HasCheckConstraint("CK_PortalDeactivationOperations_HardwareId", "\"HardwareId\" ~ '^[A-Z0-9][A-Z0-9:_-]{4,199}$'");
+
+                            t.HasCheckConstraint("CK_PortalDeactivationOperations_Outcome", "\"Outcome\" IN ('deactivated', 'already_inactive')");
+
+                            t.HasCheckConstraint("CK_PortalDeactivationOperations_Reason", "\"Reason\" IN ('settings_button', 'subscription_termination', 'uninstall')");
+
+                            t.HasCheckConstraint("CK_PortalDeactivationOperations_RequestFingerprintSha256", "length(\"RequestFingerprintSha256\") = 64 AND \"RequestFingerprintSha256\" ~ '^[0-9a-f]{64}$'");
+                        });
                 });
 
             modelBuilder.Entity("SoftLicence.Server.Data.Product", b =>
@@ -2175,6 +2495,213 @@ namespace SoftLicence.Server.Migrations
                     b.ToTable("ProductWebhooks");
                 });
 
+            modelBuilder.Entity("SoftLicence.Server.Data.RecoveryTelemetryEvent", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ClientVersion")
+                        .IsRequired()
+                        .HasMaxLength(17)
+                        .HasColumnType("character varying(17)");
+
+                    b.Property<int?>("DurationMs")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ErrorCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<Guid>("EventId")
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("IsTerminal")
+                        .HasColumnType("boolean");
+
+                    b.Property<int?>("MsiExitCode")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("OccurredAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Outcome")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("PayloadSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .IsFixedLength();
+
+                    b.Property<string>("ProcessRole")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("ReceivedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("RecoveryRunId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("RunId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Sequence")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("SourceVersion")
+                        .HasMaxLength(17)
+                        .HasColumnType("character varying(17)");
+
+                    b.Property<string>("Stage")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("TargetVersion")
+                        .HasMaxLength(17)
+                        .HasColumnType("character varying(17)");
+
+                    b.Property<string>("VerifiedRestoredVersion")
+                        .HasMaxLength(17)
+                        .HasColumnType("character varying(17)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RunId");
+
+                    b.HasIndex("ProductId", "EventId")
+                        .IsUnique();
+
+                    b.HasIndex("ProductId", "ReceivedAtUtc");
+
+                    b.HasIndex("ProductId", "RecoveryRunId")
+                        .IsUnique()
+                        .HasFilter("\"IsTerminal\" = true");
+
+                    b.HasIndex("ProductId", "RecoveryRunId", "Sequence")
+                        .IsUnique();
+
+                    b.ToTable("RecoveryTelemetryEvents", t =>
+                        {
+                            t.HasCheckConstraint("CK_RecoveryTelemetryEvents_PayloadSha256", "length(\"PayloadSha256\") = 64 AND \"PayloadSha256\" ~ '^[0-9a-f]{64}$'");
+
+                            t.HasCheckConstraint("CK_RecoveryTelemetryEvents_Sequence", "\"Sequence\" >= 1 AND \"Sequence\" <= 32");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RecoveryTelemetryRejection", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Code")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("CorrelationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("EventId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("ReceivedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("RecoveryRunId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ProductId", "ReceivedAtUtc");
+
+                    b.HasIndex("ProductId", "RecoveryRunId", "ReceivedAtUtc");
+
+                    b.ToTable("RecoveryTelemetryRejections");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RecoveryTelemetryRun", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ErrorCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<bool>("IsTerminal")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("LastOutcome")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<int>("LastSequence")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("LastStage")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("RecoveryRunId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("SourceVersion")
+                        .HasMaxLength(17)
+                        .HasColumnType("character varying(17)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("TargetVersion")
+                        .HasMaxLength(17)
+                        .HasColumnType("character varying(17)");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("VerifiedRestoredVersion")
+                        .HasMaxLength(17)
+                        .HasColumnType("character varying(17)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ProductId", "RecoveryRunId")
+                        .IsUnique();
+
+                    b.HasIndex("ProductId", "UpdatedAtUtc");
+
+                    b.ToTable("RecoveryTelemetryRuns", t =>
+                        {
+                            t.HasCheckConstraint("CK_RecoveryTelemetryRuns_LastSequence", "\"LastSequence\" >= 1 AND \"LastSequence\" <= 32");
+
+                            t.HasCheckConstraint("CK_RecoveryTelemetryRuns_Status", "\"Status\" IN ('incomplete', 'completed', 'failed', 'cancelled')");
+                        });
+                });
+
             modelBuilder.Entity("SoftLicence.Server.Data.ResellerPartner", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2215,6 +2742,186 @@ namespace SoftLicence.Server.Migrations
                         .IsUnique();
 
                     b.ToTable("ResellerPartners");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeAuthorityKeyRegistryHead", b =>
+                {
+                    b.Property<string>("RegistryId")
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("CurrentMetadataDigestSha256")
+                        .IsRequired()
+                        .HasColumnType("char(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("CurrentPublicationState")
+                        .IsRequired()
+                        .HasColumnType("varchar(16)")
+                        .UseCollation("C");
+
+                    b.Property<string>("CurrentRegistryAuthenticationInputDigestSha256")
+                        .IsRequired()
+                        .HasColumnType("char(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("CurrentSnapshotId")
+                        .IsRequired()
+                        .HasColumnType("varchar(128)")
+                        .UseCollation("C");
+
+                    b.Property<long>("CurrentSnapshotVersion")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("RegistryId");
+
+                    b.HasIndex("RegistryId", "CurrentSnapshotId", "CurrentSnapshotVersion", "CurrentMetadataDigestSha256", "CurrentRegistryAuthenticationInputDigestSha256", "CurrentPublicationState");
+
+                    b.ToTable("RuntimeAuthorityKeyRegistryHeads", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RAKRHeads_Digests", "\"CurrentMetadataDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"CurrentRegistryAuthenticationInputDigestSha256\" ~ '^[0-9a-f]{64}$'");
+
+                            t.HasCheckConstraint("CK_RAKRHeads_RegistryId", "\"RegistryId\" = 'runtime-enrollment-authority-generation-v2'");
+
+                            t.HasCheckConstraint("CK_RAKRHeads_State", "\"CurrentPublicationState\" = 'current'");
+
+                            t.HasCheckConstraint("CK_RAKRHeads_Version", "\"CurrentSnapshotVersion\" > 0");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeAuthorityKeyRegistryReadback", b =>
+                {
+                    b.Property<string>("ClientId")
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ExactResponseBodySha256")
+                        .IsRequired()
+                        .HasColumnType("char(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("RequestDigestSha256")
+                        .IsRequired()
+                        .HasColumnType("char(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("SnapshotId")
+                        .IsRequired()
+                        .HasColumnType("varchar(128)")
+                        .UseCollation("C");
+
+                    b.HasKey("ClientId", "RequestId");
+
+                    b.HasIndex("SnapshotId", "ExactResponseBodySha256");
+
+                    b.ToTable("RuntimeAuthorityKeyRegistryReadbacks", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RAKRReadbacks_ClientId", "length(\"ClientId\") BETWEEN 1 AND 64");
+
+                            t.HasCheckConstraint("CK_RAKRReadbacks_Digests", "\"RequestDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"ExactResponseBodySha256\" ~ '^[0-9a-f]{64}$'");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeAuthorityKeyRegistrySnapshot", b =>
+                {
+                    b.Property<string>("SnapshotId")
+                        .HasColumnType("varchar(128)")
+                        .UseCollation("C");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<byte[]>("ExactResponseBody")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<string>("ExactResponseBodySha256")
+                        .IsRequired()
+                        .HasColumnType("char(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("MetadataDigestSha256")
+                        .IsRequired()
+                        .HasColumnType("char(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("ObservedAtUtc")
+                        .IsRequired()
+                        .HasColumnType("varchar(33)")
+                        .UseCollation("C");
+
+                    b.Property<string>("PublicationState")
+                        .IsRequired()
+                        .HasColumnType("varchar(16)")
+                        .UseCollation("C");
+
+                    b.Property<string>("RegistryAuthenticationInputDigestSha256")
+                        .IsRequired()
+                        .HasColumnType("char(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("RegistryId")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("RegistrySignatureBase64Url")
+                        .IsRequired()
+                        .HasColumnType("varchar(342)")
+                        .UseCollation("C");
+
+                    b.Property<DateTime?>("RevokedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long>("SnapshotVersion")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("SnapshotId");
+
+                    b.HasAlternateKey("SnapshotId", "ExactResponseBodySha256")
+                        .HasName("AK_RAKRSnapshots_Snapshot_ResponseBodyDigest");
+
+                    b.HasAlternateKey("RegistryId", "SnapshotId", "SnapshotVersion", "MetadataDigestSha256", "RegistryAuthenticationInputDigestSha256", "PublicationState")
+                        .HasName("AK_RAKRSnapshots_Registry_Snapshot_Version_Metadata_Authentication_State");
+
+                    b.HasIndex("RegistryId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_RAKRSnapshots_OneCurrentPerRegistry")
+                        .HasFilter("\"PublicationState\" = 'current'");
+
+                    b.HasIndex("RegistryId", "MetadataDigestSha256")
+                        .IsUnique();
+
+                    b.HasIndex("RegistryId", "SnapshotVersion")
+                        .IsUnique();
+
+                    b.ToTable("RuntimeAuthorityKeyRegistrySnapshots", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RAKRSnapshots_Digests", "\"MetadataDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"RegistryAuthenticationInputDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"ExactResponseBodySha256\" ~ '^[0-9a-f]{64}$'");
+
+                            t.HasCheckConstraint("CK_RAKRSnapshots_ObservedAtUtc", "\"ObservedAtUtc\" ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{7}\\+00:00$'");
+
+                            t.HasCheckConstraint("CK_RAKRSnapshots_RegistryId", "\"RegistryId\" = 'runtime-enrollment-authority-generation-v2'");
+
+                            t.HasCheckConstraint("CK_RAKRSnapshots_ResponseBytes", "octet_length(\"ExactResponseBody\") BETWEEN 1 AND 16384");
+
+                            t.HasCheckConstraint("CK_RAKRSnapshots_Revocation", "(\"PublicationState\" = 'revoked' AND \"RevokedAtUtc\" IS NOT NULL) OR (\"PublicationState\" <> 'revoked' AND \"RevokedAtUtc\" IS NULL)");
+
+                            t.HasCheckConstraint("CK_RAKRSnapshots_Signature", "length(\"RegistrySignatureBase64Url\") = 342 AND \"RegistrySignatureBase64Url\" !~ '[^A-Za-z0-9_-]'");
+
+                            t.HasCheckConstraint("CK_RAKRSnapshots_State", "\"PublicationState\" IN ('current','superseded','revoked')");
+
+                            t.HasCheckConstraint("CK_RAKRSnapshots_Version", "\"SnapshotVersion\" > 0");
+                        });
                 });
 
             modelBuilder.Entity("SoftLicence.Server.Data.RuntimeCanaryProofNonce", b =>
@@ -2508,6 +3215,119 @@ namespace SoftLicence.Server.Migrations
                         });
                 });
 
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeDistributionHardwareDecision", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("AttemptCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("AuthorityMode")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<int>("AutoUnbannedCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("BanCategoriesJson")
+                        .IsRequired()
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("ClientId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("GrantRefDigestSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("HardwareIdHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("InstallationIdHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("KeyThumbprint")
+                        .HasMaxLength(43)
+                        .HasColumnType("character varying(43)");
+
+                    b.Property<DateTime>("LastSeenAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("LicenseActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("LicenseExpired")
+                        .HasColumnType("boolean");
+
+                    b.Property<Guid>("LicenseId")
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("LicenseRevoked")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Outcome")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("character varying(24)");
+
+                    b.Property<bool>("PaidAutoUnbanEligible")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("PayloadDigestSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ReasonCode")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("RequestId")
+                        .IsRequired()
+                        .HasMaxLength(36)
+                        .HasColumnType("character varying(36)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ClientId", "RequestId")
+                        .IsUnique();
+
+                    b.HasIndex("ProductId", "CreatedAtUtc");
+
+                    b.HasIndex("ProductId", "HardwareIdHash", "CreatedAtUtc");
+
+                    b.HasIndex("ProductId", "LicenseId", "CreatedAtUtc");
+
+                    b.ToTable("RuntimeDistributionHardwareDecisions", t =>
+                        {
+                            t.HasCheckConstraint("CK_RuntimeDistributionHardwareDecisions_AttemptCount", "\"AttemptCount\" >= 1");
+
+                            t.HasCheckConstraint("CK_RuntimeDistributionHardwareDecisions_AuthorityMode", "\"AuthorityMode\" IN ('server-derived', 'known-enrollment', 'digest-revalidation', 'alias-recognized')");
+
+                            t.HasCheckConstraint("CK_RuntimeDistributionHardwareDecisions_AutoUnbanCount", "\"AutoUnbannedCount\" >= 0");
+
+                            t.HasCheckConstraint("CK_RuntimeDistributionHardwareDecisions_Digests", "\"PayloadDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"GrantRefDigestSha256\" ~ '^[0-9a-f]{64}$' AND (\"HardwareIdHash\" IS NULL OR \"HardwareIdHash\" ~ '^[0-9a-f]{64}$') AND (\"InstallationIdHash\" IS NULL OR \"InstallationIdHash\" ~ '^[0-9a-f]{64}$')");
+
+                            t.HasCheckConstraint("CK_RuntimeDistributionHardwareDecisions_Outcome", "\"Outcome\" IN ('accepted', 'auto-unbanned', 'refused')");
+                        });
+                });
+
             modelBuilder.Entity("SoftLicence.Server.Data.RuntimeEnrollment", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2686,6 +3506,292 @@ namespace SoftLicence.Server.Migrations
                             t.HasCheckConstraint("CK_RuntimeEnrollments_SecurityEpoch", "\"SecurityEpoch\" >= 1");
 
                             t.HasCheckConstraint("CK_RuntimeEnrollments_State", "\"State\" IN ('PENDING', 'ACTIVE', 'INVALIDATED')");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeEnrollmentAuthorityAttempt", b =>
+                {
+                    b.Property<Guid>("AttemptId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("AuthorityGenerationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("AuthorityLineageId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CompletedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ErrorCode")
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<byte[]>("ExactResponseUtf8")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<int>("HttpStatusCode")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("RequestDigest")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasColumnType("varchar(8)")
+                        .UseCollation("C");
+
+                    b.HasKey("AttemptId")
+                        .HasName("PK_REAuthorityAttempts");
+
+                    b.HasIndex("RequestId")
+                        .HasDatabaseName("IX_REAuthorityAttempts_RequestId");
+
+                    b.HasIndex("RequestId", "AuthorityLineageId", "AuthorityGenerationId")
+                        .HasDatabaseName("IX_REAuthorityAttempts_RequestId_LineageId_GenerationId");
+
+                    b.ToTable("RuntimeEnrollmentAuthorityAttempts", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_REAuthorityAttempts_Chronology", "\"CreatedAtUtc\" <= \"CompletedAtUtc\"");
+
+                            t.HasCheckConstraint("CK_REAuthorityAttempts_ErrorCode", "\"ErrorCode\" IS NULL OR (octet_length(\"ErrorCode\") BETWEEN 1 AND 64 AND \"ErrorCode\" ~ '^[A-Z0-9_]+$')");
+
+                            t.HasCheckConstraint("CK_REAuthorityAttempts_HttpStatus", "\"HttpStatusCode\" IN (200, 400, 403, 409, 503)");
+
+                            t.HasCheckConstraint("CK_REAuthorityAttempts_RequestDigest", "octet_length(\"RequestDigest\") = 64 AND \"RequestDigest\" ~ '^[0-9a-f]{64}$'");
+
+                            t.HasCheckConstraint("CK_REAuthorityAttempts_ResponseBytes", "octet_length(\"ExactResponseUtf8\") BETWEEN 1 AND 8192");
+
+                            t.HasCheckConstraint("CK_REAuthorityAttempts_Status", "\"Status\" IN ('ACCEPTED', 'REFUSED')");
+
+                            t.HasCheckConstraint("CK_REAuthorityAttempts_TerminalShape", "(\"Status\" = 'ACCEPTED' AND \"AuthorityLineageId\" IS NOT NULL AND \"AuthorityGenerationId\" IS NOT NULL AND \"ErrorCode\" IS NULL AND \"HttpStatusCode\" = 200) OR (\"Status\" = 'REFUSED' AND \"AuthorityLineageId\" IS NULL AND \"AuthorityGenerationId\" IS NULL AND \"ErrorCode\" IS NOT NULL AND \"HttpStatusCode\" IN (400, 403, 409, 503))");
+                        });
+
+                    b.HasAnnotation("RuntimeEnrollment:CompositeRequestResultForeignKey", "RequestId,AuthorityLineageId,AuthorityGenerationId|NO ACTION");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeEnrollmentAuthorityGeneration", b =>
+                {
+                    b.Property<Guid>("AuthorityGenerationId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AuthorityDigest")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("AuthorityLineageId")
+                        .HasColumnType("uuid");
+
+                    b.Property<byte[]>("CanonicalPayloadUtf8")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("OccurredAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("PreviousGenerationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<long>("Sequence")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("SignatureAlgorithm")
+                        .IsRequired()
+                        .HasColumnType("varchar(16)")
+                        .UseCollation("C");
+
+                    b.Property<string>("SignatureKeyId")
+                        .IsRequired()
+                        .HasColumnType("varchar(128)")
+                        .UseCollation("C");
+
+                    b.Property<string>("SignatureValue")
+                        .IsRequired()
+                        .HasColumnType("varchar(342)")
+                        .UseCollation("C");
+
+                    b.Property<byte[]>("SignedStatementUtf8")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.HasKey("AuthorityGenerationId")
+                        .HasName("PK_REAuthorityGenerations");
+
+                    b.HasAlternateKey("AuthorityGenerationId", "RequestId")
+                        .HasName("AK_REAuthorityGenerations_GenerationId_RequestId");
+
+                    b.HasAlternateKey("AuthorityLineageId", "AuthorityGenerationId")
+                        .HasName("AK_REAuthorityGenerations_LineageId_GenerationId");
+
+                    b.HasAlternateKey("AuthorityLineageId", "AuthorityGenerationId", "RequestId")
+                        .HasName("AK_REAuthorityGenerations_LineageId_GenerationId_RequestId");
+
+                    b.HasAlternateKey("AuthorityLineageId", "AuthorityGenerationId", "Sequence")
+                        .HasName("AK_REAuthorityGenerations_LineageId_GenerationId_Sequence");
+
+                    b.HasIndex("AuthorityLineageId", "PreviousGenerationId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_REAuthorityGenerations_LineageId_PredecessorId")
+                        .HasFilter("\"PreviousGenerationId\" IS NOT NULL");
+
+                    b.HasIndex("AuthorityLineageId", "Sequence")
+                        .IsUnique()
+                        .HasDatabaseName("UX_REAuthorityGenerations_LineageId_Sequence");
+
+                    b.ToTable("RuntimeEnrollmentAuthorityGenerations", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_REAuthorityGenerations_Algorithm", "\"SignatureAlgorithm\" = 'PS256'");
+
+                            t.HasCheckConstraint("CK_REAuthorityGenerations_KeyId", "octet_length(\"SignatureKeyId\") BETWEEN 1 AND 128 AND \"SignatureKeyId\" ~ '^[a-z0-9][a-z0-9._-]{0,127}$'");
+
+                            t.HasCheckConstraint("CK_REAuthorityGenerations_PayloadBytes", "octet_length(\"CanonicalPayloadUtf8\") BETWEEN 1 AND 2895");
+
+                            t.HasCheckConstraint("CK_REAuthorityGenerations_Sequence", "(\"Sequence\" = 0 AND \"PreviousGenerationId\" IS NULL) OR (\"Sequence\" > 0 AND \"PreviousGenerationId\" IS NOT NULL)");
+
+                            t.HasCheckConstraint("CK_REAuthorityGenerations_Signature", "octet_length(\"SignatureValue\") = 342 AND \"SignatureValue\" !~ '[^A-Za-z0-9_-]'");
+
+                            t.HasCheckConstraint("CK_REAuthorityGenerations_StatementBytes", "octet_length(\"SignedStatementUtf8\") BETWEEN 1 AND 3569");
+
+                            t.HasCheckConstraint("CK_RuntimeEnrollmentAuthorityGenerations_AuthorityDigest", "octet_length(\"AuthorityDigest\") = 64 AND \"AuthorityDigest\" ~ '^[0-9a-f]{64}$'");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeEnrollmentAuthorityLineage", b =>
+                {
+                    b.Property<Guid>("AuthorityLineageId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("HeadGenerationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<long>("HeadSequence")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("LicenseSeatId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Provider")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("ProviderGrantRef")
+                        .IsRequired()
+                        .HasColumnType("varchar(1536)")
+                        .UseCollation("C");
+
+                    b.Property<int>("ProviderGrantRefScalarCount")
+                        .HasColumnType("integer");
+
+                    b.HasKey("AuthorityLineageId")
+                        .HasName("PK_REAuthorityLineages");
+
+                    b.HasIndex("AuthorityLineageId", "HeadGenerationId", "HeadSequence");
+
+                    b.HasIndex("Provider", "ProductId", "ProviderGrantRef", "LicenseSeatId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_REAuthorityLineages_Provider_ProductId_GrantRef_SeatId");
+
+                    b.ToTable("RuntimeEnrollmentAuthorityLineages", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_REAuthorityLineages_GrantRef", "octet_length(\"ProviderGrantRef\") BETWEEN 1 AND 1536 AND \"ProviderGrantRefScalarCount\" BETWEEN 1 AND 256");
+
+                            t.HasCheckConstraint("CK_REAuthorityLineages_HeadSequence", "\"HeadSequence\" >= 0");
+
+                            t.HasCheckConstraint("CK_REAuthorityLineages_Provider", "octet_length(\"Provider\") BETWEEN 1 AND 64 AND \"Provider\" ~ '^[a-z0-9][a-z0-9._-]{0,63}$'");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeEnrollmentAuthorityRequest", b =>
+                {
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("AuthorityGenerationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("AuthorityLineageId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CompletedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ErrorCode")
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<byte[]>("ExactResponseUtf8")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<int>("HttpStatusCode")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("RequestDigest")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("ResultCode")
+                        .IsRequired()
+                        .HasColumnType("varchar(8)")
+                        .UseCollation("C");
+
+                    b.HasKey("RequestId")
+                        .HasName("PK_REAuthorityRequests");
+
+                    b.HasIndex("AuthorityGenerationId", "RequestId")
+                        .HasDatabaseName("IX_REAuthorityRequests_GenerationId_RequestId");
+
+                    b.HasIndex("AuthorityLineageId", "AuthorityGenerationId", "RequestId")
+                        .HasDatabaseName("IX_REAuthorityRequests_LineageId_GenerationId_RequestId");
+
+                    b.HasIndex("RequestId", "AuthorityLineageId", "AuthorityGenerationId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_REAuthorityRequests_RequestId_LineageId_GenerationId");
+
+                    b.ToTable("RuntimeEnrollmentAuthorityRequests", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_REAuthorityRequests_Chronology", "\"CreatedAtUtc\" <= \"CompletedAtUtc\"");
+
+                            t.HasCheckConstraint("CK_REAuthorityRequests_ErrorCode", "\"ErrorCode\" IS NULL OR (octet_length(\"ErrorCode\") BETWEEN 1 AND 64 AND \"ErrorCode\" ~ '^[A-Z0-9_]+$')");
+
+                            t.HasCheckConstraint("CK_REAuthorityRequests_HttpStatus", "\"HttpStatusCode\" IN (200, 400, 403, 409, 503)");
+
+                            t.HasCheckConstraint("CK_REAuthorityRequests_ResponseBytes", "octet_length(\"ExactResponseUtf8\") BETWEEN 1 AND 8192");
+
+                            t.HasCheckConstraint("CK_REAuthorityRequests_ResultCode", "\"ResultCode\" IN ('ACCEPTED', 'REFUSED')");
+
+                            t.HasCheckConstraint("CK_REAuthorityRequests_TerminalShape", "(\"ResultCode\" = 'ACCEPTED' AND \"AuthorityLineageId\" IS NOT NULL AND \"AuthorityGenerationId\" IS NOT NULL AND \"ErrorCode\" IS NULL AND \"HttpStatusCode\" = 200) OR (\"ResultCode\" = 'REFUSED' AND \"AuthorityLineageId\" IS NULL AND \"AuthorityGenerationId\" IS NULL AND \"ErrorCode\" IS NOT NULL AND \"HttpStatusCode\" IN (400, 403, 409, 503))");
+
+                            t.HasCheckConstraint("CK_RuntimeEnrollmentAuthorityRequests_RequestDigest", "octet_length(\"RequestDigest\") = 64 AND \"RequestDigest\" ~ '^[0-9a-f]{64}$'");
                         });
                 });
 
@@ -3262,6 +4368,814 @@ namespace SoftLicence.Server.Migrations
                         });
                 });
 
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeRecoveryCommercialOwnership", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("EndedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("LicenseId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("OwnerSubjectId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("PreviousOwnershipId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("varchar(24)")
+                        .UseCollation("C");
+
+                    b.HasKey("Id");
+
+                    b.HasAlternateKey("ProductId", "LicenseId", "Id")
+                        .HasName("AK_RRCO_ProductId_LicenseId_Id");
+
+                    b.HasIndex("ProductId", "LicenseId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_RRCO_OneActiveOwner")
+                        .HasFilter("\"State\" = 'ACTIVE'");
+
+                    b.HasIndex("ProductId", "OwnerSubjectId");
+
+                    b.HasIndex("ProductId", "LicenseId", "PreviousOwnershipId")
+                        .HasDatabaseName("IX_RRCO_PreviousOwnership");
+
+                    b.ToTable("RuntimeRecoveryCommercialOwnerships", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RRCO_Ended", "(\"State\" = 'ACTIVE' AND \"EndedAtUtc\" IS NULL) OR (\"State\" <> 'ACTIVE' AND \"EndedAtUtc\" IS NOT NULL)");
+
+                            t.HasCheckConstraint("CK_RRCO_Previous_NotSelf", "\"PreviousOwnershipId\" IS NULL OR \"PreviousOwnershipId\" <> \"Id\"");
+
+                            t.HasCheckConstraint("CK_RRCO_State", "\"State\" IN ('PENDING_TRANSFER','ACTIVE','TRANSFERRED','REVOKED')");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeRecoveryCommercialOwnershipCommand", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ExpectedOwnershipId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("LicenseId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("OccurredAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Operation")
+                        .IsRequired()
+                        .HasColumnType("varchar(32)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("RequestDigestSha256")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("ResponseJson")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .UseCollation("C");
+
+                    b.Property<Guid?>("ResultOwnershipId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("TargetCommercialSubjectId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ProductId", "TargetCommercialSubjectId")
+                        .HasDatabaseName("IX_RRCOC_TargetSubject");
+
+                    b.HasIndex("ProductId", "LicenseId", "ExpectedOwnershipId")
+                        .HasDatabaseName("IX_RRCOC_ExpectedOwnership");
+
+                    b.HasIndex("ProductId", "LicenseId", "ResultOwnershipId")
+                        .HasDatabaseName("IX_RRCOC_ResultOwnership");
+
+                    b.ToTable("RuntimeRecoveryCommercialOwnershipCommands", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RRCOC_Operation", "\"Operation\" IN ('TRANSFER_OWNERSHIP','REVOKE_OWNERSHIP')");
+
+                            t.HasCheckConstraint("CK_RRCOC_RequestDigest", "octet_length(\"RequestDigestSha256\") = 64 AND \"RequestDigestSha256\" ~ '^[0-9a-f]{64}$'");
+
+                            t.HasCheckConstraint("CK_RRCOC_ResultShape", "(\"Operation\" = 'TRANSFER_OWNERSHIP' AND \"TargetCommercialSubjectId\" IS NOT NULL AND \"ResultOwnershipId\" IS NOT NULL) OR (\"Operation\" = 'REVOKE_OWNERSHIP' AND \"TargetCommercialSubjectId\" IS NULL AND \"ResultOwnershipId\" IS NULL)");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeRecoveryCommercialSubject", b =>
+                {
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("ProductId", "Id");
+
+                    b.ToTable("RuntimeRecoveryCommercialSubjects", (string)null);
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeRecoveryGrantOwnership", b =>
+                {
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ProviderGrantRefDigestSha256")
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("AuthenticatedClientId")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid?>("CommercialOwnershipId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("LicenseId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("OwnerSubjectId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("RecoveryDigestSha256")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("RecoveryOperationRef")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("ProductId", "ProviderGrantRefDigestSha256");
+
+                    b.HasIndex("RecoveryOperationRef")
+                        .IsUnique();
+
+                    b.HasIndex("ProductId", "LicenseId", "CommercialOwnershipId");
+
+                    b.ToTable("RuntimeRecoveryGrantOwnerships", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RRGO_Digests", "\"ProviderGrantRefDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"RecoveryDigestSha256\" ~ '^[0-9a-f]{64}$'");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeSeatRecoveryActivationReceipt", b =>
+                {
+                    b.Property<string>("AuthenticatedClientId")
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ActivationRequestDigestSha256")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<byte[]>("CanonicalRequestUtf8")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<DateTime>("CompletedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ConfirmationRequestSha256")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("ContentType")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("EnrollmentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ErrorCode")
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<byte[]>("ExactResponseUtf8")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<int>("HttpStatusCode")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("NewAuthorityGenerationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("NewAuthorityLineageId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("PrepareRef")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("PreviousAuthorityGenerationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("PreviousAuthorityLineageId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("RecoveryOperationRef")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("RequestDigestSha256")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("ReservationRef")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("varchar(16)")
+                        .UseCollation("C");
+
+                    b.HasKey("AuthenticatedClientId", "RequestId");
+
+                    b.HasIndex("ReservationRef")
+                        .IsUnique();
+
+                    b.HasIndex("AuthenticatedClientId", "PrepareRef")
+                        .IsUnique()
+                        .HasDatabaseName("UX_RSRActivation_Client_PrepareRef");
+
+                    b.ToTable("RuntimeSeatRecoveryActivationReceipts", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RSRActivation_ContentType", "\"ContentType\" = 'application/json; charset=utf-8'");
+
+                            t.HasCheckConstraint("CK_RSRActivation_Digests", "\"ActivationRequestDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"RequestDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"ConfirmationRequestSha256\" ~ '^[0-9a-f]{64}$'");
+
+                            t.HasCheckConstraint("CK_RSRActivation_RequestBytes", "octet_length(\"CanonicalRequestUtf8\") = 524");
+
+                            t.HasCheckConstraint("CK_RSRActivation_ResponseBytes", "octet_length(\"ExactResponseUtf8\") BETWEEN 1 AND 8192");
+
+                            t.HasCheckConstraint("CK_RSRActivation_State", "\"State\" IN ('COMMITTED','REFUSED')");
+
+                            t.HasCheckConstraint("CK_RSRActivation_TerminalShape", "(\"State\" = 'COMMITTED' AND \"HttpStatusCode\" = 200 AND \"ErrorCode\" IS NULL) OR (\"State\" = 'REFUSED' AND \"HttpStatusCode\" IN (409,410) AND \"ErrorCode\" IN ('activation_conflict','activation_expired'))");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeSeatRecoveryAuthority", b =>
+                {
+                    b.Property<Guid>("ReservationRef")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ArtifactSetDigestSha256")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("AuthorityGenerationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AuthorityLineageId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("BindingId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("EnrollmentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("HardwareIdDigestSha256")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("InstallationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("IsCurrentHead")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("KeyThumbprint")
+                        .IsRequired()
+                        .HasColumnType("varchar(43)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("LicenseSeatId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("PreviousAuthorityGenerationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("PreviousAuthorityLineageId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("PreviousAuthorityState")
+                        .IsRequired()
+                        .HasColumnType("varchar(16)")
+                        .UseCollation("C");
+
+                    b.Property<string>("PublicKeySpkiSha256")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("ReleaseVersion")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("varchar(16)")
+                        .UseCollation("C");
+
+                    b.Property<string>("SubjectRefDigestSha256")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.HasKey("ReservationRef");
+
+                    b.HasIndex("AuthorityGenerationId")
+                        .IsUnique();
+
+                    b.HasIndex("BindingId")
+                        .IsUnique();
+
+                    b.HasIndex("EnrollmentId")
+                        .IsUnique();
+
+                    b.HasIndex("LicenseSeatId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_RSRAuthorities_OneActivePerSeat")
+                        .HasFilter("\"State\" = 'ACTIVE'");
+
+                    b.HasIndex("AuthorityLineageId", "AuthorityGenerationId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_RSRAuthorities_NewLineageGeneration");
+
+                    b.HasIndex("PreviousAuthorityLineageId", "PreviousAuthorityGenerationId")
+                        .HasDatabaseName("IX_RSRAuthorities_PreviousLineageGeneration");
+
+                    b.HasIndex("ReservationRef", "LicenseSeatId")
+                        .IsUnique();
+
+                    b.ToTable("RuntimeSeatRecoveryAuthorities", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RSRAuthority_Digests", "\"HardwareIdDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"ArtifactSetDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"PublicKeySpkiSha256\" ~ '^[0-9a-f]{64}$' AND \"SubjectRefDigestSha256\" ~ '^[0-9a-f]{64}$'");
+
+                            t.HasCheckConstraint("CK_RSRAuthority_PreviousState", "\"PreviousAuthorityState\" IN ('ACTIVE','SUPERSEDED')");
+
+                            t.HasCheckConstraint("CK_RSRAuthority_State", "\"State\" IN ('PREPARED','ACTIVE','ABANDONED','SUPERSEDED')");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeSeatRecoveryAuthorization", b =>
+                {
+                    b.Property<string>("AuthenticatedClientId")
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<byte[]>("CanonicalRequestUtf8")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<DateTime>("CompletedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ContentType")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("Decision")
+                        .IsRequired()
+                        .HasColumnType("varchar(16)")
+                        .UseCollation("C");
+
+                    b.Property<string>("ErrorCode")
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<byte[]>("ExactResponseUtf8")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<int>("HttpStatusCode")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("RecoveryDigestSha256")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("RecoveryOperationRef")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("RequestDigestSha256")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid?>("ReservationRef")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("AuthenticatedClientId", "RequestId");
+
+                    b.HasIndex("RecoveryOperationRef");
+
+                    b.HasIndex("ReservationRef")
+                        .IsUnique()
+                        .HasFilter("\"ReservationRef\" IS NOT NULL");
+
+                    b.ToTable("RuntimeSeatRecoveryAuthorizations", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RSRA_Decision", "\"Decision\" IN ('AUTHORIZED', 'REFUSED')");
+
+                            t.HasCheckConstraint("CK_RSRA_RecoveryDigest", "octet_length(\"RecoveryDigestSha256\") = 64 AND \"RecoveryDigestSha256\" ~ '^[0-9a-f]{64}$'");
+
+                            t.HasCheckConstraint("CK_RSRA_RequestBytes", "octet_length(\"CanonicalRequestUtf8\") BETWEEN 1 AND 4096");
+
+                            t.HasCheckConstraint("CK_RSRA_RequestDigest", "octet_length(\"RequestDigestSha256\") = 64 AND \"RequestDigestSha256\" ~ '^[0-9a-f]{64}$'");
+
+                            t.HasCheckConstraint("CK_RSRA_ResponseBytes", "octet_length(\"ExactResponseUtf8\") BETWEEN 1 AND 16384");
+
+                            t.HasCheckConstraint("CK_RSRA_TerminalShape", "(\"Decision\" = 'AUTHORIZED' AND \"ReservationRef\" IS NOT NULL AND \"ErrorCode\" IS NULL AND \"HttpStatusCode\" = 200) OR (\"Decision\" = 'REFUSED' AND \"ReservationRef\" IS NULL AND \"ErrorCode\" IS NOT NULL AND \"HttpStatusCode\" IN (400,403,409,410))");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeSeatRecoveryKeyConfirmation", b =>
+                {
+                    b.Property<string>("AuthenticatedClientId")
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("PrepareRef")
+                        .HasColumnType("uuid");
+
+                    b.Property<byte[]>("CanonicalRequestUtf8")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<DateTime>("CompletedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ConfirmationRequestSha256")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("ContentType")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("ErrorCode")
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<byte[]>("ExactResponseUtf8")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<int>("HttpStatusCode")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("varchar(16)")
+                        .UseCollation("C");
+
+                    b.HasKey("AuthenticatedClientId", "PrepareRef");
+
+                    b.ToTable("RuntimeSeatRecoveryKeyConfirmations", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RSRKC_Digest", "\"ConfirmationRequestSha256\" ~ '^[0-9a-f]{64}$'");
+
+                            t.HasCheckConstraint("CK_RSRKC_RequestBytes", "octet_length(\"CanonicalRequestUtf8\") BETWEEN 1 AND 4096");
+
+                            t.HasCheckConstraint("CK_RSRKC_ResponseBytes", "octet_length(\"ExactResponseUtf8\") BETWEEN 1 AND 8192");
+
+                            t.HasCheckConstraint("CK_RSRKC_State", "\"State\" IN ('PROVED','REFUSED')");
+
+                            t.HasCheckConstraint("CK_RSRKC_TerminalShape", "(\"State\" = 'PROVED' AND \"HttpStatusCode\" = 200 AND \"ErrorCode\" IS NULL) OR (\"State\" = 'REFUSED' AND \"HttpStatusCode\" IN (403,409,410) AND \"ErrorCode\" IS NOT NULL)");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeSeatRecoveryKeyPreparation", b =>
+                {
+                    b.Property<string>("AuthenticatedClientId")
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("PrepareRef")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AuthorityGenerationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<byte[]>("CanonicalRequestUtf8")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<string>("ChallengeCiphertext")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .UseCollation("C");
+
+                    b.Property<DateTime?>("ChallengeConsumedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ChallengeDigestSha256")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("ChallengeKeyId")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("ConfirmAudience")
+                        .IsRequired()
+                        .HasColumnType("varchar(96)")
+                        .UseCollation("C");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("EnrollmentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<byte[]>("ExactResponseUtf8")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<DateTime>("ExpiresAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("PublicKeySpkiCiphertext")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .UseCollation("C");
+
+                    b.Property<string>("PublicKeySpkiKeyId")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<string>("PublicKeySpkiSha256")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("RecoveryOperationRef")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("RequestDigestSha256")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ReservationRef")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("AuthenticatedClientId", "PrepareRef");
+
+                    b.HasAlternateKey("AuthenticatedClientId", "RequestId", "RecoveryOperationRef")
+                        .HasName("AK_RSRKP_Client_Request_Recovery");
+
+                    b.HasIndex("AuthorityGenerationId")
+                        .IsUnique();
+
+                    b.HasIndex("EnrollmentId")
+                        .IsUnique();
+
+                    b.HasIndex("ReservationRef")
+                        .IsUnique();
+
+                    b.ToTable("RuntimeSeatRecoveryKeyPreparations", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RSRKP_Audience", "\"ConfirmAudience\" = 'softlicence:runtime-identity-recovery:confirm:v1'");
+
+                            t.HasCheckConstraint("CK_RSRKP_Chronology", "\"CreatedAtUtc\" < \"ExpiresAtUtc\" AND (\"ChallengeConsumedAtUtc\" IS NULL OR \"ChallengeConsumedAtUtc\" >= \"CreatedAtUtc\")");
+
+                            t.HasCheckConstraint("CK_RSRKP_Digests", "\"RequestDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"PublicKeySpkiSha256\" ~ '^[0-9a-f]{64}$' AND \"ChallengeDigestSha256\" ~ '^[0-9a-f]{64}$'");
+
+                            t.HasCheckConstraint("CK_RSRKP_RequestBytes", "octet_length(\"CanonicalRequestUtf8\") BETWEEN 1 AND 4096");
+
+                            t.HasCheckConstraint("CK_RSRKP_ResponseBytes", "octet_length(\"ExactResponseUtf8\") BETWEEN 1 AND 8192");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeSeatRecoveryProofReceipt", b =>
+                {
+                    b.Property<string>("AuthenticatedClientId")
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("PrepareRef")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AuthorityGenerationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ConfirmationRequestSha256")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("EnrollmentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("ExpiresAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("PreparationExpiresAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("ProvedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("PublicKeySpkiSha256")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("RecoveryOperationRef")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("RequestDigestSha256")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("ReservationExpiresAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("ReservationRef")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("varchar(16)")
+                        .UseCollation("C");
+
+                    b.HasKey("AuthenticatedClientId", "PrepareRef");
+
+                    b.HasIndex("AuthorityGenerationId")
+                        .IsUnique();
+
+                    b.HasIndex("ReservationRef")
+                        .IsUnique();
+
+                    b.ToTable("RuntimeSeatRecoveryProofReceipts", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RSRPR_Chronology", "\"ProvedAtUtc\" < \"ExpiresAtUtc\"");
+
+                            t.HasCheckConstraint("CK_RSRPR_Digests", "\"RequestDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"PublicKeySpkiSha256\" ~ '^[0-9a-f]{64}$' AND \"ConfirmationRequestSha256\" ~ '^[0-9a-f]{64}$'");
+
+                            t.HasCheckConstraint("CK_RSRPR_ExpiryMinimum", "\"ExpiresAtUtc\" = LEAST(\"PreparationExpiresAtUtc\", \"ReservationExpiresAtUtc\")");
+
+                            t.HasCheckConstraint("CK_RSRPR_State", "\"State\" = 'PROVED'");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeSeatRecoveryReservation", b =>
+                {
+                    b.Property<Guid>("ReservationRef")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AuthenticatedClientId")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("ExpiresAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("LicenseId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("LicenseSeatId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ProviderGrantRef")
+                        .IsRequired()
+                        .HasColumnType("varchar(1536)")
+                        .UseCollation("C");
+
+                    b.Property<Guid>("RecoveryOperationRef")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasColumnType("varchar(16)")
+                        .UseCollation("C");
+
+                    b.HasKey("ReservationRef");
+
+                    b.HasAlternateKey("ReservationRef", "LicenseSeatId")
+                        .HasName("AK_RuntimeSeatRecoveryReservations_ReservationRef_LicenseSeatId");
+
+                    b.HasIndex("LicenseId");
+
+                    b.HasIndex("LicenseSeatId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_RSRR_OneReservedPerSeat")
+                        .HasFilter("\"State\" = 'RESERVED'");
+
+                    b.HasIndex("RecoveryOperationRef")
+                        .IsUnique();
+
+                    b.HasIndex("AuthenticatedClientId", "RequestId", "RecoveryOperationRef")
+                        .IsUnique();
+
+                    b.ToTable("RuntimeSeatRecoveryReservations", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_RSRR_Chronology", "\"CreatedAtUtc\" < \"ExpiresAtUtc\"");
+
+                            t.HasCheckConstraint("CK_RSRR_State", "\"State\" IN ('RESERVED','COMMITTED','ABANDONED')");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeSeatRecoveryRevokedClaimNonce", b =>
+                {
+                    b.Property<Guid>("Nonce")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ReasonCode")
+                        .IsRequired()
+                        .HasColumnType("varchar(64)")
+                        .UseCollation("C");
+
+                    b.Property<DateTime>("RevokedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Nonce");
+
+                    b.ToTable("RuntimeSeatRecoveryRevokedClaimNonces", (string)null);
+                });
+
             modelBuilder.Entity("SoftLicence.Server.Data.SecurityIncident", b =>
                 {
                     b.Property<Guid>("Id")
@@ -3359,6 +5273,281 @@ namespace SoftLicence.Server.Migrations
                     b.ToTable("SecurityIncidentEvidence");
                 });
 
+            modelBuilder.Entity("SoftLicence.Server.Data.SecurityLockAlertDelivery", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("AttemptCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Channel")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("ClientIp")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<DateTime?>("LeaseExpiresUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("LeaseToken")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Message")
+                        .HasColumnType("text");
+
+                    b.Property<bool>("NewBan")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTime>("NextAttemptUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("SecurityLockReportId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("SentAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("Target")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<string>("TargetDigestSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Title")
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)");
+
+                    b.Property<string>("Trigger")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("State", "NextAttemptUtc");
+
+                    b.HasIndex("SecurityLockReportId", "Trigger", "Channel", "TargetDigestSha256")
+                        .IsUnique();
+
+                    b.ToTable("SecurityLockAlertDeliveries", t =>
+                        {
+                            t.HasCheckConstraint("CK_SecurityLockAlertDeliveries_Attempts", "\"AttemptCount\" >= 0");
+
+                            t.HasCheckConstraint("CK_SecurityLockAlertDeliveries_Channel", "\"Channel\" IN ('EMAIL', 'WEBHOOK')");
+
+                            t.HasCheckConstraint("CK_SecurityLockAlertDeliveries_State", "\"State\" IN ('PENDING', 'PROCESSING', 'SENT', 'SKIPPED', 'FAILED', 'UNKNOWN')");
+
+                            t.HasCheckConstraint("CK_SecurityLockAlertDeliveries_TargetDigest", "\"TargetDigestSha256\" ~ '^[0-9a-f]{64}$'");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.SecurityLockEnforcementPolicy", b =>
+                {
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Cause")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Mode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedBy")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.HasKey("ProductId", "Cause");
+
+                    b.ToTable("SecurityLockEnforcementPolicies", t =>
+                        {
+                            t.HasCheckConstraint("CK_SecurityLockEnforcementPolicies_Mode", "\"Mode\" IN ('SHADOW', 'REVIEW', 'ENFORCE')");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.SecurityLockReport", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AdminDecision")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<DateTime?>("AdminDecisionAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("AdminDecisionBy")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("AdminDecisionReason")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<string>("AppVersion")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<Guid>("BindingId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Cause")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("ClientMode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("EffectiveMode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<Guid>("EnrollmentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("EvidenceDigestSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime>("FirstReportedUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("FirstSeenUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("HardwareId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("InstallationId")
+                        .IsRequired()
+                        .HasMaxLength(36)
+                        .HasColumnType("character varying(36)");
+
+                    b.Property<DateTime>("LastReportedUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LastVerdict")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<int>("Level")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("LockId")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("ReportCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("HardwareId");
+
+                    b.HasIndex("EnrollmentId", "LockId")
+                        .IsUnique();
+
+                    b.HasIndex("State", "LastReportedUtc");
+
+                    b.ToTable("SecurityLockReports", t =>
+                        {
+                            t.HasCheckConstraint("CK_SecurityLockReports_AdminDecision", "\"AdminDecision\" IS NULL OR \"AdminDecision\" IN ('RELEASE', 'BAN')");
+
+                            t.HasCheckConstraint("CK_SecurityLockReports_CanonicalIds", "\"LockId\" ~ '^[0-9a-f]{32}$' AND \"EvidenceDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"Cause\" ~ '^[A-Z][A-Z0-9_]*$' AND \"HardwareId\" ~ '^[A-Z0-9_.-]+$'");
+
+                            t.HasCheckConstraint("CK_SecurityLockReports_LastVerdict", "\"LastVerdict\" IN ('MAINTAIN', 'RELEASE', 'BAN')");
+
+                            t.HasCheckConstraint("CK_SecurityLockReports_Level", "\"Level\" BETWEEN 0 AND 5");
+
+                            t.HasCheckConstraint("CK_SecurityLockReports_Modes", "\"ClientMode\" IN ('NOT_APPLICABLE', 'SHADOW', 'REVIEW', 'ENFORCE') AND \"EffectiveMode\" IN ('NOT_APPLICABLE', 'SHADOW', 'REVIEW', 'ENFORCE')");
+
+                            t.HasCheckConstraint("CK_SecurityLockReports_State", "\"State\" IN ('OPEN', 'RELEASED', 'BANNED')");
+                        });
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.SecurityLockReportNonce", b =>
+                {
+                    b.Property<Guid>("EnrollmentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Jti")
+                        .HasMaxLength(36)
+                        .HasColumnType("character varying(36)");
+
+                    b.Property<string>("BodyDigestSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime>("ExpiresAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ReportId")
+                        .IsRequired()
+                        .HasMaxLength(36)
+                        .HasColumnType("character varying(36)");
+
+                    b.Property<string>("ResponseJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("EnrollmentId", "Jti");
+
+                    b.HasIndex("ExpiresAtUtc");
+
+                    b.ToTable("SecurityLockReportNonces");
+                });
+
             modelBuilder.Entity("SoftLicence.Server.Data.SystemSetting", b =>
                 {
                     b.Property<string>("Key")
@@ -3447,6 +5636,93 @@ namespace SoftLicence.Server.Migrations
                         .IsUnique();
 
                     b.ToTable("TelemetryCertPinningDailyAlerts");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.TelemetryUpdatePreflightAlert", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CurrentVersion")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("DecisionReason")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTime>("FirstSeenUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LastPresentationStage")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<DateTime>("LastSeenUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LatestVersion")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<Guid?>("NotificationClaimId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("NotificationClaimedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("NotificationSentAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long>("OccurrenceCount")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("ProductId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ReconciliationOutcome")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("SelectedChannel")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("SignatureSha256")
+                        .IsRequired()
+                        .IsFixedLength()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)");
+
+                    b.Property<string>("SupportCode")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<DateTime>("WindowEndUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("WindowStartUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ProductId", "LastSeenUtc");
+
+                    b.HasIndex("ProductId", "SignatureSha256", "WindowStartUtc")
+                        .IsUnique();
+
+                    b.ToTable("TelemetryUpdatePreflightAlerts", t =>
+                        {
+                            t.HasCheckConstraint("CK_TelemetryUpdatePreflightAlerts_SignatureSha256", "length(\"SignatureSha256\") = 64 AND \"SignatureSha256\" ~ '^[0-9a-f]{64}$'");
+                        });
                 });
 
             modelBuilder.Entity("SoftLicence.Server.Data.TelemetryDiagnostic", b =>
@@ -3910,6 +6186,13 @@ namespace SoftLicence.Server.Migrations
                         .HasForeignKey("ProductId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+
+                    b.HasOne("SoftLicence.Server.Data.RuntimeEnrollmentAuthorityGeneration", null)
+                        .WithMany()
+                        .HasForeignKey("AuthorityLineageId", "AuthorityGenerationId")
+                        .HasPrincipalKey("AuthorityLineageId", "AuthorityGenerationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("FK_Tkt000686_DistributionEntitlements_REAuthorityGeneration");
                 });
 
             modelBuilder.Entity("SoftLicence.Server.Data.DistributionGrantOwnership", b =>
@@ -4099,6 +6382,14 @@ namespace SoftLicence.Server.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
+                    b.HasOne("SoftLicence.Server.Data.RuntimeRecoveryCommercialSubject", "CommercialSubject")
+                        .WithMany()
+                        .HasForeignKey("ProductId", "CommercialSubjectId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .HasConstraintName("FK_LicenseProvisioningRequests_CommercialSubjects_ProductId_SubjectId");
+
+                    b.Navigation("CommercialSubject");
+
                     b.Navigation("Product");
                 });
 
@@ -4166,6 +6457,40 @@ namespace SoftLicence.Server.Migrations
                     b.Navigation("Product");
                 });
 
+            modelBuilder.Entity("SoftLicence.Server.Data.PersonalDayPass", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.RuntimeRecoveryCommercialSubject", null)
+                        .WithMany()
+                        .HasForeignKey("ProductId", "CommercialSubjectId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("SoftLicence.Server.Data.License", null)
+                        .WithMany()
+                        .HasForeignKey("ProductId", "LicenseId")
+                        .HasPrincipalKey("ProductId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.PersonalDayPassOperation", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.PersonalDayPassPayment", null)
+                        .WithMany()
+                        .HasForeignKey("PaymentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.PersonalDayPassPayment", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.PersonalDayPass", null)
+                        .WithMany()
+                        .HasForeignKey("PassId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("SoftLicence.Server.Data.PiracySuspect", b =>
                 {
                     b.HasOne("SoftLicence.Server.Data.Product", "Product")
@@ -4175,6 +6500,16 @@ namespace SoftLicence.Server.Migrations
                         .IsRequired();
 
                     b.Navigation("Product");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.PortalDeactivationOperation", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.License", null)
+                        .WithMany()
+                        .HasForeignKey("ProductId", "LicenseId")
+                        .HasPrincipalKey("ProductId", "Id")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("SoftLicence.Server.Data.Product", b =>
@@ -4196,6 +6531,60 @@ namespace SoftLicence.Server.Migrations
                         .IsRequired();
 
                     b.Navigation("Product");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RecoveryTelemetryEvent", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.RecoveryTelemetryRun", "Run")
+                        .WithMany("Events")
+                        .HasForeignKey("RunId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Run");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RecoveryTelemetryRejection", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.Product", "Product")
+                        .WithMany()
+                        .HasForeignKey("ProductId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.Navigation("Product");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RecoveryTelemetryRun", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.Product", "Product")
+                        .WithMany()
+                        .HasForeignKey("ProductId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Product");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeAuthorityKeyRegistryHead", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.RuntimeAuthorityKeyRegistrySnapshot", null)
+                        .WithMany()
+                        .HasForeignKey("RegistryId", "CurrentSnapshotId", "CurrentSnapshotVersion", "CurrentMetadataDigestSha256", "CurrentRegistryAuthenticationInputDigestSha256", "CurrentPublicationState")
+                        .HasPrincipalKey("RegistryId", "SnapshotId", "SnapshotVersion", "MetadataDigestSha256", "RegistryAuthenticationInputDigestSha256", "PublicationState")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_RAKRHeads_RAKRSnapshots_CurrentTuple");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeAuthorityKeyRegistryReadback", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.RuntimeAuthorityKeyRegistrySnapshot", null)
+                        .WithMany()
+                        .HasForeignKey("SnapshotId", "ExactResponseBodySha256")
+                        .HasPrincipalKey("SnapshotId", "ExactResponseBodySha256")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_RAKRReadbacks_RAKRSnapshots_Body");
                 });
 
             modelBuilder.Entity("SoftLicence.Server.Data.RuntimeCanaryProofNonce", b =>
@@ -4279,6 +6668,15 @@ namespace SoftLicence.Server.Migrations
                     b.Navigation("Recovery");
                 });
 
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeDistributionHardwareDecision", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.Product", null)
+                        .WithMany()
+                        .HasForeignKey("ProductId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("SoftLicence.Server.Data.RuntimeEnrollment", b =>
                 {
                     b.HasOne("SoftLicence.Server.Data.DistributionInstallationBinding", "Binding")
@@ -4300,6 +6698,64 @@ namespace SoftLicence.Server.Migrations
                         .IsRequired();
 
                     b.Navigation("Binding");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeEnrollmentAuthorityAttempt", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.RuntimeEnrollmentAuthorityRequest", "Request")
+                        .WithMany()
+                        .HasForeignKey("RequestId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_REAuthorityAttempts_REAuthorityRequests_Request");
+
+                    b.Navigation("Request");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeEnrollmentAuthorityGeneration", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.RuntimeEnrollmentAuthorityLineage", "Lineage")
+                        .WithMany("Generations")
+                        .HasForeignKey("AuthorityLineageId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_REAuthorityGenerations_REAuthorityLineages_Lineage");
+
+                    b.HasOne("SoftLicence.Server.Data.RuntimeEnrollmentAuthorityGeneration", "PreviousGeneration")
+                        .WithMany()
+                        .HasForeignKey("AuthorityLineageId", "PreviousGenerationId")
+                        .HasPrincipalKey("AuthorityLineageId", "AuthorityGenerationId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .HasConstraintName("FK_REAuthorityGenerations_REAuthorityGenerations_Predecessor");
+
+                    b.Navigation("Lineage");
+
+                    b.Navigation("PreviousGeneration");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeEnrollmentAuthorityLineage", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.RuntimeEnrollmentAuthorityGeneration", "HeadGeneration")
+                        .WithMany()
+                        .HasForeignKey("AuthorityLineageId", "HeadGenerationId", "HeadSequence")
+                        .HasPrincipalKey("AuthorityLineageId", "AuthorityGenerationId", "Sequence")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_REAuthorityLineages_REAuthorityGenerations_Head");
+
+                    b.Navigation("HeadGeneration");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeEnrollmentAuthorityRequest", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.RuntimeEnrollmentAuthorityGeneration", "Generation")
+                        .WithMany()
+                        .HasForeignKey("AuthorityLineageId", "AuthorityGenerationId", "RequestId")
+                        .HasPrincipalKey("AuthorityLineageId", "AuthorityGenerationId", "RequestId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .HasConstraintName("FK_REAuthorityRequests_REAuthorityGenerations_Result");
+
+                    b.Navigation("Generation");
                 });
 
             modelBuilder.Entity("SoftLicence.Server.Data.RuntimeEnrollmentEncryptionNonce", b =>
@@ -4397,6 +6853,208 @@ namespace SoftLicence.Server.Migrations
                     b.Navigation("Enrollment");
                 });
 
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeRecoveryCommercialOwnership", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.Product", null)
+                        .WithMany()
+                        .HasForeignKey("ProductId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_RRCO_Products_ProductId");
+
+                    b.HasOne("SoftLicence.Server.Data.License", null)
+                        .WithMany()
+                        .HasForeignKey("ProductId", "LicenseId")
+                        .HasPrincipalKey("ProductId", "Id")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_RRCO_Licenses_ProductId_LicenseId");
+
+                    b.HasOne("SoftLicence.Server.Data.RuntimeRecoveryCommercialSubject", null)
+                        .WithMany()
+                        .HasForeignKey("ProductId", "OwnerSubjectId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_RRCO_CommercialSubjects_ProductId_OwnerSubjectId");
+
+                    b.HasOne("SoftLicence.Server.Data.RuntimeRecoveryCommercialOwnership", null)
+                        .WithMany()
+                        .HasForeignKey("ProductId", "LicenseId", "PreviousOwnershipId")
+                        .HasPrincipalKey("ProductId", "LicenseId", "Id")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .HasConstraintName("FK_RRCO_Previous_ProductId_LicenseId_OwnershipId");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeRecoveryCommercialOwnershipCommand", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.Product", null)
+                        .WithMany()
+                        .HasForeignKey("ProductId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_RRCOC_Products_ProductId");
+
+                    b.HasOne("SoftLicence.Server.Data.License", null)
+                        .WithMany()
+                        .HasForeignKey("ProductId", "LicenseId")
+                        .HasPrincipalKey("ProductId", "Id")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_RRCOC_Licenses_ProductId_LicenseId");
+
+                    b.HasOne("SoftLicence.Server.Data.RuntimeRecoveryCommercialSubject", null)
+                        .WithMany()
+                        .HasForeignKey("ProductId", "TargetCommercialSubjectId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .HasConstraintName("FK_RRCOC_TargetSubjects_ProductId_SubjectId");
+
+                    b.HasOne("SoftLicence.Server.Data.RuntimeRecoveryCommercialOwnership", null)
+                        .WithMany()
+                        .HasForeignKey("ProductId", "LicenseId", "ExpectedOwnershipId")
+                        .HasPrincipalKey("ProductId", "LicenseId", "Id")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_RRCOC_ExpectedOwnership_ProductId_LicenseId_Id");
+
+                    b.HasOne("SoftLicence.Server.Data.RuntimeRecoveryCommercialOwnership", null)
+                        .WithMany()
+                        .HasForeignKey("ProductId", "LicenseId", "ResultOwnershipId")
+                        .HasPrincipalKey("ProductId", "LicenseId", "Id")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .HasConstraintName("FK_RRCOC_ResultOwnership_ProductId_LicenseId_Id");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeRecoveryCommercialSubject", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.Product", "Product")
+                        .WithMany()
+                        .HasForeignKey("ProductId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_RRCS_Products_ProductId");
+
+                    b.Navigation("Product");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeRecoveryGrantOwnership", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.RuntimeRecoveryCommercialOwnership", null)
+                        .WithMany()
+                        .HasForeignKey("ProductId", "LicenseId", "CommercialOwnershipId")
+                        .HasPrincipalKey("ProductId", "LicenseId", "Id")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .HasConstraintName("FK_RRGO_CommercialOwnership_ProductId_LicenseId_OwnershipId");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeSeatRecoveryActivationReceipt", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.RuntimeSeatRecoveryReservation", null)
+                        .WithOne()
+                        .HasForeignKey("SoftLicence.Server.Data.RuntimeSeatRecoveryActivationReceipt", "ReservationRef")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+
+                    b.HasOne("SoftLicence.Server.Data.RuntimeSeatRecoveryProofReceipt", null)
+                        .WithOne()
+                        .HasForeignKey("SoftLicence.Server.Data.RuntimeSeatRecoveryActivationReceipt", "AuthenticatedClientId", "PrepareRef")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeSeatRecoveryAuthority", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.RuntimeEnrollmentAuthorityGeneration", null)
+                        .WithOne()
+                        .HasForeignKey("SoftLicence.Server.Data.RuntimeSeatRecoveryAuthority", "AuthorityLineageId", "AuthorityGenerationId")
+                        .HasPrincipalKey("SoftLicence.Server.Data.RuntimeEnrollmentAuthorityGeneration", "AuthorityLineageId", "AuthorityGenerationId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_RSRAuthorities_REAuthorityGenerations_New");
+
+                    b.HasOne("SoftLicence.Server.Data.RuntimeEnrollmentAuthorityGeneration", null)
+                        .WithMany()
+                        .HasForeignKey("PreviousAuthorityLineageId", "PreviousAuthorityGenerationId")
+                        .HasPrincipalKey("AuthorityLineageId", "AuthorityGenerationId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_RSRAuthorities_REAuthorityGenerations_Previous");
+
+                    b.HasOne("SoftLicence.Server.Data.RuntimeSeatRecoveryReservation", null)
+                        .WithOne()
+                        .HasForeignKey("SoftLicence.Server.Data.RuntimeSeatRecoveryAuthority", "ReservationRef", "LicenseSeatId")
+                        .HasPrincipalKey("SoftLicence.Server.Data.RuntimeSeatRecoveryReservation", "ReservationRef", "LicenseSeatId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_RSRAuthorities_RSRReservations_ReservationRef_LicenseSeatId");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeSeatRecoveryKeyConfirmation", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.RuntimeSeatRecoveryKeyPreparation", null)
+                        .WithOne()
+                        .HasForeignKey("SoftLicence.Server.Data.RuntimeSeatRecoveryKeyConfirmation", "AuthenticatedClientId", "PrepareRef")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_RSRKC_RSRKeyPreparations_Client_Prepare");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeSeatRecoveryKeyPreparation", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.RuntimeSeatRecoveryReservation", null)
+                        .WithOne()
+                        .HasForeignKey("SoftLicence.Server.Data.RuntimeSeatRecoveryKeyPreparation", "ReservationRef")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_RSRKP_RSRReservations_ReservationRef");
+
+                    b.HasOne("SoftLicence.Server.Data.RuntimeSeatRecoveryAuthorization", null)
+                        .WithOne()
+                        .HasForeignKey("SoftLicence.Server.Data.RuntimeSeatRecoveryKeyPreparation", "AuthenticatedClientId", "RequestId", "RecoveryOperationRef")
+                        .HasPrincipalKey("SoftLicence.Server.Data.RuntimeSeatRecoveryAuthorization", "AuthenticatedClientId", "RequestId", "RecoveryOperationRef")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_RSRKP_RSRAuthorizations_Client_Request_Recovery");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeSeatRecoveryProofReceipt", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.RuntimeSeatRecoveryReservation", null)
+                        .WithOne()
+                        .HasForeignKey("SoftLicence.Server.Data.RuntimeSeatRecoveryProofReceipt", "ReservationRef")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_RSRPR_RSRReservations_ReservationRef");
+
+                    b.HasOne("SoftLicence.Server.Data.RuntimeSeatRecoveryKeyConfirmation", null)
+                        .WithOne()
+                        .HasForeignKey("SoftLicence.Server.Data.RuntimeSeatRecoveryProofReceipt", "AuthenticatedClientId", "PrepareRef")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("FK_RSRPR_RSRKeyConfirmations_Client_Prepare");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeSeatRecoveryReservation", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.License", null)
+                        .WithMany()
+                        .HasForeignKey("LicenseId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+
+                    b.HasOne("SoftLicence.Server.Data.LicenseSeat", null)
+                        .WithMany()
+                        .HasForeignKey("LicenseSeatId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+
+                    b.HasOne("SoftLicence.Server.Data.RuntimeSeatRecoveryAuthorization", null)
+                        .WithOne()
+                        .HasForeignKey("SoftLicence.Server.Data.RuntimeSeatRecoveryReservation", "AuthenticatedClientId", "RequestId", "RecoveryOperationRef")
+                        .HasPrincipalKey("SoftLicence.Server.Data.RuntimeSeatRecoveryAuthorization", "AuthenticatedClientId", "RequestId", "RecoveryOperationRef")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("SoftLicence.Server.Data.SecurityIncident", b =>
                 {
                     b.HasOne("SoftLicence.Server.Data.Product", "Product")
@@ -4419,7 +7077,49 @@ namespace SoftLicence.Server.Migrations
                     b.Navigation("SecurityIncident");
                 });
 
+            modelBuilder.Entity("SoftLicence.Server.Data.SecurityLockAlertDelivery", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.SecurityLockReport", "SecurityLockReport")
+                        .WithMany()
+                        .HasForeignKey("SecurityLockReportId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("SecurityLockReport");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.SecurityLockReport", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.RuntimeEnrollment", "Enrollment")
+                        .WithMany()
+                        .HasForeignKey("EnrollmentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Enrollment");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.SecurityLockReportNonce", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.RuntimeEnrollment", null)
+                        .WithMany()
+                        .HasForeignKey("EnrollmentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("SoftLicence.Server.Data.TelemetryCertPinningDailyAlert", b =>
+                {
+                    b.HasOne("SoftLicence.Server.Data.Product", "Product")
+                        .WithMany()
+                        .HasForeignKey("ProductId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Product");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.TelemetryUpdatePreflightAlert", b =>
                 {
                     b.HasOne("SoftLicence.Server.Data.Product", "Product")
                         .WithMany()
@@ -4547,6 +7247,16 @@ namespace SoftLicence.Server.Migrations
                     b.Navigation("TelemetryRecords");
 
                     b.Navigation("Webhooks");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RecoveryTelemetryRun", b =>
+                {
+                    b.Navigation("Events");
+                });
+
+            modelBuilder.Entity("SoftLicence.Server.Data.RuntimeEnrollmentAuthorityLineage", b =>
+                {
+                    b.Navigation("Generations");
                 });
 
             modelBuilder.Entity("SoftLicence.Server.Data.SecurityIncident", b =>

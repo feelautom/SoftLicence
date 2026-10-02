@@ -1,5 +1,16 @@
 # Changelog
 
+## SDK v1.1.15 - 2026-10-02
+
+### Signed assembly
+
+- security(sdk): `SoftLicence.SDK.dll` now carries an Authenticode signature with a trusted timestamp, so Windows Smart App Control no longer refuses to load it
+- release(sdk): the package is built and signed on the release workstation and attached to the GitHub Release; the publish workflow verifies its identity and signature before pushing it to NuGet
+- compatibility(sdk): no API or behavior change compared with 1.1.14
+
+## 2026-08-20
+- fix(runtime): recover authenticated alias in finalize v4
+
 ## SDK v1.1.14 - 2026-08-19
 
 ### Explicit Runtime hardware authority

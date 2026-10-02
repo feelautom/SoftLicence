@@ -22,8 +22,81 @@ public sealed class RuntimeEnrollmentOptions
     public int KeyRegistryVersion { get; set; } = 1;
     public string IpPseudonymKeyBase64 { get; set; } = string.Empty;
     public RuntimeCapabilitySigningOptions CapabilitySigning { get; set; } = new();
+    /// <summary>Gets or sets the optional runtime authority-generation signing configuration.</summary>
+    public RuntimeAuthorityGenerationSigningOptions? AuthorityGenerationSigning { get; set; }
+    /// <summary>Gets or sets the optional, independently selected v2 issuance mode and registry authentication data.</summary>
+    public RuntimeAuthorityGenerationV2Options AuthorityGenerationV2 { get; set; } = new();
     public RuntimeEncryptionOptions Encryption { get; set; } = new();
     public List<RuntimeProductCapabilityOptions> Products { get; set; } = [];
+}
+
+/// <summary>Activates the authenticated v2 authority-generation ingress without changing v1 availability.</summary>
+public sealed class RuntimeAuthorityGenerationV2Options
+{
+    /// <summary>Gets or sets the exact selector, either off or enabled.</summary>
+    public string Mode { get; set; } = "off";
+    /// <summary>Gets or sets the separately provisioned Base64 DER registry-authority SPKI pin.</summary>
+    public string RegistryAuthoritySpkiBase64 { get; set; } = string.Empty;
+    /// <summary>Gets or sets the canonical unpadded Base64Url signature over the configured registry snapshot.</summary>
+    public string RegistrySnapshotSignatureBase64Url { get; set; } = string.Empty;
+    /// <summary>Gets or sets the exact authenticated UTC snapshot observation timestamp.</summary>
+    public string RegistryObservedAtUtc { get; set; } = string.Empty;
+}
+
+/// <summary>Configures the isolated PS256 key registry used by runtime authority generations.</summary>
+public sealed class RuntimeAuthorityGenerationSigningOptions
+{
+    /// <summary>Gets or sets the sole operational key allowed to sign new generations.</summary>
+    public string ActiveSigningKeyId { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets the trusted registry snapshot identity.</summary>
+    public string RegistrySnapshotId { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets the positive trusted registry snapshot version.</summary>
+    public long RegistrySnapshotVersion { get; set; }
+
+    /// <summary>Gets or sets the ordinally sorted operational and recovery key metadata.</summary>
+    public List<RuntimeAuthorityGenerationKeyOptions> Keys { get; set; } = [];
+}
+
+/// <summary>Describes one RSA-2048 authority-generation key without normalizing opaque values.</summary>
+public sealed class RuntimeAuthorityGenerationKeyOptions
+{
+    /// <summary>Gets or sets the exact key identifier.</summary>
+    public string KeyId { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets the closed purpose, either operational or recovery.</summary>
+    public string Purpose { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets the closed signing domain, either generation or recovery.</summary>
+    public string Domain { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets the only supported authority contract version, exactly 2.</summary>
+    public int ContractVersion { get; set; } = 2;
+
+    /// <summary>Gets or sets the closed lifecycle state: active, retired, or revoked.</summary>
+    public string Status { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets the pinned RSA public key in PEM form.</summary>
+    public string PublicKeyPem { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets private PEM only for the active operational signer.</summary>
+    public string? PrivateKeyPem { get; set; }
+
+    /// <summary>Gets or sets the inclusive UTC activation instant.</summary>
+    public DateTimeOffset ActivatedAtUtc { get; set; }
+
+    /// <summary>Gets or sets the exclusive UTC retirement instant when applicable.</summary>
+    public DateTimeOffset? RetiredAtUtc { get; set; }
+
+    /// <summary>Gets or sets the UTC revocation observation instant when applicable.</summary>
+    public DateTimeOffset? RevokedAtUtc { get; set; }
+
+    /// <summary>Gets or sets the exact revocation reason when applicable.</summary>
+    public string? RevocationReason { get; set; }
+
+    /// <summary>Gets or sets the inclusive compromise instant when known.</summary>
+    public DateTimeOffset? CompromiseFromUtc { get; set; }
 }
 
 public sealed class RuntimeCapabilitySigningOptions
@@ -44,9 +117,18 @@ public sealed class RuntimeCapabilitySigningKeyOptions
 public static class RuntimeEnrollmentOptionsConfiguration
 {
     /// <summary>
-    /// Removes only fully empty signing-key entries created by fixed Compose array slots.
+    /// Removes only wholly absent signing configuration created by fixed Compose placeholders.
     /// Non-empty or whitespace-bearing values remain untouched so validation still fails closed.
     /// </summary>
+    /// <param name="options">
+    /// Caller-owned bound options mutated in place. Fully empty fixed slots are removed, a wholly
+    /// absent authority signing object becomes null, and an exact empty nullable
+    /// <c>RevocationReason</c> placeholder becomes null. Whitespace and non-empty values are preserved.
+    /// </param>
+    /// <remarks>
+    /// The server host and database migrator both invoke this exact post-configuration step before
+    /// validating Runtime options.
+    /// </remarks>
     public static void RemoveEmptySigningKeyPlaceholders(RuntimeEnrollmentOptions options)
     {
         options.CapabilitySigning.Keys.RemoveAll(key =>
@@ -55,6 +137,37 @@ public static class RuntimeEnrollmentOptionsConfiguration
             && key.PublicKeyPem.Length == 0
             && string.IsNullOrEmpty(key.PrivateKeyPem)
             && key.RetainUntilUtc is null);
+
+        if (options.AuthorityGenerationSigning is not { } authoritySigning)
+            return;
+
+        authoritySigning.Keys.RemoveAll(key =>
+            key.KeyId.Length == 0
+            && key.Purpose.Length == 0
+            && key.Domain.Length == 0
+            && key.ContractVersion == 2
+            && key.Status.Length == 0
+            && key.PublicKeyPem.Length == 0
+            && string.IsNullOrEmpty(key.PrivateKeyPem)
+            && key.ActivatedAtUtc == default
+            && key.RetiredAtUtc is null
+            && key.RevokedAtUtc is null
+            && string.IsNullOrEmpty(key.RevocationReason)
+            && key.CompromiseFromUtc is null);
+
+        foreach (var key in authoritySigning.Keys)
+        {
+            if (key.RevocationReason is { Length: 0 })
+                key.RevocationReason = null;
+        }
+
+        if (authoritySigning.ActiveSigningKeyId.Length == 0
+            && authoritySigning.RegistrySnapshotId.Length == 0
+            && authoritySigning.RegistrySnapshotVersion == 0
+            && authoritySigning.Keys.Count == 0)
+        {
+            options.AuthorityGenerationSigning = null;
+        }
     }
 }
 
@@ -86,6 +199,19 @@ public sealed class RuntimeEnrollmentOptionsValidator : IValidateOptions<Runtime
 {
     public ValidateOptionsResult Validate(string? name, RuntimeEnrollmentOptions options)
     {
+        var authorityFailures = new List<string>();
+        if (options.AuthorityGenerationSigning is not null)
+            ValidateAuthorityGenerationSigning(options.AuthorityGenerationSigning, authorityFailures);
+        if (options.AuthorityGenerationV2.Mode is not "off" and not "enabled")
+            authorityFailures.Add("Runtime authority-generation v2 mode must be exactly 'off' or 'enabled'.");
+        if (options.AuthorityGenerationV2.Mode == "enabled")
+        {
+            if (options.Mode != "enabled")
+                authorityFailures.Add("Enabled runtime authority-generation v2 requires runtime enrollment mode 'enabled'.");
+            ValidateAuthorityGenerationV2(options, authorityFailures);
+        }
+        if (authorityFailures.Count != 0)
+            return ValidateOptionsResult.Fail(authorityFailures);
         if (options.Mode == "off")
             return ValidateOptionsResult.Success;
         if (options.Mode != "enabled")
@@ -137,6 +263,77 @@ public sealed class RuntimeEnrollmentOptionsValidator : IValidateOptions<Runtime
             failures.Add("Runtime key id 'global' is reserved for the registry version sentinel.");
         ValidateProducts(options.Products, failures);
         return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);
+    }
+
+    /// <summary>Validates an explicitly supplied authority registry without repairing identifiers or key material.</summary>
+    private static void ValidateAuthorityGenerationSigning(
+        RuntimeAuthorityGenerationSigningOptions signing,
+        List<string> failures)
+    {
+        failures.AddRange(RuntimeAuthorityGenerationConfigurationValidator.Validate(signing));
+    }
+
+    /// <summary>Validates the independent registry pin, exact snapshot time/signature, and pin/key separation.</summary>
+    private static void ValidateAuthorityGenerationV2(
+        RuntimeEnrollmentOptions options, List<string> failures)
+    {
+        if (options.AuthorityGenerationSigning is null
+            || !DateTimeOffset.TryParseExact(options.AuthorityGenerationV2.RegistryObservedAtUtc, "O",
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var observed)
+            || observed.Offset != TimeSpan.Zero
+            || !TryCanonicalPs256(options.AuthorityGenerationV2.RegistrySnapshotSignatureBase64Url))
+        {
+            failures.Add("Enabled runtime authority-generation v2 requires canonical registry authentication metadata.");
+            return;
+        }
+        byte[] pin;
+        try
+        {
+            pin = Convert.FromBase64String(options.AuthorityGenerationV2.RegistryAuthoritySpkiBase64);
+            using var authority = RSA.Create();
+            authority.ImportSubjectPublicKeyInfo(pin, out var read);
+            if (read != pin.Length || authority.KeySize != 2048) throw new CryptographicException();
+        }
+        catch (Exception exception) when (exception is FormatException or CryptographicException)
+        {
+            failures.Add("Runtime authority-generation registry pin must be canonical RSA-2048 SPKI Base64.");
+            return;
+        }
+        try
+        {
+            foreach (var key in options.AuthorityGenerationSigning.Keys)
+            {
+                using var rsa = RSA.Create();
+                rsa.ImportFromPem(key.PublicKeyPem);
+                if (CryptographicOperations.FixedTimeEquals(pin, rsa.ExportSubjectPublicKeyInfo()))
+                {
+                    failures.Add("Runtime registry authority pin must be separate from operational and recovery keys.");
+                    break;
+                }
+            }
+        }
+        catch (Exception exception) when (exception is ArgumentException or CryptographicException)
+        {
+            failures.Add("Runtime authority-generation public key material is invalid.");
+        }
+        finally { CryptographicOperations.ZeroMemory(pin); }
+    }
+
+    /// <summary>Checks canonical unpadded Base64Url text for one RSA-2048 PS256 signature.</summary>
+    private static bool TryCanonicalPs256(string value)
+    {
+        if (value.Length != 342 || value.Any(character =>
+                !(character is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9'
+                    or '-' or '_'))) return false;
+        try
+        {
+            var bytes = Convert.FromBase64String(value.Replace('-', '+').Replace('_', '/') + "==");
+            return bytes.Length == 256 && string.Equals(
+                Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_'),
+                value, StringComparison.Ordinal);
+        }
+        catch (FormatException) { return false; }
     }
 
     private static void ValidateSigning(RuntimeEnrollmentOptions options, List<string> failures)
@@ -374,6 +571,168 @@ public sealed class RuntimeEnrollmentOptionsValidator : IValidateOptions<Runtime
             }
         }
         catch (FormatException)
+        {
+            return false;
+        }
+    }
+}
+
+/// <summary>Owns the single fail-closed validation used by startup and all item 2 cryptographic entry points.</summary>
+internal static class RuntimeAuthorityGenerationConfigurationValidator
+{
+    /// <summary>Validates exact registry identity, key profile, lifecycle, ownership, ordering, and RSA material.</summary>
+    /// <param name="signing">Untrusted configuration. Values are inspected ordinally and never repaired.</param>
+    /// <returns>English validation failures; an empty list is the sole success result.</returns>
+    internal static IReadOnlyList<string> Validate(RuntimeAuthorityGenerationSigningOptions? signing)
+    {
+        var failures = new List<string>();
+        if (signing is null)
+        {
+            failures.Add("Runtime authority-generation signing configuration is absent.");
+            return failures;
+        }
+        if (!IsIdentifier(signing.ActiveSigningKeyId)
+            || !IsIdentifier(signing.RegistrySnapshotId)
+            || signing.RegistrySnapshotVersion < 1
+            || signing.Keys is not { Count: >= 1 and <= 8 })
+        {
+            failures.Add("Runtime authority-generation registry requires identifiers, a positive snapshot version, and one to eight keys.");
+            return failures;
+        }
+        var material = new HashSet<string>(StringComparer.Ordinal);
+        var activeSignerCount = 0;
+        var recoveryCount = 0;
+        string? previous = null;
+        foreach (var key in signing.Keys)
+        {
+            if (previous is not null && string.CompareOrdinal(previous, key.KeyId) >= 0)
+                failures.Add("Runtime authority-generation key identifiers must be ordinally sorted and unique.");
+            previous = key.KeyId;
+            if (!IsIdentifier(key.KeyId)
+                || key.Purpose is not ("operational" or "recovery")
+                || key.Domain is not ("generation" or "recovery")
+                || (key.Purpose == "operational") != (key.Domain == "generation")
+                || key.ContractVersion != 2
+                || key.Status is not ("active" or "retired" or "revoked"))
+            {
+                failures.Add("Runtime authority-generation key metadata must use exact id, purpose, domain, version 2, and closed status values.");
+                continue;
+            }
+            if (!TryReadPublic(key.PublicKeyPem, out var publicSpki))
+            {
+                failures.Add("Runtime authority-generation public keys must be RSA-2048 with exponent 65537.");
+                continue;
+            }
+            try
+            {
+                if (!material.Add(Convert.ToHexStringLower(SHA256.HashData(publicSpki))))
+                    failures.Add("Runtime authority-generation public key material must be unique.");
+                var selected = string.Equals(key.KeyId, signing.ActiveSigningKeyId, StringComparison.Ordinal);
+                if (selected)
+                    activeSignerCount++;
+                if (key.Purpose == "recovery")
+                    recoveryCount++;
+                if (selected && (key.Purpose != "operational" || key.Domain != "generation" || key.Status != "active"))
+                    failures.Add("ActiveSigningKeyId must select an active operational generation key.");
+                if (selected)
+                {
+                    if (!TryReadPrivate(key.PrivateKeyPem, out var privateSpki)
+                        || !CryptographicOperations.FixedTimeEquals(publicSpki, privateSpki))
+                        failures.Add("The selected private signing key must match its configured RSA-2048 public key.");
+                    CryptographicOperations.ZeroMemory(privateSpki);
+                }
+                else if (!string.IsNullOrEmpty(key.PrivateKeyPem))
+                {
+                    failures.Add("Only ActiveSigningKeyId may own private key material.");
+                }
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(publicSpki);
+            }
+            ValidateLifecycle(key, failures);
+        }
+        if (activeSignerCount != 1 || recoveryCount == 0)
+            failures.Add("Runtime authority-generation registry requires one selected signer and at least one recovery key.");
+        return failures;
+    }
+
+    /// <summary>Validates UTC and complete active, retired, or revoked lifecycle relations.</summary>
+    /// <param name="key">Untrusted lifecycle metadata inspected without repair.</param>
+    /// <param name="failures">Caller-owned collection receiving exact validation failures.</param>
+    /// <remarks>No clock policy is applied here; this validates only metadata shape and ordering.</remarks>
+    private static void ValidateLifecycle(RuntimeAuthorityGenerationKeyOptions key, List<string> failures)
+    {
+        var allUtc = key.ActivatedAtUtc.Offset == TimeSpan.Zero
+            && (!key.RetiredAtUtc.HasValue || key.RetiredAtUtc.Value.Offset == TimeSpan.Zero)
+            && (!key.RevokedAtUtc.HasValue || key.RevokedAtUtc.Value.Offset == TimeSpan.Zero)
+            && (!key.CompromiseFromUtc.HasValue || key.CompromiseFromUtc.Value.Offset == TimeSpan.Zero);
+        if (!allUtc || key.ActivatedAtUtc == default)
+        {
+            failures.Add("Runtime authority-generation lifecycle instants must be explicit UTC values.");
+            return;
+        }
+        var valid = key.Status switch
+        {
+            "active" => key.RetiredAtUtc is null && key.RevokedAtUtc is null
+                && key.CompromiseFromUtc is null && key.RevocationReason is null,
+            "retired" => key.RetiredAtUtc > key.ActivatedAtUtc && key.RevokedAtUtc is null
+                && key.CompromiseFromUtc is null && key.RevocationReason is null,
+            "revoked" => key.RevokedAtUtc >= key.ActivatedAtUtc
+                && (!key.RetiredAtUtc.HasValue || key.RetiredAtUtc >= key.ActivatedAtUtc && key.RetiredAtUtc <= key.RevokedAtUtc)
+                && key.RevocationReason is { Length: >= 1 and <= 256 }
+                && (!key.CompromiseFromUtc.HasValue || key.CompromiseFromUtc >= key.ActivatedAtUtc && key.CompromiseFromUtc <= key.RevokedAtUtc),
+            _ => false,
+        };
+        if (!valid)
+            failures.Add("Runtime authority-generation lifecycle fields are inconsistent with the exact status.");
+    }
+
+    /// <summary>Checks the exact 1..128 ASCII key/snapshot identifier grammar.</summary>
+    private static bool IsIdentifier(string? value) => value is { Length: >= 1 and <= 128 }
+        && value[0] is >= 'a' and <= 'z' or >= '0' and <= '9'
+        && value.All(character => character is >= 'a' and <= 'z' or >= '0' and <= '9' or '.' or '_' or '-');
+
+    /// <summary>Imports one public RSA-2048 key with exponent 65537 and returns copied SPKI bytes.</summary>
+    /// <param name="pem">Untrusted public PEM; private labels are refused ordinally.</param>
+    /// <param name="spki">Caller-owned public bytes on success, empty on failure; the validator zeroes successful temporary copies.</param>
+    /// <returns>True only for RSA-2048/e65537 public material.</returns>
+    private static bool TryReadPublic(string? pem, out byte[] spki)
+    {
+        spki = [];
+        if (string.IsNullOrWhiteSpace(pem) || pem.Contains("PRIVATE KEY", StringComparison.Ordinal))
+            return false;
+        try
+        {
+            using var rsa = RSA.Create();
+            rsa.ImportFromPem(pem);
+            spki = rsa.ExportSubjectPublicKeyInfo();
+            return rsa.KeySize == 2048 && rsa.ExportParameters(false).Exponent is [0x01, 0x00, 0x01];
+        }
+        catch (Exception exception) when (exception is CryptographicException or ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Imports one private RSA-2048 key with exponent 65537 and returns copied public SPKI bytes.</summary>
+    /// <param name="pem">Untrusted private PEM used only for public-key matching.</param>
+    /// <param name="spki">Caller-owned public projection on success, empty on failure; the caller zeroes it after comparison.</param>
+    /// <returns>True only for RSA-2048/e65537 private material.</returns>
+    /// <remarks>The RSA instance disposes imported private material; no private PEM or private parameters are returned.</remarks>
+    private static bool TryReadPrivate(string? pem, out byte[] spki)
+    {
+        spki = [];
+        if (string.IsNullOrWhiteSpace(pem) || !pem.Contains("PRIVATE KEY", StringComparison.Ordinal))
+            return false;
+        try
+        {
+            using var rsa = RSA.Create();
+            rsa.ImportFromPem(pem);
+            spki = rsa.ExportSubjectPublicKeyInfo();
+            return rsa.KeySize == 2048 && rsa.ExportParameters(false).Exponent is [0x01, 0x00, 0x01];
+        }
+        catch (Exception exception) when (exception is CryptographicException or ArgumentException)
         {
             return false;
         }

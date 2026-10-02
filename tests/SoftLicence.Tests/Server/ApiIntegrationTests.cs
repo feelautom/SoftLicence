@@ -9,6 +9,7 @@ using Microsoft.EntityFrameworkCore;
 using SoftLicence.SDK;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using System.Globalization;
 
 namespace SoftLicence.Tests.Server;
 
@@ -529,6 +530,109 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.Equal(2, await verificationDb.LicenseHistories.CountAsync(candidate => candidate.LicenseId == license.Id));
     }
 
+    /// <summary>Proves expiry never prevents the administrator from durably revoking an active licence.</summary>
+    [Fact]
+    public async Task AdminRevoke_ExpiredActiveLicense_IsRevokedWithStableResponse()
+    {
+        var licenseKey = "EXPIRED-REVOKE-" + Guid.NewGuid().ToString("N").ToUpperInvariant();
+        Guid licenseId;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            await SeedDataAsync(scope.ServiceProvider);
+            var product = await db.Products.SingleAsync(candidate => candidate.Name == "YOUR_APP_NAME");
+            var type = await db.LicenseTypes.SingleAsync(candidate => candidate.ProductId == product.Id);
+            var license = new License
+            {
+                LicenseKey = licenseKey,
+                ProductId = product.Id,
+                LicenseTypeId = type.Id,
+                CustomerName = "Expired Revoke",
+                CustomerEmail = "expired-revoke@example.test",
+                IsActive = true,
+                ExpirationDate = DateTime.UtcNow.AddDays(-1),
+                MaxSeats = 1,
+                AllowedVersions = "*"
+            };
+            db.Licenses.Add(license);
+            await db.SaveChangesAsync();
+            licenseId = license.Id;
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Admin-Secret", "CHANGE_ME_RANDOM_SECRET");
+        var response = await client.PostAsJsonAsync(
+            $"/api/admin/licenses/{licenseKey}/revoke",
+            new { Reason = "payment authority ended" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(licenseKey, payload.GetProperty("licenseKey").GetString());
+        Assert.False(payload.GetProperty("isActive").GetBoolean());
+        Assert.Equal("payment authority ended", payload.GetProperty("revocationReason").GetString());
+        Assert.Equal(JsonValueKind.String, payload.GetProperty("revokedAt").ValueKind);
+        Assert.False(payload.GetProperty("idempotent").GetBoolean());
+        Assert.Equal(
+            ["idempotent", "isActive", "licenseKey", "revocationReason", "revokedAt"],
+            payload.EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal).ToArray());
+
+        using var verificationScope = _factory.Services.CreateScope();
+        var verificationDb = verificationScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var revoked = await verificationDb.Licenses.SingleAsync(candidate => candidate.Id == licenseId);
+        Assert.False(revoked.IsActive);
+        Assert.Equal("payment authority ended", revoked.RevocationReason);
+        Assert.NotNull(revoked.RevokedAt);
+        Assert.Single(await verificationDb.LicenseHistories.Where(candidate =>
+            candidate.LicenseId == licenseId && candidate.Action == HistoryActions.Revoked).ToListAsync());
+    }
+
+    /// <summary>Proves a repeated revoke preserves the historical idempotent response contract exactly.</summary>
+    [Fact]
+    public async Task AdminRevoke_AlreadyRevokedLicense_ReturnsExactIdempotentShape()
+    {
+        var licenseKey = "ALREADY-REVOKED-" + Guid.NewGuid().ToString("N").ToUpperInvariant();
+        var revokedAt = DateTime.UtcNow.AddHours(-2);
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            await SeedDataAsync(scope.ServiceProvider);
+            var product = await db.Products.SingleAsync(candidate => candidate.Name == "YOUR_APP_NAME");
+            var type = await db.LicenseTypes.SingleAsync(candidate => candidate.ProductId == product.Id);
+            db.Licenses.Add(new License
+            {
+                LicenseKey = licenseKey,
+                ProductId = product.Id,
+                LicenseTypeId = type.Id,
+                CustomerName = "Already Revoked",
+                CustomerEmail = "already-revoked@example.test",
+                IsActive = false,
+                RevocationReason = "existing reason",
+                RevokedAt = revokedAt,
+                ExpirationDate = DateTime.UtcNow.AddDays(-1),
+                MaxSeats = 1,
+                AllowedVersions = "*"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Admin-Secret", "CHANGE_ME_RANDOM_SECRET");
+        var response = await client.PostAsJsonAsync(
+            $"/api/admin/licenses/{licenseKey}/revoke",
+            new { Reason = "must not replace existing reason" });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(licenseKey, payload.GetProperty("licenseKey").GetString());
+        Assert.False(payload.GetProperty("isActive").GetBoolean());
+        Assert.Equal("existing reason", payload.GetProperty("revocationReason").GetString());
+        Assert.Equal(revokedAt, payload.GetProperty("revokedAt").GetDateTime());
+        Assert.True(payload.GetProperty("idempotent").GetBoolean());
+        Assert.Equal(
+            ["idempotent", "isActive", "licenseKey", "revocationReason", "revokedAt"],
+            payload.EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal).ToArray());
+    }
+
     [Fact]
     public async Task PostActivation_WhenLicenseTypeDisablesNewActivations_ShouldRejectUnactivatedLicense()
     {
@@ -771,7 +875,9 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             CustomerName = "Final Customer",
             CustomerEmail = "customer@example.test",
             TypeSlug = "TIA-CONNECT-PRO",
-            PartnerCode = partnerCode.ToLowerInvariant()
+            PartnerCode = partnerCode.ToLowerInvariant(),
+            Reference = "PARTNER-SALE-" + Guid.NewGuid().ToString("N"),
+            CommercialSubjectId = Guid.NewGuid()
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -839,7 +945,9 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             CustomerName = "Aaron Liu",
             CustomerEmail = "aaron@example.test",
             TypeSlug = "TIA-RESELLER-EVALDEMO",
-            PartnerCode = partnerCode
+            PartnerCode = partnerCode,
+            Reference = "PARTNER-DEMO-" + Guid.NewGuid().ToString("N"),
+            CommercialSubjectId = Guid.NewGuid()
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -881,7 +989,9 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             CustomerName = "Final Customer",
             CustomerEmail = "customer-no-demo@example.test",
             TypeSlug = "TIA-CONNECT-PRO",
-            PartnerCode = partnerCode
+            PartnerCode = partnerCode,
+            Reference = "PARTNER-NO-DEMO-" + Guid.NewGuid().ToString("N"),
+            CommercialSubjectId = Guid.NewGuid()
         });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -903,6 +1013,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
 
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-Admin-Secret", "CHANGE_ME_RANDOM_SECRET");
+        var commercialSubjectId = Guid.NewGuid();
         var request = new
         {
             ProductName = productName,
@@ -910,6 +1021,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             CustomerEmail = "provisioned@example.test",
             TypeSlug = "TIA-CONNECT-PRO",
             Reference = " ORDER-736 ",
+            CommercialSubjectId = commercialSubjectId,
             Quantity = 2,
             DaysValidity = 365,
             MaxSeats = 4
@@ -937,6 +1049,180 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.Equal(2, provisioning.Licenses.Count);
         Assert.All(provisioning.Licenses, license => Assert.Equal(4, license.MaxSeats));
         Assert.All(provisioning.Licenses, license => Assert.Equal(365, license.ValidityDays));
+        Assert.Equal(commercialSubjectId, provisioning.CommercialSubjectId);
+        Assert.Equal(LicenseProvisioningRequest.ProviderAdminApiProvenance, provisioning.AuthorityProvenance);
+        Assert.Matches("^[0-9a-f]{64}$", provisioning.RequestHash);
+        Assert.Equal(1, await verifyDb.RuntimeRecoveryCommercialSubjects.CountAsync(subject =>
+            subject.Id == commercialSubjectId && subject.ProductId == provisioning.ProductId));
+        Assert.Equal(2, await verifyDb.RuntimeRecoveryCommercialOwnerships.CountAsync(ownership =>
+            ownership.OwnerSubjectId == commercialSubjectId && ownership.State == "ACTIVE"));
+    }
+
+    /// <summary>
+    /// Proves canonical writes, exact historical uppercase replay, and fail-closed handling for the
+    /// required malformed representations under both default and Turkish request cultures.
+    /// </summary>
+    [Fact]
+    public async Task AdminCreateLicense_HistoricalUppercaseHashReplaysButMixedAndMalformedHashesFailClosed()
+    {
+        const string productName = "TKT800-Deterministic-Hash-Compatibility";
+        using (var seedScope = _factory.Services.CreateScope())
+            await SeedProductAndTypeAsync(
+                seedScope.ServiceProvider,
+                productName,
+                "TIA-CONNECT-PRO",
+                productId: Guid.Parse("80000000-0000-0000-0000-000000000010"),
+                typeId: Guid.Parse("80000000-0000-0000-0000-000000000011"));
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Admin-Secret", "CHANGE_ME_RANDOM_SECRET");
+        var request = new
+        {
+            ProductName = productName,
+            CustomerName = "Hash compatibility",
+            CustomerEmail = "hash-compatibility@example.test",
+            TypeSlug = "TIA-CONNECT-PRO",
+            Reference = "TKT800-HASH-COMPATIBILITY",
+            CommercialSubjectId = Guid.Parse("80000000-0000-0000-0000-000000000012")
+        };
+
+        using var first = await client.PostAsJsonAsync("/api/admin/licenses", request);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var ledger = await db.LicenseProvisioningRequests.SingleAsync(item =>
+            item.Reference == request.Reference);
+        Assert.Matches("^[0-9a-f]{64}$", ledger.RequestHash);
+        ledger.RequestHash = ledger.RequestHash.ToUpperInvariant();
+        await db.SaveChangesAsync();
+
+        using var historicalReplay = await client.PostAsJsonAsync("/api/admin/licenses", request);
+        Assert.Equal(HttpStatusCode.OK, historicalReplay.StatusCode);
+        Assert.True((await historicalReplay.Content.ReadFromJsonAsync<JsonElement>())
+            .GetProperty("idempotent").GetBoolean());
+
+        var mixedHash = ledger.RequestHash.ToCharArray();
+        var hexadecimalLetter = Array.FindIndex(mixedHash, character => character is >= 'A' and <= 'F');
+        Assert.True(hexadecimalLetter >= 0, "The fixed fingerprint must produce a digest with an ASCII hexadecimal letter.");
+        mixedHash[hexadecimalLetter] = char.ToLowerInvariant(mixedHash[hexadecimalLetter]);
+        var rejectedHashes = new[]
+        {
+            new string(mixedHash),
+            "Ａ" + ledger.RequestHash[1..],
+            new string('A', 63),
+            new string('A', 65),
+            new string('G', 64),
+            new string(' ', 64),
+            string.Empty
+        };
+        var originalCulture = CultureInfo.CurrentCulture;
+        var originalUiCulture = CultureInfo.CurrentUICulture;
+        try
+        {
+            CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("tr-TR");
+            CultureInfo.CurrentUICulture = CultureInfo.GetCultureInfo("tr-TR");
+            foreach (var rejectedHash in rejectedHashes)
+            {
+                ledger.RequestHash = rejectedHash;
+                await db.SaveChangesAsync();
+                using var rejectedReplay = await client.PostAsJsonAsync("/api/admin/licenses", request);
+                Assert.Equal(HttpStatusCode.Conflict, rejectedReplay.StatusCode);
+                Assert.Equal("reference_payload_conflict",
+                    (await rejectedReplay.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+            }
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = originalCulture;
+            CultureInfo.CurrentUICulture = originalUiCulture;
+        }
+
+        Assert.Equal(1, await db.Licenses.CountAsync(item => item.CustomerEmail == request.CustomerEmail));
+    }
+
+    [Fact]
+    public async Task AdminCreateLicense_WithoutExplicitSubjectOrReference_ShouldFailClosedWithoutMutation()
+    {
+        var productName = $"ProvisioningAuthority-{Guid.NewGuid():N}";
+        using (var scope = _factory.Services.CreateScope())
+            await SeedProductAndTypeAsync(scope.ServiceProvider, productName, "TIA-CONNECT-PRO");
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Admin-Secret", "CHANGE_ME_RANDOM_SECRET");
+        var missingSubject = await client.PostAsJsonAsync("/api/admin/licenses", new
+        {
+            ProductName = productName,
+            CustomerName = "Not authority",
+            CustomerEmail = "not-authority@example.test",
+            TypeSlug = "TIA-CONNECT-PRO",
+            Reference = "TKT780-MISSING-SUBJECT"
+        });
+        var missingReference = await client.PostAsJsonAsync("/api/admin/licenses", new
+        {
+            ProductName = productName,
+            CustomerName = "Not authority",
+            CustomerEmail = "not-authority@example.test",
+            TypeSlug = "TIA-CONNECT-PRO",
+            CommercialSubjectId = Guid.NewGuid()
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, missingSubject.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, missingReference.StatusCode);
+        Assert.Equal("commercial_subject_required",
+            (await missingSubject.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+        Assert.Equal("provisioning_reference_required",
+            (await missingReference.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+
+        using var verifyScope = _factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var productId = await verifyDb.Products.Where(product => product.Name == productName)
+            .Select(product => product.Id).SingleAsync();
+        Assert.False(await verifyDb.Licenses.AnyAsync(license => license.ProductId == productId));
+        Assert.False(await verifyDb.LicenseProvisioningRequests.AnyAsync(request => request.ProductId == productId));
+        Assert.False(await verifyDb.RuntimeRecoveryCommercialSubjects.AnyAsync(subject => subject.ProductId == productId));
+        Assert.False(await verifyDb.RuntimeRecoveryCommercialOwnerships.AnyAsync(ownership => ownership.ProductId == productId));
+    }
+
+    [Fact]
+    public async Task AdminCreateLicense_WhenReferenceSubjectChanges_ShouldReturnConflictWithoutSecondBatch()
+    {
+        var productName = $"ProvisioningSubjectConflict-{Guid.NewGuid():N}";
+        using (var scope = _factory.Services.CreateScope())
+            await SeedProductAndTypeAsync(scope.ServiceProvider, productName, "TIA-CONNECT-PRO");
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Admin-Secret", "CHANGE_ME_RANDOM_SECRET");
+        var firstSubject = Guid.NewGuid();
+        var first = await client.PostAsJsonAsync("/api/admin/licenses", new
+        {
+            ProductName = productName,
+            CustomerName = "Same presentation",
+            CustomerEmail = "same@example.test",
+            TypeSlug = "TIA-CONNECT-PRO",
+            Reference = "TKT780-SUBJECT-CONFLICT",
+            CommercialSubjectId = firstSubject
+        });
+        var conflict = await client.PostAsJsonAsync("/api/admin/licenses", new
+        {
+            ProductName = productName,
+            CustomerName = "Same presentation",
+            CustomerEmail = "same@example.test",
+            TypeSlug = "TIA-CONNECT-PRO",
+            Reference = "TKT780-SUBJECT-CONFLICT",
+            CommercialSubjectId = Guid.NewGuid()
+        });
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+        Assert.Equal("reference_payload_conflict",
+            (await conflict.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+        using var verifyScope = _factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        Assert.Equal(1, await verifyDb.Licenses.CountAsync(license => license.CustomerEmail == "same@example.test"));
+        Assert.Equal(1, await verifyDb.RuntimeRecoveryCommercialSubjects.CountAsync(subject => subject.Id == firstSubject));
+        Assert.Equal(1, await verifyDb.RuntimeRecoveryCommercialOwnerships.CountAsync(ownership =>
+            ownership.OwnerSubjectId == firstSubject));
     }
 
     [Fact]
@@ -950,6 +1236,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
 
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-Admin-Secret", "CHANGE_ME_RANDOM_SECRET");
+        var commercialSubjectId = Guid.NewGuid();
         var firstResponse = await client.PostAsJsonAsync("/api/admin/licenses", new
         {
             ProductName = productName,
@@ -957,6 +1244,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             CustomerEmail = "first@example.test",
             TypeSlug = "TIA-CONNECT-PRO",
             Reference = "ORDER-CONFLICT",
+            CommercialSubjectId = commercialSubjectId,
             MaxSeats = 1
         });
         var conflictResponse = await client.PostAsJsonAsync("/api/admin/licenses", new
@@ -966,6 +1254,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             CustomerEmail = "changed@example.test",
             TypeSlug = "TIA-CONNECT-PRO",
             Reference = "ORDER-CONFLICT",
+            CommercialSubjectId = commercialSubjectId,
             MaxSeats = 2
         });
 
@@ -1019,8 +1308,375 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         using var verifyScope = _factory.Services.CreateScope();
         var verifyDb = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
         var persisted = await verifyDb.Licenses.SingleAsync(l => l.LicenseKey == licenseKey);
+        var renewal = await verifyDb.LicenseRenewals.SingleAsync(r => r.TransactionId == "TX-736-EXACT");
         Assert.Equal(initialExpiration.AddDays(120), persisted.ExpirationDate);
-        Assert.Equal(1, await verifyDb.LicenseRenewals.CountAsync(r => r.TransactionId == "TX-736-EXACT"));
+        Assert.Equal(1, renewal.RequestFingerprintVersion);
+        Assert.Matches("^[0-9a-f]{64}$", renewal.RequestFingerprint!);
+    }
+
+    /// <summary>
+    /// Verifies that replay returns the transaction's stored null reference after another renewal changes the license.
+    /// </summary>
+    [Fact]
+    public async Task AdminRenew_WhenLaterRenewalChangesReference_ShouldReplayFrozenNullReference()
+    {
+        var productName = $"RenewalFrozen-{Guid.NewGuid():N}";
+        var licenseKey = $"RENEW-FROZEN-{Guid.NewGuid():N}".ToUpperInvariant();
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var (product, type) = await SeedProductAndTypeAsync(scope.ServiceProvider, productName, "TIA-CONNECT-PRO");
+            type.IsRecurring = true;
+            db.Licenses.Add(new License
+            {
+                ProductId = product.Id,
+                LicenseTypeId = type.Id,
+                LicenseKey = licenseKey,
+                CustomerName = "Frozen renewal",
+                CustomerEmail = "frozen-renewal@example.test",
+                ExpirationDate = DateTime.UtcNow.AddDays(10),
+                IsActive = true,
+                MaxSeats = 1
+            });
+            await db.SaveChangesAsync();
+        }
+
+        using var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Admin-Secret", "CHANGE_ME_RANDOM_SECRET");
+        var firstRequest = new { TransactionId = "TX-794-FROZEN-NULL", DaysToAdd = 30 };
+        using var first = await client.PostAsJsonAsync($"/api/admin/licenses/{licenseKey}/renew", firstRequest);
+        using var later = await client.PostAsJsonAsync($"/api/admin/licenses/{licenseKey}/renew", new
+        {
+            TransactionId = "TX-794-FROZEN-LATER",
+            Reference = "LATER-REFERENCE",
+            DaysToAdd = 1
+        });
+        using var replay = await client.PostAsJsonAsync($"/api/admin/licenses/{licenseKey}/renew", firstRequest);
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, later.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
+        var replayBody = await replay.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(replayBody.GetProperty("idempotent").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, replayBody.GetProperty("reference").ValueKind);
+    }
+
+    /// <summary>
+    /// Verifies that calendar periods of every monthly length persist their exact UTC boundary.
+    /// </summary>
+    [Theory]
+    [InlineData(28)]
+    [InlineData(29)]
+    [InlineData(30)]
+    [InlineData(31)]
+    public async Task AdminRenew_WithExactUtcTarget_ShouldPersistCalendarBoundary(int periodDays)
+    {
+        var productName = $"ExactRenewal-{Guid.NewGuid():N}";
+        var licenseKey = $"EXACT-{Guid.NewGuid():N}".ToUpperInvariant();
+        var initialExpiration = new DateTime(2027, 1, 1, 10, 40, 18, DateTimeKind.Utc);
+        var targetExpiration = initialExpiration.AddDays(periodDays);
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var (product, type) = await SeedProductAndTypeAsync(scope.ServiceProvider, productName, "TIA-CONNECT-PRO");
+            type.IsRecurring = true;
+            db.Licenses.Add(new License
+            {
+                ProductId = product.Id,
+                LicenseTypeId = type.Id,
+                LicenseKey = licenseKey,
+                CustomerName = "Exact Renewal Customer",
+                CustomerEmail = "exact-renewal@example.test",
+                ExpirationDate = initialExpiration,
+                IsActive = true,
+                MaxSeats = 1
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Admin-Secret", "CHANGE_ME_RANDOM_SECRET");
+        var transactionId = $"TX-EXACT-{periodDays}-{Guid.NewGuid():N}";
+        var request = new { TransactionId = transactionId, TargetExpirationUtc = targetExpiration };
+        var firstResponse = await client.PostAsJsonAsync($"/api/admin/licenses/{licenseKey}/renew", request);
+        var retryResponse = await client.PostAsJsonAsync($"/api/admin/licenses/{licenseKey}/renew", request);
+
+        Assert.Equal(HttpStatusCode.OK, firstResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, retryResponse.StatusCode);
+        var first = await firstResponse.Content.ReadFromJsonAsync<JsonElement>();
+        var retry = await retryResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal(targetExpiration, first.GetProperty("newExpirationDate").GetDateTime());
+        Assert.Equal(targetExpiration, retry.GetProperty("newExpirationDate").GetDateTime());
+        Assert.False(first.GetProperty("idempotent").GetBoolean());
+        Assert.True(retry.GetProperty("idempotent").GetBoolean());
+
+        using var verifyScope = _factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var persisted = await verifyDb.Licenses.SingleAsync(l => l.LicenseKey == licenseKey);
+        Assert.Equal(targetExpiration, persisted.ExpirationDate);
+        Assert.Equal(1, await verifyDb.LicenseRenewals.CountAsync(r => r.TransactionId == transactionId));
+    }
+
+    /// <summary>
+    /// Verifies that an idempotency key cannot be replayed with a different exact target.
+    /// </summary>
+    [Fact]
+    public async Task AdminRenew_WhenExactTargetChangesOnRetry_ShouldReturnConflict()
+    {
+        var productName = $"ExactRenewalConflict-{Guid.NewGuid():N}";
+        var licenseKey = $"EXACT-CONFLICT-{Guid.NewGuid():N}".ToUpperInvariant();
+        var initialExpiration = new DateTime(2027, 1, 1, 10, 40, 18, DateTimeKind.Utc);
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var (product, type) = await SeedProductAndTypeAsync(scope.ServiceProvider, productName, "TIA-CONNECT-PRO");
+            type.IsRecurring = true;
+            db.Licenses.Add(new License
+            {
+                ProductId = product.Id,
+                LicenseTypeId = type.Id,
+                LicenseKey = licenseKey,
+                CustomerName = "Exact Renewal Conflict",
+                CustomerEmail = "exact-renewal-conflict@example.test",
+                ExpirationDate = initialExpiration,
+                IsActive = true,
+                MaxSeats = 1
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Admin-Secret", "CHANGE_ME_RANDOM_SECRET");
+        const string transactionId = "TX-EXACT-PAYLOAD-CONFLICT";
+        var first = await client.PostAsJsonAsync($"/api/admin/licenses/{licenseKey}/renew", new
+        {
+            TransactionId = transactionId,
+            TargetExpirationUtc = initialExpiration.AddDays(30)
+        });
+        var conflict = await client.PostAsJsonAsync($"/api/admin/licenses/{licenseKey}/renew", new
+        {
+            TransactionId = transactionId,
+            TargetExpirationUtc = initialExpiration.AddDays(31)
+        });
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+        var body = await conflict.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("transaction_payload_conflict", body.GetProperty("error").GetString());
+    }
+
+    /// <summary>
+    /// Verifies that request-field omission and reference changes cannot reuse an existing transaction result.
+    /// </summary>
+    [Fact]
+    public async Task AdminRenew_WhenCanonicalPayloadPresenceOrReferenceChanges_ShouldReturnConflict()
+    {
+        var productName = $"RenewalFingerprint-{Guid.NewGuid():N}";
+        var licenseKey = $"FINGERPRINT-{Guid.NewGuid():N}".ToUpperInvariant();
+        var initialExpiration = new DateTime(2027, 2, 1, 8, 30, 0, DateTimeKind.Utc);
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var (product, type) = await SeedProductAndTypeAsync(scope.ServiceProvider, productName, "TIA-CONNECT-PRO");
+            type.IsRecurring = true;
+            type.DefaultDurationDays = 30;
+            db.Licenses.Add(new License
+            {
+                ProductId = product.Id,
+                LicenseTypeId = type.Id,
+                LicenseKey = licenseKey,
+                CustomerName = "Renewal fingerprint",
+                CustomerEmail = "renewal-fingerprint@example.test",
+                ExpirationDate = initialExpiration,
+                IsActive = true,
+                MaxSeats = 1
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Admin-Secret", "CHANGE_ME_RANDOM_SECRET");
+        var exactTarget = initialExpiration.AddDays(31);
+        const string exactTransaction = "TX-794-EXACT-PRESENCE";
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync(
+            $"/api/admin/licenses/{licenseKey}/renew", new
+            {
+                TransactionId = exactTransaction,
+                Reference = " INV-794 ",
+                TargetExpirationUtc = exactTarget
+            })).StatusCode);
+
+        var exactOmitted = await client.PostAsJsonAsync($"/api/admin/licenses/{licenseKey}/renew", new
+        {
+            TransactionId = exactTransaction
+        });
+        var referenceChanged = await client.PostAsJsonAsync($"/api/admin/licenses/{licenseKey}/renew", new
+        {
+            TransactionId = exactTransaction,
+            Reference = "INV-794-CHANGED",
+            TargetExpirationUtc = exactTarget
+        });
+
+        const string daysTransaction = "TX-794-DAYS-PRESENCE";
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync(
+            $"/api/admin/licenses/{licenseKey}/renew", new
+            {
+                TransactionId = daysTransaction,
+                DaysToAdd = 30
+            })).StatusCode);
+        var daysOmitted = await client.PostAsJsonAsync($"/api/admin/licenses/{licenseKey}/renew", new
+        {
+            TransactionId = daysTransaction
+        });
+
+        const string defaultTransaction = "TX-794-DEFAULT-PRESENCE";
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync(
+            $"/api/admin/licenses/{licenseKey}/renew", new
+            {
+                TransactionId = defaultTransaction
+            })).StatusCode);
+        var defaultMadeExplicit = await client.PostAsJsonAsync($"/api/admin/licenses/{licenseKey}/renew", new
+        {
+            TransactionId = defaultTransaction,
+            DaysToAdd = 30
+        });
+
+        const string nullReferenceTransaction = "TX-794-NULL-REFERENCE-PRESENCE";
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync(
+            $"/api/admin/licenses/{licenseKey}/renew", new
+            {
+                TransactionId = nullReferenceTransaction,
+                DaysToAdd = 30
+            })).StatusCode);
+        var explicitNullReference = await client.PostAsJsonAsync($"/api/admin/licenses/{licenseKey}/renew", new
+        {
+            TransactionId = nullReferenceTransaction,
+            Reference = (string?)null,
+            DaysToAdd = 30
+        });
+
+        foreach (var conflict in new[]
+                 {
+                     exactOmitted,
+                     referenceChanged,
+                     daysOmitted,
+                     defaultMadeExplicit,
+                     explicitNullReference
+                 })
+        {
+            using (conflict)
+            {
+                Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+                var body = await conflict.Content.ReadFromJsonAsync<JsonElement>();
+                Assert.Equal("transaction_payload_conflict", body.GetProperty("error").GetString());
+            }
+        }
+    }
+
+    /// <summary>
+    /// Verifies the product-approved zero-day policy for a historical renewal row without a fingerprint.
+    /// </summary>
+    [Fact]
+    public async Task AdminRenew_WhenHistoricalTransactionHasNoFingerprint_ShouldReturnLegacyUnverifiedConflict()
+    {
+        var productName = $"LegacyRenewal-{Guid.NewGuid():N}";
+        var licenseKey = $"LEGACY-{Guid.NewGuid():N}".ToUpperInvariant();
+        var expiration = new DateTime(2027, 4, 1, 9, 0, 0, DateTimeKind.Utc);
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var (product, type) = await SeedProductAndTypeAsync(scope.ServiceProvider, productName, "TIA-CONNECT-PRO");
+            type.IsRecurring = true;
+            var license = new License
+            {
+                ProductId = product.Id,
+                LicenseTypeId = type.Id,
+                LicenseKey = licenseKey,
+                CustomerName = "Legacy renewal",
+                CustomerEmail = "legacy-renewal@example.test",
+                ExpirationDate = expiration,
+                Reference = "LEGACY-REFERENCE",
+                IsActive = true,
+                MaxSeats = 1
+            };
+            db.Licenses.Add(license);
+            db.LicenseRenewals.Add(new LicenseRenewal
+            {
+                License = license,
+                TransactionId = "TX-794-LEGACY",
+                RenewalDate = expiration.AddDays(-30),
+                DaysAdded = 30,
+                ResultingExpirationDate = expiration,
+                ResultingReference = license.Reference
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Admin-Secret", "CHANGE_ME_RANDOM_SECRET");
+        var response = await client.PostAsJsonAsync($"/api/admin/licenses/{licenseKey}/renew", new
+        {
+            TransactionId = "TX-794-LEGACY",
+            Reference = "LEGACY-REFERENCE",
+            DaysToAdd = 30
+        });
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("legacy_transaction_unverified", body.GetProperty("error").GetString());
+        Assert.False(body.GetProperty("retryable").GetBoolean());
+    }
+
+    /// <summary>
+    /// Verifies rejection of ambiguous, non-UTC, and non-extending exact targets.
+    /// </summary>
+    [Fact]
+    public async Task AdminRenew_WithInvalidExactTarget_ShouldReturnBadRequest()
+    {
+        var productName = $"InvalidExactRenewal-{Guid.NewGuid():N}";
+        var licenseKey = $"INVALID-EXACT-{Guid.NewGuid():N}".ToUpperInvariant();
+        var initialExpiration = new DateTime(2027, 1, 1, 10, 40, 18, DateTimeKind.Utc);
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var (product, type) = await SeedProductAndTypeAsync(scope.ServiceProvider, productName, "TIA-CONNECT-PRO");
+            type.IsRecurring = true;
+            db.Licenses.Add(new License
+            {
+                ProductId = product.Id,
+                LicenseTypeId = type.Id,
+                LicenseKey = licenseKey,
+                CustomerName = "Invalid Exact Renewal",
+                CustomerEmail = "invalid-exact-renewal@example.test",
+                ExpirationDate = initialExpiration,
+                IsActive = true,
+                MaxSeats = 1
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Admin-Secret", "CHANGE_ME_RANDOM_SECRET");
+        var ambiguous = await client.PostAsJsonAsync($"/api/admin/licenses/{licenseKey}/renew", new
+        {
+            TransactionId = "TX-EXACT-AMBIGUOUS",
+            DaysToAdd = 30,
+            TargetExpirationUtc = initialExpiration.AddDays(30)
+        });
+        var nonUtc = await client.PostAsJsonAsync($"/api/admin/licenses/{licenseKey}/renew", new
+        {
+            TransactionId = "TX-EXACT-NON-UTC",
+            TargetExpirationUtc = new DateTimeOffset(initialExpiration.AddDays(30)).ToOffset(TimeSpan.FromHours(2))
+        });
+        var regressive = await client.PostAsJsonAsync($"/api/admin/licenses/{licenseKey}/renew", new
+        {
+            TransactionId = "TX-EXACT-REGRESSIVE",
+            TargetExpirationUtc = initialExpiration
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, ambiguous.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, nonUtc.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, regressive.StatusCode);
     }
 
     [Fact]
@@ -1072,12 +1728,37 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             db.Database.GetMigrations());
     }
 
+    /// <summary>Verifies that EF discovers the additive TKT-000794 fingerprint migration.</summary>
+    [Fact]
+    public void LicenseRenewalFingerprintMigration_ShouldBeDiscoverableByEntityFramework()
+    {
+        var options = new DbContextOptionsBuilder<LicenseDbContext>()
+            .UseNpgsql("Host=localhost;Database=not-used;Username=not-used;Password=not-used")
+            .Options;
+        using var db = new LicenseDbContext(options);
+
+        Assert.Contains(
+            "20260830203000_AddTkt000794LicenseRenewalRequestFingerprint",
+            db.Database.GetMigrations());
+    }
+
+    /// <summary>Seeds one signing-capable product and product-scoped license type for API tests.</summary>
+    /// <param name="services">The isolated test service provider.</param>
+    /// <param name="productName">The exact product name.</param>
+    /// <param name="typeSlug">The exact product-scoped type slug.</param>
+    /// <param name="disableNewActivations">Whether new activations are disabled.</param>
+    /// <param name="isFree">Whether the type is free.</param>
+    /// <param name="productId">An optional deterministic product identifier.</param>
+    /// <param name="typeId">An optional deterministic license-type identifier.</param>
+    /// <returns>The persisted product and license type.</returns>
     private async Task<(Product Product, LicenseType Type)> SeedProductAndTypeAsync(
         IServiceProvider services,
         string productName,
         string typeSlug,
         bool disableNewActivations = false,
-        bool isFree = false)
+        bool isFree = false,
+        Guid? productId = null,
+        Guid? typeId = null)
     {
         var db = services.GetRequiredService<LicenseDbContext>();
         var encryption = services.GetRequiredService<SoftLicence.Server.Services.EncryptionService>();
@@ -1085,7 +1766,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         var keys = LicenseService.GenerateKeys();
         var product = new Product
         {
-            Id = Guid.NewGuid(),
+            Id = productId ?? Guid.NewGuid(),
             Name = productName,
             PrivateKeyXml = encryption.Encrypt(keys.PrivateKey),
             PublicKeyXml = keys.PublicKey,
@@ -1093,7 +1774,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         };
         var type = new LicenseType
         {
-            Id = Guid.NewGuid(),
+            Id = typeId ?? Guid.NewGuid(),
             ProductId = product.Id,
             Name = typeSlug,
             Slug = typeSlug,

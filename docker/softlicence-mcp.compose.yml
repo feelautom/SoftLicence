@@ -1,0 +1,37 @@
+# Online SoftLicence MCP (TKT-001169) — deployed by scripts/Deploy-SoftLicenceMcp.ps1 to /opt/softlicence-mcp.
+# Kept outside the guarded SoftLicence server compose on purpose: the server deployment is untouched.
+#
+# Access is reserved to the WireGuard VPN:
+#   - the port is published ONLY on the VPS WireGuard address (1.2.3.4), never on a public interface,
+#     and there is no Traefik router;
+#   - the application refuses any caller outside SOFTLICENCE_MCP_ALLOWED_CIDRS (403);
+#   - every request needs an analytics key accepted by SoftLicence (401 otherwise); ban/unban tools
+#     additionally need X-Admin-Secret. No key or secret is stored in this container.
+# Clients: type http, url http://1.2.3.4:18090/mcp, header X-Analytics-Key (+ X-Admin-Secret for bans).
+name: softlicence-mcp
+
+services:
+  softlicence-mcp:
+    image: softlicence-mcp:${SOFTLICENCE_MCP_TAG:?SOFTLICENCE_MCP_TAG is required}
+    restart: unless-stopped
+    ports:
+      # 127.0.0.1 fallback: nothing is exposed if the VPN bind address is not provided.
+      - "${SOFTLICENCE_MCP_BIND_IP:-127.0.0.1}:${SOFTLICENCE_MCP_BIND_PORT:-18090}:8080"
+    environment:
+      - SOFTLICENCE_MCP_TRANSPORT=http
+      # Internal call to the SoftLicence server on its Docker network (no public round trip).
+      - SOFTLICENCE_BASE_URL=http://server:8080
+      - SOFTLICENCE_MCP_ALLOWED_CIDRS=${SOFTLICENCE_MCP_ALLOWED_CIDRS:-10.10.0.0/24}
+      - SOFTLICENCE_MCP_RESULT_DIRECTORY=/app/mcp-results
+    networks:
+      - softlicence
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+networks:
+  softlicence:
+    external: true
+    name: COMPOSE_PROJECT_NAME_softlicence

@@ -3,29 +3,59 @@ using System.Text.Json.Serialization;
 
 namespace SoftLicence.Server.Models;
 
+/// <summary>
+/// Carries one closed entitlement issue request; schema v4 additionally requires member-presence
+/// proof for the exact provider-issued authority generation identifier.
+/// </summary>
 public sealed class DistributionEntitlementIssueRequest
 {
+    private string? _authorityGenerationId;
+
     public string? Schema { get; set; }
     public string? RequestId { get; set; }
     public string? ProductId { get; set; }
     public string? SoftLicenceLicenseId { get; set; }
     public string? GrantRefDigestSha256 { get; set; }
     public string? SubjectRef { get; set; }
+    /// <summary>
+    /// Gets or sets the provider-issued Runtime Enrollment generation selected by the caller.
+    /// Presence is tracked separately so legacy contracts reject even an explicitly null member.
+    /// </summary>
+    public string? AuthorityGenerationId
+    {
+        get => _authorityGenerationId;
+        set
+        {
+            AuthorityGenerationIdPresent = true;
+            _authorityGenerationId = value;
+        }
+    }
+
+    /// <summary>Indicates whether the exact JSON request contained <c>authorityGenerationId</c>.</summary>
+    [JsonIgnore]
+    public bool AuthorityGenerationIdPresent { get; private set; }
 
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
 
+/// <summary>Returns the frozen entitlement reference and the v4 generation projection when applicable.</summary>
+/// <param name="Schema">Exact response schema selected by the request contract.</param>
+/// <param name="EntitlementRef">Opaque protected entitlement token.</param>
+/// <param name="ExpiresAtUtc">Canonical UTC expiry.</param>
+/// <param name="AuthorityGenerationId">Exact provider-issued UUID for v2 responses; absent from v1 JSON.</param>
 public sealed record DistributionEntitlementIssueResponse(
     string Schema,
     string EntitlementRef,
-    string ExpiresAtUtc);
+    string ExpiresAtUtc,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? AuthorityGenerationId = null);
 
 public sealed class DistributionInstallationFinalizeRequest
 {
     private bool? _allowSameAuthorityRecovery;
     private DistributionLicenseReplacementProof? _licenseReplacement;
     private DistributionLicenseReplacementCandidateSet? _licenseReplacementCandidates;
+    private DistributionLegacyLicenseReplacementProof? _legacyLicenseReplacement;
 
     public string? Schema { get; set; }
     public string? RequestId { get; set; }
@@ -77,6 +107,26 @@ public sealed class DistributionInstallationFinalizeRequest
 
     [JsonIgnore]
     public bool LicenseReplacementCandidatesPresent { get; private set; }
+    /// <summary>
+    /// Carries the authenticated Website assertion that the exact legacy source and entitlement-bound
+    /// target licences belong to the same account. SoftLicence derives all binding and seat authority.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DistributionLegacyLicenseReplacementProof? LegacyLicenseReplacement
+    {
+        get => _legacyLicenseReplacement;
+        set
+        {
+            LegacyLicenseReplacementPresent = true;
+            _legacyLicenseReplacement = value;
+        }
+    }
+
+    /// <summary>
+    /// Distinguishes an absent v5 proof from an explicitly null member so both fail closed.
+    /// </summary>
+    [JsonIgnore]
+    public bool LegacyLicenseReplacementPresent { get; private set; }
     public DistributionReleaseEvidence? Release { get; set; }
     public List<DistributionBinaryEvidence>? Binaries { get; set; }
 
@@ -113,6 +163,27 @@ public sealed class DistributionLicenseReplacementCandidateSet
     public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
 
+/// <summary>
+/// Identifies the exact source and target licence pair whose common Website ownership is asserted by
+/// the authenticated exact-body S2S request. It deliberately carries no binding, seat, hardware,
+/// customer, grant, key, or historical subject authority.
+/// </summary>
+public sealed class DistributionLegacyLicenseReplacementProof
+{
+    /// <summary>Identifies the strict additive proof contract.</summary>
+    public string? Schema { get; set; }
+
+    /// <summary>Identifies the legacy source licence in canonical lowercase UUID form.</summary>
+    public string? SourceLicenseId { get; set; }
+
+    /// <summary>Identifies the target licence already authenticated by the target entitlement.</summary>
+    public string? TargetLicenseId { get; set; }
+
+    /// <summary>Captures unknown members so service validation can reject non-exact proof shapes.</summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? ExtensionData { get; set; }
+}
+
 public sealed class DistributionReleaseEvidence
 {
     public string? Version { get; set; }
@@ -142,6 +213,44 @@ public sealed record DistributionInstallationBindingResponse(
     string ReleaseSource,
     string BoundAtUtc,
     string? InvalidatedAtUtc);
+
+/// <summary>
+/// Requests the unique Runtime-owned source licence for one product, target licence, and exact hardware identifier.
+/// </summary>
+public sealed class DistributionRuntimeSourceResolutionRequest
+{
+    /// <summary>Gets or sets the exact versioned request schema.</summary>
+    public string? Schema { get; set; }
+
+    /// <summary>Gets or sets the canonical lowercase request UUID.</summary>
+    public string? RequestId { get; set; }
+
+    /// <summary>Gets or sets the canonical lowercase product UUID.</summary>
+    public string? ProductId { get; set; }
+
+    /// <summary>Gets or sets the canonical lowercase target licence UUID.</summary>
+    public string? TargetLicenseId { get; set; }
+
+    /// <summary>Gets or sets the exact opaque hardware identifier submitted to Finalize.</summary>
+    public string? HardwareId { get; set; }
+
+    /// <summary>Captures unknown members so validation can reject every non-exact request shape.</summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? ExtensionData { get; set; }
+}
+
+/// <summary>
+/// Returns only the bounded source classification required to construct an unchanged Finalize contract.
+/// </summary>
+/// <param name="Schema">Exact versioned response schema.</param>
+/// <param name="Outcome">Either <c>source</c> or <c>none</c>.</param>
+/// <param name="SourceLicenseId">Canonical source licence UUID when a unique source exists.</param>
+/// <param name="SourceKind">Either <c>legacy</c> or <c>modern</c> when a unique source exists.</param>
+public sealed record DistributionRuntimeSourceResolutionResponse(
+    string Schema,
+    string Outcome,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? SourceLicenseId,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? SourceKind);
 
 public sealed class DistributionInstallationInvalidationRequest
 {

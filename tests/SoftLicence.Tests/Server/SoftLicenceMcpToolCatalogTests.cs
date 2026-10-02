@@ -8,6 +8,19 @@ namespace SoftLicence.Tests.Server;
 public sealed class SoftLicenceMcpToolCatalogTests
 {
     [Fact]
+    public void RuntimeDistributionDecisionRegistryTool_UsesUnversionedPublishedName()
+    {
+        var method = typeof(SoftLicenceAnalyticsTools).GetMethod(
+            nameof(SoftLicenceAnalyticsTools.GetRuntimeDistributionHardwareDecisions));
+
+        Assert.NotNull(method);
+        Assert.NotNull(method.GetCustomAttribute<McpServerToolAttribute>());
+        Assert.Equal("get_runtime_distribution_hardware_decisions", ToSnakeCase(method.Name));
+        Assert.DoesNotContain("v1", method.Name, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("v2", method.Name, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void OnboardingMetricsTool_UsesShortPublishedName()
     {
         var toolMethods = typeof(SoftLicenceAnalyticsTools)

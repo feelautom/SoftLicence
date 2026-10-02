@@ -19,9 +19,16 @@ public sealed class McpResultStore
     private readonly long _maxTotalBytes;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Dictionary<string, ArtifactState> _artifacts = new(StringComparer.Ordinal);
+    private readonly Func<string?> _currentOwner;
 
-    public McpResultStore(IOptions<SoftLicenceMcpOptions> options)
+    /// <summary>
+    /// Creates the store. <paramref name="currentOwner"/> returns the caller identity (HTTP mode: a
+    /// fingerprint of the analytics key); artifacts are then readable only by the caller that produced
+    /// them. Stdio mode has a single local caller and passes no owner.
+    /// </summary>
+    public McpResultStore(IOptions<SoftLicenceMcpOptions> options, Func<string?>? currentOwner = null)
     {
+        _currentOwner = currentOwner ?? (() => null);
         var values = options.Value;
         _directory = values.GetResultDirectory();
         _maxInlineCharacters = Math.Clamp(values.MaxInlineResultCharacters, 16_384, 4_000_000);
@@ -96,7 +103,10 @@ public sealed class McpResultStore
                 now,
                 now.Add(_ttl),
                 File.GetLastWriteTimeUtc(finalPath),
-                BuildChunkIndex(json));
+                BuildChunkIndex(json))
+            {
+                Owner = _currentOwner(),
+            };
             _artifacts.Add(artifactId, state);
             return BuildDeliveryEnvelope(BuildInfo(state));
         }
@@ -284,6 +294,9 @@ public sealed class McpResultStore
     {
         if (!_artifacts.TryGetValue(artifactId, out var state) || !File.Exists(state.Path))
             throw new KeyNotFoundException("mcp_result_artifact_not_found");
+        // Another caller's artifact is reported exactly like a missing one (no existence oracle).
+        if (state.Owner != null && !string.Equals(state.Owner, _currentOwner(), StringComparison.Ordinal))
+            throw new KeyNotFoundException("mcp_result_artifact_not_found");
 
         var file = new FileInfo(state.Path);
         state.ExpiresAtUtc = file.LastWriteTimeUtc.Add(_ttl);
@@ -447,6 +460,8 @@ public sealed class McpResultStore
         IReadOnlyDictionary<int, ArtifactChunk> chunks)
     {
         public string ArtifactId { get; } = artifactId;
+        /// <summary>Caller identity that produced the artifact, or null in single-caller stdio mode.</summary>
+        public string? Owner { get; init; }
         public string Path { get; } = path;
         public int TotalCharacters { get; } = totalCharacters;
         public long TotalBytes { get; } = totalBytes;

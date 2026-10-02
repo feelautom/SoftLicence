@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
@@ -11,6 +12,7 @@ using Xunit;
 
 namespace SoftLicence.Tests.Server;
 
+/// <summary>Exercises licence-backed automatic alert behavior using isolated test data; the provider substitute rejects human SUP operations to detect routing regressions.</summary>
 public sealed class FreemiumAbuseBugTraceAlertServiceTests
 {
     private readonly DbContextOptions<LicenseDbContext> _dbOptions;
@@ -252,6 +254,7 @@ public sealed class FreemiumAbuseBugTraceAlertServiceTests
         };
     }
 
+    /// <summary>Records automatic Ticket submissions in fixture-owned memory; unsupported conversation and SUP calls throw instead of silently accepting misrouted producers.</summary>
     private sealed class FakeBugTraceProxy : IBugTraceProxyService
     {
         public string ExpectedProjectId => "test-project";
@@ -271,7 +274,23 @@ public sealed class FreemiumAbuseBugTraceAlertServiceTests
         public Task<JsonElement> GetTicketsByEmailAsync(string email, CancellationToken ct = default) =>
             throw new NotImplementedException();
 
+        /// <summary>Throws for unsupported legacy conversation reads; this automatic producer fixture is deliberately not a customer support implementation.</summary>
         public Task<JsonElement> GetTicketCommentsAsync(string ticketNumber, CancellationToken ct = default) =>
             throw new NotImplementedException();
+
+        /// <summary>Rejects SUP calls so this non-support producer cannot silently enter the human-support channel.</summary>
+        public Task<JsonElement> CreateSupportCaseAsync(object body, string idempotencyKey, CancellationToken ct = default) => throw new NotImplementedException();
+        /// <summary>Rejects SUP calls so this non-support producer cannot silently enter the human-support channel.</summary>
+        public Task<JsonElement> ListSupportCasesAsync(string reporterEmail, int limit, CancellationToken ct = default, int offset = 0) => throw new NotImplementedException();
+        /// <summary>Rejects SUP calls so this non-support producer cannot silently enter the human-support channel.</summary>
+        public Task<JsonElement> GetSupportCaseAsync(string supportNumber, CancellationToken ct = default) => throw new NotImplementedException();
+        /// <summary>Rejects SUP calls so this non-support producer cannot silently enter the human-support channel.</summary>
+        public Task<JsonElement> AddSupportCaseMessageAsync(string supportNumber, object body, CancellationToken ct = default) => throw new NotImplementedException();
+        /// <summary>Rejects SUP calls so this non-support producer cannot silently enter the human-support channel.</summary>
+        public Task<JsonElement> ResolveSupportCaseAsync(string supportNumber, CancellationToken ct = default) => throw new NotImplementedException();
+        /// <summary>Rejects SUP calls so this non-support producer cannot silently enter the human-support channel.</summary>
+        public Task<JsonElement> StageSupportAttachmentAsync(IFormFile file, string reporterEmail, string idempotencyKey, CancellationToken ct = default) => throw new NotImplementedException();
+        /// <summary>Rejects SUP calls so this non-support producer cannot silently enter the human-support channel.</summary>
+        public Task<(byte[] Content, string ContentType, string FileName)> DownloadSupportAttachmentAsync(string supportNumber, string attachmentId, CancellationToken ct = default) => throw new NotImplementedException();
     }
 }

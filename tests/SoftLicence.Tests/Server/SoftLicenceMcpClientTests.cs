@@ -1021,6 +1021,344 @@ public sealed class SoftLicenceMcpClientTests
     }
 
     [Fact]
+    public async Task GetSecurityCaseSnapshotAsync_WhenRequiredSourceIsMalformed_FailsClosed()
+    {
+        var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json")
+        });
+        var client = CreateClient(handler);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => client.GetSecurityCaseSnapshotAsync(
+            null, null, "HW-1", null, null, null, null, null,
+            true, 25, null, "TIAConnect", CancellationToken.None));
+
+        Assert.Contains("security bans source is unavailable or malformed", error.Message);
+    }
+
+    [Fact]
+    public async Task GetRuntimeEnrollmentAuthorityDiagnosticAsync_ComposesLargeSecurityEvidenceBeforeFinalArtifact()
+    {
+        var largeEvidence = new string('Z', 24_000);
+        var handler = new CapturingHandler(request =>
+        {
+            var uri = request.RequestUri!;
+            if (uri.AbsolutePath == "/api/analytics/security/canary-alerts")
+                Assert.Contains("exactHardwareId=true", uri.Query, StringComparison.Ordinal);
+            if (uri.AbsolutePath == "/api/analytics/telemetry/machine-profile")
+            {
+                Assert.Contains("exactSnapshot=true", uri.Query, StringComparison.Ordinal);
+                Assert.Contains("take=1000", uri.Query, StringComparison.Ordinal);
+            }
+            var json = uri.AbsolutePath switch
+            {
+                "/api/analytics/support/license-decisions/request-snapshot" => JsonSerializer.Serialize(new
+                {
+                    requestId = "018f6fd4-fe06-75d7-ae93-b15d36ca5501",
+                    complete = true,
+                    items = Enumerable.Range(0, 1000).Select(index => index == 999
+                        ? (object)new
+                        {
+                            parseStatus = "available",
+                            decision = new { operationId = $"operation-{index}", submittedHardwareId = "HW-1" }
+                        }
+                        : new
+                        {
+                            parseStatus = "available",
+                            decision = new { operationId = $"operation-{index}", submittedHardwareId = "HW-1",
+                                replacementCandidates = Array.Empty<object>() }
+                        })
+                }),
+                "/api/analytics/security/bans" => JsonSerializer.Serialize(new
+                {
+                    recordsMatched = 2,
+                    recordsReturned = 2,
+                    resolvedHardwareIds = new[] { "HW-1" },
+                    bans = new object[]
+                    {
+                        new { banId = "11111111-2222-4333-8444-555555555555", targetType = "hardware_id",
+                            isActive = true, bannedAtUtc = "2026-09-10T00:00:00Z", hardwareId = "HW-1",
+                            matchType = "exact_hardware_id", reason = largeEvidence },
+                        new { banId = "33333333-2222-4333-8444-555555555555", targetType = "component",
+                            componentType = "FP_EXE", componentHashRedacted = "ABCDEF12...1234ABCD",
+                            componentMatchType = "FP_EXE", componentMatchStrength = "strong",
+                            isWeakComponentCorrelation = false, isActive = true,
+                            bannedAtUtc = "2026-09-10T00:00:00Z", matchType = "exact_component",
+                            correlatedHardwareIds = new[] { "HW-1" }, reason = "component-secret" }
+                    }
+                }),
+                "/api/analytics/security/canary-alerts" => """{"groupsMatched":0,"groupsReturned":0,"alerts":[]}""",
+                "/api/analytics/telemetry/machine-profile" => """{"hardwareId":"HW-1","days":30,"recordsAnalyzed":1,"complete":true,"firstActivityUtc":"2026-09-11T00:00:00Z","lastActivityUtc":"2026-09-11T00:00:00Z","recentRecords":[{"timestampUtc":"2026-09-11T00:00:00Z","type":"Event","eventName":"Startup_AppStarted","family":"startup","appName":"TIAConnect"}]}""",
+                _ => throw new InvalidOperationException("Unexpected diagnostic request.")
+            };
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            };
+        });
+        var resultDirectory = Path.Combine(Path.GetTempPath(), "SoftLicence.Tests",
+            nameof(SoftLicenceMcpClientTests), Guid.NewGuid().ToString("N"));
+        var options = Options.Create(new SoftLicenceMcpOptions
+        {
+            SoftLicenceBaseUrl = "https://softlicence.test/",
+            SoftLicenceApiKey = "analytics-key",
+            ResultDirectory = resultDirectory,
+            MaxInlineResultCharacters = 16_384,
+            ResultChunkCharacters = 4_096
+        });
+        var store = new McpResultStore(options);
+        var client = new SoftLicenceAnalyticsClient(new HttpClient(handler), options, store);
+
+        var delivered = await client.GetRuntimeEnrollmentAuthorityDiagnosticAsync(
+            "018f6fd4-fe06-75d7-ae93-b15d36ca5501", null, "TIAConnect", CancellationToken.None);
+
+        Assert.Equal("artifact", delivered.GetProperty("resultDelivery").GetString());
+        var artifactId = delivered.GetProperty("artifact").GetProperty("artifactId").GetString()!;
+        var reconstructed = new StringBuilder();
+        for (var offset = 0;;)
+        {
+            var chunk = store.GetChunk(artifactId, offset, 4_096);
+            reconstructed.Append(chunk.GetProperty("content").GetString());
+            if (!chunk.GetProperty("hasMore").GetBoolean()) break;
+            offset = chunk.GetProperty("nextOffset").GetInt32();
+        }
+        using var document = JsonDocument.Parse(reconstructed.ToString());
+        var security = document.RootElement.GetProperty("security");
+        Assert.False(document.RootElement.GetProperty("candidateSelection")
+            .GetProperty("historicalPayloadAvailable").GetBoolean());
+        Assert.Equal(JsonValueKind.Object, security.ValueKind);
+        Assert.False(security.TryGetProperty("resultDelivery", out _));
+        Assert.Contains(security.GetProperty("bans").GetProperty("bans").EnumerateArray(),
+            row => row.TryGetProperty("componentType", out var type) && type.GetString() == "FP_EXE");
+        Assert.DoesNotContain(largeEvidence, reconstructed.ToString());
+        Assert.DoesNotContain("component-secret", reconstructed.ToString());
+        Assert.DoesNotContain("FOREIGN-BAN", reconstructed.ToString());
+        Assert.DoesNotContain("foreign@example.test", reconstructed.ToString());
+        Assert.DoesNotContain("PREFIX-HW-1-SUFFIX", reconstructed.ToString());
+    }
+
+    [Fact]
+    public async Task GetRuntimeEnrollmentAuthorityDiagnosticAsync_UnavailableDecisionPreventsExactCorrelation()
+    {
+        var requestId = Guid.NewGuid().ToString("D");
+        var handler = new CapturingHandler(request =>
+        {
+            Assert.Equal("/api/analytics/support/license-decisions/request-snapshot", request.RequestUri!.AbsolutePath);
+            var json = JsonSerializer.Serialize(new
+            {
+                requestId,
+                complete = true,
+                items = new object[]
+                {
+                    new { parseStatus = "available", decision = new { submittedHardwareId = "HW-1" } },
+                    new { parseStatus = "unavailable", decision = (object?)null }
+                }
+            });
+            return new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+        });
+        var client = CreateClient(handler);
+
+        var result = await client.GetRuntimeEnrollmentAuthorityDiagnosticAsync(
+            requestId, null, "TIAConnect", CancellationToken.None);
+
+        Assert.False(result.GetProperty("decisionEvidenceComplete").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, result.GetProperty("exactHardwareId").ValueKind);
+        Assert.Equal(JsonValueKind.Null, result.GetProperty("security").ValueKind);
+    }
+
+    [Fact]
+    public async Task GetRuntimeEnrollmentAuthorityDiagnosticAsync_MissingSubmittedHardwarePreventsExactCorrelation()
+    {
+        var requestId = Guid.NewGuid().ToString("D");
+        var handler = new CapturingHandler(request =>
+        {
+            Assert.Equal("/api/analytics/support/license-decisions/request-snapshot", request.RequestUri!.AbsolutePath);
+            var json = JsonSerializer.Serialize(new
+            {
+                requestId,
+                complete = true,
+                items = new object[]
+                {
+                    new { parseStatus = "available", decision = new { submittedHardwareId = "HW-1" } },
+                    new { parseStatus = "available", decision = new { outcome = "refused" } }
+                }
+            });
+            return new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+        });
+        var client = CreateClient(handler);
+
+        var result = await client.GetRuntimeEnrollmentAuthorityDiagnosticAsync(
+            requestId, null, "TIAConnect", CancellationToken.None);
+
+        Assert.False(result.GetProperty("decisionEvidenceComplete").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, result.GetProperty("exactHardwareId").ValueKind);
+        Assert.Equal(JsonValueKind.Null, result.GetProperty("security").ValueKind);
+    }
+
+    [Fact]
+    public async Task GetRuntimeEnrollmentAuthorityDiagnosticAsync_WhitespaceHardwarePreventsExactCorrelation()
+    {
+        var requestId = Guid.NewGuid().ToString("D");
+        var handler = new CapturingHandler(request =>
+        {
+            Assert.Equal("/api/analytics/support/license-decisions/request-snapshot", request.RequestUri!.AbsolutePath);
+            var json = JsonSerializer.Serialize(new
+            {
+                requestId,
+                complete = true,
+                items = new[] { new { parseStatus = "available", decision = new { submittedHardwareId = "  " } } }
+            });
+            return new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+        });
+        var client = CreateClient(handler);
+
+        var result = await client.GetRuntimeEnrollmentAuthorityDiagnosticAsync(
+            requestId, null, "TIAConnect", CancellationToken.None);
+
+        Assert.False(result.GetProperty("decisionEvidenceComplete").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, result.GetProperty("security").ValueKind);
+    }
+
+    [Fact]
+    public async Task GetRuntimeEnrollmentAuthorityDiagnosticAsync_RequiresOneCompleteAtomicSnapshot()
+    {
+        var requestCount = 0;
+        var handler = new CapturingHandler(request =>
+        {
+            Assert.Equal("/api/analytics/support/license-decisions/request-snapshot", request.RequestUri!.AbsolutePath);
+            requestCount++;
+            var json = JsonSerializer.Serialize(new
+            {
+                requestId = "018f6fd4-fe06-75d7-ae93-b15d36ca5501",
+                complete = true,
+                items = Array.Empty<object>()
+            });
+            return new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+        });
+        var client = CreateClient(handler);
+
+        var result = await client.GetRuntimeEnrollmentAuthorityDiagnosticAsync(
+            "018f6fd4-fe06-75d7-ae93-b15d36ca5501", null, "TIAConnect", CancellationToken.None);
+
+        Assert.Equal(1, requestCount);
+        Assert.Equal(JsonValueKind.Null, result.GetProperty("exactHardwareId").ValueKind);
+    }
+
+    [Fact]
+    public async Task GetRuntimeEnrollmentAuthorityDiagnosticAsync_RejectsMismatchedSnapshotIdentity()
+    {
+        var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                """{"requestId":"018f6fd4-fe06-75d7-ae93-b15d36ca5502","complete":true,"items":[]}""",
+                Encoding.UTF8, "application/json")
+        });
+        var client = CreateClient(handler);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.GetRuntimeEnrollmentAuthorityDiagnosticAsync(
+                "018f6fd4-fe06-75d7-ae93-b15d36ca5501", null, "TIAConnect", CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData("bans")]
+    [InlineData("canary")]
+    [InlineData("profile")]
+    [InlineData("ban-row")]
+    [InlineData("canary-row")]
+    [InlineData("profile-row")]
+    [InlineData("ban-semantic")]
+    [InlineData("canary-text")]
+    [InlineData("profile-type")]
+    [InlineData("ban-hash")]
+    [InlineData("ban-category")]
+    [InlineData("ban-empty-guid")]
+    [InlineData("ban-noncanonical-guid")]
+    [InlineData("ban-v7-guid")]
+    [InlineData("ban-short-hash")]
+    [InlineData("ban-nonhex-hash")]
+    [InlineData("profile-version")]
+    [InlineData("profile-top")]
+    [InlineData("profile-days")]
+    public async Task GetRuntimeEnrollmentAuthorityDiagnosticAsync_RejectsIncompleteExactSources(string malformedSource)
+    {
+        const string requestId = "018f6fd4-fe06-75d7-ae93-b15d36ca5501";
+        var handler = new CapturingHandler(request =>
+        {
+            var json = request.RequestUri!.AbsolutePath switch
+            {
+                "/api/analytics/support/license-decisions/request-snapshot" =>
+                    JsonSerializer.Serialize(new
+                    {
+                        requestId,
+                        complete = true,
+                        items = new[] { new { parseStatus = "available", decision = new
+                        {
+                            outcome = "refused", submittedHardwareId = "HW-1",
+                            replacementCandidates = Array.Empty<object>()
+                        } } }
+                    }),
+                "/api/analytics/security/bans" when malformedSource == "bans" =>
+                    """{"resolvedHardwareIds":["HW-1"],"bans":[]}""",
+                "/api/analytics/security/bans" when malformedSource == "ban-row" =>
+                    """{"recordsMatched":1,"recordsReturned":1,"resolvedHardwareIds":["HW-1"],"bans":[{"banId":"11111111-2222-4333-8444-555555555555","hardwareId":"HW-1"}]}""",
+                "/api/analytics/security/bans" when malformedSource == "ban-semantic" =>
+                    """{"recordsMatched":1,"recordsReturned":1,"resolvedHardwareIds":["HW-1"],"bans":[{"banId":"11111111-2222-4333-8444-555555555555","targetType":"component","isActive":true,"bannedAtUtc":"2026-09-10T00:00:00Z","matchType":"exact_component","componentType":"CPU","componentHashRedacted":"ABCDEF12...1234ABCD","componentMatchType":"CPU","componentMatchStrength":"strong","isWeakComponentCorrelation":false,"correlatedHardwareIds":["HW-1"]}]}""",
+                "/api/analytics/security/bans" when malformedSource == "ban-hash" =>
+                    $$"""{"recordsMatched":1,"recordsReturned":1,"resolvedHardwareIds":["HW-1"],"bans":[{"banId":"11111111-2222-4333-8444-555555555555","targetType":"component","isActive":true,"bannedAtUtc":"2026-09-10T00:00:00Z","matchType":"exact_component","componentType":"FP_EXE","componentHashRedacted":"{{new string('A', 64)}}","componentMatchType":"FP_EXE","componentMatchStrength":"strong","isWeakComponentCorrelation":false,"correlatedHardwareIds":["HW-1"]}]}""",
+                "/api/analytics/security/bans" when malformedSource == "ban-category" =>
+                    """{"recordsMatched":1,"recordsReturned":1,"resolvedHardwareIds":["HW-1"],"bans":[{"banId":"11111111-2222-4333-8444-555555555555","targetType":"hardware_id","isActive":true,"bannedAtUtc":"2026-09-10T00:00:00Z","hardwareId":"HW-1","matchType":"exact_hardware_id","banCategory":"secret=unexpected"}]}""",
+                "/api/analytics/security/bans" when malformedSource == "ban-empty-guid" =>
+                    """{"recordsMatched":1,"recordsReturned":1,"resolvedHardwareIds":["HW-1"],"bans":[{"banId":"00000000-0000-0000-0000-000000000000","targetType":"hardware_id","isActive":true,"bannedAtUtc":"2026-09-10T00:00:00Z","hardwareId":"HW-1","matchType":"exact_hardware_id","banCategory":"manual"}]}""",
+                "/api/analytics/security/bans" when malformedSource == "ban-noncanonical-guid" =>
+                    """{"recordsMatched":1,"recordsReturned":1,"resolvedHardwareIds":["HW-1"],"bans":[{"banId":"11111111-2222-3333-4444-555555555555","targetType":"hardware_id","isActive":true,"bannedAtUtc":"2026-09-10T00:00:00Z","hardwareId":"HW-1","matchType":"exact_hardware_id","banCategory":"manual"}]}""",
+                "/api/analytics/security/bans" when malformedSource == "ban-v7-guid" =>
+                    """{"recordsMatched":1,"recordsReturned":1,"resolvedHardwareIds":["HW-1"],"bans":[{"banId":"11111111-2222-7333-8444-555555555555","targetType":"hardware_id","isActive":true,"bannedAtUtc":"2026-09-10T00:00:00Z","hardwareId":"HW-1","matchType":"exact_hardware_id","banCategory":"manual"}]}""",
+                "/api/analytics/security/bans" when malformedSource == "ban-short-hash" =>
+                    """{"recordsMatched":1,"recordsReturned":1,"resolvedHardwareIds":["HW-1"],"bans":[{"banId":"11111111-2222-4333-8444-555555555555","targetType":"component","isActive":true,"bannedAtUtc":"2026-09-10T00:00:00Z","matchType":"exact_component","componentType":"FP_EXE","componentHashRedacted":"secret=password","componentMatchType":"FP_EXE","componentMatchStrength":"strong","isWeakComponentCorrelation":false,"correlatedHardwareIds":["HW-1"]}]}""",
+                "/api/analytics/security/bans" when malformedSource == "ban-nonhex-hash" =>
+                    """{"recordsMatched":1,"recordsReturned":1,"resolvedHardwareIds":["HW-1"],"bans":[{"banId":"11111111-2222-4333-8444-555555555555","targetType":"component","isActive":true,"bannedAtUtc":"2026-09-10T00:00:00Z","matchType":"exact_component","componentType":"FP_EXE","componentHashRedacted":"GGGGGGGG...HHHHHHHH","componentMatchType":"FP_EXE","componentMatchStrength":"strong","isWeakComponentCorrelation":false,"correlatedHardwareIds":["HW-1"]}]}""",
+                "/api/analytics/security/bans" =>
+                    """{"recordsMatched":0,"recordsReturned":0,"resolvedHardwareIds":["HW-1"],"bans":[]}""",
+                "/api/analytics/security/canary-alerts" when malformedSource == "canary" =>
+                    """{"alerts":[]}""",
+                "/api/analytics/security/canary-alerts" when malformedSource == "canary-row" =>
+                    """{"groupsMatched":1,"groupsReturned":1,"alerts":[{"alertId":"11111111-2222-4333-8444-555555555555","hardwareId":"HW-1"}]}""",
+                "/api/analytics/security/canary-alerts" when malformedSource == "canary-text" =>
+                    """{"groupsMatched":1,"groupsReturned":1,"alerts":[{"alertId":"11111111-2222-4333-8444-555555555555","hardwareId":"HW-1","trigger":"  ","severity":3,"evidenceCount":0,"firstSeenUtc":"2026-09-10T00:00:00Z","lastSeenUtc":"2026-09-10T00:01:00Z","isHardwareBanned":false,"sourceKind":"client_canary"}]}""",
+                "/api/analytics/security/canary-alerts" =>
+                    """{"groupsMatched":0,"groupsReturned":0,"alerts":[]}""",
+                "/api/analytics/telemetry/machine-profile" when malformedSource == "profile" =>
+                    """{"hardwareId":"HW-1","days":30,"recordsAnalyzed":2,"complete":true,"firstActivityUtc":null,"lastActivityUtc":null,"recentRecords":[]}""",
+                "/api/analytics/telemetry/machine-profile" when malformedSource == "profile-row" =>
+                    """{"hardwareId":"HW-1","days":30,"recordsAnalyzed":1,"complete":true,"firstActivityUtc":"2026-09-10T00:00:00Z","lastActivityUtc":"2026-09-10T00:00:00Z","recentRecords":[null]}""",
+                "/api/analytics/telemetry/machine-profile" when malformedSource == "profile-type" =>
+                    """{"hardwareId":"HW-1","days":30,"recordsAnalyzed":1,"complete":true,"firstActivityUtc":"2026-09-10T00:00:00Z","lastActivityUtc":"2026-09-10T00:00:00Z","recentRecords":[{"timestampUtc":"2026-09-10T00:00:00Z","type":"FutureType","eventName":"Startup_AppStarted","family":"startup","appName":"TIAConnect"}]}""",
+                "/api/analytics/telemetry/machine-profile" when malformedSource == "profile-version" =>
+                    """{"hardwareId":"HW-1","days":30,"recordsAnalyzed":1,"complete":true,"firstActivityUtc":"2026-09-10T00:00:00Z","lastActivityUtc":"2026-09-10T00:00:00Z","recentRecords":[{"timestampUtc":"2026-09-10T00:00:00Z","type":"Event","eventName":"Startup_AppStarted","family":"startup","appName":"TIAConnect","version":"  "}]}""",
+                "/api/analytics/telemetry/machine-profile" when malformedSource == "profile-top" =>
+                    """{"hardwareId":"HW-1","days":30,"recordsAnalyzed":1,"complete":true,"firstActivityUtc":"secret=unexpected","lastActivityUtc":"2026-09-10T00:00:00Z","recentRecords":[{"timestampUtc":"2026-09-10T00:00:00Z","type":"Event","eventName":"Startup_AppStarted","family":"startup","appName":"TIAConnect"}]}""",
+                "/api/analytics/telemetry/machine-profile" when malformedSource == "profile-days" =>
+                    """{"hardwareId":"HW-1","days":1,"recordsAnalyzed":0,"complete":true,"firstActivityUtc":null,"lastActivityUtc":null,"recentRecords":[]}""",
+                "/api/analytics/telemetry/machine-profile" =>
+                    """{"hardwareId":"HW-1","days":30,"recordsAnalyzed":0,"complete":true,"firstActivityUtc":null,"lastActivityUtc":null,"recentRecords":[]}""",
+                _ => throw new InvalidOperationException("Unexpected diagnostic request.")
+            };
+            return new HttpResponseMessage(HttpStatusCode.OK)
+                { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+        });
+        var client = CreateClient(handler);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.GetRuntimeEnrollmentAuthorityDiagnosticAsync(
+                requestId, null, "TIAConnect", CancellationToken.None));
+    }
+
+    [Fact]
     public async Task GetLicenseDurationMigrationImpactAsync_EncodesMigrationParameters()
     {
         HttpRequestMessage? capturedRequest = null;
@@ -1453,6 +1791,42 @@ public sealed class SoftLicenceMcpClientTests
         Assert.Equal("https://softlicence.test/api/analytics/products", requests[1]);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GetTelemetryOverviewAsync_WhenProductFallbackExceedsTransportBound_OmitsProductsSafely(
+        bool omitContentLength)
+    {
+        var requests = 0;
+        var handler = new CapturingHandler(request =>
+        {
+            requests++;
+            if (request.RequestUri!.AbsolutePath.EndsWith("/api/analytics/products", StringComparison.Ordinal))
+            {
+                HttpContent content = omitContentLength
+                    ? new UnknownLengthContent(new byte[2048])
+                    : new ByteArrayContent(new byte[2048]);
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                Content = new StringContent(
+                    """{"errorCode":"PRODUCT_SELECTOR_REQUIRED","message":"Select a product."}""",
+                    Encoding.UTF8,
+                    "application/json")
+            };
+        });
+        var client = CreateClient(handler, responseMaxBytes: 1024);
+
+        var result = await client.GetTelemetryOverviewAsync(
+            days: 1, top: 5, date: null, fromUtc: null, toUtc: null, CancellationToken.None);
+
+        Assert.Equal("PRODUCT_SELECTOR_REQUIRED", result.GetProperty("errorCode").GetString());
+        Assert.Equal(JsonValueKind.Null, result.GetProperty("availableProducts").ValueKind);
+        Assert.Equal(2, requests);
+    }
+
     [Fact]
     public async Task GetTelemetryOverviewAsync_WhenApiKeyIsMissing_ThrowsConfigurationError()
     {
@@ -1470,13 +1844,20 @@ public sealed class SoftLicenceMcpClientTests
     [Fact]
     public async Task GetTelemetryOverviewAsync_WhenApiRejectsKey_ThrowsAuthError()
     {
-        var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.Unauthorized));
+        var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.Unauthorized)
+        {
+            Content = new StringContent("Missing or invalid X-Analytics-Key header.")
+        });
         var client = CreateClient(handler);
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             client.GetTelemetryOverviewAsync(days: 7, top: 20, date: null, fromUtc: null, toUtc: null, CancellationToken.None));
 
+        // TKT-001168: the message names the endpoint, relays the server text and hints at missing scopes.
         Assert.Contains("rejected SOFTLICENCE_API_KEY", ex.Message);
+        Assert.Contains("HTTP 401 on /api/analytics/", ex.Message);
+        Assert.Contains("Missing or invalid X-Analytics-Key header.", ex.Message);
+        Assert.Contains("security:read", ex.Message);
     }
 
     [Fact]
@@ -1537,9 +1918,66 @@ public sealed class SoftLicenceMcpClientTests
         Assert.Equal(sourceJson, reconstructed.ToString());
     }
 
+    [Fact]
+    public async Task RuntimeAuthorityDiagnostic_RejectsDeclaredResponseBeyondTransportBound()
+    {
+        var content = new ByteArrayContent(new byte[2048]);
+        Assert.Equal(2048, content.Headers.ContentLength);
+        var client = CreateClient(new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+            { Content = content }), responseMaxBytes: 1024);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.GetRuntimeEnrollmentAuthorityDiagnosticAsync(
+                Guid.NewGuid().ToString("D"), null, "TIAConnect", CancellationToken.None));
+
+        Assert.Contains("transport byte bound", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RuntimeAuthorityDiagnostic_RejectsChunkedResponseBeyondTransportBound()
+    {
+        var content = new UnknownLengthContent(new byte[2048]);
+        Assert.Null(content.Headers.ContentLength);
+        var client = CreateClient(new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+            { Content = content }), responseMaxBytes: 1024);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.GetRuntimeEnrollmentAuthorityDiagnosticAsync(
+                Guid.NewGuid().ToString("D"), null, "TIAConnect", CancellationToken.None));
+
+        Assert.Contains("transport byte bound", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CreateSecurityHardwareBanAsync_RejectsAdminResponseBeyondTransportBound(
+        bool omitContentLength)
+    {
+        var requests = 0;
+        var handler = new CapturingHandler(_ =>
+        {
+            requests++;
+            HttpContent content = omitContentLength
+                ? new UnknownLengthContent(new byte[2048])
+                : new ByteArrayContent(new byte[2048]);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+        });
+        var client = CreateClient(handler, responseMaxBytes: 1024);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.CreateSecurityHardwareBanAsync(
+                "ABCDEF0123456789", "Confirmed incident", "manual", null, "TIAConnect", null, null,
+                "TKT-001046", null, "Codex", null, CancellationToken.None));
+
+        Assert.Contains("transport byte bound", error.Message, StringComparison.Ordinal);
+        Assert.Equal(1, requests);
+    }
+
     private static SoftLicenceAnalyticsClient CreateClient(
         HttpMessageHandler handler,
-        string? adminSecret = "admin-secret")
+        string? adminSecret = "admin-secret",
+        int responseMaxBytes = 16 * 1024 * 1024)
     {
         return new SoftLicenceAnalyticsClient(
             new HttpClient(handler),
@@ -1547,7 +1985,8 @@ public sealed class SoftLicenceMcpClientTests
             {
                 SoftLicenceBaseUrl = "https://softlicence.test/",
                 SoftLicenceApiKey = "analytics-key",
-                SoftLicenceAdminSecret = adminSecret
+                SoftLicenceAdminSecret = adminSecret,
+                AnalyticsResponseMaxBytes = responseMaxBytes
             }));
     }
 
@@ -1576,5 +2015,24 @@ public sealed class SoftLicenceMcpClientTests
         {
             return Task.FromResult(_handler(request));
         }
+    }
+
+    /// <summary>Exposes a readable response stream while deliberately omitting Content-Length.</summary>
+    private sealed class UnknownLengthContent(byte[] bytes) : HttpContent
+    {
+        /// <inheritdoc />
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            stream.WriteAsync(bytes).AsTask();
+
+        /// <inheritdoc />
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+
+        /// <inheritdoc />
+        protected override Task<Stream> CreateContentReadStreamAsync() =>
+            Task.FromResult<Stream>(new MemoryStream(bytes, writable: false));
     }
 }

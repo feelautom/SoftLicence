@@ -23,7 +23,7 @@ public sealed class TelemetryOperationsAnalyticsController : ControllerBase
     public async Task<IActionResult> Rejections([FromHeader(Name = "X-Analytics-Key")] string? key, [FromQuery] int take = 100, CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAsync(key, cancellationToken);
-        if (auth == null) return Unauthorized("Missing or invalid X-Analytics-Key header.");
+        if (auth == null) return AnalyticsApiKeyHttp.Failure(HttpContext);
         if (!auth.IsGlobal) return Forbid();
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
         var rows = await db.TelemetryIngestionRejections.AsNoTracking()
@@ -41,7 +41,7 @@ public sealed class TelemetryOperationsAnalyticsController : ControllerBase
     public async Task<IActionResult> Incidents([FromHeader(Name = "X-Analytics-Key")] string? key, [FromQuery] string? status = null, [FromQuery] int take = 100, CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAsync(key, cancellationToken);
-        if (auth == null) return Unauthorized("Missing or invalid X-Analytics-Key header.");
+        if (auth == null) return AnalyticsApiKeyHttp.Failure(HttpContext);
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
         var query = db.ActivationIncidents.AsNoTracking().AsQueryable();
         if (!auth.IsGlobal) query = query.Where(x => x.ProductId == auth.ProductId);
@@ -60,7 +60,7 @@ public sealed class TelemetryOperationsAnalyticsController : ControllerBase
     public async Task<IActionResult> RejectionSummary([FromHeader(Name = "X-Analytics-Key")] string? key, [FromQuery] int days = 7, CancellationToken cancellationToken = default)
     {
         var auth = await AuthenticateAsync(key, cancellationToken);
-        if (auth == null) return Unauthorized("Missing or invalid X-Analytics-Key header.");
+        if (auth == null) return AnalyticsApiKeyHttp.Failure(HttpContext);
         if (!auth.IsGlobal) return Forbid();
         var fromUtc = DateTime.UtcNow.AddDays(-Math.Clamp(days, 1, 90));
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
@@ -74,6 +74,5 @@ public sealed class TelemetryOperationsAnalyticsController : ControllerBase
     }
 
     private Task<AnalyticsApiKeyAuthResult?> AuthenticateAsync(string? key, CancellationToken cancellationToken) =>
-        _auth.ValidateAsync(key ?? string.Empty, AnalyticsApiKeyScopes.TelemetryRead,
-            HttpContext.Connection.RemoteIpAddress?.ToString(), cancellationToken);
+        _auth.ValidateForRequestAsync(HttpContext, key, AnalyticsApiKeyScopes.TelemetryRead, cancellationToken);
 }

@@ -123,6 +123,44 @@ namespace SoftLicence.Server.Services
             await client.DisconnectAsync(true);
         }
 
+        /// <summary>
+        /// Sends a TKT-001177 security lock alert to the administrator mailbox (same recipient as canary alerts). The
+        /// dossier is HTML-encoded because it contains client-supplied identifiers; an unconfigured SMTP host sends
+        /// nothing.
+        /// </summary>
+        /// <param name="subject">Alert title.</param>
+        /// <param name="dossier">Plain-text dossier.</param>
+        public virtual async Task SendSecurityLockAlertEmailAsync(string subject, string dossier)
+        {
+            var host = _settings.Host?.Trim('"', '\'', ' ', '\t') ?? "";
+            var user = _settings.Username?.Trim('"', '\'', ' ', '\t') ?? "";
+            var pass = _settings.Password?.Trim('"', '\'', ' ', '\t') ?? "";
+            if (string.IsNullOrEmpty(host) || host == "localhost") return;
+            var fromEmail = _settings.FromEmail?.Trim('"') ?? "";
+            var toEmail = !string.IsNullOrEmpty(user) ? user : fromEmail;
+            if (string.IsNullOrEmpty(toEmail)) return;
+
+            var message = new MimeMessage();
+            message.From.Add(new MailboxAddress("SoftLicence Security", fromEmail));
+            message.To.Add(new MailboxAddress("Admin", toEmail));
+            message.Subject = "[VERROU] " + subject;
+            var builder = new BodyBuilder
+            {
+                TextBody = dossier,
+                HtmlBody = "<div style=\"font-family:'Segoe UI',sans-serif;max-width:700px;margin:0 auto;\">"
+                           + "<h2 style=\"color:#c53030;\">" + System.Net.WebUtility.HtmlEncode(subject) + "</h2>"
+                           + "<pre style=\"background:#f7fafc;padding:15px;white-space:pre-wrap;word-break:break-all;\">"
+                           + System.Net.WebUtility.HtmlEncode(dossier) + "</pre></div>"
+            };
+            message.Body = builder.ToMessageBody();
+
+            using var client = new SmtpClient();
+            await client.ConnectAsync(host, _settings.Port, _settings.Port == 465 ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.StartTls);
+            if (!string.IsNullOrEmpty(user)) await client.AuthenticateAsync(user, pass);
+            await client.SendAsync(message);
+            await client.DisconnectAsync(true);
+        }
+
         public async Task SendCanaryAlertEmailAsync(string trigger, string hardwareId, string? machineName, string? userName, string? ip, string? appVersion, string? details, int severity, bool isNewBan, string? osVersion = null, bool? debuggerAttached = null)
         {
             var host = _settings.Host?.Trim('"', '\'', ' ', '\t') ?? "";

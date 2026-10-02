@@ -13,6 +13,255 @@ namespace SoftLicence.Tests.Server;
 
 public sealed class RuntimeEnrollmentsControllerTests
 {
+    /// <summary>Proves recovery preparation authenticates the exact path/body and forwards only the bound principal.</summary>
+    [Fact]
+    public async Task AuthorityRecoveryPreparation_WithUpgradePrincipal_ForwardsExactAuthenticatedBody()
+    {
+        const string productId = "11111111-1111-4111-8111-111111111111";
+        const string attemptId = "22222222-2222-4222-8222-222222222222";
+        var body = "{\"productId\":\"" + productId + "\"}";
+        var bytes = Encoding.UTF8.GetBytes(body);
+        var s2s = new Mock<IDistributionS2SAuthenticationService>(MockBehavior.Strict);
+        s2s.Setup(value => value.AuthenticateAndReserveNonceAsync(
+                It.Is<HttpContext>(context => context.Request.Path ==
+                    "/api/internal/v2/runtime-enrollment-authority/recovery-preparations"),
+                It.Is<ReadOnlyMemory<byte>>(actual => ExactBytes(actual, bytes)), productId,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new DistributionS2SPrincipal("authority-client", "transport-key", false, true, false));
+        var runtime = new Mock<IRuntimeEnrollmentService>(MockBehavior.Strict);
+        runtime.Setup(value => value.PrepareAuthorityRecoveryV2Async(
+                "authority-client", "transport-key", Guid.Parse(attemptId),
+                It.Is<ReadOnlyMemory<byte>>(actual => ExactBytes(actual, bytes)),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new RuntimeEnrollmentAuthorityRecoveryPreparationResult("{}"u8.ToArray()));
+        var controller = CreateController(s2s, runtime, "enabled",
+            "/api/internal/v2/runtime-enrollment-authority/recovery-preparations", body, authorityV2: true);
+        controller.Request.Headers["X-Runtime-Enrollment-Attempt-Id"] = attemptId;
+
+        var result = Assert.IsType<FileContentResult>(
+            await controller.PrepareAuthorityRecoveryV2(CancellationToken.None));
+
+        Assert.Equal("{}"u8.ToArray(), result.FileContents);
+        Assert.Equal(controller.HttpContext.TraceIdentifier, controller.Response.Headers["X-Correlation-Id"]);
+        Assert.Equal("REA-V2-RECOVERY-PREPARED", controller.Response.Headers["X-Support-Code"]);
+        s2s.VerifyAll();
+        runtime.VerifyAll();
+    }
+
+    /// <summary>Proves finalization reauthenticates exact bytes and forwards the three exact detached recovery values.</summary>
+    [Fact]
+    public async Task AuthorityRecoveryFinalization_WithUpgradePrincipal_ForwardsExactBindings()
+    {
+        const string productId = "11111111-1111-4111-8111-111111111111";
+        const string attemptId = "22222222-2222-4222-8222-222222222222";
+        var body = "{\"productId\":\"" + productId + "\"}";
+        var bytes = Encoding.UTF8.GetBytes(body);
+        var s2s = new Mock<IDistributionS2SAuthenticationService>(MockBehavior.Strict);
+        s2s.Setup(value => value.AuthenticateAndReserveNonceAsync(
+                It.Is<HttpContext>(context => context.Request.Path ==
+                    "/api/internal/v2/runtime-enrollment-authority/recovery-finalizations"),
+                It.Is<ReadOnlyMemory<byte>>(actual => ExactBytes(actual, bytes)), productId,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new DistributionS2SPrincipal("authority-client", "transport-key", false, true, false));
+        var runtime = new Mock<IRuntimeEnrollmentService>(MockBehavior.Strict);
+        runtime.Setup(value => value.FinalizeAuthorityRecoveryV2Async(
+                "authority-client", "transport-key", Guid.Parse(attemptId),
+                It.Is<ReadOnlyMemory<byte>>(actual => ExactBytes(actual, bytes)),
+                "preparation-token", "recovery-key", new string('A', 342),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new RuntimeEnrollmentAuthorityV2OperationResult(201, "{}"u8, false));
+        var controller = CreateController(s2s, runtime, "enabled",
+            "/api/internal/v2/runtime-enrollment-authority/recovery-finalizations", body, authorityV2: true);
+        controller.Request.Headers["X-Runtime-Enrollment-Attempt-Id"] = attemptId;
+        controller.Request.Headers["X-Runtime-Enrollment-Recovery-Preparation"] = "preparation-token";
+        controller.Request.Headers["X-Runtime-Enrollment-Recovery-Key-Id"] = "recovery-key";
+        controller.Request.Headers["X-Runtime-Enrollment-Recovery-Signature"] = new string('A', 342);
+
+        var result = Assert.IsType<FileContentResult>(
+            await controller.FinalizeAuthorityRecoveryV2(CancellationToken.None));
+
+        Assert.Equal("{}"u8.ToArray(), result.FileContents);
+        Assert.Equal(201, controller.Response.StatusCode);
+        s2s.VerifyAll();
+        runtime.VerifyAll();
+    }
+
+    /// <summary>Proves authenticated exact bytes reach v2 and an accepted result emits closed correlation diagnostics.</summary>
+    [Fact]
+    public async Task AuthorityGenerationV2_WithUpgradePrincipal_ForwardsExactAuthenticatedBody()
+    {
+        const string productId = "11111111-1111-4111-8111-111111111111";
+        const string attemptId = "22222222-2222-4222-8222-222222222222";
+        var body = "{\"productId\":\"" + productId + "\"}";
+        var bytes = Encoding.UTF8.GetBytes(body);
+        var authenticated = false;
+        var s2s = new Mock<IDistributionS2SAuthenticationService>(MockBehavior.Strict);
+        s2s.Setup(value => value.AuthenticateAndReserveNonceAsync(
+                It.IsAny<HttpContext>(), It.Is<ReadOnlyMemory<byte>>(actual => ExactBytes(actual, bytes)),
+                productId, It.IsAny<CancellationToken>()))
+            .Callback<HttpContext, ReadOnlyMemory<byte>, string, CancellationToken>(
+                (context, signedBody, signedProductId, _) =>
+                {
+                    Assert.Equal(HttpMethods.Post, context.Request.Method);
+                    Assert.Equal("/api/internal/v2/runtime-enrollment-authority/generations",
+                        context.Request.Path.Value);
+                    Assert.True(ExactBytes(signedBody, bytes));
+                    Assert.Equal(productId, signedProductId);
+                    authenticated = true;
+                })
+            .ReturnsAsync(new DistributionS2SPrincipal("authority-client", "transport-key", false, true, false));
+        var runtime = new Mock<IRuntimeEnrollmentService>(MockBehavior.Strict);
+        runtime.Setup(value => value.IssueAuthorityGenerationV2Async(
+                "authority-client", "transport-key", Guid.Parse(attemptId),
+                It.Is<ReadOnlyMemory<byte>>(actual => ExactBytes(actual, bytes)), "recovery-key",
+                new string('A', 342),
+                It.IsAny<CancellationToken>()))
+            .Callback(() => Assert.True(authenticated))
+            .ReturnsAsync(new RuntimeEnrollmentAuthorityV2OperationResult(201, "{}"u8, false));
+        var controller = CreateController(s2s, runtime, "enabled",
+            "/api/internal/v2/runtime-enrollment-authority/generations", body, authorityV2: true);
+        controller.Request.Headers["X-Runtime-Enrollment-Attempt-Id"] = attemptId;
+        controller.Request.Headers["X-Runtime-Enrollment-Recovery-Key-Id"] = "recovery-key";
+        controller.Request.Headers["X-Runtime-Enrollment-Recovery-Signature"] = new string('A', 342);
+
+        var result = Assert.IsType<FileContentResult>(
+            await controller.IssueAuthorityGenerationV2(CancellationToken.None));
+
+        Assert.Equal("{}"u8.ToArray(), result.FileContents);
+        s2s.VerifyAll();
+        runtime.VerifyAll();
+    }
+
+    /// <summary>Proves a denied authenticated principal receives redacted terminal diagnostics before v2 service use.</summary>
+    [Fact]
+    public async Task AuthorityGenerationV2_WithoutUpgradePermission_FailsBeforeService()
+    {
+        const string productId = "11111111-1111-4111-8111-111111111111";
+        var s2s = new Mock<IDistributionS2SAuthenticationService>(MockBehavior.Strict);
+        s2s.Setup(value => value.AuthenticateAndReserveNonceAsync(
+                It.IsAny<HttpContext>(), It.IsAny<ReadOnlyMemory<byte>>(), productId,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new DistributionS2SPrincipal(
+                "authority-client", "transport-key", true, false, false));
+        var runtime = new Mock<IRuntimeEnrollmentService>(MockBehavior.Strict);
+        var logger = new Mock<ILogger<RuntimeEnrollmentsController>>();
+        var controller = CreateController(s2s, runtime, "enabled",
+            "/api/internal/v2/runtime-enrollment-authority/generations",
+            "{\"productId\":\"" + productId + "\"}", logger: logger.Object, authorityV2: true);
+        controller.HttpContext.TraceIdentifier = "correlation-item4";
+
+        var result = Assert.IsType<ObjectResult>(
+            await controller.IssueAuthorityGenerationV2(CancellationToken.None));
+
+        Assert.Equal(StatusCodes.Status403Forbidden, result.StatusCode);
+        Assert.Equal("correlation-item4", controller.Response.Headers["X-Correlation-Id"]);
+        Assert.Equal("REA-V2-AUTHORIZATION", controller.Response.Headers["X-Support-Code"]);
+        logger.Verify(entry => entry.Log(
+            LogLevel.Warning,
+            It.IsAny<EventId>(),
+            It.Is<It.IsAnyType>((value, _) =>
+                value.ToString()!.Contains("REFUSED", StringComparison.Ordinal)
+                && value.ToString()!.Contains("REA-V2-AUTHORIZATION", StringComparison.Ordinal)
+                && value.ToString()!.Contains("correlation-item4", StringComparison.Ordinal)
+                && value.ToString()!.Contains("AUTHORITY_AUTHORIZATION", StringComparison.Ordinal)
+                && !value.ToString()!.Contains(productId, StringComparison.Ordinal)
+                && !value.ToString()!.Contains("authority-client", StringComparison.Ordinal)
+                && !value.ToString()!.Contains("transport-key", StringComparison.Ordinal)),
+            null,
+            It.IsAny<Func<It.IsAnyType, Exception?, string>>()), Times.Once);
+        runtime.VerifyNoOtherCalls();
+    }
+
+    /// <summary>Proves v2 cannot activate while global Runtime Enrollment remains disabled.</summary>
+    [Fact]
+    public async Task AuthorityGenerationV2_GlobalModeOff_FailsBeforeAuthentication()
+    {
+        var s2s = new Mock<IDistributionS2SAuthenticationService>(MockBehavior.Strict);
+        var runtime = new Mock<IRuntimeEnrollmentService>(MockBehavior.Strict);
+        var controller = CreateController(s2s, runtime, "off",
+            "/api/internal/v2/runtime-enrollment-authority/generations",
+            "{\"productId\":\"11111111-1111-4111-8111-111111111111\"}", authorityV2: true);
+
+        var result = Assert.IsType<ObjectResult>(
+            await controller.IssueAuthorityGenerationV2(CancellationToken.None));
+
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, result.StatusCode);
+        s2s.VerifyNoOtherCalls();
+        runtime.VerifyNoOtherCalls();
+    }
+
+    /// <summary>Proves authentication refusal emits redacted terminal diagnostics without invoking v2 persistence.</summary>
+    [Fact]
+    public async Task AuthorityGenerationV2_AuthenticationFailure_DoesNotInvokeService()
+    {
+        const string productId = "11111111-1111-4111-8111-111111111111";
+        var s2s = new Mock<IDistributionS2SAuthenticationService>(MockBehavior.Strict);
+        s2s.Setup(value => value.AuthenticateAndReserveNonceAsync(
+                It.IsAny<HttpContext>(), It.IsAny<ReadOnlyMemory<byte>>(), productId,
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new DistributionS2SAuthenticationException(
+                "invalid_signature", StatusCodes.Status401Unauthorized));
+        var runtime = new Mock<IRuntimeEnrollmentService>(MockBehavior.Strict);
+        var logger = new Mock<ILogger<RuntimeEnrollmentsController>>();
+        var controller = CreateController(s2s, runtime, "enabled",
+            "/api/internal/v2/runtime-enrollment-authority/generations",
+            "{\"productId\":\"" + productId + "\"}", logger: logger.Object, authorityV2: true);
+        controller.HttpContext.TraceIdentifier = "correlation-item4";
+
+        var result = Assert.IsType<ObjectResult>(
+            await controller.IssueAuthorityGenerationV2(CancellationToken.None));
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, result.StatusCode);
+        Assert.Equal("correlation-item4", controller.Response.Headers["X-Correlation-Id"]);
+        Assert.Equal("REA-V2-AUTHENTICATION", controller.Response.Headers["X-Support-Code"]);
+        logger.Verify(entry => entry.Log(
+            LogLevel.Warning,
+            It.IsAny<EventId>(),
+            It.Is<It.IsAnyType>((value, _) =>
+                value.ToString()!.Contains("REFUSED", StringComparison.Ordinal)
+                && value.ToString()!.Contains("REA-V2-AUTHENTICATION", StringComparison.Ordinal)
+                && value.ToString()!.Contains("correlation-item4", StringComparison.Ordinal)
+                && value.ToString()!.Contains("TRANSPORT_AUTHENTICATION", StringComparison.Ordinal)
+                && !value.ToString()!.Contains(productId, StringComparison.Ordinal)
+                && !value.ToString()!.Contains("invalid_signature", StringComparison.Ordinal)),
+            null,
+            It.IsAny<Func<It.IsAnyType, Exception?, string>>()), Times.Once);
+        s2s.VerifyAll();
+        runtime.VerifyNoOtherCalls();
+    }
+
+    /// <summary>Proves altered signed bytes, path, or ordinal product fail before semantic v2 execution.</summary>
+    [Theory]
+    [InlineData("body")]
+    [InlineData("path")]
+    [InlineData("product")]
+    public async Task AuthorityGenerationV2_AlteredTransportBinding_DoesNotInvokeService(string mutation)
+    {
+        const string productId = "11111111-1111-4111-8111-111111111111";
+        var body = "{\"productId\":\"" + (mutation == "product"
+            ? "22222222-2222-4222-8222-222222222222" : productId) + "\"}";
+        var path = mutation == "path" ? "/api/internal/v2/runtime-enrollment-authority/other"
+            : "/api/internal/v2/runtime-enrollment-authority/generations";
+        var s2s = new Mock<IDistributionS2SAuthenticationService>(MockBehavior.Strict);
+        s2s.Setup(value => value.AuthenticateAndReserveNonceAsync(
+                It.IsAny<HttpContext>(), It.IsAny<ReadOnlyMemory<byte>>(), It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new DistributionS2SAuthenticationException(
+                mutation == "body" ? "invalid_signature" : "invalid_transport_binding",
+                StatusCodes.Status401Unauthorized));
+        var runtime = new Mock<IRuntimeEnrollmentService>(MockBehavior.Strict);
+        var controller = CreateController(s2s, runtime, "enabled", path,
+            mutation == "body" ? body + " " : body, authorityV2: true);
+
+        var result = Assert.IsType<ObjectResult>(
+            await controller.IssueAuthorityGenerationV2(CancellationToken.None));
+
+        Assert.Equal(mutation == "path" ? StatusCodes.Status400BadRequest
+            : StatusCodes.Status401Unauthorized, result.StatusCode);
+        if (mutation == "path") s2s.VerifyNoOtherCalls();
+        else s2s.VerifyAll();
+        runtime.VerifyNoOtherCalls();
+    }
     [Fact]
     public async Task Prepare_WhenModeIsOff_ReturnsUnavailableBeforeAuthentication()
     {
@@ -124,6 +373,47 @@ public sealed class RuntimeEnrollmentsControllerTests
             await controller.MigrateHardwareAuthority(enrollmentId, CancellationToken.None));
 
         Assert.Equal(exact, result.FileContents);
+        service.VerifyAll();
+    }
+
+    [Theory]
+    [InlineData(RuntimeEnrollmentService.ProofClockSkewDiagnosticCode, true)]
+    [InlineData(null, false)]
+    [InlineData("invalid_signature", false)]
+    public async Task HardwareAuthorityMigration_QualifiesOnlyProofClockSkewForAudit(
+        string? diagnosticCode,
+        bool expectedClassification)
+    {
+        const string enrollmentId = "11111111-1111-4111-8111-111111111111";
+        var body = "{\"schema\":\"runtime-hardware-authority-migration-v1\"," +
+            "\"protocolVersion\":\"runtime-enrollment-v1\",\"requestId\":\"22222222-2222-4222-8222-222222222222\"," +
+            "\"enrollmentId\":\"" + enrollmentId + "\",\"epoch\":1,\"securityEpoch\":1," +
+            "\"legacyHardwareId\":\"A00272B768FFD6AF\",\"hardwareIdV2\":\"A6D3EED115BC84AD\"," +
+            "\"legacyAlgorithm\":\"legacy-wmi-first-disk\",\"hardwareIdV2Algorithm\":\"v2-wmi-disk-index-0\"," +
+            "\"sdkVersion\":\"1.1.13\"}";
+        var service = new Mock<IRuntimeEnrollmentService>(MockBehavior.Strict);
+        service.Setup(runtime => runtime.MigrateHardwareAuthorityAsync(
+                Guid.Parse(enrollmentId), It.IsAny<string>(),
+                It.IsAny<RuntimeHardwareAuthorityMigrationRequest>(), It.IsAny<RuntimeProofHeaders>(),
+                It.IsAny<System.Net.IPAddress?>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new RuntimeEnrollmentException(
+                "authentication_failed",
+                StatusCodes.Status401Unauthorized,
+                diagnosticCode));
+        var controller = CreateController(new(MockBehavior.Strict), service, "enabled",
+            $"/api/v1/runtime-enrollments/{enrollmentId}/hardware-authority-migrations", body);
+        controller.Request.Headers["X-Runtime-Enrollment-Timestamp"] = "2026-08-16T13:00:00.0000000Z";
+        controller.Request.Headers["X-Runtime-Enrollment-Jti"] = "55555555-5555-4555-8555-555555555555";
+        controller.Request.Headers["X-Runtime-Enrollment-Signature"] = new string('A', 512);
+
+        var result = Assert.IsType<ObjectResult>(
+            await controller.MigrateHardwareAuthority(enrollmentId, CancellationToken.None));
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, result.StatusCode);
+        Assert.Equal("authentication_failed", Assert.IsType<RuntimeEnrollmentApiError>(result.Value).Error);
+        Assert.Equal(
+            expectedClassification,
+            controller.HttpContext.Items.ContainsKey(SoftLicence.Server.LogKeys.RuntimeAuthenticationDisposition));
         service.VerifyAll();
     }
 
@@ -248,7 +538,7 @@ public sealed class RuntimeEnrollmentsControllerTests
     }
 
     [Fact]
-    public async Task ReinstallAuthority_WhenS2sAuthenticated_ReturnsCurrentMinimalAssertion()
+    public async Task ReinstallAuthority_WhenS2sAuthenticated_ReturnsAndLogsExactDecision()
     {
         var productId = "11111111-1111-4111-8111-111111111111";
         var bootstrapId = "22222222-2222-4222-8222-222222222222";
@@ -266,7 +556,7 @@ public sealed class RuntimeEnrollmentsControllerTests
         var runtime = new Mock<IRuntimeEnrollmentService>(MockBehavior.Strict);
         var response = new RuntimeReinstallAuthorityResponse(
             RuntimeEnrollmentService.ReinstallAuthorityResponseSchema,
-            RuntimeEnrollmentService.ProtocolVersion, "authorized",
+            RuntimeEnrollmentService.ProtocolVersion, "identity_confirmed",
             "33333333-3333-4333-8333-333333333333", bootstrapId, productId,
             "66666666-6666-4666-8666-666666666666", "77777777-7777-4777-8777-777777777777",
             "44444444-4444-4444-8444-444444444444", "2.3.7", new string('D', 43), 4,
@@ -275,12 +565,21 @@ public sealed class RuntimeEnrollmentsControllerTests
         runtime.Setup(service => service.AuthorizeReinstallAsync(
                 "website-step1", It.IsAny<RuntimeReinstallAuthorityRequest>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(response);
+        var logger = new Mock<ILogger<RuntimeEnrollmentsController>>();
         var controller = CreateController(s2s, runtime, "enabled",
-            "/api/internal/v1/runtime-enrollments/reinstall-authorizations", body);
+            "/api/internal/v1/runtime-enrollments/reinstall-authorizations", body, logger: logger.Object);
 
         var result = Assert.IsType<OkObjectResult>(await controller.AuthorizeReinstall(CancellationToken.None));
 
         Assert.Same(response, result.Value);
+        logger.Verify(entry => entry.Log(
+            LogLevel.Information,
+            It.IsAny<EventId>(),
+            It.Is<It.IsAnyType>((value, _) =>
+                value.ToString()!.Contains("identity_confirmed", StringComparison.Ordinal)
+                && !value.ToString()!.Contains("authority authorized", StringComparison.Ordinal)),
+            null,
+            It.IsAny<Func<It.IsAnyType, Exception?, string>>()), Times.Once);
         s2s.VerifyAll();
         runtime.VerifyAll();
     }
@@ -379,6 +678,11 @@ public sealed class RuntimeEnrollmentsControllerTests
         + "\"eventId\":\"55555555-5555-4555-8555-555555555555\","
         + "\"oldSecurityEpoch\":1,\"newSecurityEpoch\":2}";
 
+    /// <summary>Compares exact request bytes outside Moq expression-tree span restrictions.</summary>
+    private static bool ExactBytes(ReadOnlyMemory<byte> actual, byte[] expected) =>
+        actual.ToArray().SequenceEqual(expected);
+
+    /// <summary>Creates a controller with one owned exact request body and explicit feature modes.</summary>
     private static RuntimeEnrollmentsController CreateController(
         Mock<IDistributionS2SAuthenticationService> s2s,
         Mock<IRuntimeEnrollmentService> service,
@@ -386,7 +690,8 @@ public sealed class RuntimeEnrollmentsControllerTests
         string path,
         string body,
         string query = "",
-        ILogger<RuntimeEnrollmentsController>? logger = null)
+        ILogger<RuntimeEnrollmentsController>? logger = null,
+        bool authorityV2 = false)
     {
         var bytes = Encoding.UTF8.GetBytes(body);
         var context = new DefaultHttpContext();
@@ -397,7 +702,12 @@ public sealed class RuntimeEnrollmentsControllerTests
         context.Request.ContentLength = bytes.Length;
         context.Request.Body = new MemoryStream(bytes);
         return new RuntimeEnrollmentsController(
-            s2s.Object, service.Object, Options.Create(new RuntimeEnrollmentOptions { Mode = mode }), logger)
+            s2s.Object, service.Object, Options.Create(new RuntimeEnrollmentOptions
+            {
+                Mode = mode,
+                AuthorityGenerationV2 = new RuntimeAuthorityGenerationV2Options
+                    { Mode = authorityV2 ? "enabled" : "off" }
+            }), logger)
         {
             ControllerContext = new ControllerContext { HttpContext = context }
         };

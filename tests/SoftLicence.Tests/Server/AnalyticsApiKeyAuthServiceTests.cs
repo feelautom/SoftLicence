@@ -86,6 +86,43 @@ public sealed class AnalyticsApiKeyAuthServiceTests
     }
 
     [Fact]
+    public async Task ValidateDetailedAsync_DistinguishesMissingInvalidAndMissingScope()
+    {
+        const string rawKey = "sla_test_detailed_telemetry_only";
+        await SeedKeyAsync(Guid.NewGuid(), rawKey, AnalyticsApiKeyScopes.TelemetryRead);
+        var service = new AnalyticsApiKeyAuthService(_dbFactoryMock.Object);
+
+        var missing = await service.ValidateDetailedAsync("  ", AnalyticsApiKeyScopes.SecurityRead, "127.0.0.1");
+        var invalid = await service.ValidateDetailedAsync("sla_unknown", AnalyticsApiKeyScopes.SecurityRead, "127.0.0.1");
+        var missingScope = await service.ValidateDetailedAsync(rawKey, AnalyticsApiKeyScopes.SecurityRead, "127.0.0.1");
+
+        Assert.Equal(AnalyticsApiKeyFailure.Missing, missing.Failure);
+        Assert.Equal(AnalyticsApiKeyFailure.Invalid, invalid.Failure);
+        Assert.Equal(AnalyticsApiKeyFailure.MissingScope, missingScope.Failure);
+        Assert.Equal(AnalyticsApiKeyScopes.SecurityRead, missingScope.RequiredScope);
+        Assert.Null(missing.Auth);
+        Assert.Null(invalid.Auth);
+        Assert.Null(missingScope.Auth);
+
+        // A refused key never records usage.
+        await using var db = new LicenseDbContext(_dbOptions);
+        Assert.Null((await db.AnalyticsApiKeys.SingleAsync()).LastUsedAtUtc);
+    }
+
+    [Fact]
+    public async Task ValidateDetailedAsync_WhenScopeMatchesCaseInsensitively_Succeeds()
+    {
+        const string rawKey = "sla_test_detailed_security";
+        await SeedKeyAsync(Guid.NewGuid(), rawKey, "telemetry:read SECURITY:READ");
+        var service = new AnalyticsApiKeyAuthService(_dbFactoryMock.Object);
+
+        var validation = await service.ValidateDetailedAsync($" {rawKey} ", AnalyticsApiKeyScopes.SecurityRead, "127.0.0.1");
+
+        Assert.Equal(AnalyticsApiKeyFailure.None, validation.Failure);
+        Assert.NotNull(validation.Auth);
+    }
+
+    [Fact]
     public async Task ValidateAsync_WhenGlobalKeyIsValid_ReturnsGlobalScope()
     {
         const string rawKey = "sla_test_global_valid_key";

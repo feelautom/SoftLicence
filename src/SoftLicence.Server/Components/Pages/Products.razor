@@ -688,20 +688,24 @@
                                                     <td><span class="text-muted small">@lic.Type?.Name</span></td>
                                                     <td>
                                                         @{
-                                                            var licActivated = !string.IsNullOrEmpty(lic.HardwareId) || (lic.Seats?.Any(s => s.IsActive) ?? false);
+                                                            // Une fois activée au moins une fois, la licence ne redevient jamais "Délivré" :
+                                                            // sa validité continue de se décompter même sans poste actuellement connecté.
+                                                            var licActivated = (lic.Seats?.Any() ?? false)
+                                                                || !string.IsNullOrEmpty(lic.HardwareId)
+                                                                || lic.ActivationDate.HasValue;
                                                             var licExpired = lic.ExpirationDate.HasValue && DateTime.UtcNow >= lic.ExpirationDate.Value;
                                                         }
                                                         @if (!lic.IsActive)
                                                         {
                                                             <span class="text-danger small">● @L["Licenses_Revoked"]</span>
                                                         }
-                                                        else if (!licActivated)
-                                                        {
-                                                            <span class="text-secondary small">● @L["Common_Issued"]</span>
-                                                        }
                                                         else if (licExpired)
                                                         {
                                                             <span class="text-warning small">● @L["Common_Expired"]</span>
+                                                        }
+                                                        else if (!licActivated)
+                                                        {
+                                                            <span class="text-secondary small">● @L["Common_Issued"]</span>
                                                         }
                                                         else
                                                         {

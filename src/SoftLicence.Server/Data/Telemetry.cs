@@ -121,6 +121,47 @@ public sealed class TelemetryCertPinningDailyAlert
     public DateTime? NotificationSentAtUtc { get; set; }
 }
 
+/// <summary>
+/// Durable 30-minute aggregate for one canonical UPD startup-shell presentation signature.
+/// Raw telemetry remains the source for per-device analytics; this projection owns notification deduplication.
+/// </summary>
+public sealed class TelemetryUpdatePreflightAlert
+{
+    [Key]
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    public Guid ProductId { get; set; }
+    public Product? Product { get; set; }
+
+    [Required]
+    public string SignatureSha256 { get; set; } = string.Empty;
+
+    public DateTime WindowStartUtc { get; set; }
+    public DateTime WindowEndUtc { get; set; }
+    public long OccurrenceCount { get; set; }
+    public DateTime FirstSeenUtc { get; set; }
+    public DateTime LastSeenUtc { get; set; }
+
+    [Required]
+    public string SupportCode { get; set; } = string.Empty;
+    [Required]
+    public string CurrentVersion { get; set; } = string.Empty;
+    [Required]
+    public string LatestVersion { get; set; } = string.Empty;
+    [Required]
+    public string DecisionReason { get; set; } = string.Empty;
+    [Required]
+    public string SelectedChannel { get; set; } = string.Empty;
+    [Required]
+    public string ReconciliationOutcome { get; set; } = string.Empty;
+    [Required]
+    public string LastPresentationStage { get; set; } = string.Empty;
+
+    public Guid? NotificationClaimId { get; set; }
+    public DateTime? NotificationClaimedAtUtc { get; set; }
+    public DateTime? NotificationSentAtUtc { get; set; }
+}
+
 public class TelemetryEvent
 {
     [Key]

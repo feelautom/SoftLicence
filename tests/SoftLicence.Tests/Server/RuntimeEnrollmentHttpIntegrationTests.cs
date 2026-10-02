@@ -27,6 +27,42 @@ public sealed class RuntimeEnrollmentHttpIntegrationTests
     private const string CriticalRecoveryRefetchPath = CriticalRecoveryPath + "/refetch";
     private const string UpgradePath = "/api/internal/v1/runtime-enrollments/upgrades";
     private const string RollbackPath = "/api/internal/v1/runtime-enrollments/recovery-rollbacks";
+    private const string AuthorityGenerationV2Path = "/api/internal/v2/runtime-enrollment-authority/generations";
+
+    /// <summary>Proves the real v2 route remains distinct, no-store, exact-byte preserving, and upgrade-permission gated.</summary>
+    [Fact]
+    public async Task AuthorityGenerationV2_RealRoute_UsesDistinctSelectorAndUpgradePermission()
+    {
+        const string productId = "22222222-2222-4222-8222-222222222222";
+        const string attemptId = "99999999-9999-4999-8999-999999999999";
+        var body = "{\"productId\":\"" + productId + "\"}";
+        var exact = "{\"schema\":\"runtime-enrollment-signed-generation-v2\"}"u8.ToArray();
+        var enrollment = new Mock<IRuntimeEnrollmentService>();
+        enrollment.Setup(service => service.IssueAuthorityGenerationV2Async(
+                "website-updater", "runtime-test-key", Guid.Parse(attemptId),
+                It.Is<ReadOnlyMemory<byte>>(value => ExactBytes(value, Encoding.UTF8.GetBytes(body))),
+                null, null, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new RuntimeEnrollmentAuthorityV2OperationResult(201, exact, false));
+
+        using var deniedFactory = CreateFactory(enrollment.Object, authorityV2: true);
+        using var deniedClient = deniedFactory.CreateClient();
+        using var deniedRequest = new HttpRequestMessage(HttpMethod.Post, AuthorityGenerationV2Path)
+            { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+        deniedRequest.Headers.Add("X-Runtime-Enrollment-Attempt-Id", attemptId);
+        using var denied = await deniedClient.SendAsync(deniedRequest);
+        Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+
+        using var factory = CreateFactory(enrollment.Object, allowRuntimeUpgrade: true, authorityV2: true);
+        using var client = factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, AuthorityGenerationV2Path)
+            { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+        request.Headers.Add("X-Runtime-Enrollment-Attempt-Id", attemptId);
+        using var response = await client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        Assert.Equal(exact, await response.Content.ReadAsByteArrayAsync());
+        AssertNoStore(response);
+        enrollment.VerifyAll();
+    }
     private const string ConfirmBody = "{\"schema\":\"runtime-enrollment-confirm-v1\",\"protocolVersion\":\"runtime-enrollment-v1\",\"enrollmentId\":\"" + EnrollmentId + "\",\"epoch\":1}";
     private const string CapabilityBody = "{\"schema\":\"runtime-enrollment-capability-v1\",\"protocolVersion\":\"runtime-enrollment-v1\",\"enrollmentId\":\"" + EnrollmentId + "\",\"epoch\":1,\"securityEpoch\":1,\"audience\":\"https://broker.example.test\",\"scope\":[\"runtime.execute\"]}";
     private const string ClientCriticalRecoveryRefetchBody = "{\"schema\":\"runtime-critical-recovery-client-refetch-v1\",\"protocolVersion\":\"runtime-enrollment-v1\",\"requestId\":\"77777777-7777-4777-8777-777777777777\",\"enrollmentId\":\"" + EnrollmentId + "\",\"epoch\":1,\"securityEpoch\":1}";
@@ -704,7 +740,8 @@ public sealed class RuntimeEnrollmentHttpIntegrationTests
         IRuntimeEnrollmentService enrollment,
         bool allowRuntimeRecovery = false,
         bool allowRuntimeUpgrade = false,
-        bool allowLicenseBootstrap = false)
+        bool allowLicenseBootstrap = false,
+        bool authorityV2 = false)
     {
         var authentication = new Mock<IDistributionS2SAuthenticationService>();
         authentication.Setup(service => service.AuthenticateAndReserveNonceAsync(
@@ -734,10 +771,19 @@ public sealed class RuntimeEnrollmentHttpIntegrationTests
                 services.AddSingleton(authentication.Object);
                 services.AddSingleton(enrollment);
                 services.AddSingleton<IOptions<RuntimeEnrollmentOptions>>(
-                    Options.Create(new RuntimeEnrollmentOptions { Mode = "enabled" }));
+                    Options.Create(new RuntimeEnrollmentOptions
+                    {
+                        Mode = "enabled",
+                        AuthorityGenerationV2 = new RuntimeAuthorityGenerationV2Options
+                            { Mode = authorityV2 ? "enabled" : "off" }
+                    }));
             });
         });
     }
+
+    /// <summary>Compares owned request bytes without placing a span in a Moq expression tree.</summary>
+    private static bool ExactBytes(ReadOnlyMemory<byte> actual, byte[] expected) =>
+        actual.ToArray().SequenceEqual(expected);
 
     private static WebApplicationFactory<Program> CreateRealServiceFactory(
         IRuntimeEnrollmentAuthorityService authority,

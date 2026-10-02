@@ -17,8 +17,10 @@ public sealed class ApprovedBinaryServiceTests : IAsyncLifetime
     public async Task InitializeAsync()
     {
         await _connection.OpenAsync();
+        SqliteFullModelHarness.RegisterConnection(_connection);
         _options = new DbContextOptionsBuilder<LicenseDbContext>()
             .UseSqlite(_connection)
+            .AddInterceptors(SqliteFullModelHarness.ConnectionInterceptor, SqliteFullModelHarness.CommandInterceptor)
             .Options;
 
         await using var db = new LicenseDbContext(_options);

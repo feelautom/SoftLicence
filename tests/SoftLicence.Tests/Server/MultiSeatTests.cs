@@ -351,6 +351,230 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
     }
 
     [Fact]
+    public async Task Deactivate_WithExactPortalSource_OnPublicRoute_ShouldRejectImmediatePostActivationWithoutMutation()
+    {
+        var client = _factory.CreateClient();
+        string licenseKey;
+        string appId;
+        Guid licenseId;
+        Guid productId;
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var license = await CreateLicenseAsync(scope.ServiceProvider, 1);
+            licenseKey = license.LicenseKey;
+            licenseId = license.Id;
+            productId = license.ProductId;
+            appId = productId.ToString();
+        }
+
+        var activation = await client.PostAsJsonAsync("/api/activation", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "C000000000000023",
+            AppName = "MultiApp",
+            AppId = appId
+        });
+        Assert.Equal(HttpStatusCode.OK, activation.StatusCode);
+
+        var unlink = await client.PostAsJsonAsync("/api/activation/deactivate", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "C000000000000023",
+            AppName = "MultiApp",
+            AppId = appId,
+            Source = "portal",
+            DeactivationSource = "unknown"
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, unlink.StatusCode);
+
+        using var verifyScope = _factory.Services.CreateScope();
+        var db = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var licenseAfter = await db.Licenses.Include(l => l.Seats).Include(l => l.Type)
+            .SingleAsync(l => l.Id == licenseId);
+        var preservedSeat = Assert.Single(licenseAfter.Seats, s => s.HardwareId == "C000000000000023");
+        Assert.True(preservedSeat.IsActive);
+        Assert.Null(preservedSeat.UnlinkedAt);
+        Assert.Equal(productId, licenseAfter.ProductId);
+        Assert.Equal(1, licenseAfter.MaxSeats);
+        Assert.True(licenseAfter.IsActive);
+        Assert.Equal(0, licenseAfter.Type!.MaxActivationsPerDay);
+        Assert.Empty(await db.BannedHardwareIds.ToListAsync());
+        Assert.False(await db.LicenseHistories.AnyAsync(h =>
+            h.LicenseId == licenseId && h.Action == HistoryActions.UnlinkedApi));
+    }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("unknown", null)]
+    [InlineData("PORTAL", null)]
+    [InlineData("portal ", null)]
+    [InlineData("portál", null)]
+    [InlineData("unknown", "portal")]
+    public async Task Deactivate_WithNonCanonicalPortalSource_ShouldRejectImmediatePostActivation(
+        string? source,
+        string? deactivationSource)
+    {
+        var client = _factory.CreateClient();
+        string licenseKey;
+        string appId;
+        Guid licenseId;
+        var hardwareId = $"C{Guid.NewGuid():N}"[..16].ToUpperInvariant();
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var license = await CreateLicenseAsync(scope.ServiceProvider, 1);
+            licenseKey = license.LicenseKey;
+            licenseId = license.Id;
+            appId = license.ProductId.ToString();
+        }
+
+        var activation = await client.PostAsJsonAsync("/api/activation", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = hardwareId,
+            AppName = "MultiApp",
+            AppId = appId
+        });
+        Assert.Equal(HttpStatusCode.OK, activation.StatusCode);
+
+        var unlink = await client.PostAsJsonAsync("/api/activation/deactivate", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = hardwareId,
+            AppName = "MultiApp",
+            AppId = appId,
+            Source = source,
+            DeactivationSource = deactivationSource
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, unlink.StatusCode);
+
+        using var verifyScope = _factory.Services.CreateScope();
+        var db = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var licenseAfter = await db.Licenses.Include(l => l.Seats).SingleAsync(l => l.Id == licenseId);
+        Assert.Contains(licenseAfter.Seats, s => s.HardwareId == hardwareId && s.IsActive);
+        Assert.False(await db.LicenseHistories.AnyAsync(h =>
+            h.LicenseId == licenseId && h.Action == HistoryActions.UnlinkedApi));
+    }
+
+    [Fact]
+    public async Task Deactivate_WithExactPortalSource_ShouldStillRespectDailyQuota()
+    {
+        var client = _factory.CreateClient();
+        string licenseKey;
+        string appId;
+        Guid licenseId;
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var license = await CreateLicenseAsync(scope.ServiceProvider, 2);
+            licenseKey = license.LicenseKey;
+            licenseId = license.Id;
+            appId = license.ProductId.ToString();
+        }
+
+        var activation = await client.PostAsJsonAsync("/api/activation", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "C000000000000024",
+            AppName = "MultiApp",
+            AppId = appId
+        });
+        Assert.Equal(HttpStatusCode.OK, activation.StatusCode);
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var license = await db.Licenses.Include(l => l.Type).SingleAsync(l => l.Id == licenseId);
+            license.Type!.MaxActivationsPerDay = 1;
+            db.LicenseSeats.Add(new LicenseSeat
+            {
+                LicenseId = licenseId,
+                HardwareId = "C000000000000025",
+                FirstActivatedAt = DateTime.UtcNow.AddDays(-1),
+                LastCheckInAt = DateTime.UtcNow.AddDays(-1),
+                IsActive = false,
+                UnlinkedAt = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var unlink = await client.PostAsJsonAsync("/api/activation/deactivate", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = "C000000000000024",
+            AppName = "MultiApp",
+            AppId = appId,
+            Source = "portal"
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, unlink.StatusCode);
+        using var verifyScope = _factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var licenseAfter = await verifyDb.Licenses.Include(l => l.Seats).SingleAsync(l => l.Id == licenseId);
+        Assert.Contains(licenseAfter.Seats, s => s.HardwareId == "C000000000000024" && s.IsActive);
+    }
+
+    [Fact]
+    public async Task Deactivate_WithExactPortalSource_ShouldStillRespectHardwareBan()
+    {
+        var client = _factory.CreateClient();
+        string licenseKey;
+        string appId;
+        Guid licenseId;
+        const string hardwareId = "C000000000000026";
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var license = await CreateLicenseAsync(scope.ServiceProvider, 1);
+            licenseKey = license.LicenseKey;
+            licenseId = license.Id;
+            appId = license.ProductId.ToString();
+        }
+
+        var activation = await client.PostAsJsonAsync("/api/activation", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = hardwareId,
+            AppName = "MultiApp",
+            AppId = appId
+        });
+        Assert.Equal(HttpStatusCode.OK, activation.StatusCode);
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            db.BannedHardwareIds.Add(new BannedHardwareId
+            {
+                HardwareId = hardwareId,
+                IsActive = true,
+                Reason = "TKT-000751 regression fixture",
+                BanCategory = BannedHardwareId.Categories.Manual
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var unlink = await client.PostAsJsonAsync("/api/activation/deactivate", new
+        {
+            LicenseKey = licenseKey,
+            HardwareId = hardwareId,
+            AppName = "MultiApp",
+            AppId = appId,
+            Source = "portal"
+        });
+
+        Assert.Equal(HttpStatusCode.Forbidden, unlink.StatusCode);
+        using var verifyScope = _factory.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var licenseAfter = await verifyDb.Licenses.Include(l => l.Seats).SingleAsync(l => l.Id == licenseId);
+        Assert.Contains(licenseAfter.Seats, s => s.HardwareId == hardwareId && s.IsActive);
+        Assert.False(await verifyDb.LicenseHistories.AnyAsync(h =>
+            h.LicenseId == licenseId && h.Action == HistoryActions.UnlinkedApi));
+    }
+
+    [Fact]
     public async Task Deactivate_WithoutSource_ShouldClassifyLegacyUnknown_WhenSeatIsNotRecent()
     {
         var client = _factory.CreateClient();

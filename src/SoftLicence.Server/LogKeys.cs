@@ -9,5 +9,10 @@ namespace SoftLicence.Server
         public const string Endpoint = "Audit_Endpoint";
         public const string Version = "Audit_Version";
         public const string ResultStatusOverride = "Audit_ResultStatusOverride";
+        /// <summary>
+        /// Carries a server-owned Runtime authentication classification from the public controller
+        /// to the audit middleware. Client input must never populate this item.
+        /// </summary>
+        public const string RuntimeAuthenticationDisposition = "Audit_RuntimeAuthenticationDisposition";
     }
 }

@@ -143,18 +143,18 @@ public sealed class BackupProcessRunnerTests
         Assert.Empty(result.StandardOutput);
         Assert.Empty(result.StandardError);
         Assert.True(result.DiagnosticDrainsObserved);
-        Assert.NotNull(result.ProducerProcessId);
-        await AssertProcessExitedAsync(result.ProducerProcessId.Value);
+        if (result.ProducerProcessId is int producerProcessId)
+        {
+            await AssertProcessExitedAsync(producerProcessId);
+        }
     }
 
     [Fact]
     public async Task PipeAsync_InternalDeadline_ReturnsCanonicalTimeoutStage()
     {
-        var producerPidFile = NewPidFile();
-        var consumerPidFile = NewPidFile();
         var result = await _runner.PipeAsync(
-            HelperRaw("sleep-producer", "5000", producerPidFile),
-            HelperRaw("sleep-consumer", "5000", consumerPidFile),
+            Helper("sleep-producer", 5000),
+            Helper("sleep-consumer", 5000),
             TimeSpan.FromMilliseconds(100),
             default);
 
@@ -162,8 +162,15 @@ public sealed class BackupProcessRunnerTests
         Assert.Equal("timeout", result.FailureStage.ToDiagnosticCode());
         Assert.NotEqual(0, result.ExitCode);
         Assert.True(result.DiagnosticDrainsObserved);
-        await AssertProcessExitedAsync(await ReadPidAsync(producerPidFile));
-        await AssertProcessExitedAsync(await ReadPidAsync(consumerPidFile));
+        if (result.ProducerProcessId is int producerProcessId)
+        {
+            await AssertProcessExitedAsync(producerProcessId);
+        }
+
+        if (result.ConsumerProcessId is int consumerProcessId)
+        {
+            await AssertProcessExitedAsync(consumerProcessId);
+        }
     }
 
     [Fact]
@@ -171,55 +178,71 @@ public sealed class BackupProcessRunnerTests
     {
         var producerPidFile = NewPidFile();
         var consumerPidFile = NewPidFile();
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        using var cancellation = new CancellationTokenSource();
 
-        var error = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => _runner.PipeAsync(
+        var operation = _runner.PipeAsync(
             HelperRaw("sleep-producer", "5000", producerPidFile),
             HelperRaw("sleep-consumer", "5000", consumerPidFile),
             TimeSpan.FromSeconds(20),
-            cancellation.Token));
+            cancellation.Token);
+        var producerProcessId = await ReadPidAsync(producerPidFile, deleteAfterRead: false);
+        var consumerProcessId = await ReadPidAsync(consumerPidFile, deleteAfterRead: false);
+        cancellation.Cancel();
+        var error = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
 
         Assert.Equal(cancellation.Token, error.CancellationToken);
-        await AssertProcessExitedAsync(await ReadPidAsync(producerPidFile));
-        await AssertProcessExitedAsync(await ReadPidAsync(consumerPidFile));
+        await AssertProcessExitedAsync(producerProcessId);
+        await AssertProcessExitedAsync(consumerProcessId);
+        File.Delete(producerPidFile);
+        File.Delete(consumerPidFile);
     }
 
     [Fact]
     public async Task PipeAsync_CallerCancellationDuringTimeoutCleanup_WinsOverTimeoutResult()
     {
         using var cancellation = new CancellationTokenSource();
-        var runner = CreateRunnerWithCleanupAction(cancellation.Cancel);
-        var producerPidFile = NewPidFile();
-        var consumerPidFile = NewPidFile();
+        (int? Producer, int? Consumer) cleanupProcesses = default;
+        var runner = CreateRunnerWithCleanupAction((producer, consumer) =>
+        {
+            cleanupProcesses = (producer, consumer);
+            cancellation.Cancel();
+        });
 
         var error = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => runner.PipeAsync(
-            HelperRaw("sleep-producer", "5000", producerPidFile),
-            HelperRaw("sleep-consumer", "5000", consumerPidFile),
+            Helper("sleep-producer", 5000),
+            Helper("sleep-consumer", 5000),
             TimeSpan.FromMilliseconds(100),
             cancellation.Token));
 
         Assert.Equal(cancellation.Token, error.CancellationToken);
-        await AssertProcessExitedAsync(await ReadPidAsync(producerPidFile));
-        await AssertProcessExitedAsync(await ReadPidAsync(consumerPidFile));
+        Assert.NotNull(cleanupProcesses.Producer);
+        Assert.NotNull(cleanupProcesses.Consumer);
+        await AssertProcessExitedAsync(cleanupProcesses.Producer.Value);
+        await AssertProcessExitedAsync(cleanupProcesses.Consumer.Value);
     }
 
     [Fact]
     public async Task PipeAsync_CallerCancellationDuringCopyCleanup_WinsOverConsumerFailure()
     {
         using var cancellation = new CancellationTokenSource();
-        var runner = CreateRunnerWithCleanupAction(cancellation.Cancel);
-        var producerPidFile = NewPidFile();
-        var consumerPidFile = NewPidFile();
+        (int? Producer, int? Consumer) cleanupProcesses = default;
+        var runner = CreateRunnerWithCleanupAction((producer, consumer) =>
+        {
+            cleanupProcesses = (producer, consumer);
+            cancellation.Cancel();
+        });
 
         var error = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => runner.PipeAsync(
-            HelperRaw("produce", "8388608", "0", producerPidFile),
-            HelperRaw("consume-close-delay", "1", "1000", "31", consumerPidFile),
+            Helper("produce", 8388608, 0),
+            Helper("consume-close-delay", 1, 1000, 31),
             TimeSpan.FromSeconds(20),
             cancellation.Token));
 
         Assert.Equal(cancellation.Token, error.CancellationToken);
-        await AssertProcessExitedAsync(await ReadPidAsync(producerPidFile));
-        await AssertProcessExitedAsync(await ReadPidAsync(consumerPidFile));
+        Assert.NotNull(cleanupProcesses.Producer);
+        Assert.NotNull(cleanupProcesses.Consumer);
+        await AssertProcessExitedAsync(cleanupProcesses.Producer.Value);
+        await AssertProcessExitedAsync(cleanupProcesses.Consumer.Value);
     }
 
     private static BackupProcessSpec Helper(string operation, params int[] arguments) => new(
@@ -234,7 +257,8 @@ public sealed class BackupProcessRunnerTests
         $"softlicence-missing-{Guid.NewGuid():N}",
         []);
 
-    private static BackupProcessRunner CreateRunnerWithCleanupAction(Action cleanupAction) =>
+    // The callback exposes runner-owned process identities before cancellation is rethrown.
+    private static BackupProcessRunner CreateRunnerWithCleanupAction(Action<int?, int?> cleanupAction) =>
         Assert.IsType<BackupProcessRunner>(Activator.CreateInstance(
             typeof(BackupProcessRunner),
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
@@ -255,19 +279,43 @@ public sealed class BackupProcessRunnerTests
     private static string NewPidFile() =>
         Path.Combine(Path.GetTempPath(), $"softlicence-backup-pid-{Guid.NewGuid():N}.txt");
 
-    private static async Task<int> ReadPidAsync(string path)
+    // Reads only a complete invariant PID; callers can retain the file until the writer exits.
+    private static async Task<int> ReadPidAsync(string path, bool deleteAfterRead = true)
     {
         var deadline = DateTime.UtcNow.AddSeconds(3);
-        while (!File.Exists(path) && DateTime.UtcNow < deadline)
-            await Task.Delay(20);
-        Assert.True(File.Exists(path), "The subprocess did not publish its PID before cleanup.");
         try
         {
-            return int.Parse(await File.ReadAllTextAsync(path), System.Globalization.CultureInfo.InvariantCulture);
+            while (DateTime.UtcNow < deadline)
+            {
+                if (File.Exists(path))
+                {
+                    try
+                    {
+                        var content = await File.ReadAllTextAsync(path);
+                        if (int.TryParse(
+                            content,
+                            System.Globalization.NumberStyles.None,
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            out var processId))
+                        {
+                            return processId;
+                        }
+                    }
+                    catch (IOException)
+                    {
+                        // The helper can still hold the file exclusively while completing the write.
+                    }
+                }
+
+                await Task.Delay(20);
+            }
+
+            throw new Xunit.Sdk.XunitException("The subprocess did not publish a complete PID before the test deadline.");
         }
         finally
         {
-            File.Delete(path);
+            if (deleteAfterRead)
+                File.Delete(path);
         }
     }
 

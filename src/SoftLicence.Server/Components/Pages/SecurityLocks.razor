@@ -1,0 +1,274 @@
+@page "/security-locks"
+@inject IDbContextFactory<LicenseDbContext> DbFactory
+@inject SoftLicence.Server.Services.AuthService Auth
+@inject SoftLicence.Server.Services.ToastService Toast
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+@inject SoftLicence.Server.Services.SecurityLocks.SecurityLockAdminService LockAdmin
+@using SoftLicence.Server.Data
+@using SoftLicence.Server.Services.SecurityLocks
+@using Microsoft.EntityFrameworkCore
+
+@* TKT-001177: security locks awaiting a decision, history, and level-4/5 enforcement modes. *@
+<div class="container-fluid animate-fade">
+    @if (!isAuthorized)
+    {
+        <div class="text-center py-5">
+            <h2 class="text-white">Access Denied</h2>
+        </div>
+    }
+    else
+    {
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h3 class="mb-0">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-2"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                Verrous de sécurité <small class="text-muted fs-6">(@openCount à examiner)</small>
+            </h3>
+            <div class="d-flex gap-2 align-items-center">
+                <input type="text" class="form-control form-control-sm" style="width: 220px" placeholder="HWID, e-mail, verrou..."
+                       @bind="searchText" @bind:event="oninput" @bind:after="LoadData" />
+                <select class="form-select form-select-sm" style="width: 170px" @bind="stateFilter" @bind:after="LoadData">
+                    <option value="OPEN">À examiner</option>
+                    <option value="">Tous</option>
+                    <option value="RELEASED">Relâchés</option>
+                    <option value="BANNED">Bannis</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="card shadow-sm mb-4">
+            <div class="table-responsive">
+                <table class="table table-sm table-hover mb-0 align-middle">
+                    <thead>
+                        <tr>
+                            <th>Dernier rapport</th>
+                            <th>Client</th>
+                            <th>HWID</th>
+                            <th>Cause</th>
+                            <th>Niveau</th>
+                            <th>Mode</th>
+                            <th>Verdict</th>
+                            <th>État</th>
+                            <th>Rapports</th>
+                            <th>Verrou</th>
+                            <th class="text-end">Décision</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @if (rows.Count == 0)
+                        {
+                            <tr><td colspan="11" class="text-center text-muted py-4">Aucun verrou.</td></tr>
+                        }
+                        @foreach (var r in rows)
+                        {
+                            <tr>
+                                <td><small>@TZ.ToLocal(r.LastReportedUtc).ToString("dd/MM/yy HH:mm")</small></td>
+                                <td><small>@(r.CustomerEmail ?? "?")<br /><span class="text-muted">@r.Product</span></small></td>
+                                <td><code class="small">@r.HardwareId</code></td>
+                                <td><small>@r.Cause</small></td>
+                                <td><span class="badge @LevelBadge(r.Level)">@r.Level</span></td>
+                                <td><small>@r.EffectiveMode</small></td>
+                                <td><small>@r.LastVerdict</small></td>
+                                <td><span class="badge @StateBadge(r.State)">@r.State</span></td>
+                                <td><small>@r.ReportCount</small></td>
+                                <td><code class="small" title="@r.EvidenceDigest">@r.LockId</code></td>
+                                <td class="text-end text-nowrap">
+                                    @if (r.State == SecurityLockReportStates.Banned)
+                                    {
+                                        <small class="text-muted">@(r.AdminDecisionBy ?? "automatique")</small>
+                                    }
+                                    else if (pendingBan == r.Id)
+                                    {
+                                        <span class="small text-danger me-1">Ban définitif ?</span>
+                                        <button class="btn btn-sm btn-danger" @onclick="() => Decide(r.Id, SecurityLockAdminDecisions.Ban)">Confirmer</button>
+                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => pendingBan = null">Annuler</button>
+                                    }
+                                    else
+                                    {
+                                        @if (r.AdminDecision != SecurityLockAdminDecisions.Release)
+                                        {
+                                            <button class="btn btn-sm btn-outline-success me-1" @onclick="() => Decide(r.Id, SecurityLockAdminDecisions.Release)">Relâcher</button>
+                                        }
+                                        else
+                                        {
+                                            <small class="text-success me-1">relâché (@r.AdminDecisionBy)</small>
+                                        }
+                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => pendingBan = r.Id">Bannir</button>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <h5 class="mb-2">Modes des causes irréversibles (niveaux 4 et 5)</h5>
+        <p class="text-muted small mb-2">SHADOW : observation seule. REVIEW : blocage réversible, décision admin. ENFORCE : ban automatique définitif.</p>
+        <div class="d-flex gap-2 align-items-center mb-2">
+            <select class="form-select form-select-sm" style="width: 240px" @bind="policyProductId" @bind:after="LoadPolicies">
+                @foreach (var p in products)
+                {
+                    <option value="@p.Id">@p.Name</option>
+                }
+            </select>
+        </div>
+        <div class="card shadow-sm">
+            <table class="table table-sm mb-0 align-middle">
+                <thead><tr><th>Cause</th><th>Niveau</th><th>Mode</th><th>Modifié</th></tr></thead>
+                <tbody>
+                    @foreach (var policy in policies)
+                    {
+                        <tr>
+                            <td><small>@policy.Cause</small></td>
+                            <td><span class="badge @LevelBadge(policy.Level)">@policy.Level</span></td>
+                            <td>
+                                @if (pendingEnforce == policy.Cause)
+                                {
+                                    <span class="small text-danger me-1">ENFORCE = ban automatique.</span>
+                                    <button class="btn btn-sm btn-danger" @onclick="() => SetMode(policy.Cause, SecurityLockCauseCatalog.ModeEnforce)">Confirmer</button>
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => pendingEnforce = null">Annuler</button>
+                                }
+                                else
+                                {
+                                    <div class="btn-group btn-group-sm">
+                                        @foreach (var mode in new[] { SecurityLockCauseCatalog.ModeShadow, SecurityLockCauseCatalog.ModeReview, SecurityLockCauseCatalog.ModeEnforce })
+                                        {
+                                            var current = mode == policy.Mode;
+                                            <button class="btn @(current ? "btn-primary" : "btn-outline-secondary")" disabled="@current"
+                                                    @onclick="() => RequestMode(policy.Cause, mode)">@mode</button>
+                                        }
+                                    </div>
+                                }
+                            </td>
+                            <td><small class="text-muted">@(policy.UpdatedBy == null ? "défaut" : policy.UpdatedBy + " " + TZ.ToLocal(policy.UpdatedAtUtc!.Value).ToString("dd/MM/yy HH:mm"))</small></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</div>
+
+@code {
+    private sealed record LockRow(Guid Id, string Product, string? CustomerEmail, string HardwareId, string Cause, int Level,
+        string EffectiveMode, string LastVerdict, string State, int ReportCount, string LockId, string EvidenceDigest,
+        DateTime LastReportedUtc, string? AdminDecision, string? AdminDecisionBy);
+
+    private sealed record PolicyRow(string Cause, int Level, string Mode, string? UpdatedBy, DateTime? UpdatedAtUtc);
+
+    private bool isAuthorized;
+    private string adminName = "";
+    private string stateFilter = SecurityLockReportStates.Open;
+    private string searchText = "";
+    private int openCount;
+    private List<LockRow> rows = new();
+    private List<Product> products = new();
+    private Guid policyProductId;
+    private List<PolicyRow> policies = new();
+    private Guid? pendingBan;
+    private string? pendingEnforce;
+
+    protected override async Task OnInitializedAsync()
+    {
+        isAuthorized = await Auth.IsRootAsync();
+        if (!isAuthorized) return;
+        adminName = (await Auth.GetAuthenticationStateAsync()).User.Identity?.Name ?? "admin";
+        await using (var db = await DbFactory.CreateDbContextAsync())
+            products = await db.Products.AsNoTracking().OrderBy(p => p.Name).ToListAsync();
+        // Default to the product that uses security locks (T-IA Connect), not the first one alphabetically.
+        policyProductId = (products.FirstOrDefault(p => string.Equals(p.Name, "TIAConnect", StringComparison.Ordinal))
+                           ?? products.FirstOrDefault())?.Id ?? Guid.Empty;
+        await LoadData();
+        await LoadPolicies();
+    }
+
+    private async Task LoadData()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        openCount = await db.SecurityLockReports.CountAsync(r => r.State == SecurityLockReportStates.Open);
+        var query = from r in db.SecurityLockReports.AsNoTracking()
+                    join p in db.Products.AsNoTracking() on r.ProductId equals p.Id
+                    join b in db.DistributionInstallationBindings.AsNoTracking() on r.BindingId equals b.Id into bindings
+                    from b in bindings.DefaultIfEmpty()
+                    join l in db.Licenses.AsNoTracking() on b.LicenseId equals l.Id into licenses
+                    from l in licenses.DefaultIfEmpty()
+                    select new { r, Product = p.Name, Email = l == null ? null : l.CustomerEmail };
+        if (!string.IsNullOrEmpty(stateFilter))
+            query = query.Where(x => x.r.State == stateFilter);
+        if (!string.IsNullOrWhiteSpace(searchText))
+        {
+            // Display search only: case-insensitive on purpose, never used for a security decision.
+            var s = searchText.Trim().ToUpperInvariant();
+            query = query.Where(x => x.r.HardwareId.ToUpper().Contains(s) || x.r.LockId.ToUpper().Contains(s)
+                                     || (x.Email != null && x.Email.ToUpper().Contains(s)));
+        }
+        rows = await query.OrderByDescending(x => x.r.LastReportedUtc).Take(300)
+            .Select(x => new LockRow(x.r.Id, x.Product, x.Email, x.r.HardwareId, x.r.Cause, x.r.Level, x.r.EffectiveMode,
+                x.r.LastVerdict, x.r.State, x.r.ReportCount, x.r.LockId, x.r.EvidenceDigestSha256, x.r.LastReportedUtc,
+                x.r.AdminDecision, x.r.AdminDecisionBy))
+            .ToListAsync();
+    }
+
+    private async Task LoadPolicies()
+    {
+        pendingEnforce = null;
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var configured = await db.SecurityLockEnforcementPolicies.AsNoTracking()
+            .Where(policy => policy.ProductId == policyProductId)
+            .ToDictionaryAsync(policy => policy.Cause, StringComparer.Ordinal);
+        policies = SecurityLockCauseCatalog.AllCauses
+            .Select(cause => (Cause: cause, Ok: SecurityLockCauseCatalog.TryGetLevel(cause, out var level), Level: level))
+            .Where(c => c.Ok && SecurityLockCauseCatalog.IsIrreversibleCandidate(c.Level))
+            .OrderBy(c => c.Level).ThenBy(c => c.Cause, StringComparer.Ordinal)
+            .Select(c => configured.TryGetValue(c.Cause, out var p)
+                ? new PolicyRow(c.Cause, c.Level, p.Mode, p.UpdatedBy, p.UpdatedAtUtc)
+                : new PolicyRow(c.Cause, c.Level, SecurityLockVerdictPolicy.DefaultIrreversibleMode, null, null))
+            .ToList();
+    }
+
+    private async Task Decide(Guid id, string decision)
+    {
+        pendingBan = null;
+        var result = await LockAdmin.DecideAsync(id, decision, null, adminName, null);
+        if (result.Outcome == SecurityLockAdminOutcomes.Ok)
+            Toast.ShowSuccess(decision == SecurityLockAdminDecisions.Ban
+                ? "Matériel banni définitivement."
+                : "Verrou relâché : il sera levé au prochain rapport (5 minutes au plus).");
+        else
+            Toast.ShowError("Décision refusée : " + result.Outcome);
+        await LoadData();
+    }
+
+    private async Task RequestMode(string cause, string mode)
+    {
+        if (mode == SecurityLockCauseCatalog.ModeEnforce)
+        {
+            pendingEnforce = cause;
+            return;
+        }
+        await SetMode(cause, mode);
+    }
+
+    private async Task SetMode(string cause, string mode)
+    {
+        var outcome = await LockAdmin.SetPolicyAsync(policyProductId, cause, mode, adminName);
+        if (outcome == SecurityLockAdminOutcomes.Ok) Toast.ShowSuccess(cause + " : " + mode);
+        else Toast.ShowError("Mode refusé : " + outcome);
+        await LoadPolicies();
+    }
+
+    private static string LevelBadge(int level) => level switch
+    {
+        >= 5 => "bg-danger",
+        4 => "bg-warning text-dark",
+        3 => "bg-info text-dark",
+        _ => "bg-secondary"
+    };
+
+    private static string StateBadge(string state) => state switch
+    {
+        SecurityLockReportStates.Open => "bg-warning text-dark",
+        SecurityLockReportStates.Banned => "bg-danger",
+        _ => "bg-success"
+    };
+}

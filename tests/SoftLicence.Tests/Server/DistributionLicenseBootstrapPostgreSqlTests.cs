@@ -856,11 +856,56 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         return copy;
     }
 
-    private static async Task<PreparedBootstrapScenario> CreatePreparedBootstrapScenarioAsync()
+    /// <summary>
+    /// Creates the shared prepared scenario, optionally binding its finalized entitlement to one
+    /// provider-issued authority generation for v4 provenance tests. The fixture keeps the grant
+    /// ownership source aligned with the entitlement contract so PostgreSQL exercises a coherent
+    /// v3 or v4 authority graph rather than an impossible mixed-generation state.
+    /// </summary>
+    private static async Task<PreparedBootstrapScenario> CreatePreparedBootstrapScenarioAsync(
+        bool useAuthorityGeneration = false)
     {
         var connections = await ProvisionIsolatedAsync();
         var factory = new TestDbFactory(connections.App);
         var fixture = await SeedAuthorityAsync(factory, "2.2.979");
+        Tkt000686Authority? projectedAuthority = null;
+        if (useAuthorityGeneration)
+        {
+            await using var authorityDb = await factory.CreateDbContextAsync();
+            var bindingAuthority = await authorityDb.DistributionInstallationBindings.AsNoTracking()
+                .Where(row => row.Id == fixture.BindingId)
+                .Select(row => new
+                {
+                    row.GrantRef,
+                    row.ExecutableSha256,
+                    row.NativeDllSha256,
+                    row.CoreSha256
+                })
+                .SingleAsync();
+            var approvedRows = await authorityDb.ApprovedBinaries
+                .Where(row => row.ProductId == fixture.ProductId && row.Version == fixture.Version)
+                .ToListAsync();
+            authorityDb.ApprovedBinaries.RemoveRange(approvedRows);
+            await authorityDb.SaveChangesAsync();
+            var artifacts = new List<ApprovedBinaryArtifact>
+            {
+                new("FP_EXE", bindingAuthority.ExecutableSha256),
+                new("FP_DLL", bindingAuthority.NativeDllSha256),
+                new("FP_CORE", bindingAuthority.CoreSha256)
+            };
+            var registration = await new ApprovedBinaryService(
+                    factory, NullLogger<ApprovedBinaryService>.Instance)
+                .RegisterReleaseBaselineAsync(
+                    fixture.ProductId,
+                    fixture.Version,
+                    $"tkt000699-{fixture.ProductId:D}",
+                    new string('e', 64),
+                    artifacts);
+            Assert.Equal(ApprovedBinaryVerdict.Approved, registration.Result.Verdict);
+            var artifactDigest = Assert.IsType<string>(registration.Result.BaselineDigestSha256);
+            projectedAuthority = await PersistTkt000686AuthorityAsync(
+                factory, fixture.ProductId, fixture.Version, bindingAuthority.GrantRef, artifactDigest);
+        }
         var runtimeSigning = CreateSigningKey(ActiveSigningPrivateKey);
         var nextSigning = CreateSigningKey(NextSigningPrivateKey);
         var enrollmentKey = RSA.Create(3072);
@@ -884,12 +929,19 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 LicenseId = binding.LicenseId,
                 GrantRefDigestSha256 = binding.GrantRefDigestSha256,
                 SubjectRefDigestSha256 = binding.SubjectRefDigestSha256,
-                ContractVersion = 3,
+                AuthorityLineageId = projectedAuthority?.LineageId,
+                AuthorityGenerationId = projectedAuthority?.GenerationId,
+                ArtifactSetDigestSha256 = projectedAuthority?.ArtifactDigest,
+                ContractVersion = useAuthorityGeneration ? 4 : 3,
                 State = "finalized",
                 IssuedAtUtc = DateTime.UtcNow.AddMinutes(-2),
                 ExpiresAtUtc = DateTime.UtcNow.AddHours(1),
                 FinalizedAtUtc = DateTime.UtcNow.AddMinutes(-1)
             });
+            var grantOwnership = await db.DistributionGrantOwnerships.SingleAsync(row =>
+                row.ProductId == binding.ProductId
+                && row.GrantRefDigestSha256 == binding.GrantRefDigestSha256);
+            grantOwnership.Source = useAuthorityGeneration ? "issue_v4" : "issue_v3";
             var product = await db.Products.SingleAsync(row => row.Id == fixture.ProductId);
             product.PrivateKeyXml = encryption.Encrypt(licenseKeys.PrivateKey);
             product.PublicKeyXml = licenseKeys.PublicKey;

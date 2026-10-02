@@ -6,6 +6,8 @@ using System.Text.RegularExpressions;
 
 namespace SoftLicence.Server.Middlewares
 {
+    /// <summary>Persists bounded request audit metadata after downstream execution, with whole-payload redaction for sensitive routes including every SUP descendant and rejected multipart request.</summary>
+    /// <remarks>Route classification applies before body capture; request annotations enrich metadata but never restore raw support content. This middleware audits rather than grants access.</remarks>
     public class AuditMiddleware
     {
         private const int MaximumErrorDetailsBytes = 8 * 1024;
@@ -30,13 +32,32 @@ namespace SoftLicence.Server.Middlewares
             _scopeFactory = scopeFactory;
         }
 
-        public async Task InvokeAsync(HttpContext context, IDbContextFactory<LicenseDbContext> dbFactory, Services.SecurityService security, Services.GeoIpService geoIp, IConfiguration config, Services.AuditNotifier auditNotifier)
+        /// <summary>
+        /// Captures bounded API audit metadata after the downstream pipeline completes while redacting
+        /// sensitive licensing, telemetry, runtime, and BugTrace report payloads before persistence.
+        /// Security checks may consume request-scoped authority in memory, but redacted routes never store it.
+        /// </summary>
+        /// <param name="context">Current HTTP exchange and request-scoped audit annotations.</param>
+        /// <param name="dbFactory">Factory used to persist one isolated audit record.</param>
+        /// <param name="security">Security policy used for bounded threat evaluation.</param>
+        /// <param name="geoIp">Network enrichment service for the remote address.</param>
+        /// <param name="config">Runtime audit and local-development policy.</param>
+        /// <param name="auditNotifier">Notifier invoked only after successful persistence.</param>
+        /// <returns>A task that completes after downstream handling and best-effort audit persistence.</returns>
+        public async Task InvokeAsync(
+            HttpContext context,
+            IDbContextFactory<LicenseDbContext> dbFactory,
+            Services.SecurityService security,
+            Services.GeoIpService geoIp,
+            IConfiguration config,
+            Services.AuditNotifier auditNotifier)
         {
             var path = context.Request.Path.ToString().ToLowerInvariant();
             var redactSensitivePayload = IsActivationApiPath(path)
                 || IsDistributionS2SPath(path)
                 || IsRuntimeEnrollmentPath(path)
                 || IsTelemetryApiPath(path)
+                || IsBugTraceSensitiveReportPath(path)
                 || IsTargetedLicenseResolutionPath(path);
 
             // EXCLUSIONS SYSTEME : Blazor, fichiers statiques, et navigation admin (pages UI)
@@ -67,6 +88,7 @@ namespace SoftLicence.Server.Middlewares
             // ForwardedHeaders has already accepted only configured trusted proxies.
             // Never parse raw forwarding headers again here.
             var clientIp = context.Connection.RemoteIpAddress?.ToString() ?? "Unknown";
+            var correlationId = context.TraceIdentifier;
 
             // 1. VÉRIFICATION BAN (PRIORITÉ ABSOLUE)
             // Exception : la télémétrie reste accessible même pour les IPs bannies
@@ -84,7 +106,22 @@ namespace SoftLicence.Server.Middlewares
             var currentScore = security.GetThreatScore(clientIp);
             var banCount = await security.GetBanCountAsync(clientIp);
 
-            if (currentScore >= 100 && currentScore < 200 && !security.IsWhitelisted(clientIp))
+            if (ShouldBypassThreatScoreDelay(path, currentScore, security.IsWhitelisted(clientIp)))
+            {
+                // TEMP-FAIL-OPEN(TKT-001268): TEMPORARY, never leave as is. The intended strict rule
+                // is to delay genuinely hostile traffic. SoftLicence currently misclassifies known
+                // Runtime clock-recovery requests, and Franck requested observation without blocking
+                // legitimate clients. Analyse and correct every logged case, then restore the strict
+                // decision and remove this marker only after production telemetry proves it correct.
+                _logger.LogWarning(
+                    "TEMP-FAIL-OPEN(TKT-001268) Public Runtime threat-score delay bypassed for path {Path}, IP {ClientIp}, score {ThreatScore}, ban count {BanCount}, correlation {CorrelationId}.",
+                    path,
+                    clientIp,
+                    currentScore,
+                    banCount,
+                    correlationId);
+            }
+            else if (currentScore >= 100 && currentScore < 200 && !security.IsWhitelisted(clientIp))
             {
                 // Délai progressif : 5s de base + 1s par tranche de 10 points au dessus de 100
                 int delaySec = 5 + ((currentScore - 100) / 10);
@@ -214,6 +251,7 @@ namespace SoftLicence.Server.Middlewares
                 // 2. Infos HTTP
                 var method = context.Request.Method;
                 var requestPath = context.Request.Path.ToString();
+                if (IsHistoricalReturnPath(path)) requestPath = "/api/admin/licenses/[redacted]/historical-return-conditional";
                 var statusCode = context.Response.StatusCode;
                 var duration = sw.ElapsedMilliseconds;
                 var userAgent = context.Request.Headers["User-Agent"].ToString();
@@ -234,11 +272,14 @@ namespace SoftLicence.Server.Middlewares
                 var hardwareIdForSecurityChecks = hardwareId;
                 var endpoint = context.Items[LogKeys.Endpoint]?.ToString() ?? "HTTP_REQUEST";
                 var resultStatusOverride = context.Items[LogKeys.ResultStatusOverride]?.ToString();
+                var runtimeAuthenticationDisposition =
+                    context.Items[LogKeys.RuntimeAuthenticationDisposition]?.ToString();
 
                 // Distribution v2 requests contain a short-lived bearer entitlement and raw
                 // installation evidence. Keep only HTTP metadata for these internal routes,
                 // even if a downstream component accidentally populates structured log items.
                 if (IsDistributionS2SPath(path) || IsRuntimeEnrollmentPath(path) || IsTelemetryApiPath(path)
+                    || IsBugTraceSensitiveReportPath(path)
                     || IsTargetedLicenseResolutionPath(path))
                 {
                     licenseKey = "";
@@ -289,7 +330,29 @@ namespace SoftLicence.Server.Middlewares
                             // Scoring de menace (uniquement pour les visiteurs non-authentifiés)
                             if (!isAuthenticated && !scopedSecurity.IsWhitelisted(clientIp))
                             {
-                                if (banCount >= 5)
+                                if (ShouldSuppressAuthenticationThreatScore(
+                                        requestPath,
+                                        statusCode,
+                                        runtimeAuthenticationDisposition))
+                                {
+                                    // TEMP-FAIL-OPEN(TKT-001268): TEMPORARY, never leave as is. The
+                                    // strict rule is to score hostile authentication failures. The
+                                    // server currently knows this exact result is its Runtime clock
+                                    // recovery handshake, so Franck requested logging instead of client
+                                    // punishment. Fix the protocol/data cause for every logged case,
+                                    // prove production classification, then remove this marker and
+                                    // restore the correct strict decision.
+                                    _logger.LogWarning(
+                                        "TEMP-FAIL-OPEN(TKT-001268) Expected Runtime authentication recovery was not threat-scored for path {Path}, IP {ClientIp}, status {StatusCode}, disposition {Disposition}, prior score {ThreatScore}, ban count {BanCount}, correlation {CorrelationId}.",
+                                        requestPath,
+                                        clientIp,
+                                        statusCode,
+                                        runtimeAuthenticationDisposition,
+                                        currentScore,
+                                        banCount,
+                                        correlationId);
+                                }
+                                else if (banCount >= 5)
                                 {
                                     // BASTA : Tolérance zéro pour les récidivistes lourds
                                     await scopedSecurity.ReportThreatAsync(clientIp, 200, $"Zero tolerance (Ban history: x{banCount})");
@@ -519,25 +582,80 @@ namespace SoftLicence.Server.Middlewares
         private static bool IsTargetedLicenseResolutionPath(string path)
         {
             var normalizedPath = path.EndsWith("/", StringComparison.Ordinal) ? path[..^1] : path;
-            return normalizedPath.Equals("/api/admin/licenses/resolve", StringComparison.OrdinalIgnoreCase);
+            return normalizedPath.Equals("/api/admin/licenses/resolve", StringComparison.OrdinalIgnoreCase)
+                || IsHistoricalReturnPath(path);
         }
+
+        /// <summary>Historical attribution contains private account/payment evidence and a key-bearing route.</summary>
+        private static bool IsHistoricalReturnPath(string path) =>
+            path.StartsWith("/api/admin/licenses/", StringComparison.OrdinalIgnoreCase)
+            && path.TrimEnd('/').EndsWith("/historical-return-conditional", StringComparison.OrdinalIgnoreCase);
 
         private static bool IsDistributionS2SPath(string path)
         {
             var normalizedPath = path.EndsWith("/", StringComparison.Ordinal) ? path[..^1] : path;
             return normalizedPath.Equals("/api/internal/v1/distribution-entitlements/issue", StringComparison.OrdinalIgnoreCase)
+                || normalizedPath.Equals("/api/internal/distribution-installation-bindings/hardware-authority", StringComparison.OrdinalIgnoreCase)
+                || normalizedPath.Equals("/api/internal/v1/portal-deactivations", StringComparison.OrdinalIgnoreCase)
                 || normalizedPath.Equals("/api/internal/v1/distribution-installation-bindings/finalize", StringComparison.OrdinalIgnoreCase)
+                || normalizedPath.Equals("/api/internal/v1/distribution-installation-bindings/source-authority/resolve", StringComparison.OrdinalIgnoreCase)
                 || normalizedPath.Equals("/api/internal/v1/distribution-installation-bindings/invalidate", StringComparison.OrdinalIgnoreCase)
                 || normalizedPath.Equals("/api/internal/v1/distribution-license-bootstraps/issue", StringComparison.OrdinalIgnoreCase)
                 || normalizedPath.Equals("/api/internal/v1/distribution-license-bootstraps/remint", StringComparison.OrdinalIgnoreCase)
                 || normalizedPath.Equals("/api/internal/v1/distribution-license-bootstraps/recover", StringComparison.OrdinalIgnoreCase);
         }
 
+        /// <summary>
+        /// Classifies public, S2S authority-v2, and test-only Source C runtime-enrollment paths as sensitive.
+        /// Comparisons are route-oriented and case-insensitive; the caller retains the original path for no output.
+        /// </summary>
+        /// <param name="path">Exact request path already separated from query text.</param>
+        /// <returns><see langword="true"/> when confidential audit-field redaction is mandatory.</returns>
         private static bool IsRuntimeEnrollmentPath(string path)
         {
             return path.Equals("/api/internal/v1/runtime-enrollments", StringComparison.OrdinalIgnoreCase)
                 || path.StartsWith("/api/internal/v1/runtime-enrollments/", StringComparison.OrdinalIgnoreCase)
+                || path.Equals("/api/internal/v2/runtime-enrollment-authority", StringComparison.OrdinalIgnoreCase)
+                || path.StartsWith("/api/internal/v2/runtime-enrollment-authority/", StringComparison.OrdinalIgnoreCase)
+                || path.Equals("/api/internal/test/v1/runtime-enrollment-source-c-authority", StringComparison.OrdinalIgnoreCase)
+                || path.StartsWith("/api/internal/test/v1/runtime-enrollment-source-c-authority/", StringComparison.OrdinalIgnoreCase)
                 || path.Equals("/api/v1/runtime-enrollments", StringComparison.OrdinalIgnoreCase)
+                || path.StartsWith("/api/v1/runtime-enrollments/", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Temporarily bypasses only the pre-controller quarantine delay for public Runtime requests.
+        /// Active bans are evaluated before this decision, and downstream authentication, authorization,
+        /// rate limiting, replay protection, and non-recovery threat scoring remain in force.
+        /// </summary>
+        private static bool ShouldBypassThreatScoreDelay(string path, int currentScore, bool isWhitelisted)
+        {
+            return currentScore >= 100
+                && currentScore < 200
+                && !isWhitelisted
+                && IsPublicRuntimeEnrollmentPath(path);
+        }
+
+        /// <summary>
+        /// Suppresses punitive scoring only for a server-classified public Runtime clock recovery.
+        /// A client cannot set the request-scoped disposition used by this predicate.
+        /// </summary>
+        private static bool ShouldSuppressAuthenticationThreatScore(
+            string path,
+            int statusCode,
+            string? runtimeAuthenticationDisposition)
+        {
+            return statusCode == StatusCodes.Status401Unauthorized
+                && IsPublicRuntimeEnrollmentPath(path)
+                && string.Equals(
+                    runtimeAuthenticationDisposition,
+                    Services.RuntimeEnrollmentService.ProofClockSkewDiagnosticCode,
+                    StringComparison.Ordinal);
+        }
+
+        private static bool IsPublicRuntimeEnrollmentPath(string path)
+        {
+            return path.Equals("/api/v1/runtime-enrollments", StringComparison.OrdinalIgnoreCase)
                 || path.StartsWith("/api/v1/runtime-enrollments/", StringComparison.OrdinalIgnoreCase);
         }
 
@@ -547,6 +665,19 @@ namespace SoftLicence.Server.Middlewares
             return path.Equals(telemetryPath, StringComparison.OrdinalIgnoreCase)
                 || path.StartsWith(telemetryPath + "/", StringComparison.OrdinalIgnoreCase);
         }
+
+        /// <summary>
+        /// Classifies BugTrace ingestion endpoints whose bodies contain licence, hardware, or diagnostic evidence.
+        /// The entire SUP family, including unknown nested routes and rejected multipart bodies, is sensitive.
+        /// </summary>
+        /// <param name="path">Normalized or original request path; comparison remains ordinal and case-insensitive.</param>
+        /// <returns><see langword="true"/> for report ingestion or any path inside the dedicated support family.</returns>
+        private static bool IsBugTraceSensitiveReportPath(string path) =>
+            path.Equals("/api/bugtrace/support-cases", StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith("/api/bugtrace/support-cases/", StringComparison.OrdinalIgnoreCase)
+            || path.Equals("/api/bugtrace/auto-report", StringComparison.OrdinalIgnoreCase)
+            || path.Equals("/api/bugtrace/submit", StringComparison.OrdinalIgnoreCase)
+            || path.Equals("/api/bugtrace/submit/", StringComparison.OrdinalIgnoreCase);
 
         private static bool IsCanaryEvidencePath(string path)
         {

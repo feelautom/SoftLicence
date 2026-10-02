@@ -10,6 +10,87 @@ public sealed class SoftLicenceAnalyticsTools
     private readonly SoftLicenceAnalyticsClient _client;
     private readonly McpResultStore _resultStore;
 
+    /// <summary>
+    /// Returns stored pre-download requests and decisions for one authorized product and exact selectors
+    /// or a bounded UTC period. It is read-only and rejects malformed or unbounded queries before transport.
+    /// </summary>
+    [McpServerTool]
+    [Description("Read the durable T-IA Connect pre-download hardware decision registry. Search by exact request ID, licence ID, irreversible HWID digest, closed outcome, or a UTC period up to 90 days. Returns commercial facts, ban categories, decision reason, auto-unban count and replay count without raw hardware observations, licence keys, tokens or customer identity.")]
+    public async Task<JsonElement> GetRuntimeDistributionHardwareDecisions(
+        [Description("Optional exact canonical request UUID.")] string? requestId = null,
+        [Description("Optional exact SoftLicence licence UUID.")] Guid? licenseId = null,
+        [Description("Optional lowercase SHA-256 hardware digest.")] string? hardwareIdHash = null,
+        [Description("Optional closed outcome: accepted, auto-unbanned or refused.")] string? outcome = null,
+        [Description("Optional UTC period start; must be supplied with toUtc.")] DateTime? fromUtc = null,
+        [Description("Optional UTC period end, at most 90 days after fromUtc.")] DateTime? toUtc = null,
+        [Description("Page size 1..200.")] int take = 100,
+        [Description("Page offset 0..10000, newest decisions first.")] int offset = 0,
+        [Description("Product UUID selector; required for global keys when productName is absent.")] string? productId = null,
+        [Description("Product name selector, mutually exclusive with productId.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (requestId is not null) ValidateCanonicalUuid(requestId, nameof(requestId));
+        if (licenseId == Guid.Empty
+            || hardwareIdHash is not null && (hardwareIdHash.Length != 64
+                || hardwareIdHash.Any(character => character is not (>= '0' and <= '9')
+                    and not (>= 'a' and <= 'f')))
+            || outcome is not null and not ("accepted" or "auto-unbanned" or "refused")
+            || fromUtc.HasValue != toUtc.HasValue
+            || fromUtc is not null && (fromUtc.Value.Kind != DateTimeKind.Utc
+                || toUtc!.Value.Kind != DateTimeKind.Utc || fromUtc > toUtc
+                || toUtc.Value - fromUtc.Value > TimeSpan.FromDays(90))
+            || requestId is null && licenseId is null && hardwareIdHash is null
+                && outcome is null && fromUtc is null
+            || take is < 1 or > 200 || offset is < 0 or > 10000)
+            throw new ArgumentException("Provide valid exact selectors or one bounded UTC period.");
+        if (productId is not null) ValidateCanonicalUuid(productId, nameof(productId));
+        return await _client.GetRuntimeDistributionHardwareDecisionsAsync(
+            requestId, licenseId, hardwareIdHash, outcome, fromUtc, toUtc, take, offset,
+            productId, productName, cancellationToken);
+    }
+
+    /// <summary>Exposes product-scoped stored decisions through an exact targeted administrator read.</summary>
+    /// <remarks>Rejects missing targets, controls, boundary whitespace and invalid page bounds before transport. Identifiers retain casing and Unicode. Null observations are unknown; legacy hardware-lock observations do not prove global quota authority. Existing provider errors propagate through the analytics client.</remarks>
+    [McpServerTool]
+    [Description("Read stored activation/finalization decisions for one authorized product and at least one exact licenseId, hardwareId or requestId. Targets intersect. No historical reconstruction, Website correlation or new licensing decision. Global keys require productId or productName. Unknown facts remain null; observationGuarantee states the original locking limits.")]
+    public async Task<JsonElement> GetLicenseDecisions(
+        [Description("Exact licence UUID, optional when another target is supplied.")] Guid? licenseId = null,
+        [Description("Exact submitted, resolved or correlated HWID, at most 512 characters; no normalization.")] string? hardwareId = null,
+        [Description("Exact operation or first observed HTTP correlation, at most 200 characters.")] string? requestId = null,
+        [Description("Page size 1..200.")] int take = 50,
+        [Description("Page offset 0..10000, newest events first.")] int offset = 0,
+        [Description("Product UUID selector; required for global keys when productName is absent.")] string? productId = null,
+        [Description("Existing Analytics product-name selector, mutually exclusive with productId.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        /// <summary>Validates optional exact selector text without changing bytes, case or Unicode; rejects controls and boundary whitespace before transport.</summary>
+        static bool Valid(string? value, int maximum) => value == null || (value.Length > 0
+            && value.Length <= maximum && !value.Any(char.IsControl)
+            && !char.IsWhiteSpace(value[0]) && !char.IsWhiteSpace(value[^1]));
+        if (licenseId == Guid.Empty || !Valid(hardwareId, 512) || !Valid(requestId, 200)
+            || (licenseId == null && hardwareId == null && requestId == null)
+            || take is < 1 or > 200 || offset is < 0 or > 10000)
+            throw new ArgumentException("An exact target and valid page bounds are required.");
+        return await _client.GetLicenseDecisionsAsync(licenseId, hardwareId, requestId, take, offset,
+            productId, productName, cancellationToken);
+    }
+
+    /// <summary>Returns a request-scoped Runtime enrollment authority and security diagnostic.</summary>
+    /// <remarks>The request identifier is exact and unnormalized. The result distinguishes unavailable historical candidate payloads from an empty candidate set and never changes licensing state.</remarks>
+    [McpServerTool]
+    [Description("Diagnose one Runtime enrollment/finalization request from exact stored provider decisions, then correlate only its provider-observed HWID with bans, Canary and telemetry. Historical candidate payloads are not reconstructed and remain explicitly unavailable.")]
+    public async Task<JsonElement> GetRuntimeEnrollmentAuthorityDiagnostic(
+        [Description("Exact canonical Runtime/finalization request UUID in lowercase D form.")] string requestId,
+        [Description("Optional product UUID; required for global keys when productName is absent.")] string? productId = null,
+        [Description("Optional exact product name, mutually exclusive with productId.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateCanonicalUuid(requestId, nameof(requestId));
+        if (productId is not null) ValidateCanonicalUuid(productId, nameof(productId));
+        return await _client.GetRuntimeEnrollmentAuthorityDiagnosticAsync(
+            requestId, productId, productName, cancellationToken);
+    }
+
     public SoftLicenceAnalyticsTools(SoftLicenceAnalyticsClient client, McpResultStore resultStore)
     {
         _client = client;
@@ -28,6 +109,39 @@ public sealed class SoftLicenceAnalyticsTools
     public async Task<JsonElement> ListProducts(CancellationToken cancellationToken = default)
     {
         return await _client.ListProductsAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Returns one privacy-safe Recovery v1 timeline under mono-product/global analytics authorization.
+    /// </summary>
+    [McpServerTool]
+    [Description("Get one ordered Recovery v1 support timeline and its derived incomplete/completed/failed/cancelled status. Mono-product keys need no selector; global keys must select one exact product.")]
+    public async Task<JsonElement> GetRecoveryTimeline(
+        [Description("Canonical lowercase Recovery run UUID in D form.")] string recoveryRunId,
+        [Description("Optional exact product UUID. Required for a global key when productName is omitted.")] string? productId = null,
+        [Description("Optional exact product name. Required for a global key when productId is omitted.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateCanonicalUuid(recoveryRunId, nameof(recoveryRunId));
+        if (productId is not null) ValidateCanonicalUuid(productId, nameof(productId));
+        return await _client.GetRecoveryTimelineAsync(recoveryRunId, productId, productName, cancellationToken);
+    }
+
+    /// <summary>
+    /// Returns bounded Recovery v1 rejection evidence without payloads, customer identity, machine identity, or free text.
+    /// </summary>
+    [McpServerTool]
+    [Description("List bounded product-scoped Recovery v1 ingestion rejections. Returned rows contain only valid opaque identifiers, a closed code, correlation ID, and server receive time.")]
+    public async Task<JsonElement> GetRecoveryRejections(
+        [Description("Optional canonical lowercase Recovery run UUID in D form.")] string? recoveryRunId = null,
+        [Description("Maximum rows, clamped from 1 to 200.")] int take = 100,
+        [Description("Optional exact product UUID. Required for a global key when productName is omitted.")] string? productId = null,
+        [Description("Optional exact product name. Required for a global key when productId is omitted.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (recoveryRunId is not null) ValidateCanonicalUuid(recoveryRunId, nameof(recoveryRunId));
+        if (productId is not null) ValidateCanonicalUuid(productId, nameof(productId));
+        return await _client.GetRecoveryRejectionsAsync(recoveryRunId, Math.Clamp(take, 1, 200), productId, productName, cancellationToken);
     }
 
     [McpServerTool]
@@ -1246,5 +1360,14 @@ public sealed class SoftLicenceAnalyticsTools
     private static int? NormalizeAge(int days)
     {
         return days > 0 ? Math.Clamp(days, 0, 3650) : null;
+    }
+
+    /// <summary>
+    /// Rejects non-canonical UUID text before it can become a support lookup selector.
+    /// </summary>
+    private static void ValidateCanonicalUuid(string value, string parameterName)
+    {
+        if (!Guid.TryParseExact(value, "D", out var parsed) || value != parsed.ToString("D"))
+            throw new ArgumentException("The value must be a canonical lowercase UUID in D form.", parameterName);
     }
 }

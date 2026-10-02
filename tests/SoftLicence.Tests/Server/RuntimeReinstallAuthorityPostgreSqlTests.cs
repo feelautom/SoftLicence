@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using SoftLicence.Server.Data;
@@ -34,6 +35,37 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.Empty(await check.DistributionEntitlements.ToListAsync());
         Assert.Empty(await check.DistributionBindingRequests.Where(row => row.Operation == "finalize_binding").ToListAsync());
         Assert.Equal("issue_v2", (await check.DistributionGrantOwnerships.SingleAsync()).Source);
+    }
+
+    /// <summary>
+    /// Proves a legacy reinstall whose source version is below the product minimum retains the
+    /// bounded reinstall refusal contract after live Runtime validation adopts version_ineligible.
+    /// </summary>
+    [Fact]
+    public async Task ReinstallAuthority_LegacyV2_VersionIneligibleRetainsBoundedPublicRefusal()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivatePreparedEnrollmentAsync(scenario);
+        var subjectRef = Base64Url(RandomNumberGenerator.GetBytes(32));
+        var grantRef = await ConvertToLegacyV2AuthorityAsync(scenario);
+        var request = BuildReinstallAuthorityRequest(scenario, grantRef, subjectRef);
+        await scenario.Runtime.AuthorizeReinstallAsync("website-step1", request);
+        await using (var db = await scenario.Factory.CreateDbContextAsync())
+        {
+            var product = await db.Products.SingleAsync(candidate =>
+                candidate.Id == scenario.Fixture.ProductId);
+            product.MinimumAllowedVersion = "9.9.9";
+            await db.SaveChangesAsync();
+        }
+
+        var error = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() =>
+            scenario.Runtime.AuthorizeReinstallAsync(
+                "website-step1",
+                request));
+
+        Assert.Equal(StatusCodes.Status403Forbidden, error.StatusCode);
+        Assert.Equal("reinstall_authority_ineligible", error.ErrorCode);
+        Assert.Equal("v2_binding_rows_ineligible", error.DiagnosticCode);
     }
 
     [Fact]
@@ -70,6 +102,114 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
 
         Assert.Equal(Sha256(subjectRef), response.SubjectRefDigestSha256);
         Assert.Equal(before, await SnapshotReinstallAuthorityAsync(scenario));
+    }
+
+    [Fact]
+    public async Task ReinstallSourceResolution_ModernAuthority_VerifiesDiscoveryProofWithoutMutation()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivatePreparedEnrollmentAsync(scenario);
+        var (grantRef, subjectRef) = await ConfigureModernV2AuthorityAsync(scenario);
+        var before = await SnapshotReinstallAuthorityAsync(scenario);
+
+        var response = await scenario.Runtime.ResolveReinstallSourceAuthorityAsync(
+            "website-step1", BuildReinstallSourceResolutionRequest(scenario));
+        await using var authorityCheck = await scenario.Factory.CreateDbContextAsync();
+        var sourceLicenseId = (await authorityCheck.RuntimeEnrollments.AsNoTracking().SingleAsync()).LicenseId;
+
+        Assert.Equal(RuntimeEnrollmentService.ReinstallSourceResolutionResponseSchema, response.Schema);
+        Assert.Equal("source", response.Outcome);
+        Assert.Equal("modern", response.SourceKind);
+        Assert.Equal(grantRef, response.GrantRef);
+        Assert.Equal(scenario.Fixture.BindingId.ToString("D"), response.BindingId);
+        Assert.Equal(sourceLicenseId.ToString("D"), response.SourceLicenseId);
+        Assert.Equal(Sha256(subjectRef), response.SubjectRefDigestSha256);
+        Assert.Null(response.Authority);
+        var v1Json = JsonSerializer.SerializeToElement(
+            response, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.Equal(
+            ["bindingId", "grantRef", "outcome", "requestId", "schema", "sourceKind", "sourceLicenseId", "subjectRefDigestSha256"],
+            v1Json.EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal).ToArray());
+
+        var v2Request = BuildReinstallSourceResolutionRequest(scenario);
+        v2Request.Schema = RuntimeEnrollmentService.ReinstallSourceResolutionV2Schema;
+        var v2Response = await scenario.Runtime.ResolveReinstallSourceAuthorityAsync(
+            "website-step1", v2Request);
+        Assert.Equal(RuntimeEnrollmentService.ReinstallSourceResolutionV2ResponseSchema, v2Response.Schema);
+        Assert.Equal("source", v2Response.Outcome);
+        Assert.Null(v2Response.Authority);
+        Assert.Equal(before, await SnapshotReinstallAuthorityAsync(scenario));
+    }
+
+    /// <summary>
+    /// Proves the negotiated v2 resolver returns the exact entitlement-linked provider statement
+    /// without changing the Runtime, binding, entitlement, lineage, or generation state.
+    /// </summary>
+    [Fact]
+    public async Task ReinstallSourceResolution_V2V4_ReturnsExactProviderAuthorityWithoutMutation()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync(useAuthorityGeneration: true);
+        await ActivatePreparedEnrollmentAsync(scenario);
+        var (grantRef, subjectDigest) = await ConfigureModernV4AuthorityAsync(scenario);
+        var before = await SnapshotReinstallAuthorityAsync(scenario);
+        var request = BuildReinstallSourceResolutionRequest(scenario);
+        request.Schema = RuntimeEnrollmentService.ReinstallSourceResolutionV2Schema;
+        Guid lineageId;
+        Guid generationId;
+        byte[] signedStatement;
+        await using (var authorityDb = await scenario.Factory.CreateDbContextAsync())
+        {
+            var entitlement = await authorityDb.DistributionEntitlements.AsNoTracking().SingleAsync();
+            lineageId = Assert.IsType<Guid>(entitlement.AuthorityLineageId);
+            generationId = Assert.IsType<Guid>(entitlement.AuthorityGenerationId);
+            signedStatement = await authorityDb.RuntimeEnrollmentAuthorityGenerations.AsNoTracking()
+                .Where(row => row.AuthorityLineageId == lineageId
+                    && row.AuthorityGenerationId == generationId)
+                .Select(row => row.SignedStatementUtf8)
+                .SingleAsync();
+        }
+
+        var response = await scenario.Runtime.ResolveReinstallSourceAuthorityAsync(
+            "website-step1", request);
+
+        Assert.Equal(RuntimeEnrollmentService.ReinstallSourceResolutionV2ResponseSchema, response.Schema);
+        Assert.Equal("source", response.Outcome);
+        Assert.Equal("modern", response.SourceKind);
+        Assert.Equal(grantRef, response.GrantRef);
+        Assert.Equal(subjectDigest, response.SubjectRefDigestSha256);
+        var authority = Assert.IsType<RuntimeReinstallSourceAuthorityProvenance>(response.Authority);
+        Assert.Equal(lineageId.ToString("D"), authority.AuthorityLineageId);
+        Assert.Equal(generationId.ToString("D"), authority.AuthorityGenerationId);
+        Assert.Equal(Base64Url(signedStatement), authority.SignedStatementBase64Url);
+        var v2Json = JsonSerializer.SerializeToElement(
+            response, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.Equal(
+            ["authority", "bindingId", "grantRef", "outcome", "requestId", "schema", "sourceKind", "sourceLicenseId", "subjectRefDigestSha256"],
+            v2Json.EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal).ToArray());
+        Assert.Equal(
+            ["authorityGenerationId", "authorityLineageId", "signedStatementBase64Url"],
+            v2Json.GetProperty("authority").EnumerateObject()
+                .Select(property => property.Name).Order(StringComparer.Ordinal).ToArray());
+        Assert.Equal(before, await SnapshotReinstallAuthorityAsync(scenario));
+    }
+
+    [Fact]
+    public async Task ReinstallSourceResolution_InvalidProof_ReturnsBoundedNone()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivatePreparedEnrollmentAsync(scenario);
+        await ConfigureModernV2AuthorityAsync(scenario);
+        var request = BuildReinstallSourceResolutionRequest(scenario);
+        request.Signature = Base64Url(RandomNumberGenerator.GetBytes(384));
+
+        var response = await scenario.Runtime.ResolveReinstallSourceAuthorityAsync(
+            "website-step1", request);
+
+        Assert.Equal("none", response.Outcome);
+        Assert.Null(response.SourceLicenseId);
+        Assert.Null(response.GrantRef);
+        Assert.Null(response.BindingId);
+        Assert.Null(response.SubjectRefDigestSha256);
     }
 
     [Fact]
@@ -218,13 +358,37 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var (grantRef, subjectRef) = await ConfigureModernV2AuthorityAsync(scenario);
         var before = await SnapshotReinstallAuthorityAsync(scenario);
 
+        var repeatedRequest = BuildReinstallAuthorityRequest(scenario, grantRef, subjectRef);
         var responses = await Task.WhenAll(
-            scenario.Runtime.AuthorizeReinstallAsync(
-                "website-step1", BuildReinstallAuthorityRequest(scenario, grantRef, subjectRef)),
-            scenario.Runtime.AuthorizeReinstallAsync(
-                "website-step1", BuildReinstallAuthorityRequest(scenario, grantRef, subjectRef)));
+            scenario.Runtime.AuthorizeReinstallAsync("website-step1", repeatedRequest),
+            scenario.Runtime.AuthorizeReinstallAsync("website-step1", repeatedRequest));
 
-        Assert.All(responses, response => Assert.Equal(Sha256(subjectRef), response.SubjectRefDigestSha256));
+        Assert.All(responses, response =>
+        {
+            Assert.Equal("identity_confirmed", response.Decision);
+            Assert.Equal(Sha256(subjectRef), response.SubjectRefDigestSha256);
+        });
+        Assert.Equal(before, await SnapshotReinstallAuthorityAsync(scenario));
+    }
+
+    /// <summary>
+    /// Proves an exact replay of the legacy v1 request can only reproduce non-authorizing identity
+    /// evidence and cannot mutate the protected Runtime authority graph.
+    /// </summary>
+    [Fact]
+    public async Task ReinstallAuthorityV1_ConcurrentExactReplayRemainsNonAuthorizingAndReadOnly()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivatePreparedEnrollmentAsync(scenario);
+        var repeatedRequest = BuildReinstallAuthorityRequest(scenario);
+        var before = await SnapshotReinstallAuthorityAsync(scenario);
+
+        var responses = await Task.WhenAll(
+            scenario.Runtime.AuthorizeReinstallAsync("website-step1", repeatedRequest),
+            scenario.Runtime.AuthorizeReinstallAsync("website-step1", repeatedRequest));
+
+        Assert.All(responses, response =>
+            Assert.Equal("identity_confirmed", response.Decision));
         Assert.Equal(before, await SnapshotReinstallAuthorityAsync(scenario));
     }
 
@@ -357,7 +521,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var response = await scenario.Runtime.AuthorizeReinstallAsync("website-step1", request);
 
         Assert.Equal(RuntimeEnrollmentService.ReinstallAuthorityResponseSchema, response.Schema);
-        Assert.Equal("authorized", response.Decision);
+        Assert.Equal("identity_confirmed", response.Decision);
         Assert.Equal(request.BootstrapId, response.CorrelationId);
         Assert.Equal(request.EnrollmentId, response.EnrollmentId);
         Assert.Equal(request.InstallationId, response.InstallationId);
@@ -380,7 +544,6 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 row => row.Id == scenario.Fixture.BindingId);
             var license = await db.Licenses.SingleAsync(row => row.Id == binding.LicenseId);
             license.ExpirationDate = DateTime.UtcNow.AddMinutes(-1);
-            license.AllowedVersions = "9.*";
             await db.SaveChangesAsync();
         }
         var request = BuildReinstallAuthorityRequest(scenario, grantRef, subjectRef);
@@ -388,6 +551,49 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var response = await scenario.Runtime.AuthorizeReinstallAsync("website-step1", request);
 
         Assert.Equal("identity_confirmed", response.Decision);
+        Assert.Equal(scenario.Fixture.BindingId.ToString("D"), response.BindingId);
+        Assert.Equal(grantRef, response.GrantRef);
+        Assert.Equal(Sha256(subjectRef), response.SubjectRefDigestSha256);
+    }
+
+    /// <summary>
+    /// Proves each independent version policy confirms identity without granting reinstall authority.
+    /// </summary>
+    [Theory]
+    [InlineData("allowed_versions")]
+    [InlineData("minimum_version")]
+    public async Task ReinstallAuthorityV2_IneligibleVersion_ConfirmsIdentityWithoutReinstallAuthority(
+        string policy)
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivatePreparedEnrollmentAsync(scenario);
+        var (grantRef, subjectRef) = await ConfigureModernV2AuthorityAsync(scenario);
+        await using (var db = await scenario.Factory.CreateDbContextAsync())
+        {
+            var binding = await db.DistributionInstallationBindings.SingleAsync(
+                row => row.Id == scenario.Fixture.BindingId);
+            var license = await db.Licenses.SingleAsync(row => row.Id == binding.LicenseId);
+            if (policy == "allowed_versions")
+            {
+                license.AllowedVersions = "9.*";
+            }
+            else if (policy == "minimum_version")
+            {
+                var product = await db.Products.SingleAsync(row => row.Id == license.ProductId);
+                product.MinimumAllowedVersion = "9.9.9";
+            }
+            else
+            {
+                throw new InvalidOperationException("Unknown version-policy fixture.");
+            }
+            await db.SaveChangesAsync();
+        }
+        var request = BuildReinstallAuthorityRequest(scenario, grantRef, subjectRef);
+
+        var response = await scenario.Runtime.AuthorizeReinstallAsync("website-step1", request);
+
+        Assert.Equal("identity_confirmed", response.Decision);
+        Assert.Equal(request.ReleaseVersion, response.ReleaseVersion);
         Assert.Equal(scenario.Fixture.BindingId.ToString("D"), response.BindingId);
         Assert.Equal(grantRef, response.GrantRef);
         Assert.Equal(Sha256(subjectRef), response.SubjectRefDigestSha256);
@@ -494,6 +700,29 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         return (binding.GrantRef, subjectRef);
     }
 
+    /// <summary>
+    /// Aligns mutable Runtime ownership with an already finalized v4 entitlement while preserving
+    /// every frozen entitlement authority field and its exact subject digest.
+    /// </summary>
+    private static async Task<(string GrantRef, string SubjectDigest)> ConfigureModernV4AuthorityAsync(
+        PreparedBootstrapScenario scenario)
+    {
+        await using var db = await scenario.Factory.CreateDbContextAsync();
+        var enrollment = await db.RuntimeEnrollments.SingleAsync(row => row.Id == scenario.EnrollmentId);
+        var binding = await db.DistributionInstallationBindings.SingleAsync(row => row.Id == scenario.Fixture.BindingId);
+        var entitlement = await db.DistributionEntitlements.SingleAsync(row => row.Id == binding.EntitlementId);
+        var ownership = await db.DistributionGrantOwnerships.SingleAsync(row =>
+            row.ProductId == binding.ProductId && row.GrantRefDigestSha256 == binding.GrantRefDigestSha256);
+        Assert.Equal(4, entitlement.ContractVersion);
+        Assert.Equal(binding.SubjectRefDigestSha256, entitlement.SubjectRefDigestSha256);
+        enrollment.SubjectRefDigestSha256 = entitlement.SubjectRefDigestSha256;
+        ownership.Source = "issue_v4";
+        await db.SaveChangesAsync();
+        enrollment.AuthorityEpoch = (await db.RuntimeEnrollmentAuthorityStates.AsNoTracking().SingleAsync()).Epoch;
+        await db.SaveChangesAsync();
+        return (binding.GrantRef, Assert.IsType<string>(entitlement.SubjectRefDigestSha256));
+    }
+
     private static async Task<string> SnapshotReinstallAuthorityAsync(PreparedBootstrapScenario scenario)
     {
         await using var db = await scenario.Factory.CreateDbContextAsync();
@@ -503,7 +732,9 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             .Where(row => row.Id == binding.EntitlementId)
             .OrderBy(row => row.Id)
             .Select(row => row.ClientId + ":" + row.ProductId + ":" + row.LicenseId + ":"
-                + row.ContractVersion + ":" + row.State + ":" + row.SubjectRefDigestSha256)
+                + row.ContractVersion + ":" + row.State + ":" + row.SubjectRefDigestSha256 + ":"
+                + row.AuthorityLineageId + ":" + row.AuthorityGenerationId + ":"
+                + row.ArtifactSetDigestSha256)
             .ToListAsync();
         var ownerships = await db.DistributionGrantOwnerships.AsNoTracking()
             .Where(row => row.ProductId == binding.ProductId
@@ -516,10 +747,26 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             .OrderBy(row => row.ClientId).ThenBy(row => row.RequestId)
             .Select(row => row.ClientId + ":" + row.RequestId)
             .ToListAsync();
+        var authorityGenerationRows = await db.RuntimeEnrollmentAuthorityGenerations.AsNoTracking()
+            .OrderBy(row => row.AuthorityLineageId).ThenBy(row => row.Sequence)
+            .Select(row => new
+            {
+                row.AuthorityLineageId,
+                row.AuthorityGenerationId,
+                row.Sequence,
+                row.AuthorityDigest,
+                row.SignedStatementUtf8
+            })
+            .ToListAsync();
+        var authorityGenerations = authorityGenerationRows.Select(row =>
+            row.AuthorityLineageId + ":" + row.AuthorityGenerationId + ":"
+            + row.Sequence + ":" + row.AuthorityDigest + ":"
+            + Convert.ToBase64String(row.SignedStatementUtf8));
         return string.Join('|',
             enrollment.State, enrollment.SubjectRefDigestSha256, enrollment.AuthorityEpoch,
             binding.State, binding.SubjectRefDigestSha256, binding.GrantRefDigestSha256,
             string.Join(',', entitlements), string.Join(',', ownerships), string.Join(',', finalizeOwners),
+            string.Join(',', authorityGenerations),
             (await db.RuntimeEnrollmentAuthorityStates.AsNoTracking().SingleAsync()).Epoch);
     }
 
@@ -678,6 +925,45 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             ReleaseVersion = scenario.Fixture.Version,
             KeyThumbprint = thumbprint,
             SecurityEpoch = 1,
+            Challenge = challenge,
+            Signature = Base64Url(scenario.EnrollmentKey.SignData(
+                Encoding.UTF8.GetBytes(payload), HashAlgorithmName.SHA256, RSASignaturePadding.Pss))
+        };
+    }
+
+    private static RuntimeReinstallSourceResolutionRequest BuildReinstallSourceResolutionRequest(
+        PreparedBootstrapScenario scenario)
+    {
+        var requestId = Guid.NewGuid().ToString("D");
+        var bootstrapId = Guid.NewGuid().ToString("D");
+        var attemptId = Guid.NewGuid().ToString("D");
+        var challenge = Base64Url(RandomNumberGenerator.GetBytes(64));
+        var thumbprint = scenario.PrepareRequest.Key!.KeyThumbprint!;
+        var payload = string.Join('\n',
+            "distribution-reinstall-discovery-proof-v1",
+            bootstrapId,
+            requestId,
+            scenario.Fixture.InstallationId,
+            scenario.EnrollmentId.ToString("D"),
+            scenario.Fixture.Version,
+            thumbprint,
+            1.ToString(CultureInfo.InvariantCulture),
+            attemptId,
+            RuntimeEnrollmentService.ReinstallDiscoveryAuthoritySchema,
+            challenge);
+        return new RuntimeReinstallSourceResolutionRequest
+        {
+            Schema = RuntimeEnrollmentService.ReinstallSourceResolutionSchema,
+            RequestId = requestId,
+            ProductId = scenario.Fixture.ProductId.ToString("D"),
+            BootstrapId = bootstrapId,
+            InstallationId = scenario.Fixture.InstallationId,
+            EnrollmentId = scenario.EnrollmentId.ToString("D"),
+            ReleaseVersion = scenario.Fixture.Version,
+            KeyThumbprint = thumbprint,
+            SecurityEpoch = 1,
+            AttemptId = attemptId,
+            AuthoritySchema = RuntimeEnrollmentService.ReinstallDiscoveryAuthoritySchema,
             Challenge = challenge,
             Signature = Base64Url(scenario.EnrollmentKey.SignData(
                 Encoding.UTF8.GetBytes(payload), HashAlgorithmName.SHA256, RSASignaturePadding.Pss))

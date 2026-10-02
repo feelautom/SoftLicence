@@ -1,0 +1,58 @@
+@using SoftLicence.Server.Models
+@inject IStringLocalizer<SharedResource> L
+@inject SoftLicence.Server.Services.TimeZoneService TZ
+
+@* Render only the already-authorized validated projection using Razor encoding; unknown observations stay unknown and raw history JSON is never rendered. *@
+@if (Entry.Decision is not { } decision)
+{
+    <span class="text-muted">@L["Decision_Unavailable"]</span>
+}
+else
+{
+    <details class="license-decision">
+        <summary>@L[$"Decision_Classification_{Entry.Classification}"] · @decision.Code · HTTP @decision.HttpStatus</summary>
+        <dl class="small mb-1">
+            <dt>@L["Decision_Time"]</dt>
+            <dd>@Entry.TimestampUtc.ToString("yyyy-MM-dd HH:mm:ss 'UTC'") / @TZ.ToLocal(Entry.TimestampUtc).ToString("yyyy-MM-dd HH:mm:ss") (Europe/Paris)</dd>
+            <dt>@L["Decision_Phase"]</dt><dd>@decision.Phase</dd>
+            <dt>@L["Decision_Reason"]</dt><dd>@Display(decision.ReasonCode)</dd>
+            <dt>@L["Decision_Request"]</dt><dd>@decision.OperationId</dd>
+            <dt>@L["Decision_Correlation"]</dt><dd>@Display(decision.CorrelationId)</dd>
+            <dt>@L["Decision_Version"]</dt><dd>@Display(decision.AppVersion)</dd>
+            <dt>@L["Decision_Submitted"]</dt><dd>@Display(decision.SubmittedHardwareId)</dd>
+            <dt>@L["Decision_Resolved"]</dt><dd>@Display(decision.ResolvedHardwareId)</dd>
+            <dt>@L["Decision_Correlated"]</dt><dd>@Display(decision.CorrelatedHardwareId)</dd>
+            <dt>@L["Decision_Provenance"]</dt><dd>@Display(decision.ResolutionSource)</dd>
+            <dt>@L["Decision_Observation"]</dt><dd>@decision.Snapshot.ObservationGuarantee</dd>
+            <dt>@L["Decision_Seats"]</dt><dd>@Display(decision.Snapshot.ActiveSeats) / @Display(decision.Snapshot.SeatLimit)</dd>
+            <dt>@L["Decision_Daily"]</dt><dd>@Display(decision.Snapshot.ActivationsToday) / @Display(decision.Snapshot.DailyActivationLimit)</dd>
+        </dl>
+        <p class="small text-muted">@L["Decision_ObservationNotice"]</p>
+        @if (decision.Snapshot.ActiveSeatDetails is { } seats)
+        {
+            <ul class="small">
+                @foreach (var seat in seats)
+                {
+                    <li>@seat.HardwareId · @seat.SeatId · @seat.FirstActivatedAtUtc.ToString("yyyy-MM-dd HH:mm:ss 'UTC'") · @Display(seat.AppVersion)</li>
+                }
+            </ul>
+            @if (decision.Snapshot.ActiveSeatDetailsTruncated)
+            {
+                <p class="small text-muted">@L["Decision_Truncated"]</p>
+            }
+        }
+        else
+        {
+            <p class="small text-muted">@L["Decision_Unavailable"]</p>
+        }
+    </details>
+}
+
+@code {
+    /// <summary>Already authorized typed history projection; unavailable or malformed facts render as unknown, never raw JSON. Razor encodes all stored strings.</summary>
+    [Parameter, EditorRequired]
+    public LicenseDecisionHistoryProjection Entry { get; set; } = default!;
+
+    /// <summary>Displays observed values without reconstructing missing facts or normalizing opaque identifiers.</summary>
+    private string Display(object? value) => value?.ToString() ?? L["Decision_Unknown"].Value;
+}

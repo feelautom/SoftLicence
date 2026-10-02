@@ -36,6 +36,35 @@ public sealed class DatabaseMigrationRunnerTests
         Assert.Contains("must not run as the application role", exception.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Requires the migrator to reject v2 authority enablement while the global Runtime mode is off
+    /// before attempting any database connection.
+    /// </summary>
+    /// <returns>A task that completes after the pre-database failure contract is asserted.</returns>
+    [Fact]
+    public async Task RunAsync_AuthorityGenerationV2EnabledWhileRuntimeOff_FailsBeforeDatabaseAccess()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:MigrationConnection"] =
+                    "Host=unreachable.invalid;Database=db_softlicence;Username=authority;Password=opaque",
+                ["RuntimeEnrollment:Mode"] = "off",
+                ["RuntimeEnrollment:AuthorityGenerationV2:Mode"] = "enabled"
+            })
+            .Build();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => DatabaseMigrationRunner.RunAsync(configuration, cancellation.Token));
+
+        Assert.Contains(
+            "Enabled runtime authority-generation v2 requires runtime enrollment mode 'enabled'.",
+            exception.Message,
+            StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task RuntimeKeyRegistryOperatorRunner_NonExactMode_FailsBeforeDatabaseAccess()
     {

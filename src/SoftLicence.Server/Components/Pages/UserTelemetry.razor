@@ -99,8 +99,16 @@
                 <hr class="my-2 border-secondary" />
                 <div class="row">
                     @{
-                        var isActivated = !string.IsNullOrEmpty(license.HardwareId) || (license.Seats?.Any(s => s.IsActive) ?? false);
+                        // Une fois activée au moins une fois, la licence ne redevient jamais "Délivré" :
+                        // sa validité continue de se décompter même sans poste actuellement connecté.
+                        var isActivated = (license.Seats?.Any() ?? false)
+                            || !string.IsNullOrEmpty(license.HardwareId)
+                            || license.ActivationDate.HasValue;
                         var isExpired = license.ExpirationDate.HasValue && DateTime.UtcNow >= license.ExpirationDate.Value;
+                        // Le champ legacy ActivationDate est vidé quand le dernier poste est délié ;
+                        // retomber sur la première activation connue via l'historique des seats.
+                        var effectiveActivationDate = license.ActivationDate
+                            ?? license.Seats?.OrderBy(s => s.FirstActivatedAt).FirstOrDefault()?.FirstActivatedAt;
                     }
                     <div class="col-md-2">
                         <small class="text-muted d-block">@L["UserTelemetry_Status"]</small>
@@ -108,13 +116,13 @@
                         {
                             <span class="badge bg-danger">@L["UserTelemetry_Inactive"]</span>
                         }
-                        else if (!isActivated)
-                        {
-                            <span class="badge bg-secondary">@L["Common_Issued"]</span>
-                        }
                         else if (isExpired)
                         {
                             <span class="badge bg-warning text-dark">@L["UserTelemetry_Expired"]</span>
+                        }
+                        else if (!isActivated)
+                        {
+                            <span class="badge bg-secondary">@L["Common_Issued"]</span>
                         }
                         else
                         {
@@ -127,7 +135,7 @@
                     </div>
                     <div class="col-md-2">
                         <small class="text-muted d-block">@L["UserTelemetry_ActivationDate"]</small>
-                        <span>@(license.ActivationDate.HasValue ? TZ.ToLocal(license.ActivationDate.Value).ToString("dd/MM/yyyy") : L["UserTelemetry_NotActivated"])</span>
+                        <span>@(effectiveActivationDate.HasValue ? TZ.ToLocal(effectiveActivationDate.Value).ToString("dd/MM/yyyy") : L["UserTelemetry_NotActivated"])</span>
                     </div>
                     <div class="col-md-2">
                         <small class="text-muted d-block">@L["UserTelemetry_Expiration"]</small>

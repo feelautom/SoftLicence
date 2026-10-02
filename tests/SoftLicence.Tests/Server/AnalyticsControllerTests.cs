@@ -47,6 +47,27 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
     }
 
     [Fact]
+    public async Task RuntimeDistributionDecisionRegistry_ReturnsOnlyScopedPrivacySafeProjection()
+    {
+        await SeedTelemetryAsync();
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
+
+        var response = await client.GetAsync(
+            "/api/analytics/support/runtime-distribution-hardware-decisions?requestId=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await ReadJsonAsync(response);
+        Assert.Equal("no-raw-hardware-or-customer-data", GetString(json, "privacy"));
+        var item = Assert.Single(GetArray(json, "items"));
+        Assert.Equal("refused", GetString(item, "outcome"));
+        Assert.Equal("hardware_banned", GetString(item, "reasonCode"));
+        Assert.False(item.TryGetProperty("hardwareEvidence", out _));
+        Assert.False(item.TryGetProperty("licenseKey", out _));
+        Assert.False(item.TryGetProperty("customerEmail", out _));
+    }
+
+    [Fact]
     public async Task TelemetryOverview_WhenProductKeyIsInvalid_ReturnsUnauthorized()
     {
         await SeedTelemetryAsync();
@@ -904,7 +925,7 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
     }
 
     [Fact]
-    public async Task SecurityBans_WithTelemetryOnlyScope_IsUnauthorized()
+    public async Task SecurityBans_WithTelemetryOnlyScope_IsForbiddenAndNamesRequiredScope()
     {
         await SeedTelemetryAsync();
         const string telemetryOnlyKey = "sla_telemetry_only_security_denied";
@@ -927,7 +948,26 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
 
         var response = await client.GetAsync("/api/analytics/security/bans?hardwareId=HW-A");
 
+        // TKT-001168: a valid key without security:read is refused with 403 and the missing scope,
+        // never with the misleading "invalid key" 401, and without echoing the key.
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        using var document = JsonDocument.Parse(body);
+        Assert.Equal("ANALYTICS_SCOPE_REQUIRED", document.RootElement.GetProperty("errorCode").GetString());
+        Assert.Equal(AnalyticsApiKeyScopes.SecurityRead, document.RootElement.GetProperty("requiredScope").GetString());
+        Assert.DoesNotContain(telemetryOnlyKey, body);
+    }
+
+    [Fact]
+    public async Task SecurityBans_WithUnknownKey_KeepsHistoricalUnauthorizedBody()
+    {
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", "sla_unknown_security_key");
+
+        var response = await client.GetAsync("/api/analytics/security/bans?hardwareId=HW-A");
+
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Contains("Missing or invalid X-Analytics-Key header.", await response.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -1025,6 +1065,60 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
         Assert.False(alert.TryGetProperty("processPath", out _));
         Assert.False(alert.TryGetProperty("baseDirectory", out _));
         Assert.False(alert.TryGetProperty("details", out _));
+    }
+
+    [Fact]
+    public async Task SecurityCanaryAlerts_ExactWindowIncludesAlertRepeatedInsideWindow()
+    {
+        await SeedTelemetryAsync();
+        var fromUtc = DateTime.UtcNow.AddMinutes(-10);
+        var toUtc = DateTime.UtcNow;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var productId = await db.Products.Where(p => p.Name == "T-IA Connect")
+                .Select(p => p.Id).SingleAsync();
+            db.CanaryAlerts.Add(new CanaryAlert
+            {
+                ProductId = productId, HardwareId = "HW-CANARY-OVERLAP",
+                Trigger = "IntegrityCheck_Startup", Severity = 3,
+                ReceivedAt = fromUtc.AddMinutes(-20), LastSeenAt = fromUtc.AddMinutes(2), RepeatCount = 1
+            });
+            await db.SaveChangesAsync();
+        }
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
+
+        var response = await client.GetAsync(
+            $"/api/analytics/security/canary-alerts?hardwareId=HW-CANARY-OVERLAP&exactHardwareId=true&fromUtc={fromUtc:O}&toUtc={toUtc:O}&take=200");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Single(GetArray(await ReadJsonAsync(response), "alerts"));
+    }
+
+    [Fact]
+    public async Task SecurityCanaryAlerts_ExactSnapshotRejectsMoreThanRequestedGroupBound()
+    {
+        await SeedTelemetryAsync();
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var productId = await db.Products.Where(p => p.Name == "T-IA Connect")
+            .Select(p => p.Id).SingleAsync();
+        db.CanaryAlerts.AddRange(Enumerable.Range(0, 201).Select(index => new CanaryAlert
+        {
+            ProductId = productId,
+            HardwareId = "HW-CANARY-BOUND",
+            Trigger = $"IntegrityCheck_{index:D3}",
+            Details = $"synthetic-{index:D3}",
+            Severity = 3,
+            ReceivedAt = DateTime.UtcNow.AddSeconds(-index)
+        }));
+        await db.SaveChangesAsync();
+        var service = scope.ServiceProvider.GetRequiredService<SecurityCanaryAnalyticsService>();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ListForProductIdAsync(
+            productId, null, null, null, null, "HW-CANARY-BOUND", null, null, null, null,
+            null, 200, 0, CancellationToken.None, exactHardwareId: true));
     }
 
     [Fact]
@@ -1860,6 +1954,18 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
         };
 
         db.Products.AddRange(productA, productB);
+        db.RuntimeDistributionHardwareDecisions.Add(new RuntimeDistributionHardwareDecision
+        {
+            Id = Guid.NewGuid(), ClientId = "tia-connect-website",
+            RequestId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            PayloadDigestSha256 = new string('a', 64), ProductId = productA.Id,
+            LicenseId = Guid.NewGuid(), GrantRefDigestSha256 = new string('b', 64),
+            HardwareIdHash = new string('c', 64), AuthorityMode = "digest-revalidation",
+            Outcome = "refused", ReasonCode = "hardware_banned",
+            BanCategoriesJson = "[\"piracy\"]", LicenseActive = true,
+            PaidAutoUnbanEligible = true, AttemptCount = 2,
+            CreatedAtUtc = DateTime.UtcNow.AddMinutes(-2), LastSeenAtUtc = DateTime.UtcNow.AddMinutes(-1)
+        });
         db.Licenses.Add(new License
         {
             Id = Guid.NewGuid(),

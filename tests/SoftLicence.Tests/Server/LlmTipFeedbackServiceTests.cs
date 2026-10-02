@@ -134,9 +134,11 @@ public sealed class LlmTipFeedbackServiceTests
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
+        SqliteFullModelHarness.RegisterConnection(connection);
 
         var options = new DbContextOptionsBuilder<LicenseDbContext>()
             .UseSqlite(connection)
+            .AddInterceptors(SqliteFullModelHarness.ConnectionInterceptor, SqliteFullModelHarness.CommandInterceptor)
             .Options;
 
         await using (var db = new LicenseDbContext(options, Mock.Of<ILogger<LicenseDbContext>>()))

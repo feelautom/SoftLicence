@@ -132,6 +132,69 @@ public sealed partial class CanaryAckService
         return response;
     }
 
+    /// <summary>Exact schema of a signed security lock verdict (TKT-001177).</summary>
+    public const string SecurityLockVerdictSchema = "tia-security-lock-verdict-v1";
+
+    /// <summary>
+    /// Signs one security lock verdict with the active Canary ACK key (TKT-001177). The canonical payload binds
+    /// the enrollment, the one-use report identifier, the lock, the hardware and the release version, so that a
+    /// verdict can never be replayed for another installation or another request; it expires after three minutes.
+    /// </summary>
+    /// <param name="enrollmentId">Authenticated enrollment.</param>
+    /// <param name="report">Validated report being answered.</param>
+    /// <param name="verdict">Closed verdict code.</param>
+    /// <param name="issuedAt">Authoritative issue time.</param>
+    /// <returns>The signed verdict.</returns>
+    public SecurityLockVerdictResponse CreateSecurityLockVerdict(
+        Guid enrollmentId,
+        SecurityLocks.SecurityLockValidatedReport report,
+        string verdict,
+        DateTimeOffset issuedAt)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        if (!string.Equals(verdict, SecurityLocks.SecurityLockVerdicts.Maintain, StringComparison.Ordinal)
+            && !string.Equals(verdict, SecurityLocks.SecurityLockVerdicts.Release, StringComparison.Ordinal)
+            && !string.Equals(verdict, SecurityLocks.SecurityLockVerdicts.Ban, StringComparison.Ordinal))
+        {
+            throw new ArgumentOutOfRangeException(nameof(verdict));
+        }
+
+        using var rsa = _keyring.LoadActivePrivateKey();
+        var response = new SecurityLockVerdictResponse
+        {
+            Schema = SecurityLockVerdictSchema,
+            Alg = Algorithm,
+            KeyId = _keyring.Configuration.ActiveKeyId,
+            EnrollmentId = enrollmentId.ToString("D", CultureInfo.InvariantCulture),
+            ReportId = report.ReportId,
+            LockId = report.LockId,
+            HardwareId = report.HardwareId,
+            AppVersion = report.AppVersion,
+            Verdict = verdict,
+            IssuedAtUtc = FormatUtc(issuedAt),
+            ExpiresAtUtc = FormatUtc(issuedAt + ReceiptLifetime),
+            VerdictId = Guid.NewGuid().ToString("D", CultureInfo.InvariantCulture),
+            Signature = string.Empty
+        };
+        return response with { Signature = Sign(rsa, BuildSecurityLockVerdictPayload(response)) };
+    }
+
+    /// <summary>Canonical newline-joined payload covered by a security lock verdict signature.</summary>
+    /// <param name="response">Verdict (the signature field is ignored).</param>
+    public static string BuildSecurityLockVerdictPayload(SecurityLockVerdictResponse response) => string.Join('\n',
+        response.Schema,
+        response.Alg,
+        response.KeyId,
+        response.EnrollmentId,
+        response.ReportId,
+        response.LockId,
+        response.HardwareId,
+        response.AppVersion,
+        response.Verdict,
+        response.IssuedAtUtc,
+        response.ExpiresAtUtc,
+        response.VerdictId);
+
     public CanaryAckPublicKeyResponse GetPublicKey()
     {
         if (!_keyring.TryGetPublicKey(_keyring.Configuration.ActiveKeyId, out var response))

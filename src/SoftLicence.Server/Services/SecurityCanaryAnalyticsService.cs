@@ -28,7 +28,8 @@ public sealed class SecurityCanaryAnalyticsService
         bool? isBanned,
         int take,
         int offset,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool exactHardwareId = false)
     {
         take = Math.Clamp(take, 1, MaxTake);
         offset = Math.Max(0, offset);
@@ -38,7 +39,7 @@ public sealed class SecurityCanaryAnalyticsService
         var query = db.CanaryAlerts.AsNoTracking()
             .Where(a => a.ProductId.HasValue && productScopeIds.Contains(a.ProductId.Value));
 
-        if (fromUtc.HasValue) query = query.Where(a => a.ReceivedAt >= fromUtc.Value);
+        if (fromUtc.HasValue) query = query.Where(a => (a.LastSeenAt ?? a.ReceivedAt) >= fromUtc.Value);
         if (toUtc.HasValue) query = query.Where(a => a.ReceivedAt <= toUtc.Value);
         if (!string.IsNullOrWhiteSpace(trigger))
         {
@@ -49,7 +50,9 @@ public sealed class SecurityCanaryAnalyticsService
         if (!string.IsNullOrWhiteSpace(hardwareId))
         {
             var value = hardwareId.Trim().ToUpper();
-            query = query.Where(a => a.HardwareId.ToUpper().Contains(value));
+            query = exactHardwareId
+                ? query.Where(a => a.HardwareId.ToUpper() == value)
+                : query.Where(a => a.HardwareId.ToUpper().Contains(value));
         }
         if (!string.IsNullOrWhiteSpace(machine))
         {
@@ -74,8 +77,10 @@ public sealed class SecurityCanaryAnalyticsService
 
         var rows = await query
             .OrderByDescending(a => a.LastSeenAt ?? a.ReceivedAt)
-            .Take(MaxRows)
+            .Take(MaxRows + (exactHardwareId ? 1 : 0))
             .ToListAsync(cancellationToken);
+        if (exactHardwareId && rows.Count > MaxRows)
+            throw new InvalidOperationException("The exact Canary alert snapshot exceeds its safe row bound.");
 
         var incidentQuery = db.SecurityIncidents.AsNoTracking()
             .Include(i => i.Evidence)
@@ -92,7 +97,9 @@ public sealed class SecurityCanaryAnalyticsService
         if (!string.IsNullOrWhiteSpace(hardwareId))
         {
             var value = hardwareId.Trim().ToUpper();
-            incidentQuery = incidentQuery.Where(i => i.HardwareId.ToUpper().Contains(value));
+            incidentQuery = exactHardwareId
+                ? incidentQuery.Where(i => i.HardwareId.ToUpper() == value)
+                : incidentQuery.Where(i => i.HardwareId.ToUpper().Contains(value));
         }
         if (!string.IsNullOrWhiteSpace(machine) || !string.IsNullOrWhiteSpace(user))
             incidentQuery = incidentQuery.Where(_ => false);
@@ -109,8 +116,10 @@ public sealed class SecurityCanaryAnalyticsService
 
         var incidents = await incidentQuery
             .OrderByDescending(i => i.LastSeenUtc)
-            .Take(MaxRows)
+            .Take(MaxRows + (exactHardwareId ? 1 : 0))
             .ToListAsync(cancellationToken);
+        if (exactHardwareId && incidents.Count > MaxRows)
+            throw new InvalidOperationException("The exact Canary incident snapshot exceeds its safe row bound.");
 
         var hwids = rows.Select(a => a.HardwareId)
             .Concat(incidents.Select(i => i.HardwareId))
@@ -185,6 +194,8 @@ public sealed class SecurityCanaryAnalyticsService
             grouped = grouped.Where(a => a.IsHardwareBanned == isBanned.Value).ToList();
 
         grouped = grouped.OrderByDescending(a => a.LastSeenUtc).ToList();
+        if (exactHardwareId && (offset != 0 || grouped.Count > take))
+            throw new InvalidOperationException("The exact Canary group snapshot exceeds its requested complete bound.");
 
         return new SecurityCanaryListResponse
         {

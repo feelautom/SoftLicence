@@ -13,6 +13,13 @@ public sealed class SoftLicenceMcpOptions
     public int ResultChunkCharacters { get; set; } = 32_768;
     public int ResultTtlMinutes { get; set; } = 60;
     public long ResultMaxTotalBytes { get; set; } = 100 * 1024 * 1024;
+    /// <summary>
+    /// HTTP mode only (TKT-001169): comma-separated networks allowed to call /mcp, from
+    /// SOFTLICENCE_MCP_ALLOWED_CIDRS. Defaults to the WireGuard VPN.
+    /// </summary>
+    public string AllowedCidrs { get; set; } = "10.10.0.0/24";
+    /// <summary>Requested per-response transport bound; runtime clamps it to the safe 1 KiB..16 MiB range.</summary>
+    public int AnalyticsResponseMaxBytes { get; set; } = 16 * 1024 * 1024;
 
     public string GetBaseUrl()
     {
@@ -40,14 +47,35 @@ public sealed class SoftLicenceMcpOptions
         return value;
     }
 
-    public bool TryGetAdminSecret(out string value, out string errorCode, out string errorMessage)
+    public bool TryGetAdminSecret(out string value, out string errorCode, out string errorMessage) =>
+        ValidateAdminSecret(
+            SoftLicenceAdminSecret ?? SOFTLICENCE_ADMIN_SECRET,
+            "Missing SOFTLICENCE_ADMIN_SECRET.",
+            out value,
+            out errorCode,
+            out errorMessage);
+
+    /// <summary>
+    /// Validates an admin secret candidate, shared by stdio (environment) and HTTP (request header)
+    /// credentials. The secret is exact printable ASCII; it is never trimmed or echoed in messages.
+    /// </summary>
+    /// <param name="candidate">Raw secret, or null when absent.</param>
+    /// <param name="missingMessage">Message returned when the secret is absent.</param>
+    /// <param name="value">Validated secret, or empty on failure.</param>
+    /// <param name="errorCode">Stable refusal code, or empty on success.</param>
+    /// <param name="errorMessage">Human-readable refusal, or empty on success.</param>
+    public static bool ValidateAdminSecret(
+        string? candidate,
+        string missingMessage,
+        out string value,
+        out string errorCode,
+        out string errorMessage)
     {
-        var candidate = SoftLicenceAdminSecret ?? SOFTLICENCE_ADMIN_SECRET;
         if (string.IsNullOrWhiteSpace(candidate))
         {
             value = string.Empty;
             errorCode = "write_credentials_missing";
-            errorMessage = "Missing SOFTLICENCE_ADMIN_SECRET.";
+            errorMessage = missingMessage;
             return false;
         }
 
@@ -56,7 +84,7 @@ public sealed class SoftLicenceMcpOptions
         {
             value = string.Empty;
             errorCode = "write_credentials_invalid";
-            errorMessage = "SOFTLICENCE_ADMIN_SECRET must be exact printable ASCII without surrounding whitespace or control characters.";
+            errorMessage = "The admin secret must be exact printable ASCII without surrounding whitespace or control characters.";
             return false;
         }
 

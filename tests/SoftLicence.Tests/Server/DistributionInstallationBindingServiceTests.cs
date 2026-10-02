@@ -1,11 +1,16 @@
+using System.Collections.Concurrent;
+using System.Data.Common;
 using System.Security.Cryptography;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.Extensions.Logging;
 using SoftLicence.Server.Data;
 using SoftLicence.Server.Models;
 using SoftLicence.Server.Services;
@@ -13,7 +18,7 @@ using Xunit;
 
 namespace SoftLicence.Tests.Server;
 
-public sealed class DistributionInstallationBindingServiceTests : IDisposable
+public sealed partial class DistributionInstallationBindingServiceTests : IDisposable
 {
     private static readonly DateTimeOffset Now = new(2026, 7, 18, 18, 30, 0, TimeSpan.Zero);
     private static readonly Guid ProductId = Guid.Parse("12345678-1234-4234-9234-1234567890ab");
@@ -32,7 +37,14 @@ public sealed class DistributionInstallationBindingServiceTests : IDisposable
         var connectionString = $"Data Source=binding-{Guid.NewGuid():N};Mode=Memory;Cache=Shared";
         _keepAlive = new SqliteConnection(connectionString);
         _keepAlive.Open();
-        _options = new DbContextOptionsBuilder<LicenseDbContext>().UseSqlite(connectionString).Options;
+        RegisterOrdinalCollation(_keepAlive);
+        _options = new DbContextOptionsBuilder<LicenseDbContext>()
+            .UseSqlite(connectionString)
+            .AddInterceptors(
+                SqliteOrdinalCollationInterceptor.Instance,
+                SqlitePostgresCheckFunctionInterceptor.Instance,
+                SqlitePostgresCheckConstraintInterceptor.Instance)
+            .Options;
         using (var db = new LicenseDbContext(_options))
         {
             db.Database.EnsureCreated();
@@ -41,7 +53,112 @@ public sealed class DistributionInstallationBindingServiceTests : IDisposable
         _service = new DistributionInstallationBindingService(
             new TestDbContextFactory(_options),
             new EphemeralDataProtectionProvider(),
-            new FixedTimeProvider(Now));
+            new FixedTimeProvider(Now),
+            TestHardwareAuthorityAliasResolver.Instance);
+    }
+
+    /// <summary>Proves the SQLite C collation preserves exact ordinal equality and case distinctions.</summary>
+    [Fact]
+    public async Task SqliteCollationC_UsesExactOrdinalCaseSensitiveSemantics()
+    {
+        await using var db = new LicenseDbContext(_options);
+        await db.Database.OpenConnectionAsync();
+        await using var command = db.Database.GetDbConnection().CreateCommand();
+        command.CommandText = """
+            SELECT
+                CASE WHEN 'A' COLLATE C = 'A' COLLATE C THEN 1 ELSE 0 END,
+                CASE WHEN 'A' COLLATE C = 'a' COLLATE C THEN 1 ELSE 0 END,
+                CASE WHEN 'A' COLLATE C < 'a' COLLATE C THEN 1 ELSE 0 END,
+                CASE WHEN 'é' COLLATE C = 'é' COLLATE C THEN 1 ELSE 0 END;
+            """;
+
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(1L, reader.GetInt64(0));
+        Assert.Equal(0L, reader.GetInt64(1));
+        Assert.Equal(1L, reader.GetInt64(2));
+        Assert.Equal(0L, reader.GetInt64(3));
+    }
+
+    /// <summary>Proves translated PostgreSQL CHECK primitives retain hostile-input rejection in SQLite.</summary>
+    [Fact]
+    public async Task SqlitePostgresCheckPrimitives_PreserveRegexAndOctetSemantics()
+    {
+        await using var db = new LicenseDbContext(_options);
+        await db.Database.ExecuteSqlRawAsync("""
+            CREATE TABLE "PgCheckWitness" (
+                "Provider" TEXT NOT NULL,
+                "Signature" TEXT NOT NULL,
+                "Payload" BLOB NOT NULL,
+                "ExpiresAtUtc" TEXT NOT NULL,
+                "PreparationExpiresAtUtc" TEXT NOT NULL,
+                "ReservationExpiresAtUtc" TEXT NOT NULL,
+                CONSTRAINT "CK_PgCheckWitness_Provider" CHECK (
+                    octet_length("Provider") BETWEEN 1 AND 64
+                    AND "Provider" ~ '^[a-z0-9][a-z0-9._-]{{0,63}}$'),
+                CONSTRAINT "CK_PgCheckWitness_Signature" CHECK (
+                    "Signature" !~ '[^A-Za-z0-9_-]'),
+                CONSTRAINT "CK_PgCheckWitness_Payload" CHECK (
+                    octet_length("Payload") = 2),
+                CONSTRAINT "CK_PgCheckWitness_Expiry" CHECK (
+                    "ExpiresAtUtc" = LEAST("PreparationExpiresAtUtc", "ReservationExpiresAtUtc"))
+            );
+            """);
+
+        await db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO "PgCheckWitness" (
+                "Provider", "Signature", "Payload",
+                "ExpiresAtUtc", "PreparationExpiresAtUtc", "ReservationExpiresAtUtc")
+            VALUES (
+                'provider-1', 'Ab_9-', X'C3A9',
+                '2026-08-31T10:00:00Z', '2026-08-31T10:00:00Z', '2026-08-31T11:00:00Z');
+            """);
+
+        await Assert.ThrowsAsync<SqliteException>(() => db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO "PgCheckWitness" VALUES (
+                'Provider-1', 'Ab_9-', X'C3A9',
+                '2026-08-31T10:00:00Z', '2026-08-31T10:00:00Z', '2026-08-31T11:00:00Z');
+            """));
+        await Assert.ThrowsAsync<SqliteException>(() => db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO "PgCheckWitness" VALUES (
+                {0}, 'Ab_9-', X'C3A9',
+                '2026-08-31T10:00:00Z', '2026-08-31T10:00:00Z', '2026-08-31T11:00:00Z');
+            """, "provider-1\n"));
+        await Assert.ThrowsAsync<SqliteException>(() => db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO "PgCheckWitness" VALUES (
+                'provider-1', 'Ab+9', X'C3A9',
+                '2026-08-31T10:00:00Z', '2026-08-31T10:00:00Z', '2026-08-31T11:00:00Z');
+            """));
+        await Assert.ThrowsAsync<SqliteException>(() => db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO "PgCheckWitness" VALUES (
+                'provider-1', 'Ab_9-', X'C3A900',
+                '2026-08-31T10:00:00Z', '2026-08-31T10:00:00Z', '2026-08-31T11:00:00Z');
+            """));
+        await Assert.ThrowsAsync<SqliteException>(() => db.Database.ExecuteSqlRawAsync("""
+            INSERT INTO "PgCheckWitness" VALUES (
+                'provider-1', 'Ab_9-', X'C3A9',
+                '2026-08-31T11:00:00Z', '2026-08-31T10:00:00Z', '2026-08-31T11:00:00Z');
+            """));
+
+        await db.Database.OpenConnectionAsync();
+        await using var command = db.Database.GetDbConnection().CreateCommand();
+        command.CommandText = """
+            SELECT "sql"
+            FROM "sqlite_master"
+            WHERE "type" = 'table' AND "name" = 'RuntimeEnrollmentAuthorityGenerations';
+            """;
+        var createSql = Assert.IsType<string>(await command.ExecuteScalarAsync());
+        Assert.Contains("CK_RuntimeEnrollmentAuthorityGenerations_AuthorityDigest", createSql, StringComparison.Ordinal);
+        Assert.Contains("CK_REAuthorityGenerations_Signature", createSql, StringComparison.Ordinal);
+        Assert.Contains(" REGEXP ", createSql, StringComparison.Ordinal);
+        Assert.Contains(" NOT REGEXP ", createSql, StringComparison.Ordinal);
+        Assert.Contains("octet_length", createSql, StringComparison.Ordinal);
+
+        command.CommandText = "SELECT octet_length('é'), octet_length(X'C3A9');";
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(2L, reader.GetInt64(0));
+        Assert.Equal(2L, reader.GetInt64(1));
     }
 
     [Fact]
@@ -59,6 +176,204 @@ public sealed class DistributionInstallationBindingServiceTests : IDisposable
         Assert.Equal("2026-07-18T20:30:00.0000000Z", first.Response.ExpiresAtUtc);
         Assert.DoesNotContain(LicenseId.ToString("D"), first.Response.EntitlementRef, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("@", JsonSerializer.Serialize(first.Response));
+    }
+
+    [Theory]
+    [InlineData(HardwareAuthorityRefusalReason.AmbiguousAlias)]
+    [InlineData(HardwareAuthorityRefusalReason.AliasUnavailable)]
+    [InlineData(HardwareAuthorityRefusalReason.AuthorityGraphMissing)]
+    [InlineData(HardwareAuthorityRefusalReason.AuthorityGraphDiverged)]
+    public async Task ResolveRuntimeSource_HardwareAuthorityRefusal_RemainsFailClosed(
+        HardwareAuthorityRefusalReason refusalReason)
+    {
+        var resolution = new HardwareAuthorityResolution(
+            HardwareId,
+            HardwareId,
+            null,
+            HardwareAuthorityResolutionStatus.Refused,
+            RefusalReason: refusalReason);
+        var service = CreateService(
+            new FixedHardwareAuthorityAliasResolver(resolution),
+            new EphemeralDataProtectionProvider());
+
+        var exception = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            service.ResolveRuntimeSourceAsync(ClientId, RuntimeSourceResolutionRequest()));
+
+        Assert.Equal("binding_conflict", exception.ErrorCode);
+        Assert.Equal("replacement_source_authority_mismatch", exception.ReasonCode);
+    }
+
+    [Fact]
+    public async Task ResolveRuntimeSource_SameLicenseSeatTransitionWithoutIdentity_RemainsFailClosed()
+    {
+        var resolution = new HardwareAuthorityResolution(
+            HardwareId,
+            HardwareId,
+            null,
+            HardwareAuthorityResolutionStatus.Refused,
+            RefusalReason: HardwareAuthorityRefusalReason.SameLicenseSeatTransitionRequired);
+        var service = CreateService(
+            new FixedHardwareAuthorityAliasResolver(resolution),
+            new EphemeralDataProtectionProvider());
+
+        var exception = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            service.ResolveRuntimeSourceAsync(ClientId, RuntimeSourceResolutionRequest()));
+
+        Assert.Equal("binding_conflict", exception.ErrorCode);
+        Assert.Equal("alias_reconciliation_identity_missing", exception.ReasonCode);
+    }
+
+    [Fact]
+    public async Task ResolveRuntimeSource_AuthenticatedSameLicenseSeatTransition_ReturnsNone()
+    {
+        var resolution = new HardwareAuthorityResolution(
+            HardwareId,
+            "CANONICAL-HWID-ABCDEF012345",
+            Guid.NewGuid(),
+            HardwareAuthorityResolutionStatus.Refused,
+            Guid.NewGuid(),
+            SeatId,
+            HardwareAuthorityRefusalReason.SameLicenseSeatTransitionRequired);
+        var service = CreateService(
+            new FixedHardwareAuthorityAliasResolver(resolution),
+            new EphemeralDataProtectionProvider());
+
+        var result = await service.ResolveRuntimeSourceAsync(ClientId, RuntimeSourceResolutionRequest());
+
+        Assert.Equal("none", result.Outcome);
+        Assert.Null(result.SourceLicenseId);
+        Assert.Null(result.SourceKind);
+    }
+
+    private DistributionRuntimeSourceResolutionRequest RuntimeSourceResolutionRequest() => new()
+    {
+        Schema = DistributionInstallationBindingService.RuntimeSourceResolutionSchema,
+        RequestId = NewUuid(),
+        ProductId = ProductId.ToString("D"),
+        TargetLicenseId = LicenseId.ToString("D"),
+        HardwareId = HardwareId
+    };
+
+    [Theory]
+    [InlineData(HardwareAuthorityRefusalReason.AmbiguousAlias, "alias_resolution_ambiguous")]
+    [InlineData(HardwareAuthorityRefusalReason.AliasUnavailable, "alias_resolution_unavailable")]
+    [InlineData(HardwareAuthorityRefusalReason.AuthorityGraphMissing, "authority_graph_missing")]
+    [InlineData(HardwareAuthorityRefusalReason.AuthorityGraphDiverged, "authority_graph_diverged")]
+    [InlineData(HardwareAuthorityRefusalReason.SameLicenseSeatTransitionRequired, "alias_reconciliation_identity_missing")]
+    [Trait("Category", "RequiresPostgreSql")]
+    public async Task Finalize_HardwareAuthorityResolverGuard_EmitsExactBoundedDiagnostic(
+        HardwareAuthorityRefusalReason refusalReason,
+        string expectedReasonCode)
+    {
+        // This exact early-history contract needs a real PostgreSQL transaction, not the SQLite lock double.
+        if (!_tkt976NativeDecisionFixture)
+        {
+            using var fixture = await CreateTkt976DecisionPostgresFixtureAsync();
+            await fixture.Finalize_HardwareAuthorityResolverGuard_EmitsExactBoundedDiagnostic(refusalReason, expectedReasonCode);
+            return;
+        }
+
+        var resolution = new HardwareAuthorityResolution(
+            HardwareId,
+            HardwareId,
+            null,
+            HardwareAuthorityResolutionStatus.Refused,
+            RefusalReason: refusalReason);
+        var logger = new RecordingLogger<DistributionInstallationBindingService>();
+        var service = CreateService(
+            new FixedHardwareAuthorityAliasResolver(resolution),
+            new EphemeralDataProtectionProvider(),
+            logger);
+        var entitlement = (await service.IssueEntitlementAsync(
+            ClientId, Hash("authority-refusal-issue-" + refusalReason), IssueRequest())).Response.EntitlementRef;
+        var request = FinalizeRequest(entitlement);
+
+        var exception = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            service.FinalizeAsync(ClientId, Hash("authority-refusal-finalize-" + refusalReason), request));
+
+        Assert.Equal("hardware_authority_refused", exception.ErrorCode);
+        Assert.Equal(expectedReasonCode, exception.ReasonCode);
+        var diagnostic = Assert.IsType<HardwareAuthorityRefusalEvent>(exception.HardwareAuthorityRefusal);
+        Assert.Equal(request.RequestId, diagnostic.RequestId);
+        Assert.DoesNotContain(request.HardwareId!, JsonSerializer.Serialize(diagnostic), StringComparison.Ordinal);
+        Assert.Single(logger.Messages, message =>
+            message.StartsWith("HardwareAuthorityRefused ", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("cardinality", "canonical_seat_cardinality_mismatch")]
+    [InlineData("source-missing", "recovery_source_missing")]
+    [InlineData("binding-mismatch", "recovery_source_binding_mismatch")]
+    public async Task Finalize_ReconciliationGuard_EmitsExactBoundedDiagnostic(
+        string guardScenario,
+        string expectedReasonCode)
+    {
+        const string legacyHardwareId = "LEGACY-HWID-ABCDEF012345";
+        var dataProtection = new EphemeralDataProtectionProvider();
+        var normalService = CreateService(TestHardwareAuthorityAliasResolver.Instance, dataProtection);
+        if (guardScenario == "binding-mismatch")
+        {
+            var originalEntitlement = (await normalService.IssueEntitlementAsync(
+                ClientId, Hash("binding-mismatch-original-issue"), IssueRequest())).Response.EntitlementRef;
+            await normalService.FinalizeAsync(
+                ClientId, Hash("binding-mismatch-original-finalize"), FinalizeRequest(originalEntitlement));
+        }
+
+        await using (var db = new LicenseDbContext(_options))
+        {
+            var canonicalSeat = await db.LicenseSeats.SingleAsync(candidate => candidate.Id == SeatId);
+            canonicalSeat.IsActive = false;
+            canonicalSeat.UnlinkedAt = Now.AddMinutes(-5).UtcDateTime;
+            if (guardScenario != "cardinality")
+            {
+                db.LicenseSeats.Add(new LicenseSeat
+                {
+                    Id = Guid.NewGuid(),
+                    LicenseId = LicenseId,
+                    HardwareId = legacyHardwareId,
+                    IsActive = true,
+                    FirstActivatedAt = Now.AddMinutes(-4).UtcDateTime,
+                    LastCheckInAt = Now.AddMinutes(-4).UtcDateTime,
+                    AppVersion = "2.2.844"
+                });
+            }
+            await db.SaveChangesAsync();
+        }
+
+        var issue = IssueRequest();
+        issue.RequestId = NewUuid();
+        var authenticatedBindingId = Guid.NewGuid();
+        var resolution = new HardwareAuthorityResolution(
+            legacyHardwareId,
+            HardwareId,
+            null,
+            HardwareAuthorityResolutionStatus.Refused,
+            authenticatedBindingId,
+            SeatId,
+            HardwareAuthorityRefusalReason.SameLicenseSeatTransitionRequired);
+        var logger = new RecordingLogger<DistributionInstallationBindingService>();
+        var service = CreateService(new FixedHardwareAuthorityAliasResolver(resolution), dataProtection, logger);
+        var entitlement = (await service.IssueEntitlementAsync(
+            ClientId, Hash("reconciliation-issue-" + guardScenario), issue)).Response.EntitlementRef;
+        var request = FinalizeRequest(entitlement);
+        request.RequestId = NewUuid();
+        request.GrantRef = NewUuid();
+        request.HandoffDigestSha256 = Hash("reconciliation-handoff-" + guardScenario);
+        request.HardwareId = legacyHardwareId;
+
+        var exception = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            service.FinalizeAsync(ClientId, Hash("reconciliation-finalize-" + guardScenario), request));
+
+        Assert.Equal("hardware_authority_refused", exception.ErrorCode);
+        Assert.Equal(expectedReasonCode, exception.ReasonCode);
+        var diagnostic = Assert.IsType<HardwareAuthorityRefusalEvent>(exception.HardwareAuthorityRefusal);
+        Assert.Equal(request.RequestId, diagnostic.RequestId);
+        Assert.True(diagnostic.Decision.SeatReconciliationRequired);
+        Assert.DoesNotContain(legacyHardwareId, JsonSerializer.Serialize(diagnostic), StringComparison.Ordinal);
+        Assert.DoesNotContain(HardwareId, JsonSerializer.Serialize(diagnostic), StringComparison.Ordinal);
+        Assert.DoesNotContain(authenticatedBindingId.ToString("D"), JsonSerializer.Serialize(diagnostic), StringComparison.Ordinal);
+        Assert.Single(logger.Messages, message =>
+            message.StartsWith("HardwareAuthorityRefused ", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -206,6 +521,56 @@ public sealed class DistributionInstallationBindingServiceTests : IDisposable
         Assert.Equal("binding_conflict", noSource.ErrorCode);
     }
 
+    [Fact]
+    public async Task FinalizeV5_LegacyReplacementProof_RequiresExactMinimalShape()
+    {
+        var sourceLicenseId = Guid.NewGuid();
+        var targetLicenseId = Guid.NewGuid();
+
+        // Rebuilds a canonical v5 request for each mutation and proves validation stops before database authority lookup.
+        async Task AssertInvalidAsync(
+            string label,
+            Action<DistributionInstallationFinalizeRequest> mutate)
+        {
+            var request = FinalizeRequest("opaque-entitlement-token");
+            request.Schema = DistributionInstallationBindingService.FinalizeV5Schema;
+            request.AllowSameAuthorityRecovery = true;
+            request.LegacyLicenseReplacement = new DistributionLegacyLicenseReplacementProof
+            {
+                Schema = DistributionInstallationBindingService.LegacyLicenseReplacementSchema,
+                SourceLicenseId = sourceLicenseId.ToString("D"),
+                TargetLicenseId = targetLicenseId.ToString("D")
+            };
+            mutate(request);
+
+            var exception = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+                _service.FinalizeAsync(ClientId, Hash("legacy-v5-" + label), request));
+            Assert.Equal("invalid_request", exception.ErrorCode);
+        }
+
+        var absent = FinalizeRequest("opaque-entitlement-token");
+        absent.Schema = DistributionInstallationBindingService.FinalizeV5Schema;
+        absent.AllowSameAuthorityRecovery = true;
+        var absentException = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            _service.FinalizeAsync(ClientId, Hash("legacy-v5-absent"), absent));
+        Assert.Equal("invalid_request", absentException.ErrorCode);
+
+        await AssertInvalidAsync("explicit-null", request => request.LegacyLicenseReplacement = null);
+        await AssertInvalidAsync("wrong-schema", request =>
+            request.LegacyLicenseReplacement!.Schema = "distribution-legacy-license-replacement-v0");
+        await AssertInvalidAsync("uppercase-source", request =>
+            request.LegacyLicenseReplacement!.SourceLicenseId = sourceLicenseId.ToString("D").ToUpperInvariant());
+        await AssertInvalidAsync("same-license", request =>
+            request.LegacyLicenseReplacement!.TargetLicenseId = request.LegacyLicenseReplacement.SourceLicenseId);
+        await AssertInvalidAsync("extension", request =>
+            request.LegacyLicenseReplacement!.ExtensionData = new Dictionary<string, JsonElement>
+            {
+                ["sourceBindingId"] = JsonDocument.Parse($"\"{Guid.NewGuid():D}\"").RootElement.Clone()
+            });
+        await AssertInvalidAsync("legacy-proof-on-v4", request =>
+            request.Schema = DistributionInstallationBindingService.FinalizeV4Schema);
+    }
+
     [Theory]
     [InlineData("distribution-installation-finalize-v1", "absent", true)]
     [InlineData("distribution-installation-finalize-v1", "null", false)]
@@ -279,7 +644,8 @@ public sealed class DistributionInstallationBindingServiceTests : IDisposable
         var service = new DistributionInstallationBindingService(
             new TestDbContextFactory(_options),
             new EphemeralDataProtectionProvider(),
-            new FixedTimeProvider(subMicrosecondNow));
+            new FixedTimeProvider(subMicrosecondNow),
+            TestHardwareAuthorityAliasResolver.Instance);
         var issue = IssueRequest(Hash(DefaultGrantRef), v2: false);
         issue.Schema = DistributionInstallationBindingService.IssueV3Schema;
         issue.SubjectRef = Convert.ToBase64String(SHA256.HashData("database-precision-subject"u8.ToArray()))
@@ -307,7 +673,8 @@ public sealed class DistributionInstallationBindingServiceTests : IDisposable
         var service = new DistributionInstallationBindingService(
             new TestDbContextFactory(_options),
             dataProtectionProvider,
-            new FixedTimeProvider(Now));
+            new FixedTimeProvider(Now),
+            TestHardwareAuthorityAliasResolver.Instance);
         var issue = IssueRequest(Hash(DefaultGrantRef), v2: false);
         issue.Schema = DistributionInstallationBindingService.IssueV3Schema;
         issue.SubjectRef = Convert.ToBase64String(SHA256.HashData("historical-precision-subject"u8.ToArray()))
@@ -726,6 +1093,46 @@ public sealed class DistributionInstallationBindingServiceTests : IDisposable
         Assert.Equal("handoff_unavailable", handoffException.ErrorCode);
     }
 
+    /// <summary>Runs real finalization against configurable application masks; Portal versions never authorize an application release.</summary>
+    [Theory]
+    [InlineData("*", true)]
+    [InlineData("2.*", true)]
+    [InlineData("2.4.*", true)]
+    [InlineData("2.4.50", true)]
+    [InlineData("2.4.51", false)]
+    [InlineData("17,18,19,20,21", false)]
+    [InlineData("V17-V21", false)]
+    [InlineData(">=2.0.0", false)]
+    public async Task Finalize_ApplicationVersionMask_DistinguishesPortalAndApplicationVersions(string mask, bool allowed)
+    {
+        await using (var db = new LicenseDbContext(_options))
+        {
+            (await db.Licenses.SingleAsync(license => license.Id == LicenseId)).AllowedVersions = mask;
+            foreach (var binary in await db.ApprovedBinaries.ToListAsync()) binary.Version = "2.4.50";
+            await db.SaveChangesAsync();
+        }
+        var entitlement = (await _service.IssueEntitlementAsync(
+            ClientId, Hash("application-mask-issue"), IssueRequest())).Response.EntitlementRef;
+        var request = FinalizeRequest(entitlement);
+        request.Release!.Version = "2.4.50";
+        request.Release.InstallerFilename = "TiaConnect-Setup_v2.4.50.exe";
+
+        if (allowed)
+        {
+            await _service.FinalizeAsync(ClientId, Hash("application-mask-finalize"), request);
+            await using var db = new LicenseDbContext(_options);
+            Assert.Single(await db.DistributionInstallationBindings.ToListAsync());
+        }
+        else
+        {
+            var error = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+                _service.FinalizeAsync(ClientId, Hash("application-mask-finalize"), request));
+            Assert.Equal("version_not_allowed", error.ErrorCode);
+            await using var db = new LicenseDbContext(_options);
+            Assert.Empty(await db.DistributionInstallationBindings.ToListAsync());
+        }
+    }
+
     [Fact]
     public async Task Finalize_WrongVersionProductInstallationOrHash_FailsClosedWithoutBinding()
     {
@@ -778,8 +1185,17 @@ public sealed class DistributionInstallationBindingServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Finalize_SameHandoffWithNewRequestId_PersistsSecondIdempotencyRecord()
+    [Trait("Category", "RequiresPostgreSql")]
+    public async Task Finalize_SameHandoffWithNewRequestId_FailsClosedOnGrantOwnershipMismatch()
     {
+        // This exact early-history contract needs a real PostgreSQL transaction, not the SQLite lock double.
+        if (!_tkt976NativeDecisionFixture)
+        {
+            using var fixture = await CreateTkt976DecisionPostgresFixtureAsync();
+            await fixture.Finalize_SameHandoffWithNewRequestId_FailsClosedOnGrantOwnershipMismatch();
+            return;
+        }
+
         var entitlement = (await _service.IssueEntitlementAsync(
             ClientId, Hash("issue"), IssueRequest())).Response.EntitlementRef;
         var firstRequest = FinalizeRequest(entitlement);
@@ -789,12 +1205,12 @@ public sealed class DistributionInstallationBindingServiceTests : IDisposable
         secondRequest.HandoffDigestSha256 = firstRequest.HandoffDigestSha256;
         secondRequest.InstallationId = firstRequest.InstallationId;
 
-        var second = await _service.FinalizeAsync(ClientId, Hash("second-finalize"), secondRequest);
+        var exception = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            _service.FinalizeAsync(ClientId, Hash("second-finalize"), secondRequest));
 
-        Assert.True(second.Idempotent);
-        Assert.Equal(first.Response, second.Response);
+        Assert.Equal("grant_ownership_mismatch", exception.ErrorCode);
         await using var db = new LicenseDbContext(_options);
-        Assert.Equal(3, await db.DistributionBindingRequests.CountAsync());
+        Assert.Equal(2, await db.DistributionBindingRequests.CountAsync());
     }
 
     [Fact]
@@ -823,6 +1239,9 @@ public sealed class DistributionInstallationBindingServiceTests : IDisposable
         Assert.Equal("entitlement_ineligible", revokedException.ErrorCode);
     }
 
+    /// <summary>
+    /// Proves a security invalidation remains pseudonymous and replayable while preserving the commercial seat.
+    /// </summary>
     [Fact]
     public async Task Invalidate_AfterFinalize_IsAtomicPseudonymousAndExactlyIdempotent()
     {
@@ -851,8 +1270,116 @@ public sealed class DistributionInstallationBindingServiceTests : IDisposable
         var persistedBinding = await db.DistributionInstallationBindings.SingleAsync();
         Assert.Equal("invalidated", persistedBinding.State);
         Assert.Equal("grant_revoked", persistedBinding.InvalidationReason);
+        Assert.True((await db.LicenseSeats.SingleAsync(candidate => candidate.Id == SeatId)).IsActive);
         Assert.Single(await db.DistributionBindingInvalidations.ToListAsync());
         Assert.Equal(3, await db.DistributionBindingRequests.CountAsync());
+    }
+
+    /// <summary>
+    /// Proves seat release refuses a divergent enrollment, then atomically retires only the exact seat authority
+    /// and returns the frozen response for an exact retry.
+    /// </summary>
+    [Fact]
+    public async Task Invalidate_SeatReleased_AtomicallyRetiresOnlyExactAuthorityAndExactlyReplays()
+    {
+        var entitlement = (await _service.IssueEntitlementAsync(
+            ClientId, Hash("seat-release-issue"), IssueRequest())).Response.EntitlementRef;
+        var finalizeRequest = FinalizeRequest(entitlement);
+        var finalized = await _service.FinalizeAsync(
+            ClientId, Hash("seat-release-finalize"), finalizeRequest);
+        var bindingId = Guid.Parse(finalized.Response.BindingId);
+        var unrelatedSeatId = Guid.NewGuid();
+        var enrollmentId = Guid.NewGuid();
+        await using (var setup = new LicenseDbContext(_options))
+        {
+            setup.RuntimeEnrollmentKeyRegistries.Add(new RuntimeEnrollmentKeyRegistry
+            {
+                Purpose = "encryption",
+                KeyId = "seat-release-test-key",
+                MaterialDigestSha256 = Hash("seat-release-test-key"),
+                State = "active",
+                Epoch = 1,
+                CreatedAtUtc = Now.UtcDateTime
+            });
+            setup.LicenseSeats.Add(new LicenseSeat
+            {
+                Id = unrelatedSeatId,
+                LicenseId = LicenseId,
+                HardwareId = "UNRELATED-HARDWARE",
+                IsActive = true
+            });
+            setup.RuntimeEnrollments.Add(new RuntimeEnrollment
+            {
+                Id = enrollmentId,
+                ClientId = ClientId,
+                BindingId = bindingId,
+                ProductId = ProductId,
+                LicenseId = LicenseId,
+                LicenseSeatId = unrelatedSeatId,
+                InstallationId = finalizeRequest.InstallationId!,
+                HardwareIdHash = Hash(HardwareId),
+                ReleaseVersion = finalizeRequest.Release!.Version!,
+                HandoffDigestSha256 = finalizeRequest.HandoffDigestSha256!,
+                ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion,
+                Algorithm = "PS256",
+                KeyBackend = "software-cng-unattested",
+                AttestationLevel = "none",
+                PublicKeySpkiCiphertext = "test",
+                PublicKeySpkiKeyId = "seat-release-test-key",
+                PublicKeySpkiSha256 = Hash("seat-release-spki"),
+                KeyThumbprint = "seat-release-thumbprint",
+                ChallengeCiphertext = "test",
+                ChallengeKeyId = "seat-release-test-key",
+                ChallengeDigestSha256 = Hash("seat-release-challenge"),
+                State = "ACTIVE",
+                Epoch = 1,
+                SecurityEpoch = 1,
+                CreatedAtUtc = Now.UtcDateTime,
+                ChallengeExpiresAtUtc = Now.AddMinutes(5).UtcDateTime,
+                ActivatedAtUtc = Now.UtcDateTime
+            });
+            await setup.SaveChangesAsync();
+        }
+
+        var request = InvalidationRequest(finalizeRequest, finalized.Response.BindingId);
+        request.Reason = "seat_released";
+        var digest = Hash("exact-seat-release-body");
+
+        var scopeDivergence = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            _service.InvalidateAsync(ClientId, digest, request));
+        Assert.Equal("binding_mismatch", scopeDivergence.ErrorCode);
+        await using (var cleanup = new LicenseDbContext(_options))
+        {
+            var correctedEnrollment = await cleanup.RuntimeEnrollments
+                .SingleAsync(candidate => candidate.Id == enrollmentId);
+            correctedEnrollment.LicenseSeatId = SeatId;
+            await cleanup.SaveChangesAsync();
+        }
+
+        var first = await _service.InvalidateAsync(ClientId, digest, request);
+        var replay = await _service.InvalidateAsync(ClientId, digest, request);
+        var divergent = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            _service.InvalidateAsync(ClientId, Hash("divergent-seat-release-body"), request));
+
+        Assert.False(first.Idempotent);
+        Assert.True(replay.Idempotent);
+        Assert.Equal(first.Response, replay.Response);
+        Assert.Equal("idempotency_conflict", divergent.ErrorCode);
+        Assert.Equal("seat_released", first.Response.Reason);
+        await using var db = new LicenseDbContext(_options);
+        var binding = await db.DistributionInstallationBindings.SingleAsync(candidate => candidate.Id == bindingId);
+        var releasedSeat = await db.LicenseSeats.SingleAsync(candidate => candidate.Id == SeatId);
+        var unrelatedSeat = await db.LicenseSeats.SingleAsync(candidate => candidate.Id == unrelatedSeatId);
+        var enrollment = await db.RuntimeEnrollments.SingleAsync(candidate => candidate.Id == enrollmentId);
+        Assert.Equal("invalidated", binding.State);
+        Assert.Equal("seat_released", binding.InvalidationReason);
+        Assert.False(releasedSeat.IsActive);
+        Assert.NotNull(releasedSeat.UnlinkedAt);
+        Assert.True(unrelatedSeat.IsActive);
+        Assert.Equal("INVALIDATED", enrollment.State);
+        Assert.Equal("seat_released", enrollment.InvalidationReason);
+        Assert.Single(await db.LicenseHistories.Where(item =>
+            item.LicenseId == LicenseId && item.Action == "RUNTIME_SEAT_RELEASED").ToListAsync());
     }
 
     [Fact]
@@ -911,8 +1438,17 @@ public sealed class DistributionInstallationBindingServiceTests : IDisposable
     }
 
     [Fact]
+    [Trait("Category", "RequiresPostgreSql")]
     public async Task Finalize_V2EntitlementForDifferentGrant_IsRejected()
     {
+        // This exact early-history contract needs a real PostgreSQL transaction, not the SQLite lock double.
+        if (!_tkt976NativeDecisionFixture)
+        {
+            using var fixture = await CreateTkt976DecisionPostgresFixtureAsync();
+            await fixture.Finalize_V2EntitlementForDifferentGrant_IsRejected();
+            return;
+        }
+
         var finalizeRequest = FinalizeRequest("pending-entitlement");
         var entitlement = (await _service.IssueEntitlementAsync(
             ClientId, Hash("issue-v2"), IssueRequest(Hash("different-grant"), v2: true))).Response.EntitlementRef;
@@ -1107,6 +1643,56 @@ public sealed class DistributionInstallationBindingServiceTests : IDisposable
 
     public void Dispose() => _keepAlive.Dispose();
 
+    private DistributionInstallationBindingService CreateService(
+        IHardwareAuthorityAliasResolver hardwareAuthorityAliases,
+        IDataProtectionProvider dataProtectionProvider,
+        ILogger<DistributionInstallationBindingService>? logger = null) => new(
+            new TestDbContextFactory(_options),
+            dataProtectionProvider,
+            new FixedTimeProvider(Now),
+            hardwareAuthorityAliases,
+            logger);
+
+    /// <summary>Captures rendered diagnostics so tests can prove one event per rejected attempt.</summary>
+    private sealed class RecordingLogger<T> : ILogger<T>
+    {
+        private readonly ConcurrentQueue<string> _messages = new();
+
+        public IReadOnlyList<string> Messages => _messages.ToArray();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            _messages.Enqueue(formatter(state, exception));
+    }
+
+    /// <summary>Returns one predetermined authority decision through either resolver entry point.</summary>
+    private sealed class FixedHardwareAuthorityAliasResolver(HardwareAuthorityResolution resolution)
+        : IHardwareAuthorityAliasResolver
+    {
+        public Task<HardwareAuthorityResolution> ResolveAsync(
+            Guid productId,
+            Guid licenseId,
+            string submittedHardwareId,
+            HardwareAuthorityResolutionIntent intent,
+            CancellationToken cancellationToken = default) => Task.FromResult(resolution);
+
+        public Task<HardwareAuthorityResolution> ResolveAsync(
+            LicenseDbContext authorityDb,
+            Guid productId,
+            Guid licenseId,
+            string submittedHardwareId,
+            HardwareAuthorityResolutionIntent intent,
+            CancellationToken cancellationToken = default) => Task.FromResult(resolution);
+    }
+
     private static DistributionEntitlementIssueRequest IssueRequest(
         string? grantRefDigestSha256 = null,
         bool v2 = false) => new()
@@ -1213,6 +1799,137 @@ public sealed class DistributionInstallationBindingServiceTests : IDisposable
 
     private static string Hash(char value) => new(value, 64);
     private static string NewUuid() => Guid.NewGuid().ToString("D");
+
+    /// <summary>Registers PostgreSQL's C collation name with equivalent ordinal semantics for SQLite tests.</summary>
+    private static void RegisterOrdinalCollation(SqliteConnection connection) =>
+        connection.CreateCollation("C", static (left, right) => string.CompareOrdinal(left, right));
+
+    /// <summary>Registers the test-only C collation on every SQLite connection opened by EF Core.</summary>
+    private sealed class SqliteOrdinalCollationInterceptor : DbConnectionInterceptor
+    {
+        public static readonly SqliteOrdinalCollationInterceptor Instance = new();
+
+        public override void ConnectionOpened(DbConnection connection, ConnectionEndEventData eventData)
+        {
+            if (connection is SqliteConnection sqliteConnection)
+                RegisterOrdinalCollation(sqliteConnection);
+        }
+
+        public override Task ConnectionOpenedAsync(
+            DbConnection connection,
+            ConnectionEndEventData eventData,
+            CancellationToken cancellationToken = default)
+        {
+            if (connection is SqliteConnection sqliteConnection)
+                RegisterOrdinalCollation(sqliteConnection);
+
+            return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>
+    /// Adapts PostgreSQL CHECK syntax to SQLite without removing constraints or weakening their semantics.
+    /// </summary>
+    private sealed class SqlitePostgresCheckConstraintInterceptor : DbCommandInterceptor
+    {
+        public static readonly SqlitePostgresCheckConstraintInterceptor Instance = new();
+
+        public override InterceptionResult<int> NonQueryExecuting(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result)
+        {
+            TranslateCheckConstraintOperators(command);
+            return result;
+        }
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            TranslateCheckConstraintOperators(command);
+            return ValueTask.FromResult(result);
+        }
+
+        private static void TranslateCheckConstraintOperators(DbCommand command)
+        {
+            if (command is not SqliteCommand
+                || !command.CommandText.Contains("CHECK", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            command.CommandText = command.CommandText
+                .Replace(" !~ ", " NOT REGEXP ", StringComparison.Ordinal)
+                .Replace(" ~ ", " REGEXP ", StringComparison.Ordinal);
+        }
+
+    }
+
+    /// <summary>Registers PostgreSQL-compatible CHECK functions on every SQLite fixture connection.</summary>
+    private sealed class SqlitePostgresCheckFunctionInterceptor : DbConnectionInterceptor
+    {
+        public static readonly SqlitePostgresCheckFunctionInterceptor Instance = new();
+
+        public override void ConnectionOpened(DbConnection connection, ConnectionEndEventData eventData) =>
+            RegisterPostgresCheckFunctions(connection);
+
+        public override Task ConnectionOpenedAsync(
+            DbConnection connection,
+            ConnectionEndEventData eventData,
+            CancellationToken cancellationToken = default)
+        {
+            RegisterPostgresCheckFunctions(connection);
+            return Task.CompletedTask;
+        }
+
+        /// <summary>Registers existing CHECK primitives and test-only UUID INSERT defaults on SQLite connections.</summary>
+        private static void RegisterPostgresCheckFunctions(DbConnection connection)
+        {
+            if (connection is not SqliteConnection sqliteConnection)
+                return;
+
+            SqliteFullModelHarness.RegisterUuidDefault(sqliteConnection);
+            sqliteConnection.CreateFunction<string?, string?, bool?>(
+                "regexp",
+                static (pattern, value) => pattern is null || value is null
+                    ? null
+                    : Regex.IsMatch(
+                        value,
+                        ToDotNetRegex(pattern),
+                        RegexOptions.CultureInvariant),
+                isDeterministic: true);
+            sqliteConnection.CreateFunction<object?, long?>(
+                "octet_length",
+                static value => value switch
+                {
+                    null => null,
+                    string text => Encoding.UTF8.GetByteCount(text),
+                    byte[] bytes => bytes.LongLength,
+                    _ => throw new InvalidOperationException(
+                        $"Unsupported SQLite octet_length argument type: {value.GetType().FullName}.")
+                },
+                isDeterministic: true);
+            sqliteConnection.CreateFunction<string?, string?, string?>(
+                "least",
+                static (left, right) => (left, right) switch
+                {
+                    (null, null) => null,
+                    (null, _) => right,
+                    (_, null) => left,
+                    _ => string.CompareOrdinal(left, right) <= 0 ? left : right
+                },
+                isDeterministic: true);
+        }
+
+        /// <summary>Maps PostgreSQL's strict end anchor to the equivalent .NET anchor.</summary>
+        private static string ToDotNetRegex(string pattern) =>
+            pattern.EndsWith('$') && !pattern.EndsWith("\\$", StringComparison.Ordinal)
+                ? string.Concat(pattern.AsSpan(0, pattern.Length - 1), "\\z")
+                : pattern;
+    }
 
     private sealed class TestDbContextFactory(DbContextOptions<LicenseDbContext> options)
         : IDbContextFactory<LicenseDbContext>

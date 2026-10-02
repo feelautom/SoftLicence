@@ -1326,6 +1326,35 @@ public class DocumentationService
 
         ---
 
+        ### POST /api/admin/licenses/{licenseKey}/hardware-authority
+
+        Check whether one exact hardware identifier is already covered by an active seat on the
+        selected licence. This read-only endpoint accepts direct seat identifiers and active,
+        server-authenticated aliases; it never creates or moves a seat.
+
+        **Headers:** `X-Admin-Secret` required (global or matching product secret)
+
+        **Request Body:**
+        ```json
+        { "hardwareId": "A1B2C3D4E5F67890" }
+        ```
+
+        **Response (200):**
+        ```json
+        { "coveredByActiveSeat": true }
+        ```
+
+        Invalid, unknown, disabled, ambiguous, cross-licence, cross-product, or inactive-seat
+        identities return `coveredByActiveSeat: false`. A server-authenticated alias
+        that still targets the same active licence seat may tolerate bounded Runtime-graph drift;
+        historical Runtime terminals are logged for diagnosis but do not block that compatibility
+        path unless an active ban independently refuses it. SoftLicence logs the exact internal
+        state without logging either HWID. Malformed identifiers
+        return `400`. This endpoint proves seat topology only; distribution preflight and
+        activation/check remain authoritative for bans.
+
+        ---
+
         ### POST /api/admin/licenses/{licenseKey}/renew
 
         Renew a recurring license (subscription model).
@@ -1334,7 +1363,8 @@ public class DocumentationService
         ```json
         {
           "transactionId": "stripe_pi_123456789",
-          "reference": "INV-2024-002"
+          "reference": "INV-2024-002",
+          "targetExpirationUtc": "2026-01-15T00:00:00Z"
         }
         ```
 
@@ -1350,8 +1380,17 @@ public class DocumentationService
 
         **Behavior:**
         - License type must have `IsRecurring = true`
-        - `TransactionId` must be unique (idempotency — duplicate returns 409)
-        - Extends expiration by `LicenseType.DefaultDurationDays`
+        - `TransactionId` is an opaque, exact idempotency key bound to a versioned SHA-256 fingerprint
+        - The fingerprint includes the target license, exact transaction ID, trim-only reference,
+          duration, exact UTC target, and whether each optional property was present
+        - An identical canonical request returns the original result; omission versus an explicit value conflicts
+        - `TargetExpirationUtc` sets an exact UTC boundary and is mutually exclusive with `DaysToAdd`
+        - A retry that changes any canonical request field returns `409 transaction_payload_conflict`
+        - A historical transaction without a verifiable fingerprint returns
+          `409 { "error": "legacy_transaction_unverified", "retryable": false }`
+        - Historical rows are never backfilled because omitted versus explicit values cannot be reconstructed
+        - Without an explicit target, extends expiration by `DaysToAdd` or `LicenseType.DefaultDurationDays`
+        - Exact targets must extend the current entitlement and remain within the 3650-day safety horizon
         - Reactivates license if it was expired
         - Creates `LicenseRenewal` record and `RENEWED` history entry
 

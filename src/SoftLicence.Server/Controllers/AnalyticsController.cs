@@ -9,7 +9,8 @@ namespace SoftLicence.Server.Controllers;
 [ApiController]
 [Route("api/analytics")]
 [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("AdminAPI")]
-public sealed class AnalyticsController : ControllerBase
+/// <summary>Provides administrator analytics under the existing telemetry permission and product selector; targeted decision reads intersect exact identifiers and expose validated projections only.</summary>
+public sealed partial class AnalyticsController : ControllerBase
 {
     private readonly TelemetryOverviewAnalyticsService _overviewAnalytics;
     private readonly TelemetryDevicesAnalyticsService _devicesAnalytics;
@@ -122,7 +123,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         TelemetryAnalyticsPeriod period;
         try
@@ -182,7 +183,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         if (auth.IsGlobal)
         {
@@ -217,7 +218,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
         var query = db.Products.AsNoTracking();
@@ -268,7 +269,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         try
         {
@@ -306,7 +307,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         try
         {
@@ -341,7 +342,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -367,7 +368,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -393,7 +394,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -419,7 +420,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -445,7 +446,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -471,7 +472,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -502,7 +503,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         try
         {
@@ -534,13 +535,15 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] int days = 7,
         [FromQuery] int top = 20,
         [FromQuery] int take = 25,
+        [FromQuery] bool exactSnapshot = false,
         [FromQuery] string? productId = null,
         [FromQuery] string? productName = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        [FromQuery] bool allowPartial = false)
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         if (string.IsNullOrWhiteSpace(hardwareId))
             return BadRequest("Missing hardwareId query parameter.");
@@ -555,7 +558,8 @@ public sealed class AnalyticsController : ControllerBase
             days,
             top,
             take,
-            cancellationToken);
+            cancellationToken,
+            exactSnapshot, allowPartial);
 
         return Ok(result);
     }
@@ -576,7 +580,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         try
         {
@@ -622,7 +626,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         try
         {
@@ -663,7 +667,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -767,6 +771,7 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] string? clientIp = null,
         [FromQuery] string? version = null,
         [FromQuery] bool? isBanned = null,
+        [FromQuery] bool exactHardwareId = false,
         [FromQuery] int take = 50,
         [FromQuery] int offset = 0,
         [FromQuery] string? productId = null,
@@ -775,7 +780,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateSecurityAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -790,7 +795,7 @@ public sealed class AnalyticsController : ControllerBase
 
         var result = await _securityCanaryAnalytics.ListForProductIdAsync(
             product.ProductId, parsedFrom, parsedTo, trigger, severity, hardwareId, machine, user,
-            clientIp, version, isBanned, take, offset, cancellationToken);
+            clientIp, version, isBanned, take, offset, cancellationToken, exactHardwareId);
         return Ok(result);
     }
 
@@ -804,7 +809,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateSecurityAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -826,14 +831,16 @@ public sealed class AnalyticsController : ControllerBase
         [FromQuery] string? licenseFragment,
         [FromQuery] bool includeInactive = false,
         [FromQuery] bool includeSourceEvents = false,
+        [FromQuery] bool exactHardwareId = false,
         [FromQuery] int take = 25,
         [FromQuery] string? productId = null,
         [FromQuery] string? productName = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        [FromQuery] bool allowPartial = false)
     {
         var auth = await AuthenticateSecurityAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -850,7 +857,8 @@ public sealed class AnalyticsController : ControllerBase
             includeInactive,
             includeSourceEvents,
             take,
-            cancellationToken);
+            cancellationToken,
+            exactHardwareId, allowPartial);
 
         return Ok(result);
     }
@@ -865,7 +873,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateSecurityAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -889,7 +897,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateSecurityAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -917,7 +925,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         try
         {
@@ -951,7 +959,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -982,7 +990,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -1018,7 +1026,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -1054,7 +1062,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -1084,7 +1092,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -1111,7 +1119,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -1145,7 +1153,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -1181,7 +1189,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         try
         {
@@ -1215,7 +1223,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
         if (product.Error != null)
@@ -1240,7 +1248,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         var resolvedHardwareId = !string.IsNullOrWhiteSpace(hardwareId) ? hardwareId : hwid;
         if (string.IsNullOrWhiteSpace(resolvedHardwareId))
@@ -1273,7 +1281,7 @@ public sealed class AnalyticsController : ControllerBase
     {
         var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
 
         try
         {
@@ -1312,10 +1320,10 @@ public sealed class AnalyticsController : ControllerBase
         string? analyticsKey,
         CancellationToken cancellationToken)
     {
-        return await _apiKeyAuth.ValidateAsync(
-            analyticsKey ?? "",
+        return await _apiKeyAuth.ValidateForRequestAsync(
+            HttpContext,
+            analyticsKey,
             AnalyticsApiKeyScopes.TelemetryRead,
-            HttpContext.Connection.RemoteIpAddress?.ToString(),
             cancellationToken);
     }
 
@@ -1323,10 +1331,10 @@ public sealed class AnalyticsController : ControllerBase
         string? analyticsKey,
         CancellationToken cancellationToken)
     {
-        return await _apiKeyAuth.ValidateAsync(
-            analyticsKey ?? "",
+        return await _apiKeyAuth.ValidateForRequestAsync(
+            HttpContext,
+            analyticsKey,
             AnalyticsApiKeyScopes.SecurityRead,
-            HttpContext.Connection.RemoteIpAddress?.ToString(),
             cancellationToken);
     }
 

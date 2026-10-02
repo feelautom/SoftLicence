@@ -8,6 +8,15 @@ namespace SoftLicence.Server.Data;
 /// </summary>
 public sealed class HardwareAuthorityAlias
 {
+    /// <summary>Persisted reason assigned only to aliases disabled by the historical authority backfill.</summary>
+    public const string BackfillAuthorityInvalidReason = "backfill_authority_invalid";
+
+    /// <summary>Persisted fail-closed reason for inactive aliases whose historical cause cannot be proven.</summary>
+    public const string LegacyDisabledUnknownReason = "legacy_disabled_unknown";
+
+    /// <summary>Persisted reason assigned when an operator deliberately disables compatibility.</summary>
+    public const string OperatorDisabledReason = "operator_disabled";
+
     /// <summary>Gets or sets the database identifier.</summary>
     public Guid Id { get; set; } = Guid.NewGuid();
 
@@ -54,6 +63,12 @@ public sealed class HardwareAuthorityAlias
 
     /// <summary>Gets or sets when an operator or policy disabled compatibility resolution.</summary>
     public DateTime? DisabledAtUtc { get; set; }
+
+    /// <summary>
+    /// Gets or sets the exact server-owned reason for an inactive alias. Active aliases must not carry a reason.
+    /// </summary>
+    [MaxLength(64)]
+    public string? DisabledReason { get; set; }
 
     /// <summary>Gets or sets the last hourly-bounded compatibility observation.</summary>
     public DateTime? LastObservedAtUtc { get; set; }

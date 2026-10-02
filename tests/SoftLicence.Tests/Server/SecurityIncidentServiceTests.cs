@@ -19,8 +19,10 @@ public sealed class SecurityIncidentServiceTests : IDisposable
     {
         _connection = new SqliteConnection("Data Source=:memory:");
         _connection.Open();
+        SqliteFullModelHarness.RegisterConnection(_connection);
         _options = new DbContextOptionsBuilder<LicenseDbContext>()
             .UseSqlite(_connection)
+            .AddInterceptors(SqliteFullModelHarness.ConnectionInterceptor, SqliteFullModelHarness.CommandInterceptor)
             .Options;
         using var db = new LicenseDbContext(_options);
         db.Database.EnsureCreated();

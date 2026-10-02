@@ -71,13 +71,27 @@ public sealed class BackupProcessRunner : IBackupProcessRunner
 {
     private const int MaximumDiagnosticCharacters = 64 * 1024;
     private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(3);
-    private readonly Action? _cleanupStartedForTests;
+    // Test-only observation hook invoked with runner-owned process identifiers before termination.
+    private readonly Action<int?, int?>? _cleanupStartedForTests;
 
     public BackupProcessRunner()
     {
     }
 
+    /// <summary>
+    /// Creates a runner that reports when cleanup starts.
+    /// This compatibility overload preserves existing test seams that do not need process identities.
+    /// </summary>
     internal BackupProcessRunner(Action cleanupStartedForTests)
+        : this((_, _) => cleanupStartedForTests())
+    {
+    }
+
+    /// <summary>
+    /// Creates a runner that reports the process identifiers captured at the cleanup boundary.
+    /// This test-only seam makes cancellation ordering observable without changing production behavior.
+    /// </summary>
+    internal BackupProcessRunner(Action<int?, int?> cleanupStartedForTests)
     {
         _cleanupStartedForTests = cleanupStartedForTests;
     }
@@ -310,15 +324,18 @@ public sealed class BackupProcessRunner : IBackupProcessRunner
     private static IReadOnlyList<Task> DrainTasks(params Task<string>?[] tasks) =>
         tasks.Where(task => task != null).Cast<Task>().ToArray();
 
+    /// <summary>
+    /// Captures process state, terminates the pipeline, and observes all diagnostic drains within the cleanup bound.
+    /// </summary>
     private async Task<BackupCleanupResult> CleanupAsync(
         Process? producer,
         Process? consumer,
         IReadOnlyList<Task> drainTasks)
     {
-        _cleanupStartedForTests?.Invoke();
         CloseStandardInput(consumer);
         var producerProcessId = TryGetProcessId(producer);
         var consumerProcessId = TryGetProcessId(consumer);
+        _cleanupStartedForTests?.Invoke(producerProcessId, consumerProcessId);
         var producerExitCode = TryGetExitCode(producer);
         var consumerExitCode = TryGetExitCode(consumer);
         Kill(producer);

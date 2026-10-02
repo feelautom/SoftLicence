@@ -8,9 +8,18 @@ on:
   release:
     types: [ published ]
 
+# The job only reads the repository, its pull requests and the release assets; the NuGet push
+# uses its own API key. Declared explicitly so the token never inherits wider repository defaults.
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   test-and-publish:
     runs-on: windows-latest
+    env:
+      # Self-hosted Windows runners may not have write access to Program Files.
+      DOTNET_INSTALL_DIR: ${{ runner.temp }}\.dotnet
 
     steps:
       - uses: actions/checkout@v7
@@ -24,6 +33,13 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
+      - name: Run publish guard tests
+        # The publish guards live in PowerShell; a change that weakens them must fail here.
+        # Only this suite runs: it is self-sufficient in the public mirror, where the private
+        # scripts directory is reduced to the scripts this workflow needs.
+        shell: pwsh
+        run: ./tests/PowerShell/PublishWorkflow.Tests.ps1
+
       - name: Restore dependencies
         run: dotnet restore src/SoftLicence.sln
 
@@ -33,7 +49,7 @@ jobs:
       - name: Run tests
         # PostgreSQL contract tests require a dedicated PostgreSQL 17 database and
         # are validated separately from this self-contained public release job.
-        run: dotnet test tests/SoftLicence.Tests/ --no-restore --verbosity normal --filter "FullyQualifiedName!~PostgreSql&Category!=PrivateRepository"
+        run: dotnet test tests/SoftLicence.Tests/ --no-restore --verbosity normal --filter "FullyQualifiedName!~PostgreSql&Category!=PrivateRepository&Category!=RequiresPostgreSql"
 
       - name: Build solution
         run: dotnet build src/SoftLicence.sln -c Release --no-restore
@@ -108,10 +124,35 @@ jobs:
           Write-Host "No open pull request blocks the SDK release."
 
       - name: Pack SDK
+        # Push and pull request runs only prove that the SDK still packs. A release never
+        # publishes a package built here: this runner cannot reach the release certificate.
+        if: github.event_name != 'release'
         shell: pwsh
         env:
           SDK_VERSION: ${{ steps.sdk_version.outputs.version }}
         run: dotnet pack src/SoftLicence.SDK/SoftLicence.SDK.csproj -c Release -o out -p:PackageVersion=$env:SDK_VERSION -p:ContinuousIntegrationBuild=true
+
+      - name: Download the signed SDK package attached to the release
+        # scripts/Prepare-SdkRelease.ps1 signs SoftLicence.SDK.dll on the release workstation
+        # and produces the package; the release must carry that exact file as an asset.
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          SDK_VERSION: ${{ steps.sdk_version.outputs.version }}
+        run: |
+          $assetName = "SoftLicence.SDK.$($env:SDK_VERSION).nupkg"
+          if (Test-Path out) {
+              Remove-Item -LiteralPath out -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path out | Out-Null
+
+          gh release download $env:RELEASE_TAG --repo $env:REPOSITORY --pattern $assetName --dir out
+          if ($LASTEXITCODE -ne 0) {
+              throw "Release $($env:RELEASE_TAG) has no '$assetName' asset. Attach the signed package produced by scripts/Prepare-SdkRelease.ps1."
+          }
 
       - name: Verify package version and scan package metadata
         shell: pwsh
@@ -147,8 +188,8 @@ jobs:
               )
 
               foreach ($entry in $entries) {
-                  $isAllowed = $allowed -contains $entry.FullName `
-                      -or $entry.FullName -like "package/services/metadata/core-properties/*.psmdcp"
+                  $isAllowed = $allowed -ccontains $entry.FullName `
+                      -or $entry.FullName -clike "package/services/metadata/core-properties/*.psmdcp"
                   if (-not $isAllowed) {
                       throw "Unexpected file in NuGet package: $($entry.FullName)"
                   }
@@ -180,9 +221,27 @@ jobs:
         shell: pwsh
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          SDK_VERSION: ${{ steps.sdk_version.outputs.version }}
         run: |
-          $packages = Get-ChildItem -Path out -Filter *.nupkg
+          . ./scripts/SdkSigning.ps1
+
+          $packages = @(Get-ChildItem -Path out -Filter *.nupkg)
+          if ($packages.Count -ne 1) {
+              throw "Expected exactly one nupkg to publish, found $($packages.Count)."
+          }
+
           foreach ($pkg in $packages) {
+              # NuGet publishes the identity written inside the package, not its file name.
+              Assert-SdkPackageIdentity -PackagePath $pkg.FullName -ExpectedVersion $env:SDK_VERSION
+              # An SDK whose assembly is not signed with the release certificate is never published.
+              $thumbprint = Assert-SdkPackageSignature -PackagePath $pkg.FullName
+              Write-Host "SoftLicence.SDK $($env:SDK_VERSION) identity and assembly signature verified (certificate $thumbprint)."
+
+              # Duplicates are not skipped: the version was checked as unpublished above, so a duplicate
+              # here means the wrong package and must fail instead of reporting a silent success.
               Write-Host "Pushing $($pkg.FullName)..."
-              dotnet nuget push $pkg.FullName --api-key $env:NUGET_API_KEY --source https://api.nuget.org/v3/index.json --skip-duplicate
+              dotnet nuget push $pkg.FullName --api-key $env:NUGET_API_KEY --source https://api.nuget.org/v3/index.json
+              if ($LASTEXITCODE -ne 0) {
+                  throw "dotnet nuget push failed with exit code $LASTEXITCODE."
+              }
           }

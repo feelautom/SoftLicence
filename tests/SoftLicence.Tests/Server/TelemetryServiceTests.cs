@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Moq;
@@ -11,6 +12,7 @@ using Xunit;
 
 namespace SoftLicence.Tests.Server;
 
+/// <summary>Exercises licence-backed automatic alert behavior using isolated test data; the provider substitute rejects human SUP operations to detect routing regressions.</summary>
 public class TelemetryServiceTests
 {
     private readonly DbContextOptions<LicenseDbContext> _dbOptions;
@@ -235,6 +237,46 @@ public class TelemetryServiceTests
 
         using var checkDb = new LicenseDbContext(_dbOptions);
         Assert.Equal(2, await checkDb.TelemetryRecords.CountAsync(t => t.HardwareId == "HW-SECURITY-FLOOD"));
+        Assert.False(await checkDb.TelemetryFloodSuppressionCounters.AnyAsync());
+    }
+
+    [Fact]
+    public async Task SaveEventAsync_WhenUpdShellPresentationRepeats_ShouldStoreEveryOccurrence()
+    {
+        using (var db = new LicenseDbContext(_dbOptions))
+        {
+            await SeedProductAsync(db, "TIAConnect");
+        }
+
+        var service = BuildTelemetryServiceWithFloodSettings(threshold: 1, windowMinutes: 10);
+        var request = new TelemetryEventRequest
+        {
+            AppName = "TIAConnect",
+            HardwareId = "HW-UPD-SHELL",
+            Version = "2.4.380",
+            EventName = UpdatePreflightFailureAlertService.EventName,
+            Properties = new Dictionary<string, string>
+            {
+                ["SupportCode"] = "UPD-1002",
+                ["CurrentVersion"] = "2.4.380",
+                ["LatestVersion"] = "2.4.309",
+                ["PresentationStage"] = "initial",
+                ["DecisionReason"] = "distribution_downloads_paused",
+                ["SelectedChannel"] = "paid",
+                ["ReconciliationOutcome"] = "unknown",
+                ["UpdateAvailable"] = "False",
+                ["Mandatory"] = "False",
+                ["UpToDate"] = "False"
+            }
+        };
+
+        await service.SaveEventAsync(request);
+        await service.SaveEventAsync(request);
+
+        using var checkDb = new LicenseDbContext(_dbOptions);
+        Assert.Equal(2, await checkDb.TelemetryRecords.CountAsync(record =>
+            record.HardwareId == "HW-UPD-SHELL"
+            && record.EventName == UpdatePreflightFailureAlertService.EventName));
         Assert.False(await checkDb.TelemetryFloodSuppressionCounters.AnyAsync());
     }
 
@@ -797,6 +839,135 @@ public class TelemetryServiceTests
         Assert.Contains("2.1.750", ban.Reason);
         Assert.Contains("2.1.781", ban.Reason);
         Assert.False(await checkDb.BannedComponents.AnyAsync(), "outdated_version auto-ban must not ban component fingerprints.");
+    }
+
+    /// <summary>
+    /// Proves that the exact upgrade-uninstall lifecycle event cannot mutate hardware-ban authority
+    /// when an obsolete uninstaller reports telemetry during a valid application upgrade.
+    /// </summary>
+    [Fact]
+    public async Task SaveEventAsync_WhenOldVersionReportsExactUninstallUpgrade_ShouldNotAutoBan()
+    {
+        var productId = Guid.NewGuid();
+        const string hardwareId = "HW-OLD-UNINSTALL-UPGRADE";
+
+        using (var db = new LicenseDbContext(_dbOptions))
+        {
+            db.Products.Add(new Product
+            {
+                Id = productId,
+                Name = "TIAConnect",
+                PrivateKeyXml = "key",
+                PublicKeyXml = "key",
+                ApiSecret = "secret-TIAConnect",
+                MinimumAllowedVersion = "2.2.790"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var service = BuildTelemetryServiceWithSecurity();
+        await service.SaveEventAsync(new TelemetryEventRequest
+        {
+            AppName = "TIAConnect",
+            HardwareId = hardwareId,
+            Version = "2.1.781",
+            EventName = "Uninstall_Upgrade"
+        });
+
+        using var checkDb = new LicenseDbContext(_dbOptions);
+        Assert.False(await checkDb.BannedHardwareIds.AnyAsync(ban => ban.HardwareId == hardwareId));
+    }
+
+    /// <summary>
+    /// Proves that lifecycle-looking variants and real feature events do not broaden the exact
+    /// enforcement-neutral allowlist and remain immediately bannable below the minimum version.
+    /// </summary>
+    /// <param name="eventName">The exact protocol identifier sent by the client.</param>
+    [Theory]
+    [InlineData("uninstall_upgrade")]
+    [InlineData("UNINSTALL_UPGRADE")]
+    [InlineData(" Uninstall_Upgrade")]
+    [InlineData("Uninstall_Upgrade ")]
+    [InlineData("Uninstall_Remove")]
+    [InlineData("Uninstall_Upgrade_Block_Export")]
+    [InlineData("Block_Export")]
+    public async Task SaveEventAsync_WhenOldVersionReportsNonAllowlistedEvent_ShouldAutoBan(string eventName)
+    {
+        var productId = Guid.NewGuid();
+        var hardwareId = $"HW-OLD-{Guid.NewGuid():N}".ToUpperInvariant();
+
+        using (var db = new LicenseDbContext(_dbOptions))
+        {
+            db.Products.Add(new Product
+            {
+                Id = productId,
+                Name = "TIAConnect",
+                PrivateKeyXml = "key",
+                PublicKeyXml = "key",
+                ApiSecret = "secret-TIAConnect",
+                MinimumAllowedVersion = "2.2.790"
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await BuildTelemetryServiceWithSecurity().SaveEventAsync(new TelemetryEventRequest
+        {
+            AppName = "TIAConnect",
+            HardwareId = hardwareId,
+            Version = "2.1.781",
+            EventName = eventName
+        });
+
+        using var checkDb = new LicenseDbContext(_dbOptions);
+        var ban = await checkDb.BannedHardwareIds.SingleAsync(candidate => candidate.HardwareId == hardwareId);
+        Assert.Equal(BannedHardwareId.Categories.OutdatedVersion, ban.BanCategory);
+        Assert.True(ban.IsActive);
+    }
+
+    /// <summary>
+    /// Proves that compliant upgrade-uninstall telemetry cannot lift a previously established
+    /// outdated-version ban because lifecycle reporting is neutral to both authority directions.
+    /// </summary>
+    [Fact]
+    public async Task SaveEventAsync_WhenCompliantVersionReportsExactUninstallUpgrade_ShouldNotAutoUnban()
+    {
+        var productId = Guid.NewGuid();
+        const string hardwareId = "HW-COMPLIANT-UNINSTALL-UPGRADE";
+        var banId = Guid.NewGuid();
+
+        using (var db = new LicenseDbContext(_dbOptions))
+        {
+            db.Products.Add(new Product
+            {
+                Id = productId,
+                Name = "TIAConnect",
+                PrivateKeyXml = "key",
+                PublicKeyXml = "key",
+                ApiSecret = "secret-TIAConnect",
+                MinimumAllowedVersion = "2.2.790"
+            });
+            db.BannedHardwareIds.Add(new BannedHardwareId
+            {
+                Id = banId,
+                ProductId = productId,
+                HardwareId = hardwareId,
+                BanCategory = BannedHardwareId.Categories.OutdatedVersion,
+                Reason = "Auto-ban: feature usage (Block_Export) with version 2.1.781 below minimum 2.2.790",
+                IsActive = true
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await BuildTelemetryServiceWithSecurity().SaveEventAsync(new TelemetryEventRequest
+        {
+            AppName = "TIAConnect",
+            HardwareId = hardwareId,
+            Version = "2.3.404",
+            EventName = "Uninstall_Upgrade"
+        });
+
+        using var checkDb = new LicenseDbContext(_dbOptions);
+        Assert.True((await checkDb.BannedHardwareIds.SingleAsync(candidate => candidate.Id == banId)).IsActive);
     }
 
     [Fact]
@@ -1513,6 +1684,7 @@ public class TelemetryServiceTests
         };
     }
 
+    /// <summary>Records automatic Ticket submissions in fixture-owned memory; unsupported conversation and SUP calls throw instead of silently accepting misrouted producers.</summary>
     private sealed class FakeBugTraceAlertProxy : IBugTraceProxyService
     {
         public string ExpectedProjectId => "test-project";
@@ -1532,8 +1704,24 @@ public class TelemetryServiceTests
         public Task<JsonElement> GetTicketsByEmailAsync(string email, CancellationToken ct = default) =>
             throw new NotImplementedException();
 
+        /// <summary>Throws for unsupported legacy conversation reads; this automatic producer fixture is deliberately not a customer support implementation.</summary>
         public Task<JsonElement> GetTicketCommentsAsync(string ticketNumber, CancellationToken ct = default) =>
             throw new NotImplementedException();
+
+        /// <summary>Rejects SUP calls so this non-support producer cannot silently enter the human-support channel.</summary>
+        public Task<JsonElement> CreateSupportCaseAsync(object body, string idempotencyKey, CancellationToken ct = default) => throw new NotImplementedException();
+        /// <summary>Rejects SUP calls so this non-support producer cannot silently enter the human-support channel.</summary>
+        public Task<JsonElement> ListSupportCasesAsync(string reporterEmail, int limit, CancellationToken ct = default, int offset = 0) => throw new NotImplementedException();
+        /// <summary>Rejects SUP calls so this non-support producer cannot silently enter the human-support channel.</summary>
+        public Task<JsonElement> GetSupportCaseAsync(string supportNumber, CancellationToken ct = default) => throw new NotImplementedException();
+        /// <summary>Rejects SUP calls so this non-support producer cannot silently enter the human-support channel.</summary>
+        public Task<JsonElement> AddSupportCaseMessageAsync(string supportNumber, object body, CancellationToken ct = default) => throw new NotImplementedException();
+        /// <summary>Rejects SUP calls so this non-support producer cannot silently enter the human-support channel.</summary>
+        public Task<JsonElement> ResolveSupportCaseAsync(string supportNumber, CancellationToken ct = default) => throw new NotImplementedException();
+        /// <summary>Rejects SUP calls so this non-support producer cannot silently enter the human-support channel.</summary>
+        public Task<JsonElement> StageSupportAttachmentAsync(IFormFile file, string reporterEmail, string idempotencyKey, CancellationToken ct = default) => throw new NotImplementedException();
+        /// <summary>Rejects SUP calls so this non-support producer cannot silently enter the human-support channel.</summary>
+        public Task<(byte[] Content, string ContentType, string FileName)> DownloadSupportAttachmentAsync(string supportNumber, string attachmentId, CancellationToken ct = default) => throw new NotImplementedException();
     }
 
     private sealed class CaptureHttpHandler : HttpMessageHandler

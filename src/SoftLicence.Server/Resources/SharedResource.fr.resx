@@ -574,4 +574,44 @@
   <data name="Layout_AdminConsole" xml:space="preserve"><value>Administration Console</value></data>
   <data name="Layout_Settings" xml:space="preserve"><value>Paramètres</value></data>
   <data name="Layout_Logout" xml:space="preserve"><value>Déconnexion</value></data>
+  <data name="Decision_Unavailable" xml:space="preserve"><value>Faits de décision indisponibles ; aucun historique reconstruit.</value></data>
+  <data name="Decision_Unknown" xml:space="preserve"><value>Inconnu</value></data>
+  <data name="Decision_Time" xml:space="preserve"><value>Date du fait</value></data>
+  <data name="Decision_Phase" xml:space="preserve"><value>Phase productrice</value></data>
+  <data name="Decision_Reason" xml:space="preserve"><value>Motif canonique</value></data>
+  <data name="Decision_Request" xml:space="preserve"><value>Identifiant opération</value></data>
+  <data name="Decision_Correlation" xml:space="preserve"><value>Première corrélation HTTP observée</value></data>
+  <data name="Decision_Version" xml:space="preserve"><value>Version application</value></data>
+  <data name="Decision_Submitted" xml:space="preserve"><value>HWID soumis</value></data>
+  <data name="Decision_Resolved" xml:space="preserve"><value>HWID résolu par le serveur</value></data>
+  <data name="Decision_Correlated" xml:space="preserve"><value>HWID corrélé à titre observationnel</value></data>
+  <data name="Decision_Provenance" xml:space="preserve"><value>Provenance de résolution</value></data>
+  <data name="Decision_Observation" xml:space="preserve"><value>Garantie de l’observation</value></data>
+  <data name="Decision_Seats" xml:space="preserve"><value>Occupation observée / limite de postes</value></data>
+  <data name="Decision_Daily" xml:space="preserve"><value>Activations quotidiennes observées / limite (0 = illimité)</value></data>
+  <data name="Decision_ObservationNotice" xml:space="preserve"><value>Les faits décrivent la décision initiale, pas l’état actuel ni la réception par le client. hardware_lock_observation ne prouve pas une autorité globale entre HWID. Une identité inconnue ne prouve pas un autre ordinateur.</value></data>
+  <data name="Decision_Truncated" xml:space="preserve"><value>Seuls les 64 premiers postes actifs observés sont affichés ; le total couvre l’ensemble observé.</value></data>
+  <data name="Decision_Classification_expected_other_hwid_seat_limit" xml:space="preserve"><value>Refus attendu — autre HWID, limite de places atteinte</value></data>
+  <data name="Decision_Classification_refusal_observed" xml:space="preserve"><value>Refus observé — voir le motif canonique et les faits disponibles</value></data>
+  <data name="Decision_Classification_accepted" xml:space="preserve"><value>Décision d’activation acceptée</value></data>
+  <data name="Decision_Classification_indeterminate" xml:space="preserve"><value>Indéterminé — faits nécessaires indisponibles</value></data>
+  <data name="Licenses_ExtensionTitle" xml:space="preserve"><value>Prolonger la licence</value></data>
+  <data name="Licenses_ExtensionDays" xml:space="preserve"><value>Nombre de jours</value></data>
+  <data name="Licenses_ExtensionCurrent" xml:space="preserve"><value>Expiration actuelle</value></data>
+  <data name="Licenses_ExtensionPreview" xml:space="preserve"><value>Expiration prévisionnelle</value></data>
+  <data name="Licenses_ExtensionRange" xml:space="preserve"><value>Entier de 1 à 3 650 jours.</value></data>
+  <data name="Licenses_ExtensionClock" xml:space="preserve"><value>Si la licence est encore valide, les jours s’ajoutent à son expiration actuelle. Si elle est expirée, ils partent du clic sur Confirmer, selon l’horloge UTC du serveur. Un jour vaut exactement 24 heures.</value></data>
+  <data name="Licenses_ExtensionExpirationOutOfRange" xml:space="preserve"><value>Cette durée dépasse la date d’expiration maximale prise en charge. Réduisez le nombre de jours.</value></data>
+  <data name="Licenses_ExtensionReview" xml:space="preserve"><value>Vérifier avant confirmation</value></data>
+  <data name="Licenses_ExtensionConfirm" xml:space="preserve"><value>Confirmer la prolongation</value></data>
+  <data name="Licenses_ExtensionRetry" xml:space="preserve"><value>Vérifier / reprendre cette opération</value></data>
+  <data name="Licenses_ExtensionReference" xml:space="preserve"><value>Référence de l’opération</value></data>
+  <data name="Licenses_ExtensionInvalidDays" xml:space="preserve"><value>Saisissez un nombre entier de 1 à 3 650, sans signe, espace ni décimale.</value></data>
+  <data name="Licenses_ExtensionWouldShorten" xml:space="preserve"><value>Cette durée raccourcirait les droits existants. Annulez et choisissez une durée plus longue.</value></data>
+  <data name="Licenses_ExtensionUnauthorized" xml:space="preserve"><value>Votre session ne permet plus cette opération. Annulez et reconnectez-vous.</value></data>
+  <data name="Licenses_ExtensionConflict" xml:space="preserve"><value>La licence ou la confirmation a changé. Annulez et actualisez la liste avant de recommencer.</value></data>
+  <data name="Licenses_ExtensionNotFound" xml:space="preserve"><value>La licence n’existe plus. Annulez et actualisez la liste.</value></data>
+  <data name="Licenses_ExtensionIneligible" xml:space="preserve"><value>Cette licence est révoquée, inactive ou sans expiration fixe. Elle ne peut pas être prolongée ici.</value></data>
+  <data name="Licenses_ExtensionInconsistentPass" xml:space="preserve"><value>La licence et son registre Day Pass ne concordent pas. Aucune modification : une vérification est nécessaire.</value></data>
+  <data name="Licenses_ExtensionUnknown" xml:space="preserve"><value>Le résultat n’a pas pu être confirmé. Vérifiez ou reprenez la même opération avec le bouton ci-dessous. Ne créez pas une nouvelle prolongation.</value></data>
 </root>

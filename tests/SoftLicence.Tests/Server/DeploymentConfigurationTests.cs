@@ -75,6 +75,63 @@ public sealed class DeploymentConfigurationTests
         Assert.DoesNotContain("PUBLIC KEY-----", compose, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Requires both startup roles to receive every authority-generation setting without embedded key material.
+    /// </summary>
+    [Fact]
+    public void DockerCompose_WiresAuthorityGenerationV2ContractToMigratorAndServer()
+    {
+        var compose = ReadProjectFile("Docker/docker-compose.yml");
+        var migratorStart = compose.IndexOf("\n  migrator:", StringComparison.Ordinal);
+        var serverStart = compose.IndexOf("\n  server:", StringComparison.Ordinal);
+        Assert.True(migratorStart >= 0);
+        Assert.True(serverStart > migratorStart);
+
+        var names = new List<string>
+        {
+            "RuntimeEnrollment__AuthorityGenerationSigning__ActiveSigningKeyId",
+            "RuntimeEnrollment__AuthorityGenerationSigning__RegistrySnapshotId",
+            "RuntimeEnrollment__AuthorityGenerationSigning__RegistrySnapshotVersion",
+            "RuntimeEnrollment__AuthorityGenerationV2__Mode",
+            "RuntimeEnrollment__AuthorityGenerationV2__RegistryAuthoritySpkiBase64",
+            "RuntimeEnrollment__AuthorityGenerationV2__RegistrySnapshotSignatureBase64Url",
+            "RuntimeEnrollment__AuthorityGenerationV2__RegistryObservedAtUtc"
+        };
+        for (var index = 0; index < 3; index++)
+        {
+            names.Add($"RuntimeEnrollment__AuthorityGenerationSigning__Keys__{index}__KeyId");
+            names.Add($"RuntimeEnrollment__AuthorityGenerationSigning__Keys__{index}__Purpose");
+            names.Add($"RuntimeEnrollment__AuthorityGenerationSigning__Keys__{index}__Domain");
+            names.Add($"RuntimeEnrollment__AuthorityGenerationSigning__Keys__{index}__ContractVersion");
+            names.Add($"RuntimeEnrollment__AuthorityGenerationSigning__Keys__{index}__Status");
+            names.Add($"RuntimeEnrollment__AuthorityGenerationSigning__Keys__{index}__PublicKeyPem");
+            names.Add($"RuntimeEnrollment__AuthorityGenerationSigning__Keys__{index}__PrivateKeyPem");
+            names.Add($"RuntimeEnrollment__AuthorityGenerationSigning__Keys__{index}__ActivatedAtUtc");
+            names.Add($"RuntimeEnrollment__AuthorityGenerationSigning__Keys__{index}__RetiredAtUtc");
+            names.Add($"RuntimeEnrollment__AuthorityGenerationSigning__Keys__{index}__RevokedAtUtc");
+            names.Add($"RuntimeEnrollment__AuthorityGenerationSigning__Keys__{index}__RevocationReason");
+            names.Add($"RuntimeEnrollment__AuthorityGenerationSigning__Keys__{index}__CompromiseFromUtc");
+        }
+
+        foreach (var name in names)
+        {
+            var defaultValue =
+                name.EndsWith("AuthorityGenerationV2__Mode", StringComparison.Ordinal) ? "off" :
+                name.EndsWith("RegistrySnapshotVersion", StringComparison.Ordinal) ? "0" :
+                name.EndsWith("ContractVersion", StringComparison.Ordinal) ? "2" :
+                name.EndsWith("ActivatedAtUtc", StringComparison.Ordinal)
+                    ? "0001-01-01T00:00:00.0000000+00:00"
+                    : string.Empty;
+            var expected = $"- {name}=${{{name}:-{defaultValue}}}";
+            Assert.Equal(2, CountOrdinal(compose, expected));
+            Assert.Equal(1, CountOrdinal(compose[migratorStart..serverStart], expected));
+            Assert.Equal(1, CountOrdinal(compose[serverStart..], expected));
+        }
+
+        Assert.DoesNotContain("PRIVATE KEY-----", compose, StringComparison.Ordinal);
+        Assert.DoesNotContain("PUBLIC KEY-----", compose, StringComparison.Ordinal);
+    }
+
     [Fact]
     [Trait("Category", "PrivateRepository")]
     public void DeployScript_ValidatesAndVerifiesBootstrapPermissionWithoutPrintingValue()

@@ -125,7 +125,7 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
             || entitlement.ClientId != clientId
             || enrollment.ClientId != clientId
             || !bindingOwnedByClient
-            || entitlement.ContractVersion != 3
+            || !IsModernEntitlementContractVersion(entitlement.ContractVersion)
             || entitlement.State != "finalized"
             || entitlement.ExpiresAtUtc <= now.UtcDateTime
             || entitlement.ProductId != binding.ProductId
@@ -252,6 +252,9 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
         await lease.CommitAsync(cancellationToken);
         return new(response, false, responseBytes);
     }
+
+    /// <summary>Recognizes only persisted Distribution entitlement contracts with relational authority.</summary>
+    private static bool IsModernEntitlementContractVersion(int contractVersion) => contractVersion is 3 or 4;
 
     private DistributionLicenseBootstrapAuthorization NewAuthorization(
         string clientId, DistributionInstallationBinding binding, RuntimeEnrollment enrollment, DateTimeOffset now) => new()

@@ -263,12 +263,15 @@ public sealed class TelemetryActivationFailureRecord
 
 public sealed class TelemetryMachineProfileResponse
 {
+    /// <summary>Closed reasons why this bounded evidence cannot establish absence outside its rows.</summary>
+    public List<string> IncompleteReasons { get; set; } = new();
     public DateTime GeneratedAtUtc { get; set; } = DateTime.UtcNow;
     public bool Cached { get; set; }
     public DateTime ExpiresAtUtc { get; set; }
     public int Days { get; set; }
     public string HardwareId { get; set; } = "";
     public int RecordsAnalyzed { get; set; }
+    public bool Complete { get; set; }
     public int RealActivityEvents { get; set; }
     public int SystemNoiseEvents { get; set; }
     public DateTime? FirstActivityUtc { get; set; }
@@ -532,6 +535,10 @@ public sealed class TelemetrySupportUsageMetric
 
 public sealed class SecurityBanAuditResponse
 {
+    /// <summary>True only when exact identity discovery and returned ban evidence are exhaustive.</summary>
+    public bool Complete { get; set; }
+    /// <summary>Closed evidence bounds reached while collecting this response.</summary>
+    public List<string> IncompleteReasons { get; set; } = new();
     public DateTime GeneratedAtUtc { get; set; } = DateTime.UtcNow;
     public SecurityBanAuditQuery Query { get; set; } = new();
     public int RecordsMatched { get; set; }
@@ -550,6 +557,7 @@ public sealed class SecurityBanAuditQuery
     public bool HasLicenseFragment { get; set; }
     public bool IncludeInactive { get; set; }
     public bool IncludeSourceEvents { get; set; }
+    public bool ExactHardwareId { get; set; }
     public int Take { get; set; }
 }
 
@@ -563,6 +571,7 @@ public sealed class SecurityBanAuditItem
     public DateTime BannedAtUtc { get; set; }
     public DateTime? ExpiresAtUtc { get; set; }
     public string? HardwareId { get; set; }
+    public List<string> CorrelatedHardwareIds { get; set; } = new();
     public string? ComponentType { get; set; }
     public string? ComponentHash { get; set; }
     public string? ComponentHashRedacted { get; set; }
@@ -725,6 +734,7 @@ public sealed class TelemetryInsightItem
     public string Title { get; set; } = "";
     public string Summary { get; set; } = "";
     public int Count { get; set; }
+    public int UniqueDevices { get; set; }
     public double? Score { get; set; }
     public DateTime? FirstSeenUtc { get; set; }
     public DateTime? LastSeenUtc { get; set; }

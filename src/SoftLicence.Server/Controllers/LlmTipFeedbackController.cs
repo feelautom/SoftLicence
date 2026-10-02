@@ -87,14 +87,14 @@ public sealed class LlmTipFeedbackController : ControllerBase
         [FromQuery] int take = 50,
         CancellationToken cancellationToken = default)
     {
-        var auth = await _apiKeyAuth.ValidateAsync(
-            analyticsKey ?? "",
+        var auth = await _apiKeyAuth.ValidateForRequestAsync(
+            HttpContext,
+            analyticsKey,
             AnalyticsApiKeyScopes.TelemetryRead,
-            HttpContext.Connection.RemoteIpAddress?.ToString(),
             cancellationToken);
 
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
         if (!auth.ProductId.HasValue)
             return StatusCode(StatusCodes.Status403Forbidden, new
             {
@@ -133,7 +133,7 @@ public sealed class LlmTipFeedbackController : ControllerBase
     {
         var auth = await AuthenticateAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
         var resolvedProduct = await ResolveProductAsync(auth, productId, productName, cancellationToken);
         if (resolvedProduct.Error != null)
             return resolvedProduct.Error;
@@ -176,7 +176,7 @@ public sealed class LlmTipFeedbackController : ControllerBase
     {
         var auth = await AuthenticateAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
         var resolvedProduct = await ResolveProductAsync(auth, productId, productName, cancellationToken);
         if (resolvedProduct.Error != null)
             return resolvedProduct.Error;
@@ -203,7 +203,7 @@ public sealed class LlmTipFeedbackController : ControllerBase
     {
         var auth = await AuthenticateAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
         var resolvedProduct = await ResolveProductAsync(auth, productId, productName, cancellationToken);
         if (resolvedProduct.Error != null)
             return resolvedProduct.Error;
@@ -246,7 +246,7 @@ public sealed class LlmTipFeedbackController : ControllerBase
     {
         var auth = await AuthenticateAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
         var resolvedProduct = await ResolveProductAsync(auth, productId, productName, cancellationToken);
         if (resolvedProduct.Error != null)
             return resolvedProduct.Error;
@@ -277,7 +277,7 @@ public sealed class LlmTipFeedbackController : ControllerBase
     {
         var auth = await AuthenticateAsync(analyticsKey, cancellationToken);
         if (auth == null)
-            return Unauthorized("Missing or invalid X-Analytics-Key header.");
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
         if (!auth.ProductId.HasValue)
             return StatusCode(StatusCodes.Status403Forbidden, new
             {
@@ -313,10 +313,10 @@ public sealed class LlmTipFeedbackController : ControllerBase
         string? analyticsKey,
         CancellationToken cancellationToken)
     {
-        return await _apiKeyAuth.ValidateAsync(
-            analyticsKey ?? "",
+        return await _apiKeyAuth.ValidateForRequestAsync(
+            HttpContext,
+            analyticsKey,
             AnalyticsApiKeyScopes.TelemetryRead,
-            HttpContext.Connection.RemoteIpAddress?.ToString(),
             cancellationToken);
     }
 

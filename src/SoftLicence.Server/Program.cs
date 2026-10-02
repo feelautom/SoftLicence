@@ -55,15 +55,18 @@ builder.Services.AddRateLimiter(options =>
         context.HttpContext.Response.ContentType = "application/json";
         context.HttpContext.Response.Headers.RetryAfter = retryAfterSeconds.ToString();
         if (context.HttpContext.Request.Path.StartsWithSegments("/api/v1/runtime-enrollments")
-            || context.HttpContext.Request.Path.StartsWithSegments("/api/internal/v1/runtime-enrollments"))
+            || context.HttpContext.Request.Path.StartsWithSegments("/api/internal/v1/runtime-enrollments")
+            || context.HttpContext.Request.Path.StartsWithSegments("/api/internal/v1/runtime-seat-recovery-authorizations")
+            || context.HttpContext.Request.Path.StartsWithSegments("/api/internal/v2/runtime-enrollment-authority"))
         {
             context.HttpContext.Response.Headers.CacheControl = "no-store, max-age=0";
             context.HttpContext.Response.Headers.Pragma = "no-cache";
         }
 
-        await context.HttpContext.Response.WriteAsJsonAsync(
-            new { error = "rate_limited", retryAfterSeconds },
-            cancellationToken);
+        var response = context.HttpContext.Request.Path.StartsWithSegments("/api/bugtrace/auto-report")
+            ? new { errorCode = "rate_limited", retryAfterSeconds }
+            : (object)new { error = "rate_limited", retryAfterSeconds };
+        await context.HttpContext.Response.WriteAsJsonAsync(response, cancellationToken);
     };
 
     // Politique pour l'activation client (Stricte) — IPs privées exemptées
@@ -141,6 +144,34 @@ builder.Services.AddRateLimiter(options =>
             new FixedWindowRateLimiterOptions
             {
                 PermitLimit = key == "__unlimited__" ? 10000 : 30,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst
+            }));
+
+    // Human SUP traffic has its own 30/minute IP boundary, including private networks.
+    // The legacy policy remains unchanged; per-licence atomic quotas run after authentication.
+    // Missing remote addresses share the unknown bucket; there is no queue or private-IP bypass.
+    // Rejections use the shared safe 429 response. Callbacks only select that bucket and options.
+    options.AddPolicy("BugTraceSupportAPI", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 30,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst
+            }));
+
+    // Automatic reports are bounded for every source address, including private networks. A
+    // second per-license limiter runs only after authoritative license recognition.
+    options.AddPolicy("BugTraceAutoReportAPI", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0,
                 QueueProcessingOrder = QueueProcessingOrder.OldestFirst
@@ -232,6 +263,13 @@ builder.Services.AddScoped<SoftLicence.Server.Services.IDistributionS2SAuthentic
     SoftLicence.Server.Services.DistributionS2SAuthenticationService>();
 builder.Services.AddScoped<SoftLicence.Server.Services.IDistributionInstallationBindingService,
     SoftLicence.Server.Services.DistributionInstallationBindingService>();
+// Keep raw machine observations inside a request-scoped provider authority and outside durable bindings.
+builder.Services.AddScoped<SoftLicence.Server.Services.IRuntimeDistributionPreflightService,
+    SoftLicence.Server.Services.RuntimeDistributionPreflightService>();
+builder.Services.AddScoped<SoftLicence.Server.Services.IFinalizeAuthorityPairResolver,
+    SoftLicence.Server.Services.FinalizeAuthorityPairResolver>();
+builder.Services.AddScoped<SoftLicence.Server.Services.IPortalDeactivationService,
+    SoftLicence.Server.Services.PortalDeactivationService>();
 builder.Services.AddSingleton<Microsoft.Extensions.Options.IValidateOptions<SoftLicence.Server.Services.RuntimeEnrollmentOptions>,
     SoftLicence.Server.Services.RuntimeEnrollmentOptionsValidator>();
 builder.Services.AddOptions<SoftLicence.Server.Services.RuntimeEnrollmentOptions>()
@@ -247,8 +285,18 @@ builder.Services.AddSingleton<SoftLicence.Server.Services.ICanaryAckKeyring,
 builder.Services.AddSingleton<SoftLicence.Server.Services.ICanaryAckKeyRegistryService,
     SoftLicence.Server.Services.CanaryAckKeyRegistryService>();
 builder.Services.AddHostedService<SoftLicence.Server.Services.CanaryAckKeyRegistryStartupValidator>();
-builder.Services.AddSingleton<SoftLicence.Server.Services.IRuntimeEnrollmentAuthorityService,
-    SoftLicence.Server.Services.RuntimeEnrollmentAuthorityService>();
+builder.Services.AddSingleton<SoftLicence.Server.Services.RuntimeEnrollmentAuthorityService>();
+builder.Services.AddSingleton<SoftLicence.Server.Services.IRuntimeEnrollmentAuthorityService>(provider =>
+    provider.GetRequiredService<SoftLicence.Server.Services.RuntimeEnrollmentAuthorityService>());
+builder.Services.AddSingleton<SoftLicence.Server.Services.RuntimeEnrollmentAuthorityV2Coordinator>();
+builder.Services.AddScoped<SoftLicence.Server.Services.IRuntimeAuthorityKeyRegistrySnapshotService,
+    SoftLicence.Server.Services.RuntimeAuthorityKeyRegistrySnapshotService>();
+builder.Services.AddScoped<SoftLicence.Server.Services.IRuntimeSeatRecoveryAuthorizationService,
+    SoftLicence.Server.Services.RuntimeSeatRecoveryAuthorizationService>();
+// TKT-000782 keeps provider ownership commands transaction-scoped and separate from recovery orchestration.
+builder.Services.AddScoped<SoftLicence.Server.Services.IRuntimeRecoveryCommercialOwnershipCommandService,
+    SoftLicence.Server.Services.RuntimeRecoveryCommercialOwnershipCommandService>();
+builder.Services.AddScoped<SoftLicence.Server.Services.RuntimeSeatRecoverySeatClaimCryptography>();
 builder.Services.AddSingleton<SoftLicence.Server.Services.IRuntimeEnrollmentCryptoService,
     SoftLicence.Server.Services.RuntimeEnrollmentCryptoService>();
 builder.Services.AddScoped<SoftLicence.Server.Services.IRuntimeEnrollmentService,
@@ -260,7 +308,10 @@ builder.Services.AddSingleton<SoftLicence.Server.Services.IRuntimeEnrollmentKeyR
     SoftLicence.Server.Services.RuntimeEnrollmentKeyRegistryService>();
 builder.Services.AddHostedService<SoftLicence.Server.Services.RuntimeEnrollmentKeyRegistryStartupValidator>();
 builder.Services.AddHostedService<SoftLicence.Server.Services.RuntimeEnrollmentCleanupService>();
+builder.Services.AddSingleton<SoftLicence.Server.Services.PersonalDayPassSeatMaterializationService>();
+builder.Services.AddHostedService(provider => provider.GetRequiredService<SoftLicence.Server.Services.PersonalDayPassSeatMaterializationService>());
 builder.Services.AddScoped<SoftLicence.Server.Services.CanaryAckService>(); // Reçus canaris signés et anti-rejeu
+builder.Services.AddScoped<SoftLicence.Server.Services.SecurityLocks.SecurityLockAdminService>(); // Décisions admin sur les verrous (TKT-001177)
 builder.Services.AddScoped<SoftLicence.Server.Services.EncryptionService>(); // Chiffrement des clés
 builder.Services.AddScoped<SoftLicence.Server.Services.ISignedLicenseFileService,
     SoftLicence.Server.Services.SignedLicenseFileService>();
@@ -280,6 +331,8 @@ builder.Services.AddSingleton<SoftLicence.Server.Services.GeoIpService>(); // In
 builder.Services.AddTransient<SoftLicence.Server.Services.EmailService>();
 builder.Services.AddSingleton<SoftLicence.Server.Services.AuditNotifier>(); // Push temps réel audit logs
 builder.Services.AddSingleton<SoftLicence.Server.Services.NotificationService>(); // Webhooks & Alertes
+builder.Services.AddSingleton<SoftLicence.Server.Services.SecurityLockAlertOutboxProcessor>();
+builder.Services.AddHostedService<SoftLicence.Server.Services.SecurityLockAlertOutboxWorker>();
 builder.Services.AddTransient<SoftLicence.Server.Services.StatsService>(); // Stats
 builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryAnalyticsService>(); // Telemetry Analytics
 builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryOverviewAnalyticsService>(); // Telemetry overview analytics
@@ -307,6 +360,7 @@ builder.Services.AddTransient<SoftLicence.Server.Services.LicenseSeatConsistency
 builder.Services.AddTransient<SoftLicence.Server.Services.LicenseHardwareVerifierAnalyticsService>(); // Authoritative license/HWID verifier for server-to-server consumers
 builder.Services.AddTransient<SoftLicence.Server.Services.FreemiumAbuseRiskAnalyticsService>(); // Freemium group abuse risk analytics
 builder.Services.AddTransient<SoftLicence.Server.Services.AnalyticsApiKeyAuthService>(); // Analytics/MCP API key auth
+builder.Services.AddTransient<SoftLicence.Server.Services.RecoveryTelemetryAnalyticsService>(); // Product-scoped Recovery support analytics
 builder.Services.AddTransient<SoftLicence.Server.Services.LlmTipFeedbackService>(); // LLM tips feedback dedicated ingestion
 builder.Services.AddTransient<SoftLicence.Server.Services.SecurityBanAuditAnalyticsService>(); // Security ban read-only audit analytics
 builder.Services.AddTransient<SoftLicence.Server.Services.SecurityCanaryAnalyticsService>(); // Canary security analytics
@@ -314,18 +368,31 @@ builder.Services.AddScoped<SoftLicence.Server.Services.SecurityIncidentService>(
 builder.Services.AddTransient<SoftLicence.Server.Services.SecurityCaseContextService>(); // Shared securityCaseId and redacted enrichment context
 builder.Services.AddTransient<SoftLicence.Server.Services.CertPinningBugTraceAlertService>(); // Auto BugTrace tickets for cert pinning alerts
 builder.Services.AddTransient<SoftLicence.Server.Services.CertPinningDailyAlertService>(); // Persistent daily ntfy dedupe for cert pinning alerts
+builder.Services.AddTransient<SoftLicence.Server.Services.UpdatePreflightFailureAlertService>(); // Persistent 30-minute UPD shell alert aggregation
 builder.Services.AddTransient<SoftLicence.Server.Services.FreemiumAbuseBugTraceAlertService>(); // Auto BugTrace tickets for Freemium abuse risk alerts
 builder.Services.AddScoped<SoftLicence.Server.Services.TelemetryService>(); // Télémétrie
 builder.Services.AddScoped<SoftLicence.Server.Services.TelemetryRejectionService>();
+builder.Services.AddScoped<SoftLicence.Server.Services.RecoveryTelemetryService>(); // Strict Recovery v1 ingestion and FSM
 builder.Services.AddScoped<SoftLicence.Server.Services.ActivationIncidentService>();
 builder.Services.AddScoped<SoftLicence.Server.Services.FingerprintService>(); // Hardware Fingerprints
 builder.Services.AddScoped<SoftLicence.Server.Services.SeatCleanupService>(); // Enforcement un HWID par produit
 builder.Services.AddTransient<SoftLicence.Server.Services.PiracyDetectionService>(); // Détection piratage
+// One process-wide quota ledger makes concurrent SUP reservations atomic; restart clears the
+// fixed windows. Multi-replica deployment requires a shared authority before this policy scales.
+builder.Services.AddSingleton<SoftLicence.Server.Services.BugTraceSupportQuota>(); // Atomic bounded SUP admission
+// The proxy retains server-only configuration; named HTTP handlers forbid redirects, cookies
+// and decompression. Controllers remain responsible for product, reporter and case ownership.
 builder.Services.AddSingleton<SoftLicence.Server.Services.IBugTraceProxyService, SoftLicence.Server.Services.BugTraceProxyService>(); // Proxy BugTrace
+// Automatic reports use a dedicated identified capability and durable outbox; support lifecycle endpoints remain separate.
+builder.Services.AddSingleton<SoftLicence.Server.Services.IBugTraceAutoReportService,
+    SoftLicence.Server.Services.BugTraceAutoReportService>();
+builder.Services.AddHostedService<SoftLicence.Server.Services.BugTraceAutoReportOutboxWorker>();
 builder.Services.AddTransient<SoftLicence.Server.Services.AiAnalysisService>(); // Analyse IA télémétrie
 builder.Services.AddHostedService<SoftLicence.Server.Services.CleanupService>(); // Nettoyage Automatique
 builder.Services.Configure<SoftLicence.Server.Services.SmtpSettings>(builder.Configuration.GetSection("SmtpSettings"));
 builder.Services.AddHttpClient(); // Pour GeoIP et Webhooks
+builder.Services.AddHttpClient("BugTrace")
+    .ConfigurePrimaryHttpMessageHandler(SoftLicence.Server.Services.BugTraceProxyService.CreateHttpMessageHandler);
 
 // Database Configuration
 builder.Services.AddSoftLicenceDatabase(builder.Configuration);
@@ -351,13 +418,19 @@ app.UseForwardedHeaders(new ForwardedHeadersOptions
 app.Use(async (context, next) =>
 {
     if (context.Request.Path.StartsWithSegments("/api/v1/runtime-enrollments")
-        || context.Request.Path.StartsWithSegments("/api/internal/v1/runtime-enrollments"))
+        || context.Request.Path.StartsWithSegments("/api/internal/v1/runtime-enrollments")
+        || context.Request.Path.StartsWithSegments("/api/internal/v1/runtime-seat-recovery-authorizations")
+        || context.Request.Path.StartsWithSegments("/api/internal/v2/runtime-enrollment-authority"))
     {
         context.Response.Headers.CacheControl = "no-store, max-age=0";
         context.Response.Headers.Pragma = "no-cache";
     }
     await next(context);
 });
+
+// Recovery owns a strict two-field response schema even when routing, throttling,
+// or a downstream failure answers before/after its controller.
+app.UseMiddleware<SoftLicence.Server.Middlewares.RecoveryTelemetryResponseEnvelopeMiddleware>();
 
 app.UseRateLimiter();
 

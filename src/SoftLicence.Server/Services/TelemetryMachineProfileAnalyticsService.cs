@@ -13,6 +13,7 @@ public sealed class TelemetryMachineProfileAnalyticsService
     private const int MaxTop = 100;
     private const int DefaultTake = 25;
     private const int MaxTake = 50;
+    private const int MaxExactTake = 1000;
     private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(60);
 
     private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
@@ -30,11 +31,12 @@ public sealed class TelemetryMachineProfileAnalyticsService
         int days = DefaultDays,
         int top = DefaultTop,
         int take = DefaultTake,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool requireComplete = false)
     {
         days = Math.Clamp(days, 1, MaxDays);
         top = Math.Clamp(top, 1, MaxTop);
-        take = Math.Clamp(take, 1, MaxTake);
+        take = Math.Clamp(take, 1, requireComplete ? MaxExactTake : MaxTake);
         hardwareId = hardwareId.Trim();
 
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
@@ -47,7 +49,8 @@ public sealed class TelemetryMachineProfileAnalyticsService
         if (product == null)
             return null;
 
-        return await GetMachineProfileForProductIdAsync(product.Id, hardwareId, days, top, take, cancellationToken);
+        return await GetMachineProfileForProductIdAsync(
+            product.Id, hardwareId, days, top, take, cancellationToken, requireComplete);
     }
 
     public async Task<TelemetryMachineProfileResponse> GetMachineProfileForProductIdAsync(
@@ -56,16 +59,18 @@ public sealed class TelemetryMachineProfileAnalyticsService
         int days = DefaultDays,
         int top = DefaultTop,
         int take = DefaultTake,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool requireComplete = false,
+        bool allowPartial = false)
     {
         days = Math.Clamp(days, 1, MaxDays);
         top = Math.Clamp(top, 1, MaxTop);
-        take = Math.Clamp(take, 1, MaxTake);
+        take = Math.Clamp(take, 1, requireComplete ? MaxExactTake : MaxTake);
         hardwareId = hardwareId.Trim();
 
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
 
-        var cacheKey = $"telemetry-machine-profile:{productId:N}:{hardwareId.ToLowerInvariant()}:{days}:{top}:{take}";
+        var cacheKey = $"telemetry-machine-profile:{productId:N}:{hardwareId}:{days}:{top}:{take}:{requireComplete}:{allowPartial}";
         if (_cache.TryGetValue(cacheKey, out TelemetryMachineProfileResponse? cached) && cached != null)
         {
             cached.Cached = true;
@@ -74,10 +79,11 @@ public sealed class TelemetryMachineProfileAnalyticsService
 
         var productScopeIds = await ProductScopeResolver.ResolveProductScopeIdsAsync(db, productId, cancellationToken);
         var since = DateTime.UtcNow.AddDays(-days);
-        var rows = await db.TelemetryRecords.AsNoTracking()
+        var rowsQuery = db.TelemetryRecords.AsNoTracking()
             .Where(r => r.ProductId.HasValue && productScopeIds.Contains(r.ProductId.Value)
                 && r.HardwareId == hardwareId
                 && r.Timestamp >= since)
+            .OrderByDescending(r => r.Timestamp)
             .Select(r => new MachineTelemetryRow(
                 r.Timestamp,
                 r.Type,
@@ -86,8 +92,13 @@ public sealed class TelemetryMachineProfileAnalyticsService
                 r.Version,
                 r.EventData != null ? r.EventData.PropertiesJson : null,
                 r.ErrorData != null ? r.ErrorData.ErrorType : null,
-                r.DiagnosticData != null ? r.DiagnosticData.Score : null))
+                r.DiagnosticData != null ? r.DiagnosticData.Score : null));
+        var rows = await (requireComplete ? rowsQuery.Take(take + 1) : rowsQuery)
             .ToListAsync(cancellationToken);
+        if (requireComplete && rows.Count > take && !allowPartial)
+            throw new InvalidOperationException("The exact machine-profile snapshot exceeds its complete row bound.");
+        var truncated = requireComplete && rows.Count > take;
+        if (truncated) rows = rows.Take(take).ToList();
 
         var recent = rows
             .OrderByDescending(r => r.Timestamp)
@@ -117,6 +128,8 @@ public sealed class TelemetryMachineProfileAnalyticsService
             Days = days,
             HardwareId = hardwareId,
             RecordsAnalyzed = rows.Count,
+            Complete = !truncated && rows.Count <= take,
+            IncompleteReasons = truncated ? ["machine_profile_row_limit"] : [],
             RealActivityEvents = rows.Count(r => r.Type == TelemetryType.Event && TelemetrySchemaRegistry.IsRealUserActivityEvent(r.EventName)),
             SystemNoiseEvents = rows.Count(r => r.Type == TelemetryType.Event && TelemetrySchemaRegistry.IsSystemNoiseEvent(r.EventName)),
             FirstActivityUtc = rows.Count == 0 ? null : rows.Min(r => r.Timestamp),

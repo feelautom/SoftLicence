@@ -9,6 +9,91 @@ namespace SoftLicence.Tests.Server;
 public sealed class SecurityBanAuditAnalyticsServiceTests
 {
     [Fact]
+    public async Task ListBans_WhenExactResultExceedsBound_FailsClosed()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        SqliteFullModelHarness.RegisterConnection(connection);
+        var options = new DbContextOptionsBuilder<LicenseDbContext>()
+            .UseSqlite(connection)
+            .AddInterceptors(SqliteFullModelHarness.ConnectionInterceptor, SqliteFullModelHarness.CommandInterceptor)
+            .Options;
+        var productId = Guid.NewGuid();
+        const string hardwareId = "HW-EXACT-OVERFLOW";
+        await using (var db = new LicenseDbContext(options))
+        {
+            await db.Database.EnsureCreatedAsync();
+            db.Products.Add(new Product
+            {
+                Id = productId, Name = "TIAConnect", PrivateKeyXml = "test-private-key",
+                PublicKeyXml = "test-public-key", ApiSecret = "test-api-secret"
+            });
+            var hashes = Enumerable.Range(1, 101).Select(index => index.ToString("x64")).ToArray();
+            db.BannedComponents.AddRange(hashes.Select((hash, index) => new BannedComponent
+            {
+                Id = Guid.NewGuid(), ProductId = productId, ComponentType = "FP_EXE",
+                ComponentHash = hash, Reason = $"Exact overflow fixture {index}"
+            }));
+            db.TelemetryRecords.AddRange(hashes.Select(hash =>
+                CreateFingerprintEvent(productId, hardwareId, hash)));
+            await db.SaveChangesAsync();
+        }
+        var service = new SecurityBanAuditAnalyticsService(new TestDbContextFactory(options));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ListBansForProductIdAsync(
+            productId, hardwareId, componentHash: null, componentType: null, clientIp: null,
+            emailFragment: null, licenseFragment: null, includeInactive: true,
+            includeSourceEvents: false, take: 100, exactHardwareId: true));
+    }
+
+    [Fact]
+    public async Task ListBans_WhenCombinedExactBanKindsExceedBound_FailsClosed()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        SqliteFullModelHarness.RegisterConnection(connection);
+        var options = new DbContextOptionsBuilder<LicenseDbContext>()
+            .UseSqlite(connection)
+            .AddInterceptors(SqliteFullModelHarness.ConnectionInterceptor, SqliteFullModelHarness.CommandInterceptor)
+            .Options;
+        var productId = Guid.NewGuid();
+        const string hardwareId = "HW-COMBINED-OVERFLOW";
+        var componentHashes = Enumerable.Range(1, 100)
+            .Select(index => index.ToString("x64"))
+            .ToArray();
+
+        await using (var db = new LicenseDbContext(options))
+        {
+            await db.Database.EnsureCreatedAsync();
+            db.Products.Add(new Product
+            {
+                Id = productId, Name = "TIAConnect", PrivateKeyXml = "test-private-key",
+                PublicKeyXml = "test-public-key", ApiSecret = "test-api-secret"
+            });
+            db.BannedHardwareIds.Add(new BannedHardwareId
+            {
+                Id = Guid.NewGuid(), ProductId = productId, HardwareId = hardwareId,
+                Reason = "Combined hardware fixture"
+            });
+            db.BannedComponents.AddRange(componentHashes.Select((hash, index) => new BannedComponent
+            {
+                Id = Guid.NewGuid(), ProductId = productId, ComponentType = "FP_EXE",
+                ComponentHash = hash, Reason = $"Combined component fixture {index}"
+            }));
+            db.TelemetryRecords.AddRange(componentHashes.Select(hash =>
+                CreateFingerprintEvent(productId, hardwareId, hash)));
+            await db.SaveChangesAsync();
+        }
+
+        var service = new SecurityBanAuditAnalyticsService(new TestDbContextFactory(options));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ListBansForProductIdAsync(
+            productId, hardwareId, componentHash: null, componentType: null, clientIp: null,
+            emailFragment: null, licenseFragment: null, includeInactive: true,
+            includeSourceEvents: false, take: 100, exactHardwareId: true));
+    }
+
+    [Fact]
     public async Task ListBans_WhenExactHashUsesDifferentCase_IncludesTargetAndCorrelatedBans()
     {
         const string hardwareId = "HW-RELATIONAL-HASH";
@@ -18,9 +103,11 @@ public sealed class SecurityBanAuditAnalyticsServiceTests
 
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
+        SqliteFullModelHarness.RegisterConnection(connection);
 
         var options = new DbContextOptionsBuilder<LicenseDbContext>()
             .UseSqlite(connection)
+            .AddInterceptors(SqliteFullModelHarness.ConnectionInterceptor, SqliteFullModelHarness.CommandInterceptor)
             .Options;
 
         var productId = Guid.NewGuid();
@@ -43,6 +130,17 @@ public sealed class SecurityBanAuditAnalyticsServiceTests
             db.TelemetryRecords.AddRange(
                 CreateFingerprintEvent(productId, hardwareId, targetHash),
                 CreateFingerprintEvent(productId, hardwareId, relatedHash));
+            db.TelemetryRecords.AddRange(Enumerable.Range(0, 501).Select(index => new TelemetryRecord
+            {
+                ProductId = productId,
+                HardwareId = hardwareId,
+                AppName = "TIAConnect",
+                Version = "2.1.839",
+                EventName = "Heartbeat",
+                Type = TelemetryType.Event,
+                Timestamp = DateTime.UtcNow.AddDays(-1).AddSeconds(index),
+                EventData = new TelemetryEvent { PropertiesJson = "{}" }
+            }));
             db.BannedHardwareIds.Add(new BannedHardwareId
             {
                 Id = hardwareBanId,
@@ -97,6 +195,18 @@ public sealed class SecurityBanAuditAnalyticsServiceTests
         Assert.Contains(result.Bans, ban => ban.BanId == targetBanId);
         Assert.Contains(result.Bans, ban => ban.BanId == relatedBanId);
         Assert.DoesNotContain(result.Bans, ban => ban.BanId == unrelatedBanId);
+
+        var exact = await service.ListBansForProductIdAsync(
+            productId, hardwareId, componentHash: null, componentType: null, clientIp: null,
+            emailFragment: null, licenseFragment: null, includeInactive: true,
+            includeSourceEvents: false, take: 10, exactHardwareId: true);
+
+        Assert.True(exact.Query.ExactHardwareId);
+        Assert.Contains(exact.Bans, ban => ban.BanId == targetBanId
+            && ban.CorrelatedHardwareIds.SequenceEqual([hardwareId]));
+        Assert.Contains(exact.Bans, ban => ban.BanId == relatedBanId
+            && ban.CorrelatedHardwareIds.SequenceEqual([hardwareId]));
+        Assert.DoesNotContain(exact.Bans, ban => ban.BanId == unrelatedBanId);
     }
 
     private static TelemetryRecord CreateFingerprintEvent(Guid productId, string hardwareId, string hash) =>
@@ -108,6 +218,7 @@ public sealed class SecurityBanAuditAnalyticsServiceTests
             Version = "2.1.839",
             EventName = "Startup_AppStarted",
             Type = TelemetryType.Event,
+            Timestamp = DateTime.UtcNow,
             EventData = new TelemetryEvent
             {
                 PropertiesJson = $$"""{"FP_EXE":"{{hash}}"}"""
