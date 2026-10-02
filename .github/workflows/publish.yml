@@ -17,9 +17,6 @@ permissions:
 jobs:
   test-and-publish:
     runs-on: windows-latest
-    env:
-      # Self-hosted Windows runners may not have write access to Program Files.
-      DOTNET_INSTALL_DIR: ${{ runner.temp }}\.dotnet
 
     steps:
       - uses: actions/checkout@v7
@@ -29,6 +26,10 @@ jobs:
         run: ./scripts/Test-TrackedSecrets.ps1
 
       - name: Setup .NET
+        # Self-hosted Windows runners may not have write access to Program Files. Declared on the
+        # step: GitHub rejects the runner context in job-level env and refuses the whole workflow.
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}\.dotnet
         uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '9.0.x'
