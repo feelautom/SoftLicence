@@ -1,1 +1,2 @@
 tests/SoftLicence.Tests/TestData/recovery-telemetry-v1.corpus.json text eol=lf
+tests/SoftLicence.Tests/TestData/runtime-enrollment-v2-reference-vectors.json text eol=lf
