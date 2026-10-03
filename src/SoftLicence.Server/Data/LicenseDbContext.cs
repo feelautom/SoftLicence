@@ -1301,7 +1301,7 @@ namespace SoftLicence.Server.Data
                         OR ("LinkStatus" = 'UNLINKED' AND "LinkVerifiedAtUtc" IS NOT NULL AND "LinkAssignmentId" IS NULL AND "LinkLicenseSeatId" IS NULL AND "LinkAliasId" IS NULL AND "LinkReasonCode" IN ('enrollment_mismatch','assignment_missing','assignment_ambiguous','assignment_relation_missing','hardware_unlinked','alias_ambiguous'))
                         OR ("LinkStatus" = 'VERIFIED_SEAT' AND "LinkVerifiedAtUtc" IS NOT NULL AND "LinkAssignmentId" IS NOT NULL AND "LinkLicenseSeatId" IS NOT NULL AND "LinkAliasId" IS NULL AND "LinkReasonCode" IS NULL)
                         OR ("LinkStatus" = 'VERIFIED_ALIAS' AND "LinkVerifiedAtUtc" IS NOT NULL AND "LinkAssignmentId" IS NOT NULL AND "LinkLicenseSeatId" IS NOT NULL AND "LinkAliasId" IS NOT NULL AND "LinkReasonCode" IS NULL)
-                        """);
+                        """.ReplaceLineEndings("\n")); // The migration snapshot stores LF; a CRLF checkout must not change the model.
                     table.HasCheckConstraint("CK_SecurityLockReports_BanDecision",
                         "\"State\" <> 'BANNED' OR \"AdminDecision\" IS DISTINCT FROM 'RELEASE'");
                     table.HasCheckConstraint("CK_SecurityLockReports_Level", "\"Level\" BETWEEN 0 AND 5");
