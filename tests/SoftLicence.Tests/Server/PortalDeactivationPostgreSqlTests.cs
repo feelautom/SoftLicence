@@ -79,11 +79,11 @@ public sealed class PortalDeactivationPostgreSqlTests(PortalDeactivationPostgreS
     [Fact]
     public async Task RecentSeatReasonMatrix_OnlyInteractiveReasonsBypassGuard()
     {
-        var settings = await fixture.SeedAsync("settings", active: true, seatAge: TimeSpan.FromMinutes(1), Now);
-        var uninstall = await fixture.SeedAsync("uninstall", active: true, seatAge: TimeSpan.FromMinutes(1), Now);
-        var cleanup = await fixture.SeedAsync("cleanup", active: true, seatAge: TimeSpan.FromMinutes(1), Now);
-        var future = await fixture.SeedAsync("future", active: true, seatAge: TimeSpan.FromMinutes(-1), Now);
-        var service = fixture.Service(Now);
+        var now = await ReadDatabaseUtcNowAsync();
+        var settings = await fixture.SeedAsync("settings", active: true, seatAge: TimeSpan.FromMinutes(1), now);
+        var uninstall = await fixture.SeedAsync("uninstall", active: true, seatAge: TimeSpan.FromMinutes(1), now);
+        var cleanup = await fixture.SeedAsync("cleanup", active: true, seatAge: TimeSpan.FromMinutes(1), now);
+        var service = fixture.Service(now);
 
         Assert.Equal(PortalDeactivationService.DeactivatedOutcome,
             (await service.DeactivateAsync("tia-connect-website-portal", new string('c', 64), settings.Request("settings_button"))).Response.Outcome);
@@ -94,6 +94,9 @@ public sealed class PortalDeactivationPostgreSqlTests(PortalDeactivationPostgreS
 
         Assert.Equal("deactivation_guard_active", blocked.ErrorCode);
         Assert.Equal(StatusCodes.Status409Conflict, blocked.StatusCode);
+        // Arrange this independent future-seat premise immediately before its request.
+        var futureNow = await ReadDatabaseUtcNowAsync();
+        var future = await fixture.SeedAsync("future", active: true, seatAge: TimeSpan.FromMinutes(-1), futureNow);
         var inconsistent = await Assert.ThrowsAsync<DistributionOperationException>(() =>
             service.DeactivateAsync("tia-connect-website-portal", new string('0', 64), future.Request("settings_button")));
         Assert.Equal("authority_inconsistent", inconsistent.ErrorCode);
@@ -123,7 +126,8 @@ public sealed class PortalDeactivationPostgreSqlTests(PortalDeactivationPostgreS
     [Fact]
     public async Task SubscriptionTermination_AtQuota_CleansAllSeats_ButInteractiveReasonsRemainLimited()
     {
-        var seed = await fixture.SeedAsync("termination-quota", true, TimeSpan.FromHours(1), Now);
+        var now = await ReadDailyScenarioAnchorAsync(ReadDatabaseUtcNowAsync, delay => Task.Delay(delay));
+        var seed = await fixture.SeedAsync("termination-quota", true, TimeSpan.FromHours(1), now);
         var hardwareIds = new[] { "ABCDEF0123456789", "TERMINATION-SEAT-2", "TERMINATION-SEAT-3" };
         await using (var db = fixture.Factory.CreateDbContext())
         {
@@ -131,29 +135,84 @@ public sealed class PortalDeactivationPostgreSqlTests(PortalDeactivationPostgreS
             license.IsActive = false; // The real termination caller revokes before cleaning seats.
             license.Type!.MaxActivationsPerDay = 1;
             db.LicenseSeats.Add(new LicenseSeat { LicenseId = seed.LicenseId, HardwareId = "ALREADY-UNLINKED",
-                IsActive = false, FirstActivatedAt = Now.UtcDateTime.AddHours(-2), UnlinkedAt = Now.UtcDateTime });
+                IsActive = false, FirstActivatedAt = now.UtcDateTime.AddHours(-2), UnlinkedAt = now.UtcDateTime });
             foreach (var hardwareId in hardwareIds.Skip(1))
                 db.LicenseSeats.Add(new LicenseSeat { LicenseId = seed.LicenseId, HardwareId = hardwareId,
-                    IsActive = true, FirstActivatedAt = Now.UtcDateTime.AddHours(-1), LastCheckInAt = Now.UtcDateTime });
+                    IsActive = true, FirstActivatedAt = now.UtcDateTime.AddHours(-1), LastCheckInAt = now.UtcDateTime });
             await db.SaveChangesAsync();
         }
         foreach (var reason in new[] { "settings_button", "uninstall" })
-            await Assert.ThrowsAsync<PortalDeactivationQuotaException>(() => fixture.Service(Now).DeactivateAsync(
+            await Assert.ThrowsAsync<PortalDeactivationQuotaException>(() => fixture.Service(now).DeactivateAsync(
                 "tia-connect-website-portal", new string('d', 64), seed.Request(reason)));
 
         var requests = hardwareIds.Select(hardwareId => seed.Request("subscription_termination") with {
             RequestId = Guid.NewGuid().ToString("D"), HardwareId = hardwareId }).ToArray();
         // Match the real caller's concurrent per-seat cleanup and stable child request identities.
-        var results = await Task.WhenAll(requests.Select(request => fixture.Service(Now).DeactivateAsync(
+        var results = await Task.WhenAll(requests.Select(request => fixture.Service(now).DeactivateAsync(
             "tia-connect-website-portal", new string('e', 64), request)));
         Assert.All(results, result => Assert.Equal("deactivated", result.Response.Outcome));
         foreach (var request in requests)
-            Assert.True((await fixture.Service(Now).DeactivateAsync("tia-connect-website-portal", new string('e', 64), request)).Idempotent);
+            Assert.True((await fixture.Service(now).DeactivateAsync("tia-connect-website-portal", new string('e', 64), request)).Idempotent);
         await using var verify = fixture.Factory.CreateDbContext();
         Assert.False((await verify.Licenses.SingleAsync(row => row.Id == seed.LicenseId)).IsActive);
         Assert.Equal(0, await verify.LicenseSeats.CountAsync(row => row.LicenseId == seed.LicenseId && row.IsActive));
         Assert.Equal(3, await verify.PortalDeactivationOperations.CountAsync(row => row.LicenseId == seed.LicenseId));
         Assert.Equal(3, await verify.LicenseHistories.CountAsync(row => row.LicenseId == seed.LicenseId));
+    }
+
+    /// <summary>Reads a PostgreSQL UTC anchor before the scenario's relative timestamps are seeded.</summary>
+    /// <returns>The real relational clock, rather than the service's non-relational TimeProvider fallback.</returns>
+    private async Task<DateTimeOffset> ReadDatabaseUtcNowAsync()
+    {
+        await using var db = fixture.Factory.CreateDbContext();
+        await db.Database.OpenConnectionAsync();
+        return await RuntimeEnrollmentService.DatabaseNowAsync(db, CancellationToken.None);
+    }
+
+    /// <summary>Waits out the last UTC minute before arranging a daily quota scenario, without retrying any business operation.</summary>
+    /// <param name="readUtc">Reads the authoritative database clock.</param>
+    /// <param name="delay">Waits before any scenario data or request exists; injectable for boundary proofs.</param>
+    /// <returns>The final anchor, used unchanged by every timestamp in the quota scenario.</returns>
+    private static async Task<DateTimeOffset> ReadDailyScenarioAnchorAsync(
+        Func<Task<DateTimeOffset>> readUtc, Func<TimeSpan, Task> delay)
+    {
+        var observed = await readUtc();
+        var midnight = new DateTimeOffset(observed.UtcDateTime.Date.AddDays(1), TimeSpan.Zero);
+        var remaining = midnight - observed;
+        if (remaining >= TimeSpan.FromMinutes(1))
+            return observed;
+
+        await delay(remaining);
+        var anchor = await readUtc();
+        Assert.True(anchor >= midnight, "Database UTC clock moved backwards during pre-seed midnight preparation.");
+        return anchor;
+    }
+
+    /// <summary>Proves ordinary timestamps need no wait and late-day preparation advances before any seed exists.</summary>
+    [Theory]
+    [InlineData(12, 0, 0)]
+    [InlineData(23, 59, 30)]
+    public async Task DailyScenarioAnchor_PreparesBeforeSeedingAtUtcMidnight(int hour, int minute, int second)
+    {
+        var clock = new DateTimeOffset(2026, 10, 2, hour, minute, second, TimeSpan.Zero);
+        var initial = clock;
+        var delays = new List<TimeSpan>();
+        var reads = 0;
+        var anchor = await ReadDailyScenarioAnchorAsync(
+            () => { reads++; return Task.FromResult(clock); },
+            delay => { delays.Add(delay); clock += delay; return Task.CompletedTask; });
+        if (hour == 23)
+        {
+            Assert.Equal(TimeSpan.FromSeconds(30), Assert.Single(delays));
+            Assert.Equal(initial.UtcDateTime.Date.AddDays(1), anchor.UtcDateTime);
+            Assert.Equal(2, reads);
+        }
+        else
+        {
+            Assert.Empty(delays);
+            Assert.Equal(initial, anchor);
+            Assert.Equal(1, reads);
+        }
     }
 
     /// <summary>Proves two portal requests cannot both consume the last quota slot.</summary>

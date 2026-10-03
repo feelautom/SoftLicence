@@ -15,6 +15,11 @@ namespace SoftLicence.Tests.Server;
 /// <summary>Validates Runtime licence-transfer decisions using synthetic provider authority and a caller-owned bounded PostgreSQL harness.</summary>
 public sealed partial class RuntimeEnrollmentPostgreSqlTests
 {
+    /// <summary>Proves a rejected source release still records the authenticated v2 source refusal without issuing a transition or changing the commercial graph.</summary>
+    [Fact]
+    public Task WebSetupTransitionV2_SourceReleaseRefusal_PersistsHistoryWithoutGraphMutation() =>
+        Tkt976_Runtime_TransferFaults_RetainOnlyDecisionAfterLeaseDisposal("source-ap-release");
+
     /// <summary>Exercises target quota refusal and persistence failures while source seats, target seats, ownership, bindings, receipts and encryption nonces remain unchanged.</summary>
     /// <param name="mode">Synthetic quota/post-save refusal, insertion/commit fault, client/host cancellation or bounded timeout.</param>
     /// <remarks>The real transfer prepares and confirms an enrolled source before attempting an authenticated target entitlement. The fixture contains no production secrets; exact operation retries must not duplicate its unchanged decision.</remarks>
@@ -98,7 +103,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 LicenseTypeId = licenseTypeId,
                 LicenseKey = "RUNTIME-TRANSFER-" + Guid.NewGuid().ToString("N"),
                 IsActive = true,
-                MaxSeats = 1,
+                MaxSeats = mode == "runtime-business-after-save" || mode.StartsWith("source-", StringComparison.Ordinal) ? 1 : 2,
                 AllowedVersions = "2.2.*",
                 ExpirationDate = DateTime.UtcNow.AddDays(30)
             });
@@ -155,6 +160,12 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         {
             var sourceMode = mode[7..];
             var sourceFaulted = sourceMode is "insert" or "commit-before" or "commit-ack" or "host-stop" or "timeout";
+            if (sourceMode == "ap-release")
+            {
+                await using var change = await factory.CreateDbContextAsync();
+                Assert.Equal(1, await change.ApprovedBinaries.Where(row => row.ProductId == fixture.ProductId
+                    && row.Version == fixture.Version && row.Key == "FP_EXE").ExecuteDeleteAsync());
+            }
             if (mode == "source-release" || sourceFaulted || sourceMode is "cancel-after" or "aborted-before-rollback")
             {
                 await using var change = await factory.CreateDbContextAsync();
@@ -207,6 +218,18 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                     new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
                 Assert.Equal("runtime_transfer_from_source_target_unestablished", decision.Phase);
                 Assert.Equal(mode == "source-token" ? 500 : 422, decision.HttpStatus);
+                if (sourceMode == "ap-release")
+                {
+                    Assert.Equal("authority_ineligible", decision.Code);
+                    Assert.Null(decision.ReasonCode);
+                    Assert.Empty(await sourceObserved.RuntimeEnrollmentWebSetupTransitions
+                        .Where(row => row.EnrollmentId == enrollmentId).ToListAsync());
+                    Assert.Empty(await sourceObserved.RuntimeEnrollmentWebSetupTransitionRequests
+                        .Where(row => row.ClientId == client && row.Operation == "issue"
+                            && row.RequestId == issue.RequestId).ToListAsync());
+                    Assert.Equal("ACTIVE", (await sourceObserved.EnrollmentLicenseAssignments
+                        .SingleAsync(row => row.EnrollmentId == enrollmentId)).State);
+                }
                 Assert.Null(decision.Snapshot.ActiveSeats);
                 Assert.Null(decision.Snapshot.SeatLimit);
                 Assert.Null(decision.ResolvedHardwareId);
@@ -229,11 +252,15 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         if (mode != "runtime-business-after-save")
         {
             await using var quota = await factory.CreateDbContextAsync();
-            quota.LicenseSeats.Add(new LicenseSeat
+            // A full multi-seat target preserves the capacity refusal; mono-seat replacement is now intentional.
+            for (var index = 0; index < 2; index++)
             {
-                LicenseId = targetLicenseId, HardwareId = Guid.NewGuid().ToString("N")[..16].ToUpperInvariant(),
-                IsActive = true, FirstActivatedAt = DateTime.UtcNow, LastCheckInAt = DateTime.UtcNow
-            });
+                quota.LicenseSeats.Add(new LicenseSeat
+                {
+                    LicenseId = targetLicenseId, HardwareId = Guid.NewGuid().ToString("N")[..16].ToUpperInvariant(),
+                    IsActive = true, FirstActivatedAt = DateTime.UtcNow, LastCheckInAt = DateTime.UtcNow
+                });
+            }
             await quota.SaveChangesAsync();
         }
         var before = await Tkt976_BusinessFingerprintAsync(connections.App);
@@ -278,8 +305,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                     new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
                 Assert.Equal(mode == "runtime-business-after-save" ? "synthetic_transfer_refusal" : "seat_limit_reached", decision.Code);
                 Assert.Equal(422, decision.HttpStatus);
-                Assert.Equal(mode == "runtime-business-after-save" ? 0 : 1, decision.Snapshot.ActiveSeats);
-                Assert.Equal(1, decision.Snapshot.SeatLimit);
+                Assert.Equal(mode == "runtime-business-after-save" ? 0 : 2, decision.Snapshot.ActiveSeats);
+                Assert.Equal(mode == "runtime-business-after-save" ? 1 : 2, decision.Snapshot.SeatLimit);
                 Assert.Null(decision.SubmittedHardwareId);
                 Assert.Null(decision.CorrelatedHardwareId);
                 Assert.Equal((await observed.LicenseSeats.SingleAsync(item => item.Id == sourceSeatId)).HardwareId,

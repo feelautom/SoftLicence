@@ -1480,7 +1480,7 @@ namespace SoftLicence.Server.Controllers
                 or >= '0' and <= '9'
                 or '-' or '_' or '.');
 
-        /// <summary>Authorizes and atomically releases one exact seat and its Runtime rights under the global mutation lock.</summary>
+        /// <summary>Authorizes and atomically releases one exact seat and its commercial assignment.</summary>
         [HttpDelete("licenses/{licenseKey}/seats/{hardwareId}")]
         public async Task<IActionResult> DeactivateSeat(string licenseKey, string hardwareId)
         {
@@ -1501,23 +1501,33 @@ namespace SoftLicence.Server.Controllers
             var seat = license.Seats?.FirstOrDefault(s => s.HardwareId == hardwareId && s.IsActive);
             if (seat == null) return NotFound("Appareil non trouvé ou déjà délié.");
 
-            seat.IsActive = false;
-            seat.UnlinkedAt = DateTime.UtcNow;
-            await Services.SeatRuntimeReleaseAuthority.InvalidateAsync(_db, license.ProductId, seat, seat.UnlinkedAt.Value, HttpContext.RequestAborted);
-            SyncLegacyHardwareStateFromSeats(license);
-
-            _db.LicenseHistories.Add(new LicenseHistory
+            try
             {
-                LicenseId = license.Id,
-                Action = HistoryActions.UnlinkedApi,
-                Details = $"Délié via API admin : {hardwareId}",
-                PerformedBy = "Admin (API)"
-            });
+                var releaseScope = await Services.SeatRuntimeReleaseAuthority.PrepareAsync(
+                    _db, license.ProductId, license, [seat], DateTime.UtcNow, HttpContext.RequestAborted);
+                seat.IsActive = false;
+                seat.UnlinkedAt = releaseScope.ObservedAtUtc;
+                SyncLegacyHardwareStateFromSeats(license);
 
-            await _db.SaveChangesAsync();
-            if (releaseTransaction != null)
-                await releaseTransaction.CommitAsync(HttpContext.RequestAborted);
-            return Ok(new { Message = "Appareil délié avec succès." });
+                _db.LicenseHistories.Add(new LicenseHistory
+                {
+                    LicenseId = license.Id,
+                    Action = HistoryActions.UnlinkedApi,
+                    Details = $"Délié via API admin : {hardwareId}",
+                    PerformedBy = "Admin (API)",
+                    Timestamp = releaseScope.ObservedAtUtc
+                });
+
+                await Services.SeatRuntimeReleaseAuthority.CompleteAsync(
+                    _db, releaseScope, [seat], HttpContext.RequestAborted);
+                if (releaseTransaction != null)
+                    await releaseTransaction.CommitAsync(HttpContext.RequestAborted);
+                return Ok(new { Message = "Appareil délié avec succès." });
+            }
+            catch (Services.DistributionOperationException exception)
+            {
+                return StatusCode(exception.StatusCode, new { Error = exception.ErrorCode });
+            }
         }
 
         public class RevokeByEmailRequest

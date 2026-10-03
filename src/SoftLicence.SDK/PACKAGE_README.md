@@ -4,59 +4,52 @@ The official SDK for integrating **SoftLicence** protection into your .NET appli
 
 SoftLicence provides an industrial-grade licensing solution using RSA-4096 cryptography and hardware fingerprinting (HWID).
 
-## Explicit Runtime hardware authority in SDK 1.1.14
+## Machine identity in SDK 2.0.0 (system UUID)
 
-SDK 1.1.14 adds explicit activation and status overloads for applications whose trusted
-Runtime has completed a server-authenticated migration from the legacy HWID to HWID V2:
+SDK 2.0.0 replaces the previous hardware ID calculation. There is one identifier and one
+calculation:
 
-```csharp
-string authority = RuntimeHardwareAuthority.CurrentHardwareId;
+| API | Contract |
+| --- | --- |
+| `HardwareInfo.GetHardwareId()` | Returns 16 uppercase hexadecimal characters derived only from the SMBIOS system UUID (`Win32_ComputerSystemProduct.UUID`). No other component takes part. |
+| `MachineIdentity.Resolve()` | Returns the same decision without throwing: canonical UUID, identifier, or refusal code and support code. |
+| `MachineIdentity.FromUuid(uuid)` | Applies the rule to a given UUID; the server uses exactly this function. |
+| `MachineIdentity.CollectEvidence()` | Collects the other machine indicators (processor, board, BIOS, system disk, machine name, MachineGuid, Windows device ID, global device ID, virtualization hints) for investigation only. |
 
-ActivationResult activation = await client.ActivateAsync(
-    licenseKey: "YOUR-LICENSE-KEY",
-    appName: "YourAppName",
-    appId: null,
-    appVersion: "2.3.394",
-    customerEmail: null,
-    customerName: null,
-    authoritativeHardwareId: authority);
+The UUID is trimmed, one pair of braces is accepted, ASCII hexadecimal letters are
+uppercased without culture, and the value must have the 8-4-4-4-12 form. A machine without an
+acceptable UUID has no identifier: `GetHardwareId()` throws `MachineIdentityRefusedException`
+and nothing is invented.
 
-LicenseStatusResult status = await client.CheckStatusAsync(
-    licenseKey: "YOUR-LICENSE-KEY",
-    appName: "YourAppName",
-    appId: null,
-    appVersion: "2.3.394",
-    authoritativeHardwareId: authority);
-```
+The customer only sees "Device refused (code AR-xx)". The support code identifies the reason:
 
-The explicit `authoritativeHardwareId` is not a migration hint. It is the single primary
-identity already selected by the Runtime after SoftLicence accepted the signed migration.
-It must contain exactly 16 uppercase ASCII hexadecimal characters. The SDK rejects
-lowercase, whitespace, separators, invalid characters, and incorrect lengths without
-trimming, uppercasing, or sending a network request.
+| Support code | Refusal code | Meaning |
+| --- | --- | --- |
+| AR-01 | `UUID_ABSENT` | The firmware exposes no system UUID. |
+| AR-02 | `UUID_ILLISIBLE` | The UUID could not be read. |
+| AR-03 | `UUID_FORMAT_INVALIDE` | The value is not a UUID. |
+| AR-04 | `UUID_GENERIQUE_CONNU` | Known placeholder shared by unrelated machines. |
+| AR-05 | `UUID_IDENTIFIANT_INCOHERENT` | Server only: the identifier sent is not the one derived from the UUID sent. |
 
-These overloads never call `HardwareInfo.GetHardwareIdMigrationInfo()`, never calculate a
-legacy identity, and never send invented `HardwareIdV2` or legacy algorithm fields. Optional
-component fingerprints remain best-effort anti-abuse observations and do not authorize an
-identity relationship.
+`SoftLicenceClient` sends `SystemUuid` and `MachineEvidence` with every activation, trial and
+status request. The server applies the same rule and answers `DEVICE_REFUSED` with the support
+code. A local refusal returns `ActivationErrorCode.DeviceRefused` or
+`StatusErrorCode.DeviceRefused` without any network request.
 
-The existing overloads are unchanged. They continue to send the legacy HWID as the primary
-`HardwareId` and the available V2 value only as observation metadata. They do not
-auto-migrate, retry with V2 after a mismatch, or treat a client-supplied legacy/V2 pair as
-authority. Only a signed Runtime migration accepted by SoftLicence, or an exact server-owned
-relation reconstructed from that proof, may authorize the transition.
+Removed in 2.0.0: `GetStableHardwareId`, `GetHardwareIdMigrationInfo`,
+`HardwareIdMigrationInfo`, `GetComponentFingerprints`, and the `HardwareIdV2`,
+`HardwareIdAlgorithm` and `ComponentFingerprints` request fields.
 
-### T-IA Connect adoption
+To move a licence from the identifier held in the existing licence file to the current one, call
+`ActivateReplacingHardwareIdAsync(licenseKey, appName, previousHardwareId)`. The server detaches
+the previous identifier and attaches the current one in one transaction and consumes one daily
+seat change; when the quota is exhausted the call fails with `MaxActivationsReached` and the
+previous seat stays attached.
 
-After the migration response has been authenticated and committed, T-IA Connect must pass
-`RuntimeHardwareAuthority.CurrentHardwareId` to both explicit overloads. The same exact
-value must also be supplied to managed and native license validation. Do not select V2 merely
-because it is observable, and do not substitute either identity after `HardwareMismatch`.
-
-During rollout, older T-IA Connect builds may keep the historical overloads. SoftLicence can
-resolve their legacy primary identity only while the product compatibility policy is enabled
-and only when the server already owns the authenticated alias. Once clients adopt the explicit
-overloads, direct V2 requests do not depend on legacy alias compatibility.
+The overloads taking `authoritativeHardwareId` remain until 31/12/2026, for a seat that still
+carries its pre-UUID identifier. When the given identifier is the one derived from the current
+system UUID, the UUID and the machine evidence are sent with it; otherwise neither is sent and
+the server applies its pre-UUID rule to that identifier.
 
 ## Structured server errors in SDK 1.1.13
 
@@ -78,39 +71,6 @@ Structured JSON responses keep the deprecated `errorMessage` property as an alia
 - **Custom Parameters**: Inject typed per-license-type parameters (features, limits) signed into the license file.
 - **Plugin/Sub-product Licenses**: Signed plugin metadata for applications that license optional modules.
 - **Device Transfer**: Built-in deactivation and email-reset flows for license transfers between machines.
-
-## HWID compatibility introduced in SDK 1.1.11
-
-SDK 1.1.10 changed the primary disk selection to `Win32_DiskDrive WHERE Index=0`.
-Although more deterministic, that change could produce a different HWID on machines
-already licensed with SDK 1.1.8 or 1.1.9.
-
-SDK 1.1.11 restores the existing licensing contract and exposes the deterministic value
-separately for observation:
-
-| API | Contract |
-| --- | --- |
-| `HardwareInfo.GetHardwareId()` | Returns the legacy contractual HWID compatible with SDK 1.1.8/1.1.9. Continue to use this value for licensing and local validation. |
-| `HardwareInfo.GetStableHardwareId()` | Returns the nullable stable/V2 observation based on disk `Index=0`. It returns `null` when that disk value cannot be determined. |
-| `HardwareInfo.GetHardwareIdMigrationInfo()` | Returns both values and the availability/divergence flags described below. |
-
-`HardwareIdMigrationInfo` exposes:
-
-- `LegacyHardwareId`: the current contractual license identity.
-- `StableHardwareId`: the optional V2 observation value.
-- `HasStableHardwareId`: whether V2 could be calculated.
-- `HasDistinctHardwareIds`: whether the available V2 value differs from legacy.
-
-The historical `SoftLicenceClient` overloads keep `HardwareId` set to the legacy value in
-activation, trial, and status payloads. When V2 is available, the client also sends `HardwareIdV2` and its
-metadata as secondary observation fields. There is no fallback from an unavailable V2
-value to legacy in those V2 fields.
-
-> **Important:** V2 is observation-only in SDK 1.1.11. Do not use it as the primary
-> license identity, an alternate validation identity, a fallback after a hardware
-> mismatch, or a way to bypass licensing decisions. This release performs no automatic
-> migration and does not change seats, quotas, activations, or the contractual HWID.
-> A future switch to V2 requires an explicitly validated server-side migration.
 
 ## Signed expiration contract
 
@@ -177,30 +137,22 @@ if (!validation.IsValid &&
 }
 ```
 
-Hardware IDs are compared exactly. On historical overloads, do not trim, rewrite, or
-substitute `GetStableHardwareId()` after a mismatch. The stable/V2 value remains an
-observation-only migration signal until the server accepts the signed Runtime migration.
-After that migration, use the new explicit overloads and validate the returned license with
-the same Runtime-selected authoritative HWID. A mismatch never triggers identity fallback.
+Hardware IDs are compared exactly. Do not trim, rewrite, or substitute another value after a
+mismatch; a mismatch never triggers identity fallback.
 
-### Observation-first example
+### Refusal handling example
 
 ```csharp
-string licenseHardwareId = HardwareInfo.GetHardwareId();
-HardwareIdMigrationInfo migration = HardwareInfo.GetHardwareIdMigrationInfo();
-
-var hardwareIdObservation = new
+try
 {
-    HardwareId = licenseHardwareId,
-    LegacyHardwareId = migration.LegacyHardwareId,
-    StableHardwareId = migration.StableHardwareId,
-    HasStableHardwareId = migration.HasStableHardwareId,
-    HasDistinctHardwareIds = migration.HasDistinctHardwareIds
-};
-
-// Keep licenseHardwareId as the only identity used for license validation.
-// Send hardwareIdObservation only to trusted, access-controlled telemetry.
-// Do not write complete HWIDs to general-purpose application logs.
+    string hardwareId = HardwareInfo.GetHardwareId();
+    // Use hardwareId for activation and local validation.
+}
+catch (MachineIdentityRefusedException refused)
+{
+    // Show refused.Message ("Device refused (code AR-xx).") to the customer.
+    // Log refused.RefusalCode and refused.ReadFailure internally only.
+}
 ```
 
 ## 🛠️ Quick Start

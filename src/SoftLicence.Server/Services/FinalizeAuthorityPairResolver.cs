@@ -18,6 +18,8 @@ public interface IFinalizeAuthorityPairResolver
 {
     /// <summary>
     /// Evaluates one exact request under the same commercial and ban locks as the distribution preflight.
+    /// Direct equality uses current target distribution policy. Alias matches additionally require one
+    /// current ACTIVE assignment for the authenticated historical binding and resolved seat.
     /// Contract (explicit, accepted in review): the evaluation is deterministic and persists nothing on the
     /// provider. <c>requestId</c> is a correlation echo and <c>payloadDigestSha256</c> is the SHA-256 of the
     /// exact authenticated body, echoed so the caller can prove which payload produced which decision; a
@@ -102,17 +104,19 @@ public sealed partial class FinalizeAuthorityPairResolver : IFinalizeAuthorityPa
                     : System.Data.IsolationLevel.Serializable,
                 cancellationToken)
             : null;
-        var now = DateTime.UtcNow;
         // Same lock order as the preflight and Finalize: commercial rows first, then the hardware digests,
         // so a ban or revocation writer that committed before these locks is observed below.
         await RuntimeDistributionPreflightService.AcquireCommercialAuthorityReadLocksAsync(
             db, clientId, productId, licenseId, grantRefDigest, cancellationToken);
         if (db.Database.IsNpgsql())
         {
+            if (!string.Equals(submittedHash, expectedHash, StringComparison.Ordinal))
+                await RuntimeCommercialEligibilityValidator.AcquireReadBarrierAsync(db, cancellationToken);
             await SecurityService.AcquireHardwareBanDigestMutationAsync(db, submittedHash);
             if (!string.Equals(submittedHash, expectedHash, StringComparison.Ordinal))
                 await SecurityService.AcquireHardwareBanDigestMutationAsync(db, expectedHash);
         }
+        var now = (await RuntimeEnrollmentService.DatabaseNowAsync(db, cancellationToken)).UtcDateTime;
         var entitlement = await db.DistributionEntitlements.AsNoTracking().SingleOrDefaultAsync(candidate =>
             candidate.ClientId == clientId && candidate.ProductId == productId
             && candidate.LicenseId == licenseId
@@ -152,7 +156,12 @@ public sealed partial class FinalizeAuthorityPairResolver : IFinalizeAuthorityPa
                 && string.Equals(HardwareAuthorityAliasResolver.Sha256(legacyDirection.EffectiveHardwareId),
                     expectedHash, StringComparison.Ordinal))
             {
-                response = await HardwareAuthorityAliasResolver.HasActiveHardwareBanAsync(
+                response = !await HasCurrentAliasAssignmentAsync(
+                        db, legacyDirection, licenseId, now, cancellationToken)
+                    ? Refused(requestId, payloadDigestSha256!, productId, licenseId, entitlement.Id,
+                        grantRefDigest, submittedHash, expectedHash, "commercial_authority_invalid",
+                        legacyDirection.AliasId, legacyDirection.BindingId, legacyDirection.LicenseSeatId)
+                    : await HardwareAuthorityAliasResolver.HasActiveHardwareBanAsync(
                         db, productId, submittedHardwareId, legacyDirection.EffectiveHardwareId, now, cancellationToken)
                     ? Refused(requestId, payloadDigestSha256!, productId, licenseId, entitlement.Id,
                         grantRefDigest, submittedHash, expectedHash, "hardware_banned",
@@ -166,7 +175,7 @@ public sealed partial class FinalizeAuthorityPairResolver : IFinalizeAuthorityPa
             {
                 response = Refused(requestId, payloadDigestSha256!, productId, licenseId, entitlement.Id,
                     grantRefDigest, submittedHash, expectedHash,
-                    legacyDirection.RefusalReason?.ToString() ?? "alias_refused",
+                    await ClassifyAliasRefusalAsync(db, legacyDirection, expectedHash, canonicalExpected: true, cancellationToken),
                     legacyDirection.AliasId, legacyDirection.BindingId, legacyDirection.LicenseSeatId);
             }
             else
@@ -178,7 +187,12 @@ public sealed partial class FinalizeAuthorityPairResolver : IFinalizeAuthorityPa
                     HardwareAuthorityResolutionIntent.Finalize, cancellationToken);
                 if (stableDirection.Status == HardwareAuthorityResolutionStatus.Resolved)
                 {
-                    response = await HardwareAuthorityAliasResolver.HasActiveHardwareBanAsync(
+                    response = !await HasCurrentAliasAssignmentAsync(
+                            db, stableDirection, licenseId, now, cancellationToken)
+                        ? Refused(requestId, payloadDigestSha256!, productId, licenseId, entitlement.Id,
+                            grantRefDigest, submittedHash, expectedHash, "commercial_authority_invalid",
+                            stableDirection.AliasId, stableDirection.BindingId, stableDirection.LicenseSeatId)
+                        : await HardwareAuthorityAliasResolver.HasActiveHardwareBanAsync(
                             db, productId, submittedHardwareId, stableDirection.EffectiveHardwareId, now, cancellationToken)
                         ? Refused(requestId, payloadDigestSha256!, productId, licenseId, entitlement.Id,
                             grantRefDigest, submittedHash, expectedHash, "hardware_banned",
@@ -192,7 +206,7 @@ public sealed partial class FinalizeAuthorityPairResolver : IFinalizeAuthorityPa
                 {
                     response = Refused(requestId, payloadDigestSha256!, productId, licenseId, entitlement.Id,
                         grantRefDigest, submittedHash, expectedHash,
-                        stableDirection.RefusalReason?.ToString() ?? "alias_refused",
+                        await ClassifyAliasRefusalAsync(db, stableDirection, expectedHash, canonicalExpected: false, cancellationToken),
                         stableDirection.AliasId, stableDirection.BindingId, stableDirection.LicenseSeatId);
                 }
                 else
@@ -212,6 +226,79 @@ public sealed partial class FinalizeAuthorityPairResolver : IFinalizeAuthorityPa
             response.AliasId, response.BindingId, response.LicenseSeatId, response.RefusalReason,
             typeof(FinalizeAuthorityPairResolver).Assembly.GetName().Version);
         return response;
+    }
+
+    /// <summary>Refines only a refused, intact historical graph whose current assignment changed; the requested opposite digest must still be the exact server alias member.</summary>
+    /// <remarks>The witness is produced after source validation, never by a request. This method cannot resolve an alias, return hardware, or relax commercial or structural refusals.</remarks>
+    private static async Task<string> ClassifyAliasRefusalAsync(
+        LicenseDbContext db, HardwareAuthorityResolution resolution, string expectedDigest,
+        bool canonicalExpected, CancellationToken cancellationToken)
+    {
+        if (resolution.Refused
+            && resolution.RefusalReason == HardwareAuthorityRefusalReason.AuthorityGraphDiverged
+            && resolution.CommercialAssignmentOnlyRefusal
+            && await db.HardwareAuthorityAliases.AsNoTracking().AnyAsync(alias =>
+                alias.Id == resolution.AliasId && alias.BindingId == resolution.BindingId
+                && alias.LicenseSeatId == resolution.LicenseSeatId && alias.IsActive && alias.DisabledAtUtc == null
+                && (canonicalExpected ? alias.CanonicalHardwareIdSha256 : alias.LegacyHardwareIdSha256) == expectedDigest,
+                cancellationToken))
+            return "commercial_authority_invalid";
+        return resolution.RefusalReason?.ToString() ?? "alias_refused";
+    }
+
+    /// <summary>
+    /// Rechecks alias based grants against the independent current assignment. The alias remains signed
+    /// historical proof; copied enrollment licence, seat, and hardware values never grant access.
+    /// </summary>
+    /// <param name="db">Transaction holding distribution, commercial barrier, and hardware locks.</param>
+    /// <param name="resolution">Authenticated alias result identifying the historical binding and seat.</param>
+    /// <param name="licenseId">Current distribution licence that the assignment must match exactly.</param>
+    /// <param name="now">Provider time sampled after every decisive lock wait.</param>
+    /// <param name="cancellationToken">Cancels relational reads without converting failure to denial.</param>
+    /// <returns><see langword="true"/> only when one current assignment matches the resolved seat and policy.</returns>
+    /// <exception cref="DistributionOperationException">The assignment relation is missing, ambiguous, or unavailable.</exception>
+    private static async Task<bool> HasCurrentAliasAssignmentAsync(
+        LicenseDbContext db,
+        HardwareAuthorityResolution resolution,
+        Guid licenseId,
+        DateTime now,
+        CancellationToken cancellationToken)
+    {
+        if (resolution.BindingId is not Guid bindingId || resolution.LicenseSeatId is not Guid seatId)
+            return false;
+        var enrollments = await db.RuntimeEnrollments.AsNoTracking()
+            .Where(candidate => candidate.BindingId == bindingId)
+            .Take(2).ToListAsync(cancellationToken);
+        if (enrollments.Count != 1)
+            throw new DistributionOperationException(
+                "authority_unavailable", StatusCodes.Status503ServiceUnavailable,
+                enrollments.Count == 0 ? "assignment_enrollment_missing" : "assignment_enrollment_ambiguous");
+        try
+        {
+            var assessment = await RuntimeCommercialEligibilityValidator.AssessAsync(
+                db, enrollments[0], new Dictionary<string, string>(StringComparer.Ordinal),
+                new DateTimeOffset(now, TimeSpan.Zero), null,
+                RuntimeCommercialEligibilityValidator.HardwareBanAssessmentMode.DeferToCaller,
+                cancellationToken);
+            var assignment = assessment.Assignment;
+            if (assignment is null) return false;
+            return assignment.LicenseId == licenseId && assignment.SeatId == seatId
+                && HardwareAuthorityAliasResolver.IsCanonicalHardwareId(resolution.EffectiveHardwareId)
+                && HardwareAuthorityAliasResolver.IsCanonicalHardwareId(assignment.HardwareId)
+                && string.Equals(
+                    resolution.EffectiveHardwareId, assignment.HardwareId, StringComparison.Ordinal);
+        }
+        catch (RuntimeEnrollmentException exception) when (
+            exception.StatusCode == StatusCodes.Status422UnprocessableEntity)
+        {
+            return false;
+        }
+        catch (RuntimeEnrollmentException exception) when (
+            exception.StatusCode == StatusCodes.Status503ServiceUnavailable)
+        {
+            throw new DistributionOperationException(
+                "authority_unavailable", StatusCodes.Status503ServiceUnavailable, exception.DiagnosticCode);
+        }
     }
 
     private static FinalizeAuthorityPairResponse Refused(

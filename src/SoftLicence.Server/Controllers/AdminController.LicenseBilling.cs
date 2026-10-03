@@ -163,7 +163,8 @@ public partial class AdminController
             if (!license.IsActive || license.RevocationReason is not null || license.RevokedAt is not null
                 || request.PreviousOperationId is not null || request.GraceStartedAtUtc > now
                 || (license.ExpirationDate > request.PeriodStartUtc
-                    && license.ExpirationDate != request.GraceStartedAtUtc!.Value.AddHours(24))
+                    && license.ExpirationDate != request.GraceStartedAtUtc!.Value.AddHours(24)
+                    && !await HasBillingContinuityAsync(license, currentType, request, cancellationToken))
                 || BillingDigest(currentType) != BillingDigest(desiredType) || request.DesiredMaxSeats != license.MaxSeats)
                 return Conflict(new { error = "billing_grace_conflict" });
             // Delayed delivery must still materialize the original expiry, even when already

@@ -404,6 +404,15 @@ public sealed class RuntimeEnrollmentCryptoService : IRuntimeEnrollmentCryptoSer
         response.IssuedAtUtc,
         response.ExpiresAtUtc);
 
+    /// <summary>
+    /// Builds the byte-stable signature payload for the canonical release-transition response.
+    /// </summary>
+    /// <param name="response">The validated upgrade or rollback response whose ordered fields are signed.</param>
+    /// <returns>The newline-delimited payload used by both signing and verification.</returns>
+    /// <remarks>
+    /// The field order is the deployed v1 boundary contract and must remain unchanged so stored
+    /// responses and historical signatures stay verifiable.
+    /// </remarks>
     public static string BuildUpgradeSignaturePayload(RuntimeEnrollmentUpgradeResponse response) => string.Join('\n',
         response.Schema,
         response.ProtocolVersion,
@@ -491,7 +500,7 @@ public sealed class RuntimeEnrollmentCryptoService : IRuntimeEnrollmentCryptoSer
             or "recovery-refetch-response" or "milestone-response" or "upgrade-response"
             or "rollback-response" or "bootstrap-issue-response"
             or "bootstrap-redeem-response" or "websetup-transition-response"
-            or "hardware-migration-response"
+            or "hardware-migration-response" or "hardware-migration-receipt"
             or "websetup-upgrade-response";
 
     private static byte[] SerializeJson(Action<Utf8JsonWriter> write)

@@ -531,6 +531,55 @@ internal sealed class RuntimeEnrollmentAuthorityCryptography
     internal Result<SignedGenerationResult> SignGeneration(RuntimeAuthorityGenerationSigningOptions? options, ReadOnlySpan<byte> payloadUtf8)
         => SignGeneration(options, payloadUtf8, options?.ActiveSigningKeyId);
 
+    /// <summary>
+    /// Verifies one persisted canonical authority generation with the exact configured operational key.
+    /// Historical generation bytes remain valid with their persisted key identifier; the active-key selector
+    /// is never substituted during verification.
+    /// </summary>
+    /// <param name="options">Validated key registry configuration containing the persisted public key.</param>
+    /// <param name="payloadUtf8">Persisted generic generation payload, canonicalized before verification.</param>
+    /// <param name="keyId">Exact ordinal signing-key identifier persisted with the generation.</param>
+    /// <param name="signature">Canonical persisted unpadded PS256 signature.</param>
+    /// <returns>None only when payload shape, key metadata, RSA profile, and signature are valid.</returns>
+    internal Failure VerifyGenerationSignature(
+        RuntimeAuthorityGenerationSigningOptions? options,
+        ReadOnlySpan<byte> payloadUtf8,
+        string keyId,
+        string signature)
+    {
+        if (ValidateOwnedConfiguration(options) != Failure.None)
+            return Failure.KeyConfigurationInvalid;
+        var canonical = CanonicalizeGenerationPayload(payloadUtf8);
+        if (canonical.Error != Failure.None)
+            return canonical.Error;
+        var selected = options!.Keys.SingleOrDefault(key =>
+            string.Equals(key.KeyId, keyId, StringComparison.Ordinal));
+        if (selected is null || selected.Purpose != "operational" || selected.Domain != "generation"
+            || selected.ContractVersion != 2)
+            return Failure.KeyNotAuthorized;
+        if (!TryDecodeSignature(signature, out var decoded))
+            return Failure.Base64UrlInvalid;
+        try
+        {
+            using var rsa = RSA.Create();
+            rsa.ImportFromPem(selected.PublicKeyPem);
+            return rsa.KeySize == 2048
+                && rsa.ExportParameters(false).Exponent is [0x01, 0x00, 0x01]
+                && rsa.VerifyData(SigningInput(canonical.Value!.CanonicalUtf8), decoded,
+                    HashAlgorithmName.SHA256, RSASignaturePadding.Pss)
+                ? Failure.None
+                : Failure.SignatureInvalid;
+        }
+        catch (Exception exception) when (exception is CryptographicException or ArgumentException)
+        {
+            return Failure.KeyConfigurationInvalid;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(decoded);
+        }
+    }
+
     /// <summary>Signs with one exact classifier-approved operational key, including predecessor rotation signing.</summary>
     internal Result<SignedGenerationResult> SignGeneration(
         RuntimeAuthorityGenerationSigningOptions? options, ReadOnlySpan<byte> payloadUtf8,

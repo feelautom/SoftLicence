@@ -1,5 +1,20 @@
 # Changelog
 
+## SDK v2.0.0 - 2026-10-03 (TKT-001277, TKT-001312, TKT-001510)
+
+### Machine identity from the system UUID
+
+- breaking(sdk): `HardwareInfo.GetHardwareId()` now derives the 16-character identifier from the SMBIOS system UUID only; the five-component calculation and its legacy/stable variants are removed
+- breaking(sdk): remove `GetStableHardwareId`, `GetHardwareIdMigrationInfo`, `HardwareIdMigrationInfo` and `GetComponentFingerprints`
+- feat(sdk): `MachineIdentity` (`Resolve`, `FromUuid`, `CollectEvidence`, `ToSupportCode`) and `MachineIdentityRefusedException`
+- feat(sdk): refuse absent, unreadable, malformed and known generic UUIDs with support codes AR-01 to AR-04; AR-05 is the server refusal of an identifier not derived from the UUID
+- feat(sdk): send `SystemUuid` and `MachineEvidence` with activation, trial and status requests; stop sending `HardwareIdV2`, `HardwareIdAlgorithm` and `ComponentFingerprints`
+- feat(sdk): `ActivationErrorCode.DeviceRefused` and `StatusErrorCode.DeviceRefused`
+- feat(server): apply the same UUID rule on activation, check and trial, answer `DEVICE_REFUSED` with the support code, and store machine evidence in `MachineEvidenceObservations`
+- feat(sdk/server): `ActivateReplacingHardwareIdAsync` sends `PreviousHardwareId`; activation detaches that seat and attaches the new identifier atomically, consuming one daily seat change (`MAX_DAILY_DEACTIVATIONS_REACHED` when exhausted, previous seat kept)
+- feat(server): on a single-seat licence, activating another machine detaches the active seat and attaches the new one automatically, consuming one daily seat change; when the daily quota is exhausted the activation is refused and the last activated machine stays attached; multi-seat licences keep manual detachment; a first activation or a reactivation of the same machine consumes nothing (TKT-001510)
+- security(sdk): `SoftLicence.SDK.dll` carries an Authenticode signature with a trusted timestamp, as since 1.1.15
+
 ## SDK v1.1.15 - 2026-10-02
 
 ### Signed assembly

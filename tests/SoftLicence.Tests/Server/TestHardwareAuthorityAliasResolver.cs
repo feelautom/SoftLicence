@@ -8,7 +8,9 @@ namespace SoftLicence.Tests.Server;
 /// <summary>
 /// Delegates test resolution to the production resolver using the transaction supplied by the service under test.
 /// </summary>
-internal sealed class TestHardwareAuthorityAliasResolver : IHardwareAuthorityAliasResolver
+internal sealed class TestHardwareAuthorityAliasResolver :
+    IHardwareAuthorityAliasResolver,
+    ICanonicalFinalizeHardwareAuthorityResolver
 {
     /// <summary>Gets the stateless shared test adapter.</summary>
     public static TestHardwareAuthorityAliasResolver Instance { get; } = new();
@@ -41,6 +43,26 @@ internal sealed class TestHardwareAuthorityAliasResolver : IHardwareAuthorityAli
             licenseId,
             submittedHardwareId,
             intent,
+            cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task<HardwareAuthorityResolution> ResolveFinalizeSourceByCanonicalAsync(
+        LicenseDbContext authorityDb,
+        Guid productId,
+        Guid licenseId,
+        string submittedCanonicalHardwareId,
+        CancellationToken cancellationToken = default)
+    {
+        var resolver = new HardwareAuthorityAliasResolver(
+            authorityDb,
+            Options.Create(new HardwareAuthorityAliasOptions { DefaultMode = "enabled" }),
+            NullLogger<HardwareAuthorityAliasResolver>.Instance);
+        return resolver.ResolveFinalizeSourceByCanonicalAsync(
+            authorityDb,
+            productId,
+            licenseId,
+            submittedCanonicalHardwareId,
             cancellationToken);
     }
 }

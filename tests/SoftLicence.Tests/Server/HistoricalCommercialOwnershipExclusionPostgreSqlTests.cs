@@ -25,6 +25,7 @@ public sealed partial class HistoricalCommercialOwnershipExclusionPostgreSqlTest
     /// and cross-product cohorts in PostgreSQL and proves that the commercial graph is unchanged.
     /// </summary>
     [Fact]
+    [Trait("Category", "PrivateRepository")]
     public async Task Inventory_OnlyExactTkt780TupleIsAttributedAndCommercialGraphRemainsUnchanged()
     {
         var reportSql = await File.ReadAllTextAsync(InventoryScriptPath());
@@ -142,9 +143,11 @@ public sealed partial class HistoricalCommercialOwnershipExclusionPostgreSqlTest
             string.Concat(Enumerable.Repeat("Aa", 32)), providerSubjectId,
             LicenseProvisioningRequest.ProviderAdminApiProvenance);
 
-        await using (var db = new LicenseDbContext(new DbContextOptionsBuilder<LicenseDbContext>()
-            .UseNpgsql(connectionString).Options))
+        // Keep the exact TKT780 schema: only the later generated AuthorityVersion column is absent.
+        await using (var db = HistoricalSchemaModel.CreateContext(connectionString,
+            [(typeof(SoftLicence.Server.Data.License), nameof(SoftLicence.Server.Data.License.AuthorityVersion))]))
         {
+            Assert.Equal(Tkt780Migration, (await db.Database.GetAppliedMigrationsAsync()).Last());
             db.AddRange(products);
             db.AddRange(proTypes.Values);
             db.AddRange(trialType, freeTrialType, providerTrialType);

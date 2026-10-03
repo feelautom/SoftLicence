@@ -44,8 +44,10 @@ public sealed record SeatChangeQuotaStatus(int Limit, int UsedToday, DateTime Re
 /// <para>
 /// Counted events, all on the exact licence and within [UTC midnight, next UTC midnight):
 /// portal operations whose outcome is <c>deactivated</c> and whose reason is not the
-/// server-owned <c>subscription_termination</c> cleanup; and <c>UNLINKED_API</c> history rows
-/// written by customer-facing endpoints (Desktop deactivation, reset code). Portal history rows
+/// server-owned <c>subscription_termination</c> cleanup; <c>UNLINKED_API</c> history rows
+/// written by customer-facing endpoints (Desktop deactivation, reset code); and
+/// <c>HWID_V2_MIGRATED</c> rows of the signed Runtime migration, which moves the seat to another
+/// hardware identifier in place (TKT-001277 lot 5, one change per real migration, never per replay). Portal history rows
 /// (<c>S2S:</c> performer) are excluded because their operation row is already counted, and
 /// <c>Admin (API)</c> rows are excluded because they are not customer actions. Exact portal
 /// replays and <c>already_inactive</c> outcomes create no counted event.
@@ -110,7 +112,8 @@ public static class SeatChangeQuota
 
         var clientReleases = await db.LicenseHistories.CountAsync(history =>
             history.LicenseId == licenseId
-            && history.Action == HistoryActions.UnlinkedApi
+            && (history.Action == HistoryActions.UnlinkedApi
+                || history.Action == HistoryActions.HardwareIdMigrated)
             && history.Timestamp >= dayStart
             && history.Timestamp < resetAt
             && (history.PerformedBy == null

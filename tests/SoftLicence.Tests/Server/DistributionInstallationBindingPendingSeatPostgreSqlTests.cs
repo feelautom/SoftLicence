@@ -46,7 +46,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     [Fact]
     public async Task Tkt981_PendingSeat_ConcurrentDifferentTargetsCannotExceedQuota()
     {
-        var fixture = await PreparePendingSeatRecoveryAsync();
+        var fixture = await PreparePendingSeatRecoveryAsync(withCapacityWitness: true);
         var other = JsonSerializer.Deserialize<DistributionInstallationFinalizeRequest>(JsonSerializer.Serialize(fixture.Request))!;
         var grant = Guid.NewGuid().ToString("D");
         var subject = Convert.ToBase64String(SHA256.HashData("pending-seat-owner"u8.ToArray()))
@@ -82,7 +82,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     [InlineData("enrollment", "binding_conflict")]
     public async Task Tkt981_PendingSeat_RefusalsPreserveOriginalState(string scenario, string error)
     {
-        var fixture = await PreparePendingSeatRecoveryAsync();
+        var fixture = await PreparePendingSeatRecoveryAsync(withCapacityWitness: scenario == "quota");
         await using (var db = await fixture.Factory.CreateDbContextAsync())
         {
             if (scenario == "quota")
@@ -158,8 +158,9 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// for different hardware. Each fixture owns a unique product/licence in the bounded test database.
     /// </summary>
     /// <param name="existingTarget">Adds an inactive target row to cover the pre-existing relational lookup path.</param>
+    /// <param name="withCapacityWitness">Keeps one unrelated seat active in a two-seat licence, leaving exactly one recoverable slot.</param>
     /// <returns>Only synthetic fixture identities and services; the admin connection must never be logged.</returns>
-    private static async Task<PendingSeatFixture> PreparePendingSeatRecoveryAsync(bool existingTarget = false)
+    private static async Task<PendingSeatFixture> PreparePendingSeatRecoveryAsync(bool existingTarget = false, bool withCapacityWitness = false)
     {
         var connections = await ProvisionAsync();
         var factory = new TestDbFactory(connections.App);
@@ -209,6 +210,10 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var originalId = Guid.Parse(original.Response.BindingId);
         const string targetHardware = "F1A2B3C4D5E6A7B8";
         Guid sourceSeatId;
+        Guid? witnessId = withCapacityWitness ? Guid.NewGuid() : null;
+        // Seed exactly representable PostgreSQL microseconds so immutable timestamps compare exactly.
+        var witnessTicks = now.AddDays(-2).UtcDateTime.Ticks;
+        var witnessAt = new DateTime(witnessTicks - witnessTicks % 10, DateTimeKind.Utc);
         await using (var db = await factory.CreateDbContextAsync())
         {
             var binding = await db.DistributionInstallationBindings.SingleAsync(item => item.Id == originalId);
@@ -216,6 +221,13 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             var seat = await db.LicenseSeats.SingleAsync(item => item.Id == sourceSeatId);
             seat.IsActive = false;
             seat.UnlinkedAt = now.AddMinutes(-10).UtcDateTime;
+            if (witnessId.HasValue)
+            {
+                (await db.Licenses.SingleAsync(row => row.Id == authority.LicenseId)).MaxSeats = 2;
+                db.LicenseSeats.Add(new LicenseSeat { Id = witnessId.Value, LicenseId = authority.LicenseId,
+                    HardwareId = "AAAABBBBCCCCDDDD", IsActive = true,
+                    FirstActivatedAt = witnessAt, LastCheckInAt = witnessAt });
+            }
             if (existingTarget)
                 db.LicenseSeats.Add(new LicenseSeat { Id = Guid.NewGuid(), LicenseId = authority.LicenseId,
                     HardwareId = targetHardware, IsActive = false, FirstActivatedAt = now.AddHours(-1).UtcDateTime });
@@ -238,7 +250,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             await db.SaveChangesAsync();
         }
         return new PendingSeatFixture(factory, service, connections.Admin, authority.LicenseId, originalId,
-            sourceSeatId, await RequestAsync(targetHardware, 5));
+            sourceSeatId, await RequestAsync(targetHardware, 5), witnessId, witnessAt);
     }
 
     /// <summary>Checks committed relational state rather than treating an HTTP success as proof of a valid transition.</summary>
@@ -253,10 +265,12 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.Equal("active", successor.State);
         Assert.Equal("invalidated", (await db.DistributionInstallationBindings.SingleAsync(item => item.Id == fixture.SourceBindingId)).State);
         Assert.Equal("INVALIDATED", (await db.RuntimeEnrollments.SingleAsync(item => item.BindingId == fixture.SourceBindingId)).State);
-        var activeSeat = Assert.Single(await db.LicenseSeats.Where(item => item.LicenseId == fixture.LicenseId && item.IsActive).ToListAsync());
+        await AssertPendingCapacityWitnessAsync(db, fixture);
+        var activeSeat = Assert.Single(await db.LicenseSeats.Where(item => item.LicenseId == fixture.LicenseId
+            && item.IsActive && (fixture.CapacityWitnessId == null || item.Id != fixture.CapacityWitnessId)).ToListAsync());
         Assert.Equal(successor.LicenseSeatId, activeSeat.Id);
         Assert.Equal(fixture.Request.HardwareId, activeSeat.HardwareId);
-        Assert.Equal(2, await db.LicenseSeats.CountAsync(item => item.LicenseId == fixture.LicenseId));
+        Assert.Equal(fixture.CapacityWitnessId.HasValue ? 3 : 2, await db.LicenseSeats.CountAsync(item => item.LicenseId == fixture.LicenseId));
     }
 
     /// <summary>Checks that a rejected request leaves no pending seat, successor, receipt or success history behind.</summary>
@@ -264,7 +278,11 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     private static async Task AssertPendingSeatRollbackAsync(PendingSeatFixture fixture)
     {
         await using var db = await fixture.Factory.CreateDbContextAsync();
-        Assert.Single(await db.LicenseSeats.Where(item => item.LicenseId == fixture.LicenseId).ToListAsync());
+        await AssertPendingCapacityWitnessAsync(db, fixture);
+        Assert.Equal(fixture.CapacityWitnessId.HasValue ? 2 : 1,
+            await db.LicenseSeats.CountAsync(item => item.LicenseId == fixture.LicenseId));
+        Assert.Single(await db.LicenseSeats.Where(item => item.LicenseId == fixture.LicenseId
+            && (fixture.CapacityWitnessId == null || item.Id != fixture.CapacityWitnessId)).ToListAsync());
         Assert.Single(await db.DistributionInstallationBindings.Where(item => item.LicenseId == fixture.LicenseId).ToListAsync());
         Assert.Equal("active", (await db.DistributionInstallationBindings.SingleAsync(item => item.Id == fixture.SourceBindingId)).State);
         Assert.False(await db.DistributionBindingRequests.AnyAsync(item => item.RequestId == fixture.Request.RequestId));
@@ -272,7 +290,20 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             && (item.Action == "RUNTIME_INITIAL_SEAT_CREATED" || item.Action == "RUNTIME_INITIAL_SEAT_REACTIVATED")).ToListAsync());
     }
 
-    /// <summary>Synthetic test ownership bundle; Admin is a local fixture connection and must never be rendered or logged.</summary>
+    /// <summary>Verifies that capacity competition neither releases nor rewrites the unrelated original seat.</summary>
+    private static async Task AssertPendingCapacityWitnessAsync(LicenseDbContext db, PendingSeatFixture fixture)
+    {
+        if (!fixture.CapacityWitnessId.HasValue) return;
+        var witness = await db.LicenseSeats.SingleAsync(row => row.Id == fixture.CapacityWitnessId);
+        Assert.True(witness.IsActive);
+        Assert.Equal("AAAABBBBCCCCDDDD", witness.HardwareId);
+        Assert.Equal(fixture.CapacityWitnessAt, witness.FirstActivatedAt);
+        Assert.Equal(fixture.CapacityWitnessAt, witness.LastCheckInAt);
+        Assert.Null(witness.UnlinkedAt);
+    }
+
+    /// <summary>Synthetic test ownership bundle, including optional immutable capacity-witness facts; Admin must never be rendered or logged.</summary>
     private sealed record PendingSeatFixture(TestDbFactory Factory, DistributionInstallationBindingService Service,
-        string Admin, Guid LicenseId, Guid SourceBindingId, Guid SourceSeatId, DistributionInstallationFinalizeRequest Request);
+        string Admin, Guid LicenseId, Guid SourceBindingId, Guid SourceSeatId, DistributionInstallationFinalizeRequest Request,
+        Guid? CapacityWitnessId, DateTime CapacityWitnessAt);
 }

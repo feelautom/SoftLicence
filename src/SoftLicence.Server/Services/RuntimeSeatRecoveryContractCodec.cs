@@ -81,6 +81,8 @@ public static class RuntimeSeatRecoveryContractCodec
     /// Parses one bounded request and rejects every byte representation outside the closed W5 writer,
     /// scalar grammar, seat-claim grammar, and W9 request shape.
     /// </summary>
+    /// <param name="utf8">The untrusted request bytes; they are never trimmed, normalized, or repaired.</param>
+    /// <returns>The canonical request bytes and separated digest, or the stable <c>invalid_request</c> parse failure.</returns>
     public static AuthorizationParseResult ParseAuthorizationRequest(ReadOnlySpan<byte> utf8)
     {
         if (utf8.Length is < 1 or > 4096
@@ -178,6 +180,8 @@ public static class RuntimeSeatRecoveryContractCodec
     }
 
     /// <summary>Parses the bounded W8 current-readback request and enforces its exact property sequence.</summary>
+    /// <param name="utf8">The untrusted readback identity bytes; alternate escaping, whitespace, and scalar forms are rejected.</param>
+    /// <returns>The validated readback identity, or the stable <c>invalid_request</c> failure without partial identity.</returns>
     internal static RuntimeSeatRecoveryReadbackParseResult ParseCurrentReadbackRequest(ReadOnlySpan<byte> utf8)
     {
         if (utf8.Length is < 1 or > 4096 || ContainsWhitespaceOutsideStrings(utf8)
@@ -205,6 +209,8 @@ public static class RuntimeSeatRecoveryContractCodec
     }
 
     /// <summary>Parses the exact 1078-byte RSA-3072 W10 preparation outer without string normalization or repair.</summary>
+    /// <param name="utf8">The untrusted preparation bytes in the closed canonical shape.</param>
+    /// <returns>The validated request and exact canonical bytes, or the stable <c>invalid_request</c> failure.</returns>
     internal static KeyPreparationParseResult ParseKeyPreparationRequest(ReadOnlySpan<byte> utf8)
     {
         if (utf8.Length != 1078 || InvalidCanonicalEnvelope(utf8)) return new(null, [], "invalid_request");
@@ -236,6 +242,8 @@ public static class RuntimeSeatRecoveryContractCodec
     /// Parses the exact 1873-byte RSA-3072 W10 confirmation outer, preserves the 628 raw statement bytes, and
     /// rejects every unknown member including <c>jti</c> before any one-shot provider effect.
     /// </summary>
+    /// <param name="utf8">The untrusted confirmation bytes in the closed canonical shape.</param>
+    /// <returns>The validated outer, exact outer and statement bytes, and digest, or the stable <c>invalid_request</c> failure.</returns>
     internal static KeyConfirmationParseResult ParseKeyConfirmationRequest(ReadOnlySpan<byte> utf8)
     {
         if (utf8.Length != 1873 || InvalidCanonicalEnvelope(utf8)) return InvalidConfirmation();
@@ -266,6 +274,8 @@ public static class RuntimeSeatRecoveryContractCodec
     }
 
     /// <summary>Parses the exact 524-byte activation command and derives its separated digest.</summary>
+    /// <param name="utf8">The untrusted activation bytes in the closed canonical shape.</param>
+    /// <returns>The validated request, exact canonical bytes, and lowercase separated digest, or <c>invalid_request</c>.</returns>
     internal static ActivationParseResult ParseActivationRequest(ReadOnlySpan<byte> utf8)
     {
         if (utf8.Length != 524 || InvalidCanonicalEnvelope(utf8)) return InvalidActivation();
@@ -300,6 +310,8 @@ public static class RuntimeSeatRecoveryContractCodec
     }
 
     /// <summary>Parses the exact 278-byte activation receipt readback identity.</summary>
+    /// <param name="utf8">The untrusted activation-readback bytes in the closed canonical shape.</param>
+    /// <returns>The validated receipt identity, or the stable <c>invalid_request</c> failure.</returns>
     internal static ActivationReadbackParseResult ParseActivationReadbackRequest(ReadOnlySpan<byte> utf8)
     {
         if (utf8.Length != 278 || InvalidCanonicalEnvelope(utf8)) return new(null, "invalid_request");
@@ -325,6 +337,8 @@ public static class RuntimeSeatRecoveryContractCodec
     }
 
     /// <summary>Builds the exact PS256 input from the fixed domain, one LF, and untouched statement bytes.</summary>
+    /// <param name="statementUtf8">The canonical v1 confirmation statement bytes, without decoding or normalization.</param>
+    /// <returns>A new caller-owned byte array containing the domain-separated signature input.</returns>
     internal static byte[] BuildConfirmationSignatureInput(ReadOnlySpan<byte> statementUtf8)
     {
         var input = new byte[ConfirmationDomain.Length + 1 + statementUtf8.Length];
@@ -365,7 +379,9 @@ public static class RuntimeSeatRecoveryContractCodec
     private static ActivationParseResult InvalidActivation() =>
         new(null, [], null, "invalid_request");
 
-    /// <summary>Validates every scalar without trimming, case folding, Unicode normalization, or repair.</summary>
+    /// <summary>Validates every authorization scalar without trimming, case folding, Unicode normalization, or repair.</summary>
+    /// <param name="request">The deserialized request whose closed protocol grammar is checked.</param>
+    /// <returns><see langword="true"/> only when all schema, identity, digest, timestamp, grant, release, and seat-claim invariants hold.</returns>
     private static bool Validate(RuntimeSeatRecoveryAuthorizationRequest request)
     {
         if (request.Schema != "runtime-seat-recovery-authorization-v1" || request.ContractVersion != 1
@@ -461,6 +477,9 @@ public static class RuntimeSeatRecoveryContractCodec
         catch (FormatException) { return false; }
     }
 
+    /// <summary>Validates the complete confirmation outer and embedded statement scalar grammar before byte comparison.</summary>
+    /// <param name="request">The deserialized confirmation request to validate without normalization or repair.</param>
+    /// <returns><see langword="true"/> only when every outer and statement scalar satisfies the closed v1 grammar.</returns>
     private static bool ValidateConfirmationOuter(RuntimeSeatRecoveryKeyConfirmationRequest request)
     {
         var statement = request.ConfirmationStatement;
@@ -564,6 +583,8 @@ public static class RuntimeSeatRecoveryContractCodec
     /// Serializes the complete authorization request in its closed property order, using the shared
     /// W5 opaque-scalar table and explicit null semantics for the optional seat claim.
     /// </summary>
+    /// <param name="request">The validated authorization request whose opaque scalar bytes must be preserved.</param>
+    /// <returns>The canonical authorization bytes used solely for byte-identity validation and digest ownership.</returns>
     private static byte[] SerializeCanonicalAuthorization(RuntimeSeatRecoveryAuthorizationRequest request)
     {
         var output = new ArrayBufferWriter<byte>();

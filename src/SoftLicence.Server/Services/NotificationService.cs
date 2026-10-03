@@ -21,6 +21,8 @@ public class NotificationService
         public const string SecurityHwidReuseDetected = "Security.HwidReuseDetected";
         public const string SecurityAuthFailure = "Security.AuthFailure";
         public const string SecurityEvidenceObserved = "Security.EvidenceObserved";
+        /// <summary>Grouped "would have blocked" events of the assignment controls while the switch is open (TKT-001277).</summary>
+        public const string SecurityAssignmentEnforcement = "Security.AssignmentEnforcement";
         public const string LicenseCreated = "License.Created";
         public const string LicenseActivated = "License.Activated";
         public const string LicenseRevoked = "License.Revoked";
@@ -86,6 +88,7 @@ public class NotificationService
         Triggers.SecurityHwidReuseDetected => "warning",
         Triggers.SecurityAuthFailure => "warning",
         Triggers.SecurityEvidenceObserved => "warning",
+        Triggers.SecurityAssignmentEnforcement => "warning",
         Triggers.LicenseCreated => "sparkles",
         Triggers.LicenseActivated => "white_check_mark",
         Triggers.LicenseRevoked => "no_entry_sign",

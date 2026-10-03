@@ -264,13 +264,30 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
         Assert.DoesNotContain(topEvents, e => GetString(e, "name") == "Startup_AppStarted");
     }
 
+    /// <summary>
+    /// Keeps all four expected records inside a fixed UTC calendar day and proves that records
+    /// immediately outside either boundary are excluded, independently of the execution clock.
+    /// </summary>
     [Fact]
     public async Task TelemetryOverview_WhenDateIsProvided_UsesCalendarDayPeriod()
     {
-        await SeedTelemetryAsync();
+        var telemetryAnchorUtc = new DateTime(2026, 8, 1, 12, 0, 0, DateTimeKind.Utc);
+        await SeedTelemetryAsync(telemetryAnchorUtc);
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var productId = await db.Products.Where(product => product.Name == "T-IA Connect")
+                .Select(product => product.Id).SingleAsync();
+            AddEvent(db, productId, "HW-A", "BeforeCalendarDay", "2.1.900", "{}",
+                telemetryAnchorUtc.Date.AddTicks(-1));
+            AddEvent(db, productId, "HW-A", "AfterCalendarDay", "2.1.900", "{}",
+                telemetryAnchorUtc.Date.AddDays(1));
+            await db.SaveChangesAsync();
+            Assert.Equal(6, await db.TelemetryRecords.CountAsync(record => record.ProductId == productId));
+        }
         var client = _factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
-        var date = DateTime.UtcNow.ToString("yyyy-MM-dd");
+        var date = telemetryAnchorUtc.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
 
         var response = await client.GetAsync($"/api/analytics/telemetry/overview?date={date}&top=10");
 
@@ -1928,7 +1945,14 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
         Assert.Equal(11, GetProperty(license, "minutesActivationToProductiveEvent").GetDouble());
     }
 
-    private async Task SeedTelemetryAsync()
+    /// <summary>
+    /// Recreates the isolated analytics fixture with synthetic products, credentials and records.
+    /// An explicit UTC anchor controls only telemetry timestamps for calendar-window scenarios;
+    /// callers without an anchor retain their wall-clock-relative data and all existing offsets.
+    /// Database setup failures propagate to the calling test.
+    /// </summary>
+    /// <param name="telemetryAnchorUtc">Optional UTC reference used before applying the existing telemetry offsets.</param>
+    private async Task SeedTelemetryAsync(DateTime? telemetryAnchorUtc = null)
     {
         using var scope = _factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
@@ -1990,17 +2014,17 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
 
         AddEvent(db, productA.Id, "HW-A", "Startup_AppStarted", "2.1.900",
             """{"OverallStatus":"Pass","LicenseKey":"SECRET-LICENSE-001","Token":"secret-token-value","ApiSecret":"private-secret-value"}""",
-            DateTime.UtcNow.AddHours(-3));
+            (telemetryAnchorUtc ?? DateTime.UtcNow).AddHours(-3));
         AddEvent(db, productA.Id, "HW-B", "Mcp_ToolCall", "2.1.900",
             """{"Tool":"list_blocks","RequestSource":"MCP_Agent","Quota_Mcp_Daily":"10/10"}""",
-            DateTime.UtcNow.AddHours(-2));
+            (telemetryAnchorUtc ?? DateTime.UtcNow).AddHours(-2));
         AddEvent(db, productA.Id, "HW-B", "API_AuthFailed", "2.1.900",
             """{"Reason":"InvalidKey"}""",
-            DateTime.UtcNow.AddMinutes(-90));
-        AddError(db, productA.Id, "HW-A", "UnhandledException", "2.1.900", "FatalUnhandled", DateTime.UtcNow.AddHours(-1));
+            (telemetryAnchorUtc ?? DateTime.UtcNow).AddMinutes(-90));
+        AddError(db, productA.Id, "HW-A", "UnhandledException", "2.1.900", "FatalUnhandled", (telemetryAnchorUtc ?? DateTime.UtcNow).AddHours(-1));
         AddEvent(db, productB.Id, "HW-C", "OtherProduct_Event", "1.0",
             """{"Safe":"Value"}""",
-            DateTime.UtcNow);
+            telemetryAnchorUtc ?? DateTime.UtcNow);
         AddAccessLog(db, "T-IA Connect", "ACTIVATE", false, 400, "BAD_REQUEST", "HW-A", "10.0.0.1", "Invalid license key format", DateTime.UtcNow.AddMinutes(-40));
         AddAccessLog(db, "T-IA Connect", "ACTIVATE", false, 403, "REVOKED", "HW-B", "10.0.0.2", "License revoked", DateTime.UtcNow.AddMinutes(-30));
         AddAccessLog(db, "Other Product", "ACTIVATE", false, 400, "BAD_REQUEST", "HW-C", "10.0.0.3", "Other product failure", DateTime.UtcNow.AddMinutes(-20));

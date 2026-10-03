@@ -12,7 +12,7 @@ namespace SoftLicence.Tests.Server;
 public sealed partial class RuntimeEnrollmentPostgreSqlTests
 {
     /// <summary>Proves expired/live ban maintenance is unchanged for refusal, success and failed history persistence.</summary>
-    /// <remarks>Only the controller type name and required test-project imports differ in the generated baseline. Each baseline database clones the fully seeded candidate database before either call; UUIDs and business values are identical. Clones remain until the owning ephemeral container is removed, with no database deletion during tests. Fingerprints omit history and explicitly named occurrence timestamps only, never identities, state or counters.</remarks>
+    /// <remarks>The generated controller and its cleanup dependency both come from 3742d1d9; only type names and required test-project imports differ. Mixing the old controller transaction protocol with the current cleanup lease would invalidate the baseline. Each baseline database clones the fully seeded candidate database before either call; UUIDs and business values are identical. Clones remain until the owning ephemeral container is removed, with no database deletion during tests. Fingerprints omit history and explicitly named occurrence timestamps only, never identities, state or counters.</remarks>
     [Theory]
     [InlineData(true, "refusal")]
     [InlineData(false, "refusal")]
@@ -50,7 +50,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         }
         var clone = await Tkt976_CloneBaselineDatabaseAsync(connections);
         var baselineObserver = new Tkt976EarlySqlObserver();
-        using var baselineHost = Tkt976_CreateLegacyHost(new Tkt976EarlyFactory(clone, baselineObserver));
+        using var baselineHost = Tkt976_CreateLegacyHost(new Tkt976EarlyFactory(clone, baselineObserver),
+            configureTestServices: services => services.AddScoped<SoftLicence.Server.Services.Tkt976BaselineSeatCleanupService>());
         using var requestCancellation = new CancellationTokenSource();
         using var shutdown = new CancellationTokenSource();
         var fault = new Tkt976FaultState(mode, requestCancellation, shutdown);

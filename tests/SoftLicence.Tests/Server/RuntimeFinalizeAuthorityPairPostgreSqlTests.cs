@@ -15,33 +15,54 @@ using Xunit;
 namespace SoftLicence.Tests.Server;
 
 /// <summary>
-/// TKT-001296: the distribution preflight recognizes a migrated machine through its authenticated alias and
-/// the Finalize pair resolver verifies the same alias pair in both directions, on real PostgreSQL rows.
+/// TKT-001296: the Finalize pair resolver verifies the alias pair in both directions, on real PostgreSQL rows.
+/// The distribution preflight no longer recognizes aliases: since TKT-001277 lot 2c it derives the identifier
+/// from the system UUID only, so its former alias-recognition tests were removed.
 /// </summary>
 public sealed partial class RuntimeEnrollmentPostgreSqlTests
 {
-    private sealed record PairEvidence(string Cpu, string Board, string Bios, string LegacyDisk, string StableDisk, string Machine)
+    /// <summary>Pairs the five-component legacy identity with the canonical identity derived from an accepted system UUID.</summary>
+    /// <param name="Cpu">Synthetic CPU evidence used only by the legacy identity.</param>
+    /// <param name="Board">Synthetic board evidence used only by the legacy identity.</param>
+    /// <param name="Bios">Synthetic BIOS evidence used only by the legacy identity.</param>
+    /// <param name="LegacyDisk">Synthetic disk evidence used only by the legacy identity.</param>
+    /// <param name="SystemUuid">Accepted UUID supplied to the signed migration request and canonical SDK identity derivation.</param>
+    /// <param name="Machine">Synthetic machine name used only by the legacy identity.</param>
+    private sealed record PairEvidence(string Cpu, string Board, string Bios, string LegacyDisk, string SystemUuid, string Machine)
     {
+        /// <summary>Gets the unchanged legacy five-component hardware identifier.</summary>
         public string Legacy => ServerHardwareId(Cpu, Board, Bios, LegacyDisk, Machine);
-        public string Stable => ServerHardwareId(Cpu, Board, Bios, StableDisk, Machine);
-        public RuntimeDistributionHardwareEvidence ToRequest() => new()
-        {
-            CpuId = Cpu, MotherboardId = Board, BiosId = Bios, LegacyDiskId = LegacyDisk, StableDiskId = StableDisk, MachineName = Machine
-        };
+
+        /// <summary>Gets the canonical UUID identifier, failing setup if the synthetic UUID is not accepted.</summary>
+        public string Stable => SoftLicence.SDK.MachineIdentity.FromUuid(SystemUuid).HardwareId
+            ?? throw new InvalidOperationException("The pair fixture requires an accepted system UUID.");
     }
 
-    /// <summary>Mirrors the SDK five-component algorithm the server applies to raw evidence.</summary>
+    /// <summary>Reproduces the legacy SDK identifier without altering any evidence bytes.</summary>
+    /// <param name="cpu">Legacy CPU evidence.</param>
+    /// <param name="board">Legacy board evidence.</param>
+    /// <param name="bios">Legacy BIOS evidence.</param>
+    /// <param name="disk">Legacy disk evidence.</param>
+    /// <param name="machine">Legacy machine name.</param>
+    /// <returns>The first sixteen uppercase hexadecimal characters of the concatenated evidence SHA-256.</returns>
     private static string ServerHardwareId(string cpu, string board, string bios, string disk, string machine) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(cpu + board + bios + disk + machine)))[..16];
 
-    private static readonly PairEvidence PairMachine = new("CPU-PAIR-1", "BOARD-PAIR-1", "BIOS-PAIR-1", "DISK-LEGACY-1", "DISK-STABLE-1", "HOST-PAIR-1");
+    /// <summary>Provides distinct legacy and canonical identities for one synthetic machine.</summary>
+    private static readonly PairEvidence PairMachine = new("CPU-PAIR-1", "BOARD-PAIR-1", "BIOS-PAIR-1", "DISK-LEGACY-1", TestSystemUuid, "HOST-PAIR-1");
 
-    /// <summary>Activates the scenario on the legacy identity, then migrates it to the stable identity, which creates the alias.</summary>
+    /// <summary>Activates the legacy identity and migrates to its UUID identity, asserting the persisted alias pair.</summary>
+    /// <param name="scenario">Prepared PostgreSQL scenario whose lifetime remains owned by the caller.</param>
+    /// <param name="machine">Legacy evidence and accepted target UUID for the signed migration.</param>
+    /// <returns>The binding product, licence, grant digest and entitlement client used by the pair resolver.</returns>
+    /// <remarks>Requires distinct identities and writes activation, migration and alias state through production services.</remarks>
     private static async Task<(Guid ProductId, Guid LicenseId, string GrantRefDigest, string ClientId)> MigrateScenarioToPairAsync(
         PreparedBootstrapScenario scenario, PairEvidence machine)
     {
+        Assert.NotEqual(machine.Legacy, machine.Stable);
         await ActivateCanonicalScenarioAsync(scenario, machine.Legacy);
         var request = MigrationRequest(scenario, machine.Legacy, machine.Stable);
+        request.SystemUuid = machine.SystemUuid;
         var digest = Sha256("hardware-pair-" + Guid.NewGuid().ToString("D"));
         var proof = Proof(scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId,
             scenario.Options.ConfirmAudience, "-", digest);
@@ -56,117 +77,6 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.Equal(Sha256(machine.Legacy), alias.LegacyHardwareIdSha256);
         Assert.Equal(Sha256(machine.Stable), alias.CanonicalHardwareIdSha256);
         return (binding.ProductId, binding.LicenseId, binding.GrantRefDigestSha256, entitlement.ClientId);
-    }
-
-    private static RuntimeDistributionPreflightRequest PreflightRequest(
-        Guid productId, Guid licenseId, string grantRefDigest, PairEvidence machine) => new()
-    {
-        Schema = "runtime-distribution-hardware-authority",
-        RequestId = Guid.NewGuid().ToString("D"),
-        ProductId = productId.ToString("D"),
-        SoftLicenceLicenseId = licenseId.ToString("D"),
-        GrantRefDigestSha256 = grantRefDigest,
-        InstallationId = Guid.NewGuid().ToString("D"),
-        // Base64url SHA-256 thumbprint shape (43 characters), never a real key: the installation is unknown on purpose.
-        KeyThumbprint = Convert.ToBase64String(SHA256.HashData(Guid.NewGuid().ToByteArray())).TrimEnd('=').Replace('+', '-').Replace('/', '_'),
-        HardwareEvidence = machine.ToRequest()
-    };
-
-    [Fact]
-    public async Task DistributionPreflight_RecognizesMigratedMachineThroughAliasAndChoosesStableDigest()
-    {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        var (productId, licenseId, grantRefDigest, clientId) = await MigrateScenarioToPairAsync(scenario, PairMachine);
-        var service = new RuntimeDistributionPreflightService(
-            scenario.Factory, Mock.Of<ILogger<RuntimeDistributionPreflightService>>());
-
-        var recognized = await service.EvaluateAsync(
-            clientId, Sha256("payload-recognized"), PreflightRequest(productId, licenseId, grantRefDigest, PairMachine), CancellationToken.None);
-
-        Assert.Equal("accepted", recognized.Decision);
-        Assert.Equal("alias-recognized", recognized.AuthorityMode);
-        Assert.Equal(Sha256(PairMachine.Stable), recognized.HardwareIdHash);
-
-        // Another machine of the same licence has no alias: the historical legacy choice is unchanged.
-        var stranger = PairMachine with { Cpu = "CPU-STRANGER", Board = "BOARD-STRANGER" };
-        var unchanged = await service.EvaluateAsync(
-            clientId, Sha256("payload-stranger"), PreflightRequest(productId, licenseId, grantRefDigest, stranger), CancellationToken.None);
-        Assert.Equal(Sha256(stranger.Legacy), unchanged.HardwareIdHash);
-        Assert.Equal("server-derived", unchanged.AuthorityMode);
-    }
-
-    [Fact]
-    public async Task DistributionPreflight_DisabledAliasKeepsLegacyWithoutRefusing()
-    {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        var (productId, licenseId, grantRefDigest, clientId) = await MigrateScenarioToPairAsync(scenario, PairMachine);
-        await using (var db = await scenario.Factory.CreateDbContextAsync())
-        {
-            var alias = await db.HardwareAuthorityAliases.SingleAsync();
-            alias.IsActive = false;
-            alias.DisabledAtUtc = DateTime.UtcNow;
-            alias.DisabledReason = "operator_disabled";
-            await db.SaveChangesAsync();
-        }
-        var service = new RuntimeDistributionPreflightService(
-            scenario.Factory, Mock.Of<ILogger<RuntimeDistributionPreflightService>>());
-
-        var response = await service.EvaluateAsync(
-            clientId, Sha256("payload-disabled"), PreflightRequest(productId, licenseId, grantRefDigest, PairMachine), CancellationToken.None);
-
-        // Compatibility refusals never block a client that is tolerated today: legacy is kept, only diagnosed.
-        Assert.Equal("accepted", response.Decision);
-        Assert.Equal(Sha256(PairMachine.Legacy), response.HardwareIdHash);
-        Assert.Equal("server-derived", response.AuthorityMode);
-    }
-
-    /// <summary>An inactive backfill alias is tolerated by Finalize only; at preflight it stays legacy plus diagnostic.</summary>
-    [Fact]
-    public async Task DistributionPreflight_InactiveBackfillAliasKeepsLegacy()
-    {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        var (productId, licenseId, grantRefDigest, clientId) = await MigrateScenarioToPairAsync(scenario, PairMachine);
-        await using (var db = await scenario.Factory.CreateDbContextAsync())
-        {
-            var alias = await db.HardwareAuthorityAliases.SingleAsync();
-            alias.IsActive = false;
-            alias.DisabledAtUtc = DateTime.UtcNow;
-            alias.DisabledReason = HardwareAuthorityAlias.BackfillAuthorityInvalidReason;
-            alias.MigrationRequestId = null;
-            await db.SaveChangesAsync();
-        }
-        var service = new RuntimeDistributionPreflightService(
-            scenario.Factory, Mock.Of<ILogger<RuntimeDistributionPreflightService>>());
-
-        var response = await service.EvaluateAsync(
-            clientId, Sha256("payload-backfill"), PreflightRequest(productId, licenseId, grantRefDigest, PairMachine), CancellationToken.None);
-
-        Assert.Equal("accepted", response.Decision);
-        Assert.Equal("server-derived", response.AuthorityMode);
-        Assert.Equal(Sha256(PairMachine.Legacy), response.HardwareIdHash);
-    }
-
-    [Fact]
-    public async Task DistributionPreflight_BanOnStableCandidateStillRefusesRecognizedMachine()
-    {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        var (productId, licenseId, grantRefDigest, clientId) = await MigrateScenarioToPairAsync(scenario, PairMachine);
-        await using (var db = await scenario.Factory.CreateDbContextAsync())
-        {
-            db.BannedHardwareIds.Add(new BannedHardwareId
-            {
-                HardwareId = PairMachine.Stable, ProductId = productId, Reason = "pair-test", IsActive = true,
-                BanCategory = BannedHardwareId.Categories.Manual
-            });
-            await db.SaveChangesAsync();
-        }
-        var service = new RuntimeDistributionPreflightService(
-            scenario.Factory, Mock.Of<ILogger<RuntimeDistributionPreflightService>>());
-
-        var exception = await Assert.ThrowsAsync<DistributionOperationException>(() => service.EvaluateAsync(
-            clientId, Sha256("payload-banned"), PreflightRequest(productId, licenseId, grantRefDigest, PairMachine), CancellationToken.None));
-
-        Assert.Equal(StatusCodes.Status403Forbidden, exception.StatusCode);
     }
 
     private static FinalizeAuthorityPairResolver PairResolver(PreparedBootstrapScenario scenario) => new(
@@ -231,7 +141,9 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.Null(direct.AliasId);
 
         // A third identity of the same licence is a mismatch, never a guessed match.
-        var stranger = PairMachine with { Cpu = "CPU-STRANGER" };
+        // A different CPU alone cannot change the UUID-derived canonical identity.
+        var stranger = PairMachine with { SystemUuid = "4C4C4544-0051-3610-8052-B7C04F4A4E33" };
+        Assert.NotEqual(PairMachine.Stable, stranger.Stable);
         var mismatch = await resolver.ResolveAsync(clientId, Sha256("pair-payload"),
             PairRequest(productId, licenseId, grantRefDigest, stranger.Stable, stableHash), CancellationToken.None);
         Assert.Equal("mismatch", mismatch.Outcome);
@@ -288,5 +200,221 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var malformed = await Assert.ThrowsAsync<DistributionOperationException>(() => resolver.ResolveAsync(clientId, Sha256("pair-payload"),
             PairRequest(productId, licenseId, grantRefDigest, "not-a-hardware-id", stableHash), CancellationToken.None));
         Assert.Equal(StatusCodes.Status400BadRequest, malformed.StatusCode);
+    }
+
+    /// <summary>
+    /// Proves authenticated alias history never substitutes for the current assignment relation or its
+    /// exact seat hardware. Every mutation leaves the alias intact while current B rejects the old pair.
+    /// </summary>
+    [Theory]
+    [InlineData("ended")]
+    [InlineData("quarantined")]
+    [InlineData("seat")]
+    [InlineData("license")]
+    [InlineData("hardware")]
+    public async Task FinalizeAuthorityPair_AliasWithChangedCurrentAssignment_IsCommerciallyRefused(
+        string mutation)
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        var (productId, licenseId, grantRefDigest, clientId) =
+            await MigrateScenarioToPairAsync(scenario, PairMachine);
+        await MutateCurrentPairAssignmentAsync(scenario, mutation);
+
+        var response = await PairResolver(scenario).ResolveAsync(
+            clientId, Sha256("pair-current-assignment-" + mutation),
+            PairRequest(productId, licenseId, grantRefDigest, PairMachine.Legacy,
+                Sha256(PairMachine.Stable)), CancellationToken.None);
+
+        Assert.Equal("refused", response.Outcome);
+        try
+        {
+            Assert.Equal(
+                mutation == "hardware" ? HardwareAuthorityRefusalReason.AuthorityGraphDiverged.ToString()
+                    : "commercial_authority_invalid",
+                response.RefusalReason);
+        }
+        catch (Xunit.Sdk.XunitException assertion)
+        {
+            await using var observed = await scenario.Factory.CreateDbContextAsync();
+            var enrollment = await observed.RuntimeEnrollments.SingleAsync(row => row.Id == scenario.EnrollmentId);
+            var binding = await observed.DistributionInstallationBindings.SingleAsync(row => row.Id == scenario.Fixture.BindingId);
+            var assignments = await observed.EnrollmentLicenseAssignments.Where(row => row.EnrollmentId == enrollment.Id)
+                .OrderBy(row => row.Revision).Select(row => new { row.State, row.EndReason }).ToListAsync();
+            throw new InvalidOperationException(
+                $"Pair diagnostic {mutation}: enrollment={enrollment.State}; binding={binding.State}; "
+                + $"protocol={enrollment.ProtocolVersion == RuntimeEnrollmentService.ProtocolVersion}; epoch={enrollment.Epoch}; "
+                + $"handoff={enrollment.HandoffDigestSha256 == binding.HandoffDigestSha256}; "
+                + $"subject={enrollment.SubjectRefDigestSha256 == binding.SubjectRefDigestSha256}; "
+                + $"version={enrollment.ReleaseVersion == binding.Version}; "
+                + $"assignments={System.Text.Json.JsonSerializer.Serialize(assignments)}", assertion);
+        }
+        Assert.Null(response.CanonicalEffectiveHardwareIdHash);
+    }
+
+    /// <summary>Proves changed commercial assignment never hides a corrupted historical graph or an unproved opposite digest.</summary>
+    [Theory]
+    [InlineData("seat", "hardware")]
+    [InlineData("license", "hardware")]
+    [InlineData("seat", "binding-digest")]
+    [InlineData("license", "binding-digest")]
+    [InlineData("seat", "expected-digest")]
+    [InlineData("license", "expected-digest")]
+    public async Task FinalizeAuthorityPair_ChangedAssignmentWithStructuralDivergence_KeepsStructuralRefusal(
+        string mutation, string corruption)
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        var (productId, licenseId, grantRefDigest, clientId) =
+            await MigrateScenarioToPairAsync(scenario, PairMachine);
+        await MutateCurrentPairAssignmentAsync(scenario, mutation);
+        var expectedDigest = Sha256(PairMachine.Stable);
+        await using (var db = await new TestDbFactory(scenario.AdminConnectionString).CreateDbContextAsync())
+        {
+            var binding = await db.DistributionInstallationBindings.SingleAsync(row => row.Id == scenario.Fixture.BindingId);
+            switch (corruption)
+            {
+                case "hardware":
+                    var seat = await db.LicenseSeats.SingleAsync(row => row.Id == binding.LicenseSeatId);
+                    seat.HardwareId = "1111222233334444";
+                    break;
+                case "binding-digest":
+                    binding.HardwareIdHash = new string('f', 64);
+                    break;
+                case "expected-digest":
+                    expectedDigest = new string('e', 64);
+                    break;
+                default:
+                    throw new InvalidOperationException("Unknown structural corruption.");
+            }
+            await db.SaveChangesAsync();
+        }
+        var response = await PairResolver(scenario).ResolveAsync(
+            clientId, Sha256("pair-mixed-" + mutation + "-" + corruption),
+            PairRequest(productId, licenseId, grantRefDigest, PairMachine.Legacy, expectedDigest), CancellationToken.None);
+        Assert.Equal("refused", response.Outcome);
+        Assert.Equal(HardwareAuthorityRefusalReason.AuthorityGraphDiverged.ToString(), response.RefusalReason);
+        Assert.Null(response.CanonicalEffectiveHardwareIdHash);
+    }
+
+    /// <summary>Proves an admissible second terminal enrollment on the historical binding stays infrastructure-ambiguous.</summary>
+    [Fact]
+    public async Task FinalizeAuthorityPair_AliasWithAmbiguousBindingEnrollments_IsUnavailable()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        var (productId, licenseId, grantRefDigest, clientId) =
+            await MigrateScenarioToPairAsync(scenario, PairMachine);
+        var admin = new TestDbFactory(scenario.AdminConnectionString);
+        await using (var db = await admin.CreateDbContextAsync())
+        {
+            var original = await db.RuntimeEnrollments.AsNoTracking()
+                .SingleAsync(row => row.Id == scenario.EnrollmentId);
+            var duplicate = (RuntimeEnrollment)db.Entry(original).CurrentValues.ToObject();
+            duplicate.Id = Guid.NewGuid();
+            duplicate.InstallationId = Guid.NewGuid().ToString("D");
+            duplicate.KeyThumbprint = Convert.ToBase64String(SHA256.HashData(Guid.NewGuid().ToByteArray()))
+                .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+            duplicate.State = "INVALIDATED";
+            duplicate.InvalidatedAtUtc = DateTime.UtcNow;
+            duplicate.InvalidationReason = "test_alias_enrollment_ambiguity";
+            db.RuntimeEnrollments.Add(duplicate);
+            await db.SaveChangesAsync();
+        }
+
+        var exception = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            PairResolver(scenario).ResolveAsync(
+                clientId, Sha256("pair-ambiguous-enrollment"),
+                PairRequest(productId, licenseId, grantRefDigest, PairMachine.Legacy,
+                    Sha256(PairMachine.Stable)), CancellationToken.None));
+
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, exception.StatusCode);
+        Assert.Equal("authority_unavailable", exception.ErrorCode);
+        Assert.Equal("assignment_enrollment_ambiguous", exception.ReasonCode);
+    }
+
+    /// <summary>Mutates only current commercial authority while preserving the authenticated alias row.</summary>
+    private static async Task MutateCurrentPairAssignmentAsync(
+        PreparedBootstrapScenario scenario,
+        string mutation)
+    {
+        var admin = new TestDbFactory(scenario.AdminConnectionString);
+        await using var db = await admin.CreateDbContextAsync();
+        var assignment = await db.EnrollmentLicenseAssignments.SingleAsync(row =>
+            row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE");
+        var seat = await db.LicenseSeats.SingleAsync(row => row.Id == assignment.LicenseSeatId);
+        switch (mutation)
+        {
+            case "ended":
+            case "quarantined":
+                assignment.State = "ENDED";
+                assignment.EndedAtUtc = DateTime.UtcNow;
+                assignment.EndReason = "test_current_authority_removed";
+                if (mutation == "quarantined")
+                    db.EnrollmentLicenseAssignmentQuarantines.Add(new EnrollmentLicenseAssignmentQuarantine
+                    {
+                        EnrollmentId = scenario.EnrollmentId,
+                        BindingId = scenario.Fixture.BindingId,
+                        LicenseId = assignment.LicenseId,
+                        LicenseSeatId = assignment.LicenseSeatId,
+                        Reason = "live_state_mismatch",
+                        ObservedAtUtc = DateTime.UtcNow
+                    });
+                break;
+            case "hardware":
+                seat.HardwareId = "1111222233334444";
+                break;
+            case "seat":
+            case "license":
+                assignment.State = "ENDED";
+                assignment.EndedAtUtc = DateTime.UtcNow;
+                assignment.EndReason = "test_current_authority_reassigned";
+                seat.IsActive = false;
+                seat.UnlinkedAt = DateTime.UtcNow;
+                // Complete release before inserting the successor assignment. Otherwise the
+                // seat trigger can end the newly inserted row in the same EF save batch.
+                await db.SaveChangesAsync();
+                var targetLicenseId = assignment.LicenseId;
+                if (mutation == "license")
+                {
+                    var sourceLicense = await db.Licenses.AsNoTracking()
+                        .SingleAsync(row => row.Id == assignment.LicenseId);
+                    targetLicenseId = Guid.NewGuid();
+                    db.Licenses.Add(new License
+                    {
+                        Id = targetLicenseId,
+                        ProductId = sourceLicense.ProductId,
+                        LicenseTypeId = sourceLicense.LicenseTypeId,
+                        LicenseKey = "PAIR-CHANGED-" + Guid.NewGuid().ToString("N"),
+                        IsActive = true,
+                        MaxSeats = 1,
+                        AllowedVersions = sourceLicense.AllowedVersions
+                    });
+                }
+                var targetSeat = new LicenseSeat
+                {
+                    LicenseId = targetLicenseId,
+                    HardwareId = PairMachine.Stable,
+                    IsActive = true
+                };
+                db.LicenseSeats.Add(targetSeat);
+                db.EnrollmentLicenseAssignments.Add(new EnrollmentLicenseAssignment
+                {
+                    EnrollmentId = scenario.EnrollmentId,
+                    LicenseId = targetLicenseId,
+                    LicenseSeatId = targetSeat.Id,
+                    State = "ACTIVE",
+                    ActivatedAtUtc = DateTime.UtcNow,
+                    Revision = assignment.Revision + 1
+                });
+                break;
+            default:
+                throw new InvalidOperationException("Unknown assignment mutation: " + mutation);
+        }
+        await db.SaveChangesAsync();
+        if (mutation is "seat" or "license")
+        {
+            var current = await db.EnrollmentLicenseAssignments.AsNoTracking().SingleAsync(row =>
+                row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE");
+            Assert.NotEqual(seat.Id, current.LicenseSeatId);
+            Assert.Equal(mutation == "license", current.LicenseId != assignment.LicenseId);
+        }
     }
 }

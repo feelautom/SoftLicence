@@ -49,6 +49,35 @@ public sealed class SecurityLockCoreTests : IDisposable
         Assert.Equal(new string('a', 32), report.LockId);
     }
 
+    /// <summary>Canonical parsing is independent from the provider clock used after transactional waits.</summary>
+    [Fact]
+    public void ValidateStructure_AcceptsCanonicalTimestampsUntilAuthoritativeTimeCheck()
+    {
+        var request = Request();
+        request.SentAtUtc = SecurityLockReportValidator.FormatUtc(Now.AddHours(-1));
+        request.FirstSeenUtc = SecurityLockReportValidator.FormatUtc(Now.AddHours(1));
+
+        var report = SecurityLockReportValidator.ValidateStructure(request);
+
+        Assert.Equal(Now.AddHours(-1), report.SentAtUtc);
+        Assert.Equal(Now.AddHours(1), report.FirstSeenUtc);
+        Assert.Equal("sent_at_outside_window", Assert.Throws<SecurityLockReportValidationException>(
+            () => SecurityLockReportValidator.ValidateTime(report, Now)).ErrorCode);
+    }
+
+    /// <summary>Temporal validation uses only the explicit authoritative instant and preserves closed errors.</summary>
+    [Fact]
+    public void ValidateTime_RejectsFutureFirstSeenWithClosedDiagnostic()
+    {
+        var request = Request();
+        request.FirstSeenUtc = SecurityLockReportValidator.FormatUtc(Now.AddMinutes(6));
+
+        var report = SecurityLockReportValidator.ValidateStructure(request);
+
+        Assert.Equal("first_seen_invalid", Assert.Throws<SecurityLockReportValidationException>(
+            () => SecurityLockReportValidator.ValidateTime(report, Now)).ErrorCode);
+    }
+
     public static IEnumerable<object[]> InvalidRequests() => new[]
     {
         new object[] { (Action<SecurityLockReportRequest>)(r => r.Schema = "TIA-SECURITY-LOCK-REPORT-V1"), "schema_invalid" },

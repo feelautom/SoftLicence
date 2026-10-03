@@ -29,7 +29,9 @@ namespace SoftLicence.Tests.Server;
 public sealed partial class RuntimeEnrollmentPostgreSqlTests
 {
     private const string LegacyHardwareId = "A00272B768FFD6AF";
-    private const string StableHardwareId = "A6D3EED115BC84AD";
+    // TKT-001277 lot 5: the target is the SDK 2.0 identifier derived from TestSystemUuid.
+    private const string TestSystemUuid = "4C4C4544-0051-3610-8052-B7C04F4A4E32";
+    private const string StableHardwareId = "6B775195D2F86F36";
 
     /// <summary>
     /// SUP-000040 (TKT-001262): after Finalize rotated the binding and the Runtime enrollment, the
@@ -54,6 +56,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Guid? previousMigrationRequestId;
         int previousAliasSecurityEpoch;
         long previousAliasAuthorityEpoch;
+        Guid currentLicenseId;
         int activeSeatCount;
         int activeBindingCount;
         await using (var stale = await scenario.Factory.CreateDbContextAsync())
@@ -62,6 +65,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 .SingleAsync(candidate => candidate.Id == scenario.Fixture.BindingId);
             var currentEnrollment = await stale.RuntimeEnrollments.AsNoTracking()
                 .SingleAsync(candidate => candidate.Id == scenario.EnrollmentId);
+            currentLicenseId = currentEnrollment.LicenseId;
             currentSecurityEpoch = currentEnrollment.SecurityEpoch;
             var staleGrant = Guid.NewGuid().ToString("D");
             stale.DistributionInstallationBindings.Add(new DistributionInstallationBinding
@@ -187,6 +191,27 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             return;
         }
 
+        await using (var divergentCheck = await scenario.Factory.CreateDbContextAsync())
+        {
+            var failOpenLogger = new RecordingLogger<HardwareAuthorityAliasResolver>();
+            var tolerated = await new HardwareAuthorityAliasResolver(
+                divergentCheck,
+                Options.Create(new HardwareAuthorityAliasOptions { DefaultMode = "enabled" }),
+                failOpenLogger).ResolveAsync(
+                scenario.Fixture.ProductId,
+                currentLicenseId,
+                LegacyHardwareId,
+                HardwareAuthorityResolutionIntent.StatusCheck);
+            Assert.True(tolerated.UsedAlias);
+            Assert.False(tolerated.Refused);
+            Assert.Equal(StableHardwareId, tolerated.EffectiveHardwareId);
+            Assert.Null(tolerated.BindingId);
+            Assert.Single(failOpenLogger.Messages, message =>
+                message.Contains(
+                    "TEMP-FAIL-OPEN(TKT-001262) Hardware authority alias",
+                    StringComparison.Ordinal));
+        }
+
         var result = await runtime.MigrateHardwareAuthorityAsync(
             scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback);
         Assert.Equal("already_current", result.Response.Decision);
@@ -219,10 +244,11 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.DoesNotContain(Sha256(LegacyHardwareId), repairLog, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(Sha256(StableHardwareId), repairLog, StringComparison.OrdinalIgnoreCase);
 
+        var aliasLogger = new RecordingLogger<HardwareAuthorityAliasResolver>();
         var aliasResolution = await new HardwareAuthorityAliasResolver(
             check,
             Options.Create(new HardwareAuthorityAliasOptions { DefaultMode = "enabled" }),
-            NullLogger<HardwareAuthorityAliasResolver>.Instance).ResolveAsync(
+            aliasLogger).ResolveAsync(
             scenario.Fixture.ProductId,
             activeEnrollment.LicenseId,
             LegacyHardwareId,
@@ -232,6 +258,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.Equal(StableHardwareId, aliasResolution.EffectiveHardwareId);
         Assert.Equal(scenario.Fixture.BindingId, aliasResolution.BindingId);
         Assert.Equal(repointed.LicenseSeatId, aliasResolution.LicenseSeatId);
+        Assert.DoesNotContain(aliasLogger.Messages, message =>
+            message.Contains("tolerated AuthorityGraphDiverged", StringComparison.Ordinal));
 
         var replay = await runtime.MigrateHardwareAuthorityAsync(
             scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback);
@@ -243,14 +271,37 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     }
 
     /// <summary>
-    /// Proves the signed Runtime transition updates one existing seat and every linked authority
-    /// row atomically, issues a V2 license, preserves quota, and replays exact response bytes.
+    /// Proves the signed compatibility transition updates only licensing state, issues a V2
+    /// license, preserves Runtime and assignment lineage, and replays exact response bytes.
     /// </summary>
     [Fact]
     public async Task HardwareAuthorityMigration_AtomicallyMovesExistingSeatAndReplays()
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
         await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        Guid initialAssignmentId;
+        int initialAssignmentRevision;
+        string initialBindingHardwareIdHash;
+        string initialEnrollmentHardwareIdHash;
+        long initialSecurityEpoch;
+        long initialAuthorityEpoch;
+        long leaseAuditEpoch;
+        await using (var before = await scenario.Factory.CreateDbContextAsync())
+        {
+            var initialEnrollment = await before.RuntimeEnrollments.AsNoTracking().SingleAsync(candidate =>
+                candidate.Id == scenario.EnrollmentId);
+            var initialAssignment = await before.EnrollmentLicenseAssignments.AsNoTracking().SingleAsync(candidate =>
+                candidate.EnrollmentId == scenario.EnrollmentId && candidate.State == "ACTIVE");
+            initialAssignmentId = initialAssignment.Id;
+            initialAssignmentRevision = initialAssignment.Revision;
+            initialBindingHardwareIdHash = (await before.DistributionInstallationBindings.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == scenario.Fixture.BindingId)).HardwareIdHash;
+            initialEnrollmentHardwareIdHash = initialEnrollment.HardwareIdHash;
+            initialSecurityEpoch = initialEnrollment.SecurityEpoch;
+            initialAuthorityEpoch = initialEnrollment.AuthorityEpoch;
+            leaseAuditEpoch = await before.RuntimeEnrollmentAuthorityStates.AsNoTracking()
+                .Where(candidate => candidate.Id == 1).Select(candidate => candidate.Epoch).SingleAsync();
+        }
         var request = MigrationRequest(scenario, LegacyHardwareId, StableHardwareId);
         var digest = Sha256("hardware-migration-atomic-" + Guid.NewGuid().ToString("D"));
         var proof = Proof(scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId,
@@ -265,8 +316,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.True(replay.Idempotent);
         Assert.Equal(migrated.ExactResponseBody, replay.ExactResponseBody);
         Assert.Equal("migrated", migrated.Response.Decision);
-        Assert.Equal(1, migrated.Response.OldSecurityEpoch);
-        Assert.Equal(2, migrated.Response.NewSecurityEpoch);
+        Assert.Equal(initialSecurityEpoch, migrated.Response.OldSecurityEpoch);
+        Assert.Equal(initialSecurityEpoch, migrated.Response.NewSecurityEpoch);
         Assert.Equal(StableHardwareId, migrated.Response.HardwareIdV2);
 
         await using var check = await scenario.Factory.CreateDbContextAsync();
@@ -278,10 +329,15 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var license = await check.Licenses.Include(candidate => candidate.Product)
             .SingleAsync(candidate => candidate.Id == binding.LicenseId);
         var alias = await check.HardwareAuthorityAliases.SingleAsync();
+        var assignment = await check.EnrollmentLicenseAssignments.AsNoTracking().SingleAsync(candidate =>
+            candidate.EnrollmentId == enrollment.Id && candidate.State == "ACTIVE");
+        var nonce = await check.RuntimeEnrollmentProofNonces.AsNoTracking().SingleAsync(candidate =>
+            candidate.EnrollmentId == enrollment.Id && candidate.Operation == "hardware-authority-migration");
         Assert.Equal(StableHardwareId, seat.HardwareId);
-        Assert.Equal(Sha256(StableHardwareId), binding.HardwareIdHash);
-        Assert.Equal(binding.HardwareIdHash, enrollment.HardwareIdHash);
-        Assert.Equal(2, enrollment.SecurityEpoch);
+        Assert.Equal(StableHardwareId, license.HardwareId);
+        Assert.Equal(initialBindingHardwareIdHash, binding.HardwareIdHash);
+        Assert.Equal(initialEnrollmentHardwareIdHash, enrollment.HardwareIdHash);
+        Assert.Equal(initialSecurityEpoch, enrollment.SecurityEpoch);
         Assert.Equal(license.ProductId, alias.ProductId);
         Assert.Equal(license.Id, alias.LicenseId);
         Assert.Equal(seat.Id, alias.LicenseSeatId);
@@ -291,6 +347,12 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.Equal(Sha256(StableHardwareId), alias.CanonicalHardwareIdSha256);
         Assert.Equal(enrollment.SecurityEpoch, alias.SecurityEpoch);
         Assert.Equal(enrollment.AuthorityEpoch, alias.AuthorityEpoch);
+        Assert.Equal(initialAuthorityEpoch, enrollment.AuthorityEpoch);
+        Assert.Equal(initialAssignmentId, assignment.Id);
+        Assert.Equal(initialAssignmentRevision, assignment.Revision);
+        Assert.Equal(license.Id, assignment.LicenseId);
+        Assert.Equal(seat.Id, assignment.LicenseSeatId);
+        Assert.Equal(leaseAuditEpoch, nonce.AuthorityEpoch);
         Assert.Single(await check.LicenseSeats.Where(candidate => candidate.LicenseId == license.Id).ToListAsync());
         Assert.Single(await check.LicenseHistories.Where(candidate =>
             candidate.LicenseId == license.Id && candidate.Action == "HWID_V2_MIGRATED").ToListAsync());
@@ -304,6 +366,239 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.True(validation.IsValid, validation.ErrorMessage);
         Assert.False(LicenseService.ValidateLicense(
             migrated.Response.LicenseFile, license.Product.PublicKeyXml, LegacyHardwareId).IsValid);
+    }
+
+    /// <summary>
+    /// Proves exact replay remains compatible with historical rows that already copied the
+    /// canonical digest into the Runtime binding and enrollment. The frozen response is returned
+    /// only after current authority revalidation and no commercial history is revised.
+    /// </summary>
+    [Fact]
+    public async Task HardwareAuthorityMigration_ReplayAcceptsHistoricalCanonicalRuntimeEvidence()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        var request = MigrationRequest(scenario, LegacyHardwareId, StableHardwareId);
+        var digest = Sha256("hardware-migration-historical-replay-" + Guid.NewGuid().ToString("D"));
+        var proof = Proof(scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId,
+            scenario.Options.ConfirmAudience, "-", digest);
+        var migrated = await scenario.Runtime.MigrateHardwareAuthorityAsync(
+            scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback);
+
+        var authority = new RuntimeEnrollmentAuthorityService(
+            scenario.Factory, Options.Create(scenario.Options));
+        await using (var mutate = await scenario.Factory.CreateDbContextAsync())
+        {
+            await using var lease = await authority.AcquireMutationAsync(
+                mutate, scenario.Fixture.BindingId);
+            var binding = await mutate.DistributionInstallationBindings.SingleAsync(candidate =>
+                candidate.Id == scenario.Fixture.BindingId);
+            var enrollment = await mutate.RuntimeEnrollments.SingleAsync(candidate =>
+                candidate.Id == scenario.EnrollmentId);
+            binding.HardwareIdHash = Sha256(StableHardwareId);
+            enrollment.HardwareIdHash = binding.HardwareIdHash;
+            await mutate.SaveChangesAsync();
+            await lease.CommitAsync();
+        }
+
+        var replay = await scenario.Runtime.MigrateHardwareAuthorityAsync(
+            scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback);
+
+        Assert.True(replay.Idempotent);
+        Assert.Equal(migrated.ExactResponseBody, replay.ExactResponseBody);
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        Assert.Single(await check.LicenseHistories.AsNoTracking().Where(candidate =>
+            candidate.Action == "HWID_V2_MIGRATED").ToListAsync());
+        Assert.Single(await check.RuntimeEnrollmentProofNonces.AsNoTracking().Where(candidate =>
+            candidate.EnrollmentId == scenario.EnrollmentId
+            && candidate.Operation == "hardware-authority-migration").ToListAsync());
+        Assert.Single(await check.EnrollmentLicenseAssignments.AsNoTracking().Where(candidate =>
+            candidate.EnrollmentId == scenario.EnrollmentId && candidate.State == "ACTIVE").ToListAsync());
+    }
+
+    /// <summary>
+    /// Proves copied Runtime and binding HWID compatibility values are inert after the canonical seat
+    /// has been migrated. The signed key, installation, current assignment, licence, and seat authorize
+    /// exact replay without rewriting either historical value.
+    /// </summary>
+    /// <param name="evidenceShape">Copied Runtime evidence corruption to install.</param>
+    [Theory]
+    [InlineData("mixed")]
+    [InlineData("third")]
+    public async Task HardwareAuthorityMigration_CurrentSeatIgnoresHistoricalRuntimeHardwareEvidence(
+        string evidenceShape)
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        await MigrateScenarioAsync(scenario);
+        Guid assignmentId;
+        int assignmentRevision;
+        int nonceCount;
+        int historyCount;
+        await using (var before = await scenario.Factory.CreateDbContextAsync())
+        {
+            var assignment = await before.EnrollmentLicenseAssignments.AsNoTracking().SingleAsync(candidate =>
+                candidate.EnrollmentId == scenario.EnrollmentId && candidate.State == "ACTIVE");
+            assignmentId = assignment.Id;
+            assignmentRevision = assignment.Revision;
+            nonceCount = await before.RuntimeEnrollmentProofNonces.AsNoTracking().CountAsync(candidate =>
+                candidate.EnrollmentId == scenario.EnrollmentId
+                && candidate.Operation == "hardware-authority-migration");
+            historyCount = await before.LicenseHistories.AsNoTracking().CountAsync(candidate =>
+                candidate.Action == "HWID_V2_MIGRATED");
+        }
+        var authority = new RuntimeEnrollmentAuthorityService(
+            scenario.Factory, Options.Create(scenario.Options));
+        await using (var mutate = await scenario.Factory.CreateDbContextAsync())
+        {
+            await using var lease = await authority.AcquireMutationAsync(
+                mutate, scenario.Fixture.BindingId);
+            var binding = await mutate.DistributionInstallationBindings.SingleAsync(candidate =>
+                candidate.Id == scenario.Fixture.BindingId);
+            var enrollment = await mutate.RuntimeEnrollments.SingleAsync(candidate =>
+                candidate.Id == scenario.EnrollmentId);
+            if (evidenceShape == "mixed")
+            {
+                binding.HardwareIdHash = Sha256(StableHardwareId);
+                enrollment.HardwareIdHash = Sha256(LegacyHardwareId);
+            }
+            else
+            {
+                var unknownDigest = Sha256("B6D3EED115BC84AD");
+                binding.HardwareIdHash = unknownDigest;
+                enrollment.HardwareIdHash = unknownDigest;
+            }
+            await mutate.SaveChangesAsync();
+            await lease.CommitAsync();
+        }
+        var request = MigrationRequest(scenario, LegacyHardwareId, StableHardwareId);
+        var digest = Sha256("hardware-migration-runtime-evidence-" + evidenceShape + Guid.NewGuid().ToString("D"));
+        var proof = Proof(scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId,
+            scenario.Options.ConfirmAudience, "-", digest);
+
+        var replay = await scenario.Runtime.MigrateHardwareAuthorityAsync(
+            scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback);
+
+        Assert.False(replay.Idempotent);
+        Assert.Equal("already_current", replay.Response.Decision);
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        var assignmentAfter = await check.EnrollmentLicenseAssignments.AsNoTracking().SingleAsync(candidate =>
+            candidate.EnrollmentId == scenario.EnrollmentId && candidate.State == "ACTIVE");
+        Assert.Equal(assignmentId, assignmentAfter.Id);
+        Assert.Equal(assignmentRevision, assignmentAfter.Revision);
+        Assert.Equal(nonceCount + 1, await check.RuntimeEnrollmentProofNonces.AsNoTracking().CountAsync(candidate =>
+            candidate.EnrollmentId == scenario.EnrollmentId
+            && candidate.Operation == "hardware-authority-migration"));
+        Assert.Equal(historyCount, await check.LicenseHistories.AsNoTracking().CountAsync(candidate =>
+            candidate.Action == "HWID_V2_MIGRATED"));
+    }
+
+    /// <summary>
+    /// Proves a persistence failure after the licensing rows have been staged rolls back the seat,
+    /// legacy licence projection, alias, history, nonce, quota, and assignment as one transaction.
+    /// </summary>
+    [Fact]
+    public async Task HardwareAuthorityMigration_PersistenceFailureRollsBackLicensingOnlyMutation()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        Guid assignmentId;
+        int assignmentRevision;
+        await using (var before = await scenario.Factory.CreateDbContextAsync())
+        {
+            var assignment = await before.EnrollmentLicenseAssignments.AsNoTracking().SingleAsync(candidate =>
+                candidate.EnrollmentId == scenario.EnrollmentId && candidate.State == "ACTIVE");
+            assignmentId = assignment.Id;
+            assignmentRevision = assignment.Revision;
+        }
+        await using (var admin = new Npgsql.NpgsqlConnection(scenario.AdminConnectionString))
+        {
+            await admin.OpenAsync();
+            await using var command = admin.CreateCommand();
+            command.CommandText = """
+                CREATE FUNCTION public.tkt001312_fail_hardware_migration_history()
+                RETURNS trigger LANGUAGE plpgsql AS $function$
+                BEGIN
+                    RAISE EXCEPTION 'task-owned migration rollback probe' USING ERRCODE = 'P0001';
+                END;
+                $function$;
+                CREATE TRIGGER "TR_Tkt001312_FailHardwareMigrationHistory"
+                BEFORE INSERT ON public."LicenseHistories"
+                FOR EACH ROW WHEN (NEW."Action" = 'HWID_V2_MIGRATED')
+                EXECUTE FUNCTION public.tkt001312_fail_hardware_migration_history();
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+        var request = MigrationRequest(scenario, LegacyHardwareId, StableHardwareId);
+        var digest = Sha256("hardware-migration-rollback-" + Guid.NewGuid().ToString("D"));
+        var proof = Proof(scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId,
+            scenario.Options.ConfirmAudience, "-", digest);
+
+        await Assert.ThrowsAsync<DbUpdateException>(() => scenario.Runtime.MigrateHardwareAuthorityAsync(
+            scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback));
+
+        await AssertLegacyAuthorityUnchangedAsync(scenario);
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        var assignmentAfter = await check.EnrollmentLicenseAssignments.AsNoTracking().SingleAsync(candidate =>
+            candidate.EnrollmentId == scenario.EnrollmentId && candidate.State == "ACTIVE");
+        Assert.Equal(assignmentId, assignmentAfter.Id);
+        Assert.Equal(assignmentRevision, assignmentAfter.Revision);
+        Assert.Empty(await check.HardwareAuthorityAliases.AsNoTracking().ToListAsync());
+        Assert.Empty(await check.RuntimeEnrollmentProofNonces.AsNoTracking().Where(candidate =>
+            candidate.EnrollmentId == scenario.EnrollmentId
+            && candidate.Operation == "hardware-authority-migration").ToListAsync());
+        Assert.Empty(await check.RuntimeEnrollmentQuotas.AsNoTracking().Where(candidate =>
+            candidate.Scope.StartsWith("hardware-migration-")).ToListAsync());
+    }
+
+    /// <summary>
+    /// Proves unrelated commercial global-epoch advances remain nonce audit evidence and do not
+    /// replace or increment the migration's historical enrollment lineage.
+    /// </summary>
+    [Fact]
+    public async Task HardwareAuthorityMigration_CommercialEpochBumpsPreserveLocalLineage()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        long lineageBefore;
+        await using (var before = await scenario.Factory.CreateDbContextAsync())
+        {
+            lineageBefore = await before.RuntimeEnrollments.AsNoTracking()
+                .Where(candidate => candidate.Id == scenario.EnrollmentId)
+                .Select(candidate => candidate.AuthorityEpoch).SingleAsync();
+        }
+        for (var maxSeats = 2; maxSeats <= 3; maxSeats++)
+        {
+            var authority = new RuntimeEnrollmentAuthorityService(
+                scenario.Factory, Options.Create(scenario.Options));
+            await using var mutate = await scenario.Factory.CreateDbContextAsync();
+            await using var lease = await authority.AcquireMutationAsync(mutate, scenario.Fixture.BindingId);
+            var licenseId = await mutate.DistributionInstallationBindings.AsNoTracking()
+                .Where(candidate => candidate.Id == scenario.Fixture.BindingId)
+                .Select(candidate => candidate.LicenseId).SingleAsync();
+            var license = await mutate.Licenses.SingleAsync(candidate => candidate.Id == licenseId);
+            license.MaxSeats = maxSeats;
+            await mutate.SaveChangesAsync();
+            await lease.CommitAsync();
+        }
+        var request = MigrationRequest(scenario, LegacyHardwareId, StableHardwareId);
+        var digest = Sha256("hardware-migration-commercial-epoch-" + Guid.NewGuid().ToString("D"));
+        var proof = Proof(scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId,
+            scenario.Options.ConfirmAudience, "-", digest);
+
+        await scenario.Runtime.MigrateHardwareAuthorityAsync(
+            scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback);
+
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        var enrollment = await check.RuntimeEnrollments.AsNoTracking().SingleAsync(candidate =>
+            candidate.Id == scenario.EnrollmentId);
+        var nonce = await check.RuntimeEnrollmentProofNonces.AsNoTracking().SingleAsync(candidate =>
+            candidate.EnrollmentId == scenario.EnrollmentId
+            && candidate.Operation == "hardware-authority-migration");
+        Assert.Equal(lineageBefore, enrollment.AuthorityEpoch);
+        Assert.True(nonce.AuthorityEpoch > enrollment.AuthorityEpoch);
+        Assert.Equal(enrollment.AuthorityEpoch,
+            (await check.HardwareAuthorityAliases.AsNoTracking().SingleAsync()).AuthorityEpoch);
     }
 
     /// <summary>
@@ -367,6 +662,202 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.DoesNotContain(await check.LicenseHistories.Where(candidate =>
             candidate.LicenseId == prepared.LicenseId).ToListAsync(), candidate =>
             candidate.Action is "RUNTIME_INITIAL_SEAT_CREATED" or "RUNTIME_INITIAL_SEAT_REACTIVATED");
+    }
+
+
+    /// <summary>Pre-UUID stable identifier S of the machine, from the retired disk migration (TKT-001277).</summary>
+    private const string PreUuidStableHardwareId = "A6D3EED115BC84AD";
+
+    /// <summary>
+    /// TKT-001277, production shape measured on 30/09/2026: a seat already moved L to S whose binding and enrollment
+    /// carry S. The S to U migration keeps L to S, adds S to U, and a later WebSetup reinstall submitting U finds its
+    /// source binding and keeps one seat.
+    /// </summary>
+    [Fact]
+    public async Task UuidMigration_SeatAlreadyStableWithBindingS_AddsTargetAliasAndReinstallKeepsOneSeat()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        var subjectRef = Base64Url(SHA256.HashData("uuid-migration-binding-s-subject"u8.ToArray()));
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        await SetScenarioSubjectAuthorityAsync(scenario, subjectRef);
+        await SeedPreUuidStableSeatAsync(scenario, bindingCarriesLegacy: false);
+
+        var migrated = await MigrateAsync(scenario, PreUuidStableHardwareId);
+
+        Assert.Equal("migrated", migrated.Response.Decision);
+        await using (var check = await scenario.Factory.CreateDbContextAsync())
+        {
+            var aliases = await check.HardwareAuthorityAliases.AsNoTracking().ToListAsync();
+            Assert.Equal(2, aliases.Count);
+            Assert.Contains(aliases, alias => alias.LegacyHardwareIdSha256 == Sha256(LegacyHardwareId)
+                && alias.CanonicalHardwareIdSha256 == Sha256(PreUuidStableHardwareId));
+            Assert.Contains(aliases, alias => alias.LegacyHardwareIdSha256 == Sha256(PreUuidStableHardwareId)
+                && alias.CanonicalHardwareIdSha256 == Sha256(StableHardwareId));
+            Assert.Equal(StableHardwareId, (await check.LicenseSeats.AsNoTracking().SingleAsync()).HardwareId);
+            var licenseId = (await check.Licenses.AsNoTracking().SingleAsync()).Id;
+            var resolution = await CreateAliasResolver(check).ResolveAsync(
+                scenario.Fixture.ProductId, licenseId, PreUuidStableHardwareId, HardwareAuthorityResolutionIntent.Activation);
+            Assert.True(resolution.UsedAlias);
+            Assert.Equal(StableHardwareId, resolution.EffectiveHardwareId);
+        }
+
+        await AssertUuidReinstallKeepsOneSeatAsync(scenario, subjectRef);
+    }
+
+    /// <summary>
+    /// TKT-001277 review B1: a seat already moved L to S whose binding still carries L. The migration retargets the
+    /// L to S alias to U (one alias per target, source equal to the binding digest) instead of adding S to U, so the
+    /// resolver and a WebSetup reinstall submitting U still find the source binding.
+    /// </summary>
+    [Fact]
+    public async Task UuidMigration_SeatAlreadyStableWithBindingL_RetargetsChainedAliasAndReinstallKeepsOneSeat()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        var subjectRef = Base64Url(SHA256.HashData("uuid-migration-binding-l-subject"u8.ToArray()));
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        await SetScenarioSubjectAuthorityAsync(scenario, subjectRef);
+        await SeedPreUuidStableSeatAsync(scenario, bindingCarriesLegacy: true);
+
+        var migrated = await MigrateAsync(scenario, PreUuidStableHardwareId);
+
+        Assert.Equal("migrated", migrated.Response.Decision);
+        await using (var check = await scenario.Factory.CreateDbContextAsync())
+        {
+            var alias = await check.HardwareAuthorityAliases.AsNoTracking().SingleAsync();
+            Assert.Equal(Sha256(LegacyHardwareId), alias.LegacyHardwareIdSha256);
+            Assert.Equal(Sha256(StableHardwareId), alias.CanonicalHardwareIdSha256);
+            Assert.True(alias.IsActive);
+            var licenseId = (await check.Licenses.AsNoTracking().SingleAsync()).Id;
+            var resolution = await CreateAliasResolver(check).ResolveAsync(
+                scenario.Fixture.ProductId, licenseId, LegacyHardwareId, HardwareAuthorityResolutionIntent.Activation);
+            Assert.True(resolution.UsedAlias);
+            Assert.Equal(StableHardwareId, resolution.EffectiveHardwareId);
+        }
+
+        await AssertUuidReinstallKeepsOneSeatAsync(scenario, subjectRef);
+    }
+
+    /// <summary>
+    /// TKT-001277 counter-review B1: after the chained L to U migration, a new S to U request (fresh proof) answers
+    /// already_current without adding a second alias to U, and an operator-disabled chained alias stays disabled.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task UuidMigration_AlreadyCurrentAfterChainedMigration_KeepsOneTargetAliasAndOperatorDisable(
+        bool operatorDisabled)
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        await SeedPreUuidStableSeatAsync(scenario, bindingCarriesLegacy: true);
+        await MigrateAsync(scenario, PreUuidStableHardwareId);
+        if (operatorDisabled)
+        {
+            await using var disable = await scenario.Factory.CreateDbContextAsync();
+            var alias = await disable.HardwareAuthorityAliases.SingleAsync();
+            alias.IsActive = false;
+            alias.DisabledAtUtc = DateTime.UtcNow;
+            alias.DisabledReason = "operator_disabled";
+            await disable.SaveChangesAsync();
+        }
+
+        var again = await MigrateAsync(scenario, PreUuidStableHardwareId);
+
+        Assert.Equal("already_current", again.Response.Decision);
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        var aliases = await check.HardwareAuthorityAliases.AsNoTracking().ToListAsync();
+        var target = Assert.Single(aliases);
+        Assert.Equal(Sha256(StableHardwareId), target.CanonicalHardwareIdSha256);
+        Assert.Equal(!operatorDisabled, target.IsActive);
+        Assert.Single(await check.LicenseHistories.AsNoTracking()
+            .Where(candidate => candidate.Action == HistoryActions.HardwareIdMigrated).ToListAsync());
+    }
+
+    /// <summary>
+    /// TKT-001277 review I1: a real migration consumes one customer seat change; an exact replay does not charge it
+    /// again.
+    /// </summary>
+    [Fact]
+    public async Task UuidMigration_ConsumesOneSeatChangeOnlyOnce()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        await SetScenarioDailySeatChangesAsync(scenario, 3, priorChangesToday: 0);
+        var request = MigrationRequest(scenario, LegacyHardwareId, StableHardwareId);
+        var digest = Sha256("uuid-migration-quota-" + Guid.NewGuid().ToString("D"));
+        var proof = Proof(scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId,
+            scenario.Options.ConfirmAudience, "-", digest);
+
+        await scenario.Runtime.MigrateHardwareAuthorityAsync(scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback);
+        var replay = await scenario.Runtime.MigrateHardwareAuthorityAsync(
+            scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback);
+
+        Assert.True(replay.Idempotent);
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        var license = await check.Licenses.Include(candidate => candidate.Type).SingleAsync();
+        var quota = await SeatChangeQuota.GetStatusAsync(check, license, DateTime.UtcNow);
+        Assert.Equal(1, quota.UsedToday);
+    }
+
+    /// <summary>
+    /// TKT-001277 review I1: when the daily seat changes are exhausted the migration is refused and nothing moves;
+    /// the Desktop keeps the licence-file identifier and retries later.
+    /// </summary>
+    [Fact]
+    public async Task UuidMigration_ExhaustedSeatChangeQuota_IsRefusedWithoutMutation()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        await SetScenarioDailySeatChangesAsync(scenario, 1, priorChangesToday: 1);
+
+        var refused = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => MigrateAsync(scenario, LegacyHardwareId));
+
+        Assert.Equal("max_daily_deactivations_reached", refused.ErrorCode);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, refused.StatusCode);
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        Assert.Equal(LegacyHardwareId, (await check.LicenseSeats.AsNoTracking().SingleAsync()).HardwareId);
+        Assert.Empty(await check.HardwareAuthorityAliases.AsNoTracking().ToListAsync());
+        Assert.Empty(await check.LicenseHistories.AsNoTracking()
+            .Where(candidate => candidate.Action == HistoryActions.HardwareIdMigrated).ToListAsync());
+    }
+
+    /// <summary>
+    /// TKT-001277, multi-seat licences: only the migrated seat changes; the other seat and a licence-level identifier
+    /// that names another machine are left untouched.
+    /// </summary>
+    [Fact]
+    public async Task UuidMigration_MultiSeatLicence_MovesOnlyTheMigratedSeat()
+    {
+        const string otherMachine = "0123456789ABCDEF";
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        var authority = new RuntimeEnrollmentAuthorityService(scenario.Factory, Options.Create(scenario.Options));
+        await using (var db = await scenario.Factory.CreateDbContextAsync())
+        {
+            await using var lease = await authority.AcquireMutationAsync(db, scenario.Fixture.BindingId);
+            var license = await db.Licenses.SingleAsync();
+            license.MaxSeats = 2;
+            license.HardwareId = otherMachine;
+            db.LicenseSeats.Add(new LicenseSeat
+            {
+                LicenseId = license.Id,
+                HardwareId = otherMachine,
+                IsActive = true,
+                FirstActivatedAt = DateTime.UtcNow,
+                LastCheckInAt = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+            await lease.CommitAsync();
+        }
+
+        await MigrateAsync(scenario, LegacyHardwareId);
+
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        var seats = await check.LicenseSeats.AsNoTracking().ToListAsync();
+        Assert.Equal(2, seats.Count(seat => seat.IsActive));
+        Assert.Contains(seats, seat => seat.HardwareId == StableHardwareId);
+        Assert.Contains(seats, seat => seat.HardwareId == otherMachine);
+        Assert.Equal(otherMachine, (await check.Licenses.AsNoTracking().SingleAsync()).HardwareId);
     }
 
     /// <summary>
@@ -1155,6 +1646,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         const string obsoleteVersion = "2.3.591";
         const string currentVersion = "2.4.402";
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        using var migrationCrypto = new RuntimeEnrollmentCryptoService(Options.Create(scenario.Options));
         var subjectRef = Base64Url(SHA256.HashData("forced-update-version-authority"u8.ToArray()));
         await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
         await SetScenarioSubjectAuthorityAsync(scenario, subjectRef);
@@ -1208,8 +1700,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 sourceBinding,
                 DateTimeOffset.UtcNow,
                 allowIneligibleSourceLicense: false,
-                CancellationToken.None));
-        var sourceResolution = await CreateAliasResolver(resolverDb).ResolveAsync(
+                CancellationToken.None, migrationCrypto));
+        var sourceResolution = await CreateAliasResolver(resolverDb, migrationCrypto).ResolveAsync(
             scenario.Fixture.ProductId,
             sourceBinding.LicenseId,
             LegacyHardwareId,
@@ -1217,7 +1709,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.True(sourceResolution.UsedAlias);
 
         await SetHardwareBanAsync(scenario, StableHardwareId, active: true);
-        var bannedResolution = await CreateAliasResolver(resolverDb).ResolveAsync(
+        var bannedResolution = await CreateAliasResolver(resolverDb, migrationCrypto).ResolveAsync(
             scenario.Fixture.ProductId,
             sourceBinding.LicenseId,
             LegacyHardwareId,
@@ -1236,7 +1728,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             baseline.Hash = new string('0', 64);
             await tamper.SaveChangesAsync();
 
-            var tamperedResolution = await CreateAliasResolver(tamper).ResolveAsync(
+            var tamperedResolution = await CreateAliasResolver(tamper, migrationCrypto).ResolveAsync(
                 scenario.Fixture.ProductId,
                 sourceBinding.LicenseId,
                 LegacyHardwareId,
@@ -1257,7 +1749,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             enrollment.InvalidationReason = "security_revoked";
             await securityTerminal.SaveChangesAsync();
 
-            var securityResolution = await CreateAliasResolver(securityTerminal).ResolveAsync(
+            var securityResolution = await CreateAliasResolver(securityTerminal, migrationCrypto).ResolveAsync(
                 scenario.Fixture.ProductId,
                 sourceBinding.LicenseId,
                 LegacyHardwareId,
@@ -1276,7 +1768,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             scenario,
             subjectRef,
             LegacyHardwareId,
-            hardwareAuthorityAliases: CreateAliasResolver(resolverDb));
+            hardwareAuthorityAliases: CreateAliasResolver(resolverDb, migrationCrypto));
         Assert.NotNull(prepared.Request.Release);
         prepared.Request.Release.Version = currentVersion;
 
@@ -1339,7 +1831,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             await SetHardwareBanAsync(scenario, bannedHardwareId, active: true);
             await using (var bannedDb = await scenario.Factory.CreateDbContextAsync())
             {
-                var banned = await CreateAliasResolver(bannedDb).ResolveAsync(
+                var banned = await CreateAliasResolver(bannedDb, migrationCrypto).ResolveAsync(
                     scenario.Fixture.ProductId,
                     prepared.LicenseId,
                     LegacyHardwareId,
@@ -1413,7 +1905,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             scenario,
             subjectRef,
             LegacyHardwareId,
-            hardwareAuthorityAliases: CreateAliasResolver(retryDb));
+            hardwareAuthorityAliases: CreateAliasResolver(retryDb, migrationCrypto));
         Assert.NotNull(retry.Request.Release);
         retry.Request.Release.Version = currentVersion;
         Assert.NotEqual(prepared.Request.GrantRef, retry.Request.GrantRef);
@@ -1519,7 +2011,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             current.InvalidatedAtUtc = DateTime.UtcNow;
             current.InvalidationReason = "installation_superseded";
             await zero.SaveChangesAsync();
-            var none = await CreateAliasResolver(zero).ResolveAsync(
+            var none = await CreateAliasResolver(zero, migrationCrypto).ResolveAsync(
                 scenario.Fixture.ProductId, prepared.LicenseId, LegacyHardwareId,
                 HardwareAuthorityResolutionIntent.StatusCheck);
             Assert.True(none.UsedAlias);
@@ -1814,6 +2306,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var refusalLogs = new RecordingLogger<DistributionInstallationBindingService>();
         var prepared = await PrepareDistributionFinalizeAsync(
             scenario, subjectRef, LegacyHardwareId, logger: refusalLogs);
+        // Keep the capacity diagnostics distinct from alias proof checks under the mono-seat replacement contract.
+        var capacityHardware = await Tkt976_FillMultiSeatCapacityAsync(scenario.Factory, prepared.LicenseId);
 
         foreach (var invalidHardwareId in new[]
                  {
@@ -1878,9 +2372,10 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             candidate.Id == scenario.Fixture.BindingId);
         var seats = await check.LicenseSeats.Where(candidate => candidate.LicenseId == prepared.LicenseId).ToListAsync();
         Assert.Equal("active", binding.State);
-        Assert.Single(seats);
-        Assert.True(seats[0].IsActive);
-        Assert.Equal(StableHardwareId, seats[0].HardwareId);
+        Assert.Equal(2, seats.Count);
+        Assert.All(seats, seat => Assert.True(seat.IsActive));
+        Assert.Contains(seats, seat => seat.HardwareId == StableHardwareId);
+        Assert.Contains(seats, seat => seat.HardwareId == capacityHardware);
         Assert.Single(await check.DistributionInstallationBindings.Where(candidate =>
             candidate.ProductId == scenario.Fixture.ProductId).ToListAsync());
     }
@@ -1966,6 +2461,22 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                     binding.State = "invalidated";
                     binding.InvalidatedAtUtc = DateTime.UtcNow.AddMinutes(-4);
                     binding.InvalidationReason = "security_lockdown";
+                }
+                if (guardScenario == "binding-mismatch")
+                {
+                    // Signed migration preserves the original binding's historical digest.
+                    // A distinct canonical source must exist to reach the mismatch guard;
+                    // an absent source correctly stops at recovery_source_missing instead.
+                    var distinctSource = (DistributionInstallationBinding)mutate.Entry(binding).CurrentValues.ToObject();
+                    distinctSource.Id = Guid.NewGuid();
+                    distinctSource.InstallationId = Guid.NewGuid().ToString("D");
+                    distinctSource.GrantRef = Guid.NewGuid().ToString("D");
+                    distinctSource.GrantRefDigestSha256 = Sha256(distinctSource.GrantRef);
+                    distinctSource.HandoffDigestSha256 = Sha256("binding-mismatch-source-" + distinctSource.Id);
+                    distinctSource.HardwareIdHash = Sha256(StableHardwareId);
+                    mutate.DistributionInstallationBindings.Add(distinctSource);
+                    Assert.NotEqual(binding.Id, distinctSource.Id);
+                    Assert.NotEqual(binding.HardwareIdHash, distinctSource.HardwareIdHash);
                 }
                 await mutate.SaveChangesAsync();
             }
@@ -2325,22 +2836,17 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     [Fact]
     public async Task HardwareAuthorityAlias_BackfillDivergenceCreatesDisabledRefusalMarker()
     {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
-        await MigrateScenarioAsync(scenario);
+        using var scenario = await CreateHistoricalAliasScenarioAsync();
 
         var adminFactory = new TestDbFactory(scenario.AdminConnectionString);
-        await using (var downgrade = await adminFactory.CreateDbContextAsync())
+        await using (var diverge = new Npgsql.NpgsqlConnection(scenario.AdminConnectionString))
         {
-            await downgrade.GetService<IMigrator>().MigrateAsync(
-                "20260816131533_AllowRuntimeHardwareAuthorityMigrationProofs");
-        }
-        await using (var diverge = await scenario.Factory.CreateDbContextAsync())
-        {
-            var binding = await diverge.DistributionInstallationBindings.SingleAsync(candidate =>
-                candidate.Id == scenario.Fixture.BindingId);
-            binding.HardwareIdHash = Sha256("backfill-divergence");
-            await diverge.SaveChangesAsync();
+            await diverge.OpenAsync();
+            await using var command = new Npgsql.NpgsqlCommand(
+                "UPDATE \"DistributionInstallationBindings\" SET \"HardwareIdHash\" = @digest WHERE \"Id\" = @binding;", diverge);
+            command.Parameters.AddWithValue("digest", Sha256("backfill-divergence"));
+            command.Parameters.AddWithValue("binding", scenario.Fixture.BindingId);
+            Assert.Equal(1, await command.ExecuteNonQueryAsync());
         }
         await using (var upgrade = await adminFactory.CreateDbContextAsync())
         {
@@ -2386,51 +2892,15 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     [Fact]
     public async Task HardwareAuthorityAlias_BackfilledInactiveBusinessGraph_FinalizeV4ReconcilesCanonicalV2()
     {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
         var subjectRef = Base64Url(SHA256.HashData("hardware-alias-backfill-reconciliation"u8.ToArray()));
-        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
-        await SetScenarioSubjectAuthorityAsync(scenario, subjectRef);
-        await MigrateScenarioAsync(scenario);
+        using var scenario = await CreateHistoricalAliasScenarioAsync(subjectRef);
 
         var adminFactory = new TestDbFactory(scenario.AdminConnectionString);
-        await using (var downgrade = await adminFactory.CreateDbContextAsync())
-        {
-            await downgrade.GetService<IMigrator>().MigrateAsync(
-                "20260816131533_AllowRuntimeHardwareAuthorityMigrationProofs");
-        }
 
-        Guid sourceSeatId;
-        Guid legacySeatId;
-        Guid licenseId;
-        await using (var diverge = await scenario.Factory.CreateDbContextAsync())
-        {
-            var sourceBinding = await diverge.DistributionInstallationBindings.SingleAsync(candidate =>
-                candidate.Id == scenario.Fixture.BindingId);
-            var sourceEnrollment = await diverge.RuntimeEnrollments.SingleAsync(candidate =>
-                candidate.Id == scenario.EnrollmentId);
-            var sourceSeat = await diverge.LicenseSeats.SingleAsync(candidate =>
-                candidate.Id == sourceBinding.LicenseSeatId);
-            sourceSeatId = sourceSeat.Id;
-            licenseId = sourceBinding.LicenseId;
-            sourceSeat.IsActive = false;
-            sourceSeat.UnlinkedAt = DateTime.UtcNow.AddMinutes(-5);
-            sourceEnrollment.State = "INVALIDATED";
-            sourceEnrollment.InvalidatedAtUtc = DateTime.UtcNow.AddMinutes(-4);
-            sourceEnrollment.InvalidationReason = "authority_ineligible";
-
-            legacySeatId = Guid.NewGuid();
-            diverge.LicenseSeats.Add(new LicenseSeat
-            {
-                Id = legacySeatId,
-                LicenseId = licenseId,
-                HardwareId = LegacyHardwareId,
-                IsActive = true,
-                FirstActivatedAt = DateTime.UtcNow.AddMinutes(-3),
-                LastCheckInAt = DateTime.UtcNow.AddMinutes(-3),
-                AppVersion = scenario.Fixture.Version
-            });
-            await diverge.SaveChangesAsync();
-        }
+        var historicalGraph = await ReleaseHistoricalAliasSeatAsync(scenario);
+        var licenseId = historicalGraph.LicenseId;
+        var sourceSeatId = historicalGraph.SourceSeatId;
+        var legacySeatId = historicalGraph.LegacySeatId;
 
         await using (var upgrade = await adminFactory.CreateDbContextAsync())
         {
@@ -2509,16 +2979,12 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     [Fact]
     public async Task HardwareAuthorityAlias_PreReasonOperatorDisable_UpgradeRemainsUnavailable()
     {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
-        await MigrateScenarioAsync(scenario);
+        using var scenario = await CreateHistoricalAliasScenarioAsync();
 
         var adminFactory = new TestDbFactory(scenario.AdminConnectionString);
-        await using (var downgrade = await adminFactory.CreateDbContextAsync())
+        await using (var historicalUpgrade = await adminFactory.CreateDbContextAsync())
         {
-            await downgrade.GetService<IMigrator>().MigrateAsync(
-                "20260816131533_AllowRuntimeHardwareAuthorityMigrationProofs");
-            await downgrade.GetService<IMigrator>().MigrateAsync(
+            await historicalUpgrade.GetService<IMigrator>().MigrateAsync(
                 "20260821191047_AddRecoveryTelemetryV1");
         }
         await using (var disable = new Npgsql.NpgsqlConnection(scenario.AdminConnectionString))
@@ -2557,7 +3023,10 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// <summary>
     /// Proves the inactive-backfill continuation remains fail-closed when its durable state reason,
     /// exact migration history, or business-terminal enrollment proof is not eligible.
+    /// The graph is populated on a fresh historical schema and upgraded through the actual migrations.
     /// </summary>
+    /// <param name="mutation">Exact provenance or terminal-state mutation to reject after upgrade.</param>
+    /// <param name="expectedReason">Required unchanged resolver refusal for that mutation.</param>
     [Theory]
     [InlineData("operator-disabled", HardwareAuthorityRefusalReason.AliasUnavailable)]
     [InlineData("history-tampered", HardwareAuthorityRefusalReason.AliasUnavailable)]
@@ -2567,46 +3036,13 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         string mutation,
         HardwareAuthorityRefusalReason expectedReason)
     {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
-        await MigrateScenarioAsync(scenario);
+        using var scenario = await CreateHistoricalAliasScenarioAsync();
 
         var adminFactory = new TestDbFactory(scenario.AdminConnectionString);
-        await using (var downgrade = await adminFactory.CreateDbContextAsync())
-        {
-            await downgrade.GetService<IMigrator>().MigrateAsync(
-                "20260816131533_AllowRuntimeHardwareAuthorityMigrationProofs");
-        }
 
-        Guid licenseId;
-        Guid sourceSeatId;
-        await using (var diverge = await scenario.Factory.CreateDbContextAsync())
-        {
-            var sourceBinding = await diverge.DistributionInstallationBindings.SingleAsync(candidate =>
-                candidate.Id == scenario.Fixture.BindingId);
-            var sourceEnrollment = await diverge.RuntimeEnrollments.SingleAsync(candidate =>
-                candidate.Id == scenario.EnrollmentId);
-            var sourceSeat = await diverge.LicenseSeats.SingleAsync(candidate =>
-                candidate.Id == sourceBinding.LicenseSeatId);
-            licenseId = sourceBinding.LicenseId;
-            sourceSeatId = sourceSeat.Id;
-            sourceSeat.IsActive = false;
-            sourceSeat.UnlinkedAt = DateTime.UtcNow.AddMinutes(-5);
-            sourceEnrollment.State = "INVALIDATED";
-            sourceEnrollment.InvalidatedAtUtc = DateTime.UtcNow.AddMinutes(-4);
-            sourceEnrollment.InvalidationReason = "authority_ineligible";
-            diverge.LicenseSeats.Add(new LicenseSeat
-            {
-                Id = Guid.NewGuid(),
-                LicenseId = licenseId,
-                HardwareId = LegacyHardwareId,
-                IsActive = true,
-                FirstActivatedAt = DateTime.UtcNow.AddMinutes(-3),
-                LastCheckInAt = DateTime.UtcNow.AddMinutes(-3),
-                AppVersion = scenario.Fixture.Version
-            });
-            await diverge.SaveChangesAsync();
-        }
+        var historicalGraph = await ReleaseHistoricalAliasSeatAsync(scenario);
+        var licenseId = historicalGraph.LicenseId;
+        var sourceSeatId = historicalGraph.SourceSeatId;
 
         await using (var upgrade = await adminFactory.CreateDbContextAsync())
         {
@@ -2662,7 +3098,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     }
 
     /// <summary>
-    /// Proves the complete legacy compatibility cycle uses one V2 seat through real HTTP serialization, rejects non-canonical primary identities before reactivation, checks both ban identities, and fails closed on later alias divergence.
+    /// Proves the complete legacy compatibility cycle uses one V2 seat through real HTTP serialization and successful activation bodies, rejects non-canonical primary identities before reactivation, checks both ban identities, and fails closed on later alias divergence.
     /// </summary>
     [Fact]
     public async Task HardwareAuthorityAlias_HttpCyclePreservesOneCanonicalSeatAndFailsClosed()
@@ -2807,6 +3243,18 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.True(
             reactivation.IsSuccessStatusCode,
             $"Canonical legacy reactivation failed with {(int)reactivation.StatusCode}: {await reactivation.Content.ReadAsStringAsync()}");
+
+        // HTTP 200 also carries a structured activation refusal; require business success before checking the canonical seat.
+        using (var reactivationJson = JsonDocument.Parse(await reactivation.Content.ReadAsStringAsync()))
+        {
+            var body = reactivationJson.RootElement;
+            var code = body.TryGetProperty("errorCode", out var error) ? error.GetString() : "none";
+            var businessRefused = body.TryGetProperty("isSuccess", out var success) && !success.GetBoolean();
+            Assert.False(businessRefused, $"Legacy reactivation returned a business refusal: code={code}.");
+            Assert.True(body.TryGetProperty("licenseFile", out var signedFile)
+                && signedFile.ValueKind == JsonValueKind.String
+                && !string.IsNullOrEmpty(signedFile.GetString()), "Legacy reactivation did not return a signed license file.");
+        }
 
         var directV2Check = await PostCheckAsync(client, licenseKey, appName, StableHardwareId);
         var directV2Body = await directV2Check.Content.ReadAsStringAsync();
@@ -3054,6 +3502,17 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
         await ActivateCanonicalScenarioAsync(scenario, StableHardwareId);
+        long initialAuthorityEpoch;
+        int initialAssignmentRevision;
+        await using (var before = await scenario.Factory.CreateDbContextAsync())
+        {
+            initialAuthorityEpoch = await before.RuntimeEnrollments.AsNoTracking()
+                .Where(candidate => candidate.Id == scenario.EnrollmentId)
+                .Select(candidate => candidate.AuthorityEpoch).SingleAsync();
+            initialAssignmentRevision = await before.EnrollmentLicenseAssignments.AsNoTracking()
+                .Where(candidate => candidate.EnrollmentId == scenario.EnrollmentId && candidate.State == "ACTIVE")
+                .Select(candidate => candidate.Revision).SingleAsync();
+        }
         var request = MigrationRequest(scenario, StableHardwareId, StableHardwareId);
         var digest = Sha256("hardware-migration-current-" + Guid.NewGuid().ToString("D"));
         var proof = Proof(scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId,
@@ -3065,6 +3524,12 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.Equal("already_current", result.Response.Decision);
         Assert.Equal(result.Response.OldSecurityEpoch, result.Response.NewSecurityEpoch);
         await using var check = await scenario.Factory.CreateDbContextAsync();
+        Assert.Equal(initialAuthorityEpoch, await check.RuntimeEnrollments.AsNoTracking()
+            .Where(candidate => candidate.Id == scenario.EnrollmentId)
+            .Select(candidate => candidate.AuthorityEpoch).SingleAsync());
+        Assert.Equal(initialAssignmentRevision, await check.EnrollmentLicenseAssignments.AsNoTracking()
+            .Where(candidate => candidate.EnrollmentId == scenario.EnrollmentId && candidate.State == "ACTIVE")
+            .Select(candidate => candidate.Revision).SingleAsync());
         Assert.Empty(await check.LicenseHistories.Where(candidate =>
             candidate.Action == "HWID_V2_MIGRATED").ToListAsync());
         Assert.Empty(await check.HardwareAuthorityAliases.ToListAsync());
@@ -3145,14 +3610,29 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     }
 
     /// <summary>
-    /// Proves concurrent migration attempts serialize on authority and only one can transition
-    /// the existing seat generation.
+    /// Proves concurrent migration attempts serialize on authority: one changes the licensing
+    /// seat and the follower observes the same current authority as an idempotent-safe no-op.
     /// </summary>
     [Fact]
     public async Task HardwareAuthorityMigration_ConcurrentRequestsHaveSingleWinner()
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
         await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        Guid assignmentId;
+        int assignmentRevision;
+        long securityEpoch;
+        long authorityEpoch;
+        await using (var before = await scenario.Factory.CreateDbContextAsync())
+        {
+            var assignment = await before.EnrollmentLicenseAssignments.AsNoTracking().SingleAsync(candidate =>
+                candidate.EnrollmentId == scenario.EnrollmentId && candidate.State == "ACTIVE");
+            var enrollment = await before.RuntimeEnrollments.AsNoTracking().SingleAsync(candidate =>
+                candidate.Id == scenario.EnrollmentId);
+            assignmentId = assignment.Id;
+            assignmentRevision = assignment.Revision;
+            securityEpoch = enrollment.SecurityEpoch;
+            authorityEpoch = enrollment.AuthorityEpoch;
+        }
         var firstRequest = MigrationRequest(scenario, LegacyHardwareId, StableHardwareId);
         var secondRequest = MigrationRequest(scenario, LegacyHardwareId, StableHardwareId);
         var firstDigest = Sha256("hardware-migration-race-a-" + Guid.NewGuid().ToString("D"));
@@ -3169,10 +3649,190 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 scenario.EnrollmentId, secondDigest, secondRequest, secondProof, IPAddress.Loopback)));
 
         Assert.Single(outcomes, outcome => outcome.Result?.Response.Decision == "migrated");
-        Assert.Single(outcomes, outcome => outcome.Error != null);
+        Assert.Single(outcomes, outcome => outcome.Result?.Response.Decision == "already_current");
+        Assert.All(outcomes, outcome =>
+        {
+            Assert.Null(outcome.Error);
+            Assert.NotNull(outcome.Result);
+            Assert.False(outcome.Result.Idempotent);
+            Assert.Equal(StableHardwareId, outcome.Result.Response.HardwareIdV2);
+            Assert.Equal(securityEpoch, outcome.Result.Response.OldSecurityEpoch);
+            Assert.Equal(securityEpoch, outcome.Result.Response.NewSecurityEpoch);
+        });
         await using var check = await scenario.Factory.CreateDbContextAsync();
         Assert.Single(await check.LicenseHistories.Where(candidate =>
             candidate.Action == "HWID_V2_MIGRATED").ToListAsync());
+        Assert.Equal(2, await check.RuntimeEnrollmentProofNonces.AsNoTracking().CountAsync(candidate =>
+            candidate.EnrollmentId == scenario.EnrollmentId
+            && candidate.Operation == "hardware-authority-migration"));
+        var assignmentAfter = await check.EnrollmentLicenseAssignments.AsNoTracking().SingleAsync(candidate =>
+            candidate.EnrollmentId == scenario.EnrollmentId && candidate.State == "ACTIVE");
+        var enrollmentAfter = await check.RuntimeEnrollments.AsNoTracking().SingleAsync(candidate =>
+            candidate.Id == scenario.EnrollmentId);
+        Assert.Equal(assignmentId, assignmentAfter.Id);
+        Assert.Equal(assignmentRevision, assignmentAfter.Revision);
+        Assert.Equal(securityEpoch, enrollmentAfter.SecurityEpoch);
+        Assert.Equal(authorityEpoch, enrollmentAfter.AuthorityEpoch);
+    }
+
+    /// <summary>
+    /// Proves a real commercial expiry writer and a fresh signed migration serialize on the
+    /// production global lease. A migration queued first commits one coherent HWID-only generation
+    /// before the expiry; an expiry queued first makes the migration deny while item 2 correctly
+    /// leaves the historical ACTIVE assignment revision unchanged and no migration fragment remains.
+    /// </summary>
+    /// <param name="migrationQueuedFirst">Selects the observed PostgreSQL advisory wait order.</param>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task HardwareAuthorityMigration_CommercialExpiryRaceIsAtomic(bool migrationQueuedFirst)
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        Guid licenseId;
+        Guid assignmentId;
+        int assignmentRevision;
+        string bindingHardwareIdHash;
+        string enrollmentHardwareIdHash;
+        long enrollmentSecurityEpoch;
+        long enrollmentAuthorityEpoch;
+        await using (var before = await scenario.Factory.CreateDbContextAsync())
+        {
+            var binding = await before.DistributionInstallationBindings.AsNoTracking().SingleAsync(candidate =>
+                candidate.Id == scenario.Fixture.BindingId);
+            var enrollment = await before.RuntimeEnrollments.AsNoTracking().SingleAsync(candidate =>
+                candidate.Id == scenario.EnrollmentId);
+            var assignment = await before.EnrollmentLicenseAssignments.AsNoTracking().SingleAsync(candidate =>
+                candidate.EnrollmentId == scenario.EnrollmentId && candidate.State == "ACTIVE");
+            licenseId = binding.LicenseId;
+            assignmentId = assignment.Id;
+            assignmentRevision = assignment.Revision;
+            bindingHardwareIdHash = binding.HardwareIdHash;
+            enrollmentHardwareIdHash = enrollment.HardwareIdHash;
+            enrollmentSecurityEpoch = enrollment.SecurityEpoch;
+            enrollmentAuthorityEpoch = enrollment.AuthorityEpoch;
+        }
+        var migrationApplicationName = "hardware-migration-writer-race-" + Guid.NewGuid().ToString("N");
+        var writerApplicationName = "hardware-expiry-writer-race-" + Guid.NewGuid().ToString("N");
+        var taggedRuntime = CreateTaggedRuntime(scenario, migrationApplicationName);
+        using var taggedCrypto = taggedRuntime.Crypto;
+        var request = MigrationRequest(scenario, LegacyHardwareId, StableHardwareId);
+        var digest = Sha256("hardware-migration-writer-race-" + Guid.NewGuid().ToString("D"));
+        var proof = Proof(scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId,
+            scenario.Options.ConfirmAudience, "-", digest);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var cancellationToken = timeout.Token;
+
+        await using var blocker = new Npgsql.NpgsqlConnection(scenario.AdminConnectionString);
+        await blocker.OpenAsync(cancellationToken);
+        await using var blockerTransaction = await blocker.BeginTransactionAsync(cancellationToken);
+        await using (var blockerCommand = blocker.CreateCommand())
+        {
+            blockerCommand.Transaction = blockerTransaction;
+            blockerCommand.CommandText = "SELECT pg_catalog.pg_advisory_xact_lock(999831, 1);";
+            await blockerCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var writerConnectionString = new Npgsql.NpgsqlConnectionStringBuilder(scenario.AppConnectionString)
+        {
+            ApplicationName = writerApplicationName,
+            Pooling = false
+        }.ConnectionString;
+        await using var writer = new Npgsql.NpgsqlConnection(writerConnectionString);
+        await writer.OpenAsync(cancellationToken);
+        await using var writerTransaction = await writer.BeginTransactionAsync(cancellationToken);
+        await using var writerCommand = writer.CreateCommand();
+        writerCommand.Transaction = writerTransaction;
+        writerCommand.CommandText = """
+            UPDATE public."Licenses"
+            SET "ExpirationDate" = clock_timestamp() - interval '1 minute'
+            WHERE "Id" = @licenseId;
+            """;
+        writerCommand.Parameters.AddWithValue("licenseId", licenseId);
+
+        Task<(RuntimeEnrollmentOperationResult<RuntimeHardwareAuthorityMigrationResponse>? Result, Exception? Error)> migrationTask;
+        Task<int> writerTask;
+        if (migrationQueuedFirst)
+        {
+            migrationTask = CaptureHardwareMigrationAsync(taggedRuntime.Runtime.MigrateHardwareAuthorityAsync(
+                scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback, cancellationToken));
+            await WaitForAdvisoryWaitersAsync(
+                scenario.AdminConnectionString, [migrationApplicationName], 1, cancellationToken);
+            writerTask = writerCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+        else
+        {
+            writerTask = writerCommand.ExecuteNonQueryAsync(cancellationToken);
+            await WaitForAdvisoryWaitersAsync(
+                scenario.AdminConnectionString, [writerApplicationName], 1, cancellationToken);
+            migrationTask = CaptureHardwareMigrationAsync(taggedRuntime.Runtime.MigrateHardwareAuthorityAsync(
+                scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback, cancellationToken));
+        }
+        await WaitForAdvisoryWaitersAsync(
+            scenario.AdminConnectionString,
+            [migrationApplicationName, writerApplicationName],
+            2,
+            cancellationToken);
+        Assert.False(migrationTask.IsCompleted);
+        Assert.False(writerTask.IsCompleted);
+        await blockerTransaction.CommitAsync(cancellationToken);
+
+        if (migrationQueuedFirst)
+        {
+            var migrated = await migrationTask.WaitAsync(cancellationToken);
+            Assert.Null(migrated.Error);
+            Assert.Equal("migrated", migrated.Result?.Response.Decision);
+            Assert.Equal(1, await writerTask.WaitAsync(cancellationToken));
+            await using (var visibleBeforeWriterCommit = await scenario.Factory.CreateDbContextAsync(cancellationToken))
+            {
+                var active = await visibleBeforeWriterCommit.EnrollmentLicenseAssignments.AsNoTracking()
+                    .SingleAsync(candidate => candidate.Id == assignmentId && candidate.State == "ACTIVE",
+                        cancellationToken);
+                Assert.Equal(assignmentRevision, active.Revision);
+                Assert.Equal(StableHardwareId, await visibleBeforeWriterCommit.LicenseSeats.AsNoTracking()
+                    .Where(candidate => candidate.Id == active.LicenseSeatId)
+                    .Select(candidate => candidate.HardwareId).SingleAsync(cancellationToken));
+            }
+            await writerTransaction.CommitAsync(cancellationToken);
+            await using var ended = await scenario.Factory.CreateDbContextAsync(cancellationToken);
+            var terminal = await ended.EnrollmentLicenseAssignments.AsNoTracking()
+                .SingleAsync(candidate => candidate.EnrollmentId == scenario.EnrollmentId, cancellationToken);
+            Assert.Equal("ACTIVE", terminal.State);
+            Assert.Equal(assignmentRevision, terminal.Revision);
+            var stableBinding = await ended.DistributionInstallationBindings.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == scenario.Fixture.BindingId, cancellationToken);
+            var stableEnrollment = await ended.RuntimeEnrollments.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == scenario.EnrollmentId, cancellationToken);
+            Assert.Equal(bindingHardwareIdHash, stableBinding.HardwareIdHash);
+            Assert.Equal(enrollmentHardwareIdHash, stableEnrollment.HardwareIdHash);
+            Assert.Equal(enrollmentSecurityEpoch, stableEnrollment.SecurityEpoch);
+            Assert.Equal(enrollmentAuthorityEpoch, stableEnrollment.AuthorityEpoch);
+            Assert.Single(await ended.HardwareAuthorityAliases.AsNoTracking().ToListAsync(cancellationToken));
+            Assert.Single(await ended.LicenseHistories.AsNoTracking().Where(candidate =>
+                candidate.Action == "HWID_V2_MIGRATED").ToListAsync(cancellationToken));
+            Assert.Single(await ended.RuntimeEnrollmentProofNonces.AsNoTracking().Where(candidate =>
+                candidate.EnrollmentId == scenario.EnrollmentId
+                && candidate.Operation == "hardware-authority-migration").ToListAsync(cancellationToken));
+        }
+        else
+        {
+            Assert.Equal(1, await writerTask.WaitAsync(cancellationToken));
+            await writerTransaction.CommitAsync(cancellationToken);
+            var denied = await migrationTask.WaitAsync(cancellationToken);
+            var error = Assert.IsType<RuntimeEnrollmentException>(denied.Error);
+            Assert.Equal(StatusCodes.Status422UnprocessableEntity, error.StatusCode);
+            Assert.Null(denied.Result);
+            await AssertLegacyAuthorityUnchangedAsync(scenario);
+            await using var unchanged = await scenario.Factory.CreateDbContextAsync(cancellationToken);
+            var active = await unchanged.EnrollmentLicenseAssignments.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == assignmentId, cancellationToken);
+            Assert.Equal("ACTIVE", active.State);
+            Assert.Equal(assignmentRevision, active.Revision);
+            Assert.Empty(await unchanged.HardwareAuthorityAliases.AsNoTracking().ToListAsync(cancellationToken));
+            Assert.Empty(await unchanged.RuntimeEnrollmentProofNonces.AsNoTracking().Where(candidate =>
+                candidate.EnrollmentId == scenario.EnrollmentId
+                && candidate.Operation == "hardware-authority-migration").ToListAsync(cancellationToken));
+        }
     }
 
     /// <summary>
@@ -3198,6 +3858,200 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
 
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, rejected.StatusCode);
         await using var check = await scenario.Factory.CreateDbContextAsync();
+        Assert.Single(await check.LicenseHistories.Where(candidate =>
+            candidate.Action == "HWID_V2_MIGRATED").ToListAsync());
+    }
+
+    /// <summary>
+    /// Proves an unauthenticated migration is rejected before a missing or quarantined commercial
+    /// assignment can disclose its current state, and leaves every Runtime authority row unchanged.
+    /// </summary>
+    [Fact]
+    public async Task HardwareAuthorityMigration_InvalidProofPrecedesQuarantinedAssignment()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        await using (var admin = new Npgsql.NpgsqlConnection(scenario.AdminConnectionString))
+        {
+            await admin.OpenAsync();
+            await using var command = admin.CreateCommand();
+            command.CommandText = """
+                DELETE FROM public."EnrollmentLicenseAssignments"
+                WHERE "EnrollmentId" = @enrollmentId;
+                INSERT INTO public."EnrollmentLicenseAssignmentQuarantines"
+                    ("EnrollmentId", "BindingId", "LicenseId", "LicenseSeatId", "Reason", "ObservedAtUtc")
+                SELECT "Id", "BindingId", "LicenseId", "LicenseSeatId", 'live_state_mismatch', clock_timestamp()
+                FROM public."RuntimeEnrollments" WHERE "Id" = @enrollmentId;
+                """;
+            command.Parameters.AddWithValue("enrollmentId", scenario.EnrollmentId);
+            await command.ExecuteNonQueryAsync();
+        }
+        var request = MigrationRequest(scenario, LegacyHardwareId, StableHardwareId);
+        var digest = Sha256("hardware-migration-invalid-proof-quarantine-" + Guid.NewGuid().ToString("D"));
+        using var attackerKey = RSA.Create(3072);
+        var proof = Proof(attackerKey, "hardware-authority-migration", scenario.EnrollmentId,
+            scenario.Options.ConfirmAudience, "-", digest);
+
+        var rejected = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() =>
+            scenario.Runtime.MigrateHardwareAuthorityAsync(
+                scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback));
+
+        Assert.Equal(StatusCodes.Status401Unauthorized, rejected.StatusCode);
+        Assert.Equal("authentication_failed", rejected.ErrorCode);
+        await AssertLegacyAuthorityUnchangedAsync(scenario);
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        Assert.Empty(await check.RuntimeEnrollmentProofNonces.AsNoTracking().Where(candidate =>
+            candidate.EnrollmentId == scenario.EnrollmentId
+            && candidate.Operation == "hardware-authority-migration").ToListAsync());
+    }
+
+    /// <summary>
+    /// Proves the migration endpoint itself rejects absent or quarantined commercial authority as
+    /// 422 and treats duplicate or broken assignment relations as 503, without any partial write.
+    /// Each case owns an isolated database because the ambiguity fixtures remove local constraints.
+    /// </summary>
+    /// <param name="assignmentState">Exact malformed assignment graph to install.</param>
+    /// <param name="expectedStatusCode">Stable public status for the graph classification.</param>
+    /// <param name="expectedDiagnostic">Bounded internal assignment diagnostic.</param>
+    [Theory]
+    [InlineData("missing", StatusCodes.Status422UnprocessableEntity, "assignment_missing")]
+    [InlineData("quarantined", StatusCodes.Status422UnprocessableEntity, "assignment_quarantined")]
+    [InlineData("duplicate", StatusCodes.Status503ServiceUnavailable, "assignment_duplicate_active")]
+    [InlineData("relation-missing", StatusCodes.Status503ServiceUnavailable, "assignment_relation_missing")]
+    public async Task HardwareAuthorityMigration_AssignmentGraphFailsClosedWithoutMutation(
+        string assignmentState,
+        int expectedStatusCode,
+        string expectedDiagnostic)
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        RuntimeEnrollment enrollmentBefore;
+        LicenseSeat seatBefore;
+        int quotaCountBefore;
+        await using (var before = await scenario.Factory.CreateDbContextAsync())
+        {
+            enrollmentBefore = await before.RuntimeEnrollments.AsNoTracking().SingleAsync(candidate =>
+                candidate.Id == scenario.EnrollmentId);
+            seatBefore = await before.LicenseSeats.AsNoTracking().SingleAsync(candidate =>
+                candidate.Id == enrollmentBefore.LicenseSeatId);
+            quotaCountBefore = await before.RuntimeEnrollmentQuotas.AsNoTracking().CountAsync();
+        }
+        await using (var admin = new Npgsql.NpgsqlConnection(scenario.AdminConnectionString))
+        {
+            await admin.OpenAsync();
+            await using var command = admin.CreateCommand();
+            command.Parameters.AddWithValue("enrollmentId", scenario.EnrollmentId);
+            switch (assignmentState)
+            {
+                case "missing":
+                    command.CommandText = """
+                        DELETE FROM public."EnrollmentLicenseAssignments"
+                        WHERE "EnrollmentId" = @enrollmentId;
+                        """;
+                    break;
+                case "quarantined":
+                    command.CommandText = """
+                        DELETE FROM public."EnrollmentLicenseAssignments"
+                        WHERE "EnrollmentId" = @enrollmentId;
+                        INSERT INTO public."EnrollmentLicenseAssignmentQuarantines"
+                            ("EnrollmentId", "BindingId", "LicenseId", "LicenseSeatId", "Reason", "ObservedAtUtc")
+                        SELECT "Id", "BindingId", "LicenseId", "LicenseSeatId",
+                               'live_state_mismatch', clock_timestamp()
+                        FROM public."RuntimeEnrollments" WHERE "Id" = @enrollmentId;
+                        """;
+                    break;
+                case "duplicate":
+                    command.Parameters.AddWithValue("duplicateId", Guid.NewGuid());
+                    command.CommandText = """
+                        DROP INDEX public."IX_EnrollmentLicenseAssignments_EnrollmentId";
+                        DROP INDEX public."IX_EnrollmentLicenseAssignments_LicenseSeatId";
+                        INSERT INTO public."EnrollmentLicenseAssignments"
+                            ("Id", "EnrollmentId", "LicenseId", "LicenseSeatId", "State",
+                             "ActivatedAtUtc", "EndedAtUtc", "Revision", "EndReason")
+                        SELECT @duplicateId, "EnrollmentId", "LicenseId", "LicenseSeatId", 'ACTIVE',
+                               clock_timestamp(), NULL, "Revision" + 1, NULL
+                        FROM public."EnrollmentLicenseAssignments"
+                        WHERE "EnrollmentId" = @enrollmentId AND "State" = 'ACTIVE';
+                        """;
+                    break;
+                case "relation-missing":
+                    command.Parameters.AddWithValue("missingLicenseId", Guid.NewGuid());
+                    command.CommandText = """
+                        ALTER TABLE public."EnrollmentLicenseAssignments"
+                            DROP CONSTRAINT "FK_EnrollmentLicenseAssignments_Licenses_LicenseId";
+                        ALTER TABLE public."EnrollmentLicenseAssignments"
+                            DROP CONSTRAINT "FK_EnrollmentLicenseAssignments_LicenseSeats_LicenseSeatId_LicenseId";
+                        UPDATE public."EnrollmentLicenseAssignments"
+                        SET "LicenseId" = @missingLicenseId
+                        WHERE "EnrollmentId" = @enrollmentId AND "State" = 'ACTIVE';
+                        """;
+                    break;
+                default:
+                    throw new InvalidOperationException("Unknown assignment graph fixture: " + assignmentState);
+            }
+            await command.ExecuteNonQueryAsync();
+        }
+        var request = MigrationRequest(scenario, LegacyHardwareId, StableHardwareId);
+        var digest = Sha256("hardware-migration-assignment-" + assignmentState + Guid.NewGuid().ToString("D"));
+        var proof = Proof(scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId,
+            scenario.Options.ConfirmAudience, "-", digest);
+
+        var rejected = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() =>
+            scenario.Runtime.MigrateHardwareAuthorityAsync(
+                scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback));
+
+        Assert.Equal(expectedStatusCode, rejected.StatusCode);
+        Assert.Equal(expectedDiagnostic, rejected.DiagnosticCode);
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        var enrollmentAfter = await check.RuntimeEnrollments.AsNoTracking().SingleAsync(candidate =>
+            candidate.Id == scenario.EnrollmentId);
+        var seatAfter = await check.LicenseSeats.AsNoTracking().SingleAsync(candidate =>
+            candidate.Id == seatBefore.Id);
+        Assert.Equal(enrollmentBefore.State, enrollmentAfter.State);
+        Assert.Equal(enrollmentBefore.SecurityEpoch, enrollmentAfter.SecurityEpoch);
+        Assert.Equal(enrollmentBefore.AuthorityEpoch, enrollmentAfter.AuthorityEpoch);
+        Assert.Equal(enrollmentBefore.HardwareIdHash, enrollmentAfter.HardwareIdHash);
+        Assert.Equal(seatBefore.HardwareId, seatAfter.HardwareId);
+        Assert.Equal(seatBefore.IsActive, seatAfter.IsActive);
+        Assert.Equal(quotaCountBefore, await check.RuntimeEnrollmentQuotas.AsNoTracking().CountAsync());
+        Assert.Empty(await check.HardwareAuthorityAliases.AsNoTracking().ToListAsync());
+        Assert.Empty(await check.LicenseHistories.AsNoTracking().Where(candidate =>
+            candidate.Action == "HWID_V2_MIGRATED").ToListAsync());
+        Assert.Empty(await check.RuntimeEnrollmentProofNonces.AsNoTracking().Where(candidate =>
+            candidate.EnrollmentId == scenario.EnrollmentId
+            && candidate.Operation == "hardware-authority-migration").ToListAsync());
+    }
+
+    /// <summary>
+    /// Proves a reused authenticated JTI with a different exact body remains an idempotency
+    /// conflict before a later commercial denial, without changing the migrated generation.
+    /// </summary>
+    [Fact]
+    public async Task HardwareAuthorityMigration_DivergentReplayPrecedesCommercialDenial()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        var request = MigrationRequest(scenario, LegacyHardwareId, StableHardwareId);
+        var digest = Sha256("hardware-migration-divergent-replay-" + Guid.NewGuid().ToString("D"));
+        var proof = Proof(scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId,
+            scenario.Options.ConfirmAudience, "-", digest);
+        var migrated = await scenario.Runtime.MigrateHardwareAuthorityAsync(
+            scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback);
+        await MutateScenarioAuthorityAsync(scenario, "license-revoked");
+
+        var rejected = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() =>
+            scenario.Runtime.MigrateHardwareAuthorityAsync(
+                scenario.EnrollmentId, Sha256("different-exact-body"), request, proof, IPAddress.Loopback));
+
+        Assert.Equal(StatusCodes.Status409Conflict, rejected.StatusCode);
+        Assert.Equal("replay_rejected", rejected.ErrorCode);
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        Assert.Single(await check.RuntimeEnrollmentProofNonces.AsNoTracking().Where(candidate =>
+            candidate.EnrollmentId == scenario.EnrollmentId
+            && candidate.Operation == "hardware-authority-migration").ToListAsync());
+        var enrollment = await check.RuntimeEnrollments.AsNoTracking().SingleAsync(candidate =>
+            candidate.Id == scenario.EnrollmentId);
+        Assert.Equal(migrated.Response.NewSecurityEpoch, enrollment.SecurityEpoch);
         Assert.Single(await check.LicenseHistories.Where(candidate =>
             candidate.Action == "HWID_V2_MIGRATED").ToListAsync());
     }
@@ -3267,7 +4121,37 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
         await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        if (mutation is "binding-installation" or "binding-product")
+        {
+            DistributionInstallationBinding bindingBefore;
+            await using (var before = await scenario.Factory.CreateDbContextAsync())
+            {
+                bindingBefore = await before.DistributionInstallationBindings.AsNoTracking()
+                    .SingleAsync(candidate => candidate.Id == scenario.Fixture.BindingId);
+            }
+
+            var graphRejected = await Assert.ThrowsAsync<Npgsql.PostgresException>(() =>
+                MutateScenarioAuthorityAsync(scenario, mutation));
+
+            Assert.Equal(Npgsql.PostgresErrorCodes.CheckViolation, graphRejected.SqlState);
+            Assert.Contains("binding_mismatch", graphRejected.MessageText, StringComparison.Ordinal);
+            await using var unchanged = await scenario.Factory.CreateDbContextAsync();
+            var bindingAfter = await unchanged.DistributionInstallationBindings.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == scenario.Fixture.BindingId);
+            Assert.Equal(bindingBefore.ProductId, bindingAfter.ProductId);
+            Assert.Equal(bindingBefore.InstallationId, bindingAfter.InstallationId);
+            Assert.Empty(await unchanged.RuntimeEnrollmentProofNonces.AsNoTracking().Where(candidate =>
+                candidate.EnrollmentId == scenario.EnrollmentId
+                && candidate.Operation == "hardware-authority-migration").ToListAsync());
+            return;
+        }
         await MutateScenarioAuthorityAsync(scenario, mutation);
+        RuntimeEnrollment enrollmentBefore;
+        await using (var before = await scenario.Factory.CreateDbContextAsync())
+        {
+            enrollmentBefore = await before.RuntimeEnrollments.AsNoTracking().SingleAsync(candidate =>
+                candidate.Id == scenario.EnrollmentId);
+        }
         var request = MigrationRequest(scenario, LegacyHardwareId, StableHardwareId);
         var digest = Sha256("hardware-migration-ineligible-" + mutation + Guid.NewGuid().ToString("D"));
         var proof = Proof(scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId,
@@ -3279,6 +4163,13 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
 
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, rejected.StatusCode);
         await using var check = await scenario.Factory.CreateDbContextAsync();
+        var enrollmentAfter = await check.RuntimeEnrollments.AsNoTracking().SingleAsync(candidate =>
+            candidate.Id == scenario.EnrollmentId);
+        Assert.Equal(enrollmentBefore.SecurityEpoch, enrollmentAfter.SecurityEpoch);
+        Assert.Equal(enrollmentBefore.AuthorityEpoch, enrollmentAfter.AuthorityEpoch);
+        Assert.DoesNotContain(await check.RuntimeEnrollmentProofNonces.AsNoTracking().ToListAsync(), candidate =>
+            candidate.EnrollmentId == scenario.EnrollmentId
+            && candidate.Operation == "hardware-authority-migration");
         Assert.Empty(await check.LicenseHistories.Where(candidate =>
             candidate.Action == "HWID_V2_MIGRATED").ToListAsync());
     }
@@ -3473,9 +4364,10 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             SecurityEpoch = 1,
             LegacyHardwareId = legacyHardwareId,
             HardwareIdV2 = hardwareIdV2,
-            LegacyAlgorithm = "legacy-wmi-first-disk",
-            HardwareIdV2Algorithm = "v2-wmi-disk-index-0",
-            SdkVersion = "1.1.13"
+            LegacyAlgorithm = RuntimeEnrollmentService.HardwareMigrationSourceAlgorithm,
+            HardwareIdV2Algorithm = RuntimeEnrollmentService.HardwareMigrationTargetAlgorithm,
+            SdkVersion = "2.0.0",
+            SystemUuid = TestSystemUuid
         };
 
     /// <summary>Executes one fresh signed legacy-to-V2 migration for alias tests.</summary>
@@ -3495,15 +4387,19 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// </summary>
     /// <param name="scenario">Isolated PostgreSQL authority graph.</param>
     /// <param name="purpose">Unique ASCII test purpose used only to separate request digests.</param>
+    /// <param name="afterMigration">Optional signed-migration continuation before the successor is finalized.</param>
     /// <returns>Disposable signing key and exact successor Confirm inputs.</returns>
     private static async Task<AliasSuccessorConfirmScenario> PrepareAliasSuccessorConfirmScenarioAsync(
         PreparedBootstrapScenario scenario,
-        string purpose)
+        string purpose,
+        Func<Task>? afterMigration = null)
     {
         var subjectRef = Base64Url(SHA256.HashData(Encoding.UTF8.GetBytes(purpose + "-subject")));
         await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
         await SetScenarioSubjectAuthorityAsync(scenario, subjectRef);
         await MigrateScenarioAsync(scenario);
+        if (afterMigration != null)
+            await afterMigration();
         Guid aliasId;
         Guid sourceEnrollmentId;
         int aliasSecurityEpoch;
@@ -4007,11 +4903,11 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     }
 
     /// <summary>Creates the production resolver with explicit enabled compatibility policy.</summary>
-    private static HardwareAuthorityAliasResolver CreateAliasResolver(LicenseDbContext db) =>
+    private static HardwareAuthorityAliasResolver CreateAliasResolver(LicenseDbContext db, IRuntimeEnrollmentCryptoService? migrationCrypto = null) =>
         new(
             db,
             Options.Create(new HardwareAuthorityAliasOptions { DefaultMode = "enabled" }),
-            NullLogger<HardwareAuthorityAliasResolver>.Instance);
+            NullLogger<HardwareAuthorityAliasResolver>.Instance, migrationCrypto);
 
     /// <summary>Mutates one post-migration graph dimension without creating a replacement seat.</summary>
     private static async Task MutateAliasGraphAsync(PreparedBootstrapScenario scenario, string mutation)
@@ -4089,6 +4985,100 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             scenario.Options.ConfirmAudience, scenario.Prepared.Challenge, digest);
         await scenario.Runtime.ConfirmAsync(
             scenario.EnrollmentId, digest, confirm, proof, IPAddress.Loopback);
+    }
+
+    /// <summary>Runs one fresh signed UUID migration from the given source identifier to the UUID identifier.</summary>
+    private static Task<RuntimeEnrollmentOperationResult<RuntimeHardwareAuthorityMigrationResponse>> MigrateAsync(
+        PreparedBootstrapScenario scenario, string sourceHardwareId)
+    {
+        var request = MigrationRequest(scenario, sourceHardwareId, StableHardwareId);
+        var digest = Sha256("uuid-migration-" + Guid.NewGuid().ToString("D"));
+        var proof = Proof(scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId,
+            scenario.Options.ConfirmAudience, "-", digest);
+        return scenario.Runtime.MigrateHardwareAuthorityAsync(
+            scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback);
+    }
+
+    /// <summary>
+    /// Seeds the state left by the retired disk migration: seat and licence on S, an active L to S alias bound to the
+    /// current enrollment and binding, and the binding plus enrollment digest on S (production shape) or still on L.
+    /// </summary>
+    private static async Task SeedPreUuidStableSeatAsync(PreparedBootstrapScenario scenario, bool bindingCarriesLegacy)
+    {
+        var authority = new RuntimeEnrollmentAuthorityService(scenario.Factory, Options.Create(scenario.Options));
+        await using var db = await scenario.Factory.CreateDbContextAsync();
+        await using var lease = await authority.AcquireMutationAsync(db, scenario.Fixture.BindingId);
+        var binding = await db.DistributionInstallationBindings.SingleAsync(candidate =>
+            candidate.Id == scenario.Fixture.BindingId);
+        var enrollment = await db.RuntimeEnrollments.SingleAsync(candidate => candidate.Id == scenario.EnrollmentId);
+        var seat = await db.LicenseSeats.SingleAsync(candidate => candidate.Id == binding.LicenseSeatId);
+        var license = await db.Licenses.SingleAsync(candidate => candidate.Id == binding.LicenseId);
+        seat.HardwareId = PreUuidStableHardwareId;
+        license.HardwareId = PreUuidStableHardwareId;
+        binding.HardwareIdHash = Sha256(bindingCarriesLegacy ? LegacyHardwareId : PreUuidStableHardwareId);
+        enrollment.HardwareIdHash = binding.HardwareIdHash;
+        db.HardwareAuthorityAliases.Add(new HardwareAuthorityAlias
+        {
+            ProductId = license.ProductId,
+            LicenseId = license.Id,
+            LicenseSeatId = seat.Id,
+            RuntimeEnrollmentId = enrollment.Id,
+            BindingId = binding.Id,
+            MigrationRequestId = Guid.NewGuid(),
+            LegacyHardwareIdSha256 = Sha256(LegacyHardwareId),
+            CanonicalHardwareIdSha256 = Sha256(PreUuidStableHardwareId),
+            SecurityEpoch = enrollment.SecurityEpoch,
+            AuthorityEpoch = enrollment.AuthorityEpoch,
+            CreatedAtUtc = DateTime.UtcNow.AddDays(-1)
+        });
+        await db.SaveChangesAsync();
+        await lease.CommitAsync();
+    }
+
+    /// <summary>Sets the licence type daily seat-change limit and records prior customer changes today.</summary>
+    private static async Task SetScenarioDailySeatChangesAsync(
+        PreparedBootstrapScenario scenario, int limit, int priorChangesToday)
+    {
+        await using var db = await scenario.Factory.CreateDbContextAsync();
+        var license = await db.Licenses.Include(candidate => candidate.Type).SingleAsync();
+        license.Type!.MaxActivationsPerDay = limit;
+        for (var index = 0; index < priorChangesToday; index++)
+            db.LicenseHistories.Add(new LicenseHistory
+            {
+                LicenseId = license.Id,
+                Timestamp = DateTime.UtcNow,
+                Action = HistoryActions.UnlinkedApi,
+                PerformedBy = "127.0.0.1",
+                Details = "prior customer seat change"
+            });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Runs a WebSetup reinstall Finalize that submits the UUID identifier and proves it keeps exactly one active seat
+    /// on U and one active binding on U superseding the migrated one.
+    /// </summary>
+    private static async Task AssertUuidReinstallKeepsOneSeatAsync(PreparedBootstrapScenario scenario, string subjectRef)
+    {
+        await using var resolverDb = await scenario.Factory.CreateDbContextAsync();
+        var prepared = await PrepareDistributionFinalizeAsync(scenario, subjectRef, StableHardwareId,
+            hardwareAuthorityAliases: CreateAliasResolver(resolverDb));
+
+        var finalized = await prepared.Service.FinalizeAsync(
+            "website-step1",
+            Sha256("uuid-migration-reinstall-" + Guid.NewGuid().ToString("D")),
+            prepared.Request);
+
+        Assert.Equal(Sha256(StableHardwareId), finalized.Response.HardwareIdHash);
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        var license = await check.Licenses.Include(candidate => candidate.Seats)
+            .SingleAsync(candidate => candidate.Id == prepared.LicenseId);
+        var seat = Assert.Single(license.Seats, candidate => candidate.IsActive);
+        Assert.Equal(StableHardwareId, seat.HardwareId);
+        var active = Assert.Single(await check.DistributionInstallationBindings.AsNoTracking()
+            .Where(candidate => candidate.State == "active").ToListAsync());
+        Assert.Equal(Sha256(StableHardwareId), active.HardwareIdHash);
+        Assert.Equal(scenario.Fixture.BindingId, active.SupersededBindingId);
     }
 
     /// <summary>Rebinds the seeded fixture to a canonical 16-character hardware authority.</summary>

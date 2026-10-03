@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using SoftLicence.Server.Data;
 using SoftLicence.Server.Models;
 
@@ -73,7 +74,67 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
         CancellationToken cancellationToken = default) =>
         ExecuteAsync(clientId, exactBodyDigest, request, null, RecoverOperation, cancellationToken);
 
+    /// <summary>
+    /// Issues or advances one S2S bootstrap capability after validating immutable Runtime
+    /// lineage and the current assignment independently. Exact request replay returns its
+    /// sealed original bytes only while both authorities and generation scope remain valid.
+    /// The binding lease and commercial read barrier hold through the atomic generation write;
+    /// a business denial writes no capability or enrollment state, while unavailable authority
+    /// remains distinct from a 422 refusal. Retriable PostgreSQL lock/serialization failures
+    /// restart the whole transaction, bounded by the Runtime attempt policy. The lease's global
+    /// epoch is not credential identity.
+    /// </summary>
+    /// <param name="clientId">Authenticated S2S principal that owns the finalized binding.</param>
+    /// <param name="exactBodyDigest">SHA-256 of the strict request bytes for idempotency.</param>
+    /// <param name="request">Strict issue, remint or recover request.</param>
+    /// <param name="expectedAuthorizationId">Existing bootstrap ID required by remint.</param>
+    /// <param name="operation">Closed issue/remint/recover operation code.</param>
+    /// <param name="cancellationToken">Cancels reads or rolls back the transaction.</param>
+    /// <returns>New generation or verified exact replay bytes.</returns>
     private async Task<DistributionLicenseBootstrapOperationResult<DistributionLicenseBootstrapIssuedResponse>> ExecuteAsync(
+        string clientId,
+        string exactBodyDigest,
+        DistributionLicenseBootstrapIssueRequest request,
+        Guid? expectedAuthorizationId,
+        string operation,
+        CancellationToken cancellationToken)
+    {
+        var maximumAttempts = Math.Clamp(_options.MaximumTransactionAttempts, 1, 3);
+        for (var attempt = 0; attempt < maximumAttempts; attempt++)
+        {
+            try
+            {
+                return await ExecuteOnceAsync(clientId, exactBodyDigest, request,
+                    expectedAuthorizationId, operation, cancellationToken);
+            }
+            catch (Exception exception) when (RetryableBootstrapSqlState(exception) is not null)
+            {
+                var sqlState = RetryableBootstrapSqlState(exception)!;
+                if (attempt + 1 >= maximumAttempts)
+                    throw new DistributionOperationException("authority_unavailable",
+                        StatusCodes.Status503ServiceUnavailable, "postgres_" + sqlState);
+                // Only a rolled-back PostgreSQL transaction is retried. Re-entering from the
+                // beginning rereads replay and both authorities after the contending writer.
+                await Task.Delay(Random.Shared.Next(20, 80) * (attempt + 1), cancellationToken);
+            }
+        }
+        throw new DistributionOperationException("authority_unavailable",
+            StatusCodes.Status503ServiceUnavailable, "bootstrap_retry_exhausted");
+    }
+
+    /// <summary>
+    /// Executes one issue, remint or recover transaction with fresh database state. The caller
+    /// retries this complete unit only after PostgreSQL has aborted it for a known contention
+    /// SQLSTATE; business refusals and unknown failures are never reclassified or retried.
+    /// </summary>
+    /// <param name="clientId">Authenticated S2S principal that owns the finalized binding.</param>
+    /// <param name="exactBodyDigest">SHA-256 of the strict request bytes.</param>
+    /// <param name="request">Strict issue, remint or recover request.</param>
+    /// <param name="expectedAuthorizationId">Existing bootstrap ID required by remint.</param>
+    /// <param name="operation">Closed issue/remint/recover operation code.</param>
+    /// <param name="cancellationToken">Cancels reads or rolls back the transaction.</param>
+    /// <returns>New generation or verified exact replay bytes from one transaction.</returns>
+    private async Task<DistributionLicenseBootstrapOperationResult<DistributionLicenseBootstrapIssuedResponse>> ExecuteOnceAsync(
         string clientId,
         string exactBodyDigest,
         DistributionLicenseBootstrapIssueRequest request,
@@ -100,8 +161,12 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
             throw Invalid();
 
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        // The binding lease orders the generation transaction. Its global epoch also advances
+        // for seat, licence, ban and release changes, so it is not bootstrap credential identity.
+        // Historical authorization and enrollment epochs must still match each other below.
         await using var lease = await _authority.AcquireAsync(db, bindingId, cancellationToken);
         await _keyRegistry.ValidateConfiguredKeysAsync(db, cancellationToken);
+        await RuntimeCommercialEligibilityValidator.AcquireReadBarrierAsync(db, cancellationToken);
         var replay = await db.DistributionLicenseBootstrapRequests.AsNoTracking()
             .SingleOrDefaultAsync(row => row.ClientId == clientId && row.Operation == operation
                 && row.RequestId == requestId.ToString("D"), cancellationToken);
@@ -112,10 +177,6 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
             .SingleOrDefaultAsync(row => row.Id == enrollmentId, cancellationToken);
         var entitlement = binding == null ? null : await db.DistributionEntitlements.AsNoTracking()
             .SingleOrDefaultAsync(row => row.Id == binding.EntitlementId, cancellationToken);
-        var license = binding == null ? null : await db.Licenses.AsNoTracking()
-            .SingleOrDefaultAsync(row => row.Id == binding.LicenseId, cancellationToken);
-        var seat = binding == null ? null : await db.LicenseSeats.AsNoTracking()
-            .SingleOrDefaultAsync(row => row.Id == binding.LicenseSeatId, cancellationToken);
         var bindingOwnedByClient = binding != null && await db.DistributionBindingRequests.AsNoTracking()
             .AnyAsync(row => row.BindingId == binding.Id
                 && row.Operation == "finalize_binding"
@@ -136,21 +197,49 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
             || binding.ProductId != productId
             || enrollment.ProductId != productId
             || enrollment.BindingId != binding.Id
-            || enrollment.LicenseId != binding.LicenseId
-            || enrollment.LicenseSeatId != binding.LicenseSeatId
             || enrollment.InstallationId != binding.InstallationId
-            || enrollment.HardwareIdHash != binding.HardwareIdHash
+            || enrollment.ReleaseVersion != binding.Version
             || enrollment.HandoffDigestSha256 != binding.HandoffDigestSha256
             || enrollment.SubjectRefDigestSha256 != binding.SubjectRefDigestSha256
-            || enrollment.AuthorityEpoch != lease.AuthorityEpoch
             || binding.SubjectRefDigestSha256 is not { Length: 64 }
             || enrollment.State is not ("PENDING" or "ACTIVE")
             || binding.HandoffExpiresAtUtc is null
-            || binding.HandoffExpiresAtUtc <= now.UtcDateTime
-            || license == null || !license.IsActive || license.RevokedAt != null
-            || (license.ExpirationDate.HasValue && license.ExpirationDate.Value <= now.UtcDateTime)
-            || seat == null || !seat.IsActive || seat.LicenseId != license.Id
-            || Sha256(seat.HardwareId) != binding.HardwareIdHash)
+            || binding.HandoffExpiresAtUtc <= now.UtcDateTime)
+            throw Reject("bootstrap_ineligible");
+
+        // The frozen binding is a generation-scope witness; the current assignment is the
+        // only commercial grant. A changed hardware value on the same seat does not rewrite
+        // the historical digest or require a new Runtime credential.
+        RuntimeCommercialEligibilityValidator.EligibleAssignment assignment;
+        RuntimeEnrollmentIdentityValidator.ApprovedRelease approved;
+        try
+        {
+            approved = await RuntimeEnrollmentIdentityValidator.ValidateBootstrapAsync(
+                db, enrollment, cancellationToken);
+            assignment = await RuntimeCommercialEligibilityValidator.ValidateAsync(
+                db, enrollment, approved.Binaries, now, cancellationToken);
+        }
+        catch (RuntimeEnrollmentException exception) when (exception.StatusCode == StatusCodes.Status503ServiceUnavailable)
+        {
+            // An incomplete relation or release registry is not a commercial refusal. Keep
+            // the public S2S error unavailable and retain the bounded internal reason.
+            throw new DistributionOperationException("authority_unavailable",
+                StatusCodes.Status503ServiceUnavailable, exception.DiagnosticCode);
+        }
+        catch (RuntimeEnrollmentException exception) when (
+            exception.StatusCode == StatusCodes.Status422UnprocessableEntity)
+        {
+            throw new DistributionOperationException("bootstrap_ineligible",
+                StatusCodes.Status422UnprocessableEntity, exception.DiagnosticCode);
+        }
+        if (assignment.LicenseId != binding.LicenseId || assignment.SeatId != binding.LicenseSeatId)
+            throw Reject("bootstrap_ineligible");
+        if (!approved.Binaries.TryGetValue("FP_EXE", out var executable)
+            || !approved.Binaries.TryGetValue("FP_DLL", out var nativeDll)
+            || !approved.Binaries.TryGetValue("FP_CORE", out var core)
+            || !string.Equals(executable, binding.ExecutableSha256, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(nativeDll, binding.NativeDllSha256, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(core, binding.CoreSha256, StringComparison.OrdinalIgnoreCase))
             throw Reject("bootstrap_ineligible");
 
         if (replay != null)
@@ -163,7 +252,7 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
                 .SingleOrDefaultAsync(row => row.Id == replay.CapabilityId, cancellationToken);
             if (replayAuthorization == null
                 || replayAuthorization.ExpiresAtUtc <= now.UtcDateTime
-                || !AuthorizationMatches(replayAuthorization, binding, enrollment, clientId, productId, lease.AuthorityEpoch)
+                || !AuthorizationMatches(replayAuthorization, binding, enrollment, clientId, productId)
                 || replayCapability == null || replayCapability.AuthorizationId != replayAuthorization.Id
                 || replayCapability.State != "ISSUED"
                 || replayCapability.ExpiresAtUtc <= now.UtcDateTime)
@@ -189,7 +278,7 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
                     cancellationToken)
                 ?? throw Reject("bootstrap_ineligible");
             if (authorization.ExpiresAtUtc <= now.UtcDateTime
-                || !AuthorizationMatches(authorization, binding, enrollment, clientId, productId, lease.AuthorityEpoch))
+                || !AuthorizationMatches(authorization, binding, enrollment, clientId, productId))
                 throw Reject("bootstrap_ineligible");
 
             if (operation == RecoverOperation)
@@ -253,6 +342,21 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
         return new(response, false, responseBytes);
     }
 
+    /// <summary>
+    /// Recognizes only PostgreSQL transaction-abort states whose complete S2S operation can
+    /// safely be retried after rollback. Unknown database failures preserve their original path.
+    /// </summary>
+    /// <param name="exception">Possible EF/Npgsql wrapper around the PostgreSQL failure.</param>
+    /// <returns>The exact allowlisted SQLSTATE, or null when the failure must propagate.</returns>
+    private static string? RetryableBootstrapSqlState(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+            if (current is PostgresException postgres
+                && postgres.SqlState is "40001" or "40P01" or "55P03")
+                return postgres.SqlState;
+        return null;
+    }
+
     /// <summary>Recognizes only persisted Distribution entitlement contracts with relational authority.</summary>
     private static bool IsModernEntitlementContractVersion(int contractVersion) => contractVersion is 3 or 4;
 
@@ -274,13 +378,24 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
         ExpiresAtUtc = binding.HandoffExpiresAtUtc!.Value
     };
 
+    /// <summary>
+    /// Compares a stored generation with its issuance lineage and Runtime credential. Its
+    /// hardware digest is retained as historical evidence and is never compared with mutable
+    /// current seat hardware; current commercial scope is checked separately before this call.
+    /// A global authority epoch bump does not invalidate matching historical epochs.
+    /// </summary>
+    /// <param name="authorization">Stored immutable bootstrap generation.</param>
+    /// <param name="binding">Current binding used only for issuance-lineage comparisons.</param>
+    /// <param name="enrollment">Current Runtime credential and frozen credential epochs.</param>
+    /// <param name="clientId">Authenticated S2S owner of this request.</param>
+    /// <param name="productId">Canonical product scope from the strict request.</param>
+    /// <returns>Whether the old generation still matches its original issuance lineage.</returns>
     private static bool AuthorizationMatches(
         DistributionLicenseBootstrapAuthorization authorization,
         DistributionInstallationBinding binding,
         RuntimeEnrollment enrollment,
         string clientId,
-        Guid productId,
-        long currentAuthorityEpoch) =>
+        Guid productId) =>
         authorization.State == "ISSUED"
         && authorization.ClientId == clientId
         && authorization.BindingId == binding.Id
@@ -293,7 +408,6 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
         && authorization.SubjectRefDigestSha256 == binding.SubjectRefDigestSha256
         && authorization.HandoffDigestSha256 == binding.HandoffDigestSha256
         && authorization.InstallationId == binding.InstallationId
-        && authorization.HardwareIdHash == binding.HardwareIdHash
         && authorization.ReleaseVersion == binding.Version
         && authorization.ApprovedBinariesDigestSha256 == Sha256(string.Join('\n',
             binding.ExecutableSha256, binding.NativeDllSha256, binding.CoreSha256))
@@ -302,7 +416,6 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
         && authorization.RuntimeEpoch == enrollment.Epoch
         && authorization.SecurityEpoch == enrollment.SecurityEpoch
         && authorization.AuthorityEpoch == enrollment.AuthorityEpoch
-        && authorization.AuthorityEpoch == currentAuthorityEpoch
         && authorization.Audience == Audience
         && authorization.Use == "license-bootstrap"
         && authorization.ExpiresAtUtc == binding.HandoffExpiresAtUtc;

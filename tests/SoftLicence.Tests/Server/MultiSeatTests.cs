@@ -9,6 +9,7 @@ using SoftLicence.SDK;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using System.Text.Json;
+using SoftLicence.Server.Services;
 
 namespace SoftLicence.Tests.Server;
 
@@ -67,10 +68,11 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         return license;
     }
 
+    /// <summary>The mono-seat contract replaces the first PC once, retaining its history but refusing its subsequent licence check.</summary>
     [Fact]
-    public async Task Activate_ShouldRejectSecondPc_WhenMaxSeatsIsOne()
+    public async Task Activate_ShouldReplaceFirstPc_WhenMaxSeatsIsOne()
     {
-        var client = _factory.CreateClient();
+        using var client = _factory.CreateClient();
         string licenseKey;
         
         using (var scope = _factory.Services.CreateScope())
@@ -79,15 +81,96 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
             licenseKey = lic.LicenseKey;
         }
 
-        // PC 1 : OK
-        await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = "C000000000000001", AppName = "MultiApp" });
+        using var first = await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = "C000000000000001", AppName = "MultiApp" });
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        DateTime firstActivatedAt;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var license = await db.Licenses.Include(row => row.Seats).Include(row => row.Type).SingleAsync(row => row.LicenseKey == licenseKey);
+            firstActivatedAt = Assert.Single(license.Seats).FirstActivatedAt;
+            Assert.Equal(0, (await SeatChangeQuota.GetStatusAsync(db, license, DateTime.UtcNow)).UsedToday);
+        }
 
-        // PC 2 : Rejeté
-        var response = await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = "C000000000000002", AppName = "MultiApp" });
+        using var response = await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = "C000000000000002", AppName = "MultiApp" });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var license = await db.Licenses.Include(row => row.Seats).Include(row => row.Type).SingleAsync(row => row.LicenseKey == licenseKey);
+            Assert.Equal(2, license.Seats.Count);
+            var oldSeat = Assert.Single(license.Seats, row => row.HardwareId == "C000000000000001");
+            Assert.False(oldSeat.IsActive);
+            Assert.NotNull(oldSeat.UnlinkedAt);
+            Assert.Equal(firstActivatedAt, oldSeat.FirstActivatedAt);
+            Assert.Equal("C000000000000002", Assert.Single(license.Seats, row => row.IsActive).HardwareId);
+            var history = await db.LicenseHistories.SingleAsync(row => row.LicenseId == license.Id && row.Action == HistoryActions.UnlinkedApi);
+            Assert.Equal(AutomaticSeatSwitch.Source, history.PerformedBy);
+            Assert.Contains("C000000000000001 -> C000000000000002", history.Details);
+            Assert.Equal(oldSeat.UnlinkedAt, history.Timestamp);
+            Assert.Equal(1, (await SeatChangeQuota.GetStatusAsync(db, license, history.Timestamp)).UsedToday);
+        }
+        using var oldCheck = await client.PostAsJsonAsync("/api/activation/check", new { LicenseKey = licenseKey, HardwareId = "C000000000000001", AppName = "MultiApp" });
+        Assert.Equal(HttpStatusCode.OK, oldCheck.StatusCode);
+        using var oldJson = JsonDocument.Parse(await oldCheck.Content.ReadAsStringAsync());
+        Assert.Equal(RemovedHardwareStatus, GetString(oldJson.RootElement, "status"));
+        Assert.Null(GetString(oldJson.RootElement, "licenseFile"));
+        using var currentCheck = await client.PostAsJsonAsync("/api/activation/check", new { LicenseKey = licenseKey, HardwareId = "C000000000000002", AppName = "MultiApp" });
+        Assert.Equal(HttpStatusCode.OK, currentCheck.StatusCode);
+        using var currentJson = JsonDocument.Parse(await currentCheck.Content.ReadAsStringAsync());
+        Assert.Equal("VALID", GetString(currentJson.RootElement, "status"));
+        Assert.False(string.IsNullOrWhiteSpace(GetString(currentJson.RootElement, "licenseFile")));
+    }
 
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        var content = await response.Content.ReadAsStringAsync();
-        Assert.True(content.Contains("maximum d'activations") || content.Contains("maximum activations"));
+    /// <summary>A real first replacement exhausts the configured quota; another PC cannot evict the winner or alter history.</summary>
+    [Fact]
+    public async Task Activate_ShouldRejectAnotherPc_WhenDailyChangeQuotaIsExhausted()
+    {
+        using var client = _factory.CreateClient();
+        string licenseKey;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var license = await CreateLicenseAsync(scope.ServiceProvider, 1);
+            licenseKey = license.LicenseKey;
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            (await db.LicenseTypes.SingleAsync(row => row.Id == license.LicenseTypeId)).MaxActivationsPerDay = 1;
+            await db.SaveChangesAsync();
+        }
+        foreach (var hardware in new[] { "C000000000000001", "C000000000000002" })
+        {
+            using var accepted = await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = hardware, AppName = "MultiApp" });
+            Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        }
+        Guid historyId;
+        DateTime historyTime;
+        string? historyDetails;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var license = await db.Licenses.Include(row => row.Type).SingleAsync(row => row.LicenseKey == licenseKey);
+            var history = await db.LicenseHistories.SingleAsync(row => row.LicenseId == license.Id && row.Action == HistoryActions.UnlinkedApi);
+            historyId = history.Id;
+            historyTime = history.Timestamp;
+            historyDetails = history.Details;
+            var quota = await SeatChangeQuota.GetStatusAsync(db, license, historyTime);
+            Assert.Equal(1, quota.UsedToday);
+            Assert.Equal(1, quota.Limit);
+            Assert.True(quota.IsExhausted);
+        }
+        using var refused = await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = "C000000000000001", AppName = "MultiApp" });
+        Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
+        Assert.Equal("MAX_DAILY_DEACTIVATIONS_REACHED", refused.Headers.GetValues("X-SoftLicence-Error-Code").Single());
+        using var finalScope = _factory.Services.CreateScope();
+        var final = finalScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var retained = await final.Licenses.Include(row => row.Seats).Include(row => row.Type).SingleAsync(row => row.LicenseKey == licenseKey);
+        Assert.Equal(2, retained.Seats.Count);
+        Assert.Equal("C000000000000002", Assert.Single(retained.Seats, row => row.IsActive).HardwareId);
+        Assert.False(Assert.Single(retained.Seats, row => row.HardwareId == "C000000000000001").IsActive);
+        var unchanged = await final.LicenseHistories.SingleAsync(row => row.LicenseId == retained.Id && row.Action == HistoryActions.UnlinkedApi);
+        Assert.Equal(historyId, unchanged.Id);
+        Assert.Equal(historyTime, unchanged.Timestamp);
+        Assert.Equal(historyDetails, unchanged.Details);
+        Assert.Equal(1, (await SeatChangeQuota.GetStatusAsync(final, retained, historyTime)).UsedToday);
     }
 
     [Fact]

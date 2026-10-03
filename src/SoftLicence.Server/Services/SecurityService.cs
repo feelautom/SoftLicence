@@ -598,7 +598,10 @@ public class SecurityService
 
     /// <summary>
     /// Stages an eligible paid-license auto-unban in the caller's activation transaction.
-    /// The caller owns SaveChanges, commit/rollback, and deferred notification delivery.
+    /// The caller owns SaveChanges, commit/rollback, and deferred notification delivery. PostgreSQL
+    /// callers must acquire the exclusive global authority lock before any product, seat, licence or
+    /// hardware advisory lock; this method then takes the canonical hardware locks and rechecks every
+    /// ban inside that same transaction.
     /// </summary>
     public async Task<PaidAutoUnbanDecision> TryAutoUnbanForPaidLicenseAsync(
         LicenseDbContext db,
@@ -663,6 +666,15 @@ public class SecurityService
         return new(true, false, notification);
     }
 
+    /// <summary>
+    /// Starts one standalone hardware-ban mutation transaction and acquires authority in the only
+    /// cycle-free order: exclusive global authority first, then canonical digest/raw hardware locks.
+    /// Non-relational providers retain their caller-managed no-lock behavior.
+    /// </summary>
+    /// <param name="db">Context that will read and mutate the ban rows.</param>
+    /// <param name="hardwareId">Raw hardware identity canonicalized before selecting lock keys.</param>
+    /// <returns>The owned relational transaction, or <see langword="null"/> for a non-relational provider.</returns>
+    /// <exception cref="InvalidOperationException">The relational context already owns an incompatible transaction state.</exception>
     private static async Task<IDbContextTransaction?> BeginHardwareBanMutationAsync(
         LicenseDbContext db,
         string hardwareId)
@@ -673,7 +685,7 @@ public class SecurityService
             db.Database.IsNpgsql() ? IsolationLevel.ReadCommitted : IsolationLevel.Serializable);
         try
         {
-            await AcquireHardwareBanMutationAsync(db, hardwareId);
+            await AcquireHardwareBanWriteAuthorityAsync(db, hardwareId);
             return transaction;
         }
         catch
@@ -682,6 +694,40 @@ public class SecurityService
             await transaction.DisposeAsync();
             throw;
         }
+    }
+
+    /// <summary>
+    /// Acquires the repository-wide commercial mutation authority before any narrower lock. The
+    /// protected-table trigger requests the same key, so taking it late while holding a hardware or
+    /// business row lock can deadlock with Runtime readers that already own the global side.
+    /// </summary>
+    /// <param name="db">Caller-owned transaction context.</param>
+    /// <exception cref="InvalidOperationException">A relational caller has no active transaction.</exception>
+    internal static async Task AcquireHardwareBanGlobalMutationAsync(LicenseDbContext db)
+    {
+        if (!db.Database.IsRelational()) return;
+        if (db.Database.CurrentTransaction == null)
+            throw new InvalidOperationException(
+                "The hardware-ban global authority lock requires the caller's active transaction.");
+        if (!db.Database.IsNpgsql()) return;
+
+        await db.Database.ExecuteSqlRawAsync(
+            "SET LOCAL lock_timeout = '5000ms'; SET LOCAL statement_timeout = '30000ms'; " +
+            "SELECT pg_catalog.pg_advisory_xact_lock(999831, 1);");
+    }
+
+    /// <summary>
+    /// Acquires the complete write authority for one hardware-ban identity: exclusive global authority,
+    /// then its digest and legacy raw advisory locks. Callers must invoke this before decisive row locks.
+    /// </summary>
+    /// <param name="db">Caller-owned transaction context.</param>
+    /// <param name="hardwareId">Raw hardware identity canonicalized before lock selection.</param>
+    internal static async Task AcquireHardwareBanWriteAuthorityAsync(
+        LicenseDbContext db,
+        string hardwareId)
+    {
+        await AcquireHardwareBanGlobalMutationAsync(db);
+        await AcquireHardwareBanMutationAsync(db, hardwareId);
     }
 
     /// <summary>

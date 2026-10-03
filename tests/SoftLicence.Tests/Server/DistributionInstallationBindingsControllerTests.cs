@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using SoftLicence.Server.Controllers;
+using SoftLicence.SDK;
 using SoftLicence.Server.Data;
 using SoftLicence.Server.Models;
 using SoftLicence.Server.Services;
@@ -403,15 +404,38 @@ public sealed class RuntimeDistributionPreflightServiceTests
     private static readonly string PayloadDigest = new('d', 64);
 
     [Fact]
-    public async Task UnknownInstallation_DerivesLegacyDigestWithoutPersistingRawEvidence()
+    public async Task UnknownInstallation_DerivesUuidDigest_AndStoresEvidenceOnlyInObservations()
     {
         var fixture = CreateFixture();
         var response = await EvaluateAsync(fixture, Request(Evidence()));
 
         Assert.Equal("server-derived", response.AuthorityMode);
-        Assert.Matches("^[0-9a-f]{64}$", response.HardwareIdHash);
+        Assert.Equal(Sha256Lower(MachineIdentity.FromUuid(TestUuid).HardwareId!), response.HardwareIdHash);
         await using var db = await fixture.Factory.CreateDbContextAsync();
         Assert.Empty(await db.HardwareFingerprints.ToListAsync());
+        var observation = Assert.Single(await db.MachineEvidenceObservations.ToListAsync());
+        Assert.Equal("PREFLIGHT", observation.LastEndpoint);
+        Assert.Equal(TestUuid, observation.SystemUuidCanonical);
+    }
+
+    [Theory]
+    [InlineData("03000200-0400-0500-0006-000700080009", "AR-04", "UUID_GENERIQUE_CONNU")]
+    [InlineData(null, "AR-01", "UUID_ABSENT")]
+    [InlineData("not-a-uuid", "AR-03", "UUID_FORMAT_INVALIDE")]
+    public async Task UnknownInstallation_RefusedUuid_IsDeviceRefusedWithSupportCode(string? uuid, string supportCode, string reason)
+    {
+        var fixture = CreateFixture();
+
+        var exception = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            EvaluateAsync(fixture, Request(new RuntimeDistributionHardwareEvidence { SystemUuid = uuid })));
+
+        Assert.Equal(StatusCodes.Status403Forbidden, exception.StatusCode);
+        Assert.Equal("device_refused", exception.ErrorCode);
+        Assert.Equal(supportCode, exception.ReasonCode);
+        await using var db = await fixture.Factory.CreateDbContextAsync();
+        var decision = Assert.Single(await db.RuntimeDistributionHardwareDecisions.ToListAsync());
+        Assert.Equal("refused", decision.Outcome);
+        Assert.Equal(reason, decision.ReasonCode);
     }
 
     [Fact]
@@ -446,6 +470,50 @@ public sealed class RuntimeDistributionPreflightServiceTests
 
         Assert.Equal("digest-revalidation", response.AuthorityMode);
         Assert.Equal(hardwareIdHash, response.HardwareIdHash);
+    }
+
+    /// <summary>Proves an accepted replay observes later licence revocation without rewriting frozen evidence.</summary>
+    [Fact]
+    public async Task AcceptedExactReplay_RechecksCurrentCommercialAuthority()
+    {
+        var fixture = CreateFixture();
+        var request = DigestRequest(Sha256Lower("0123456789ABCDEF"));
+        await EvaluateAsync(fixture, request);
+        await using (var db = await fixture.Factory.CreateDbContextAsync())
+        {
+            var license = await db.Licenses.SingleAsync(candidate => candidate.Id == LicenseId);
+            license.RevokedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync();
+        }
+
+        var exception = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            EvaluateAsync(fixture, request));
+        Assert.Equal(StatusCodes.Status403Forbidden, exception.StatusCode);
+        Assert.Equal("commercial_authority_invalid", exception.ReasonCode);
+        await using var verification = await fixture.Factory.CreateDbContextAsync();
+        var decision = await verification.RuntimeDistributionHardwareDecisions.SingleAsync();
+        Assert.Equal("accepted", decision.Outcome);
+        Assert.Equal(1, decision.AttemptCount);
+    }
+
+    /// <summary>Proves an accepted replay applies current paid auto-unban policy atomically.</summary>
+    [Fact]
+    public async Task AcceptedExactReplay_WithNewAllowlistedBan_AutoUnbansBeforeReturning()
+    {
+        var fixture = CreateFixture();
+        const string hardwareId = "0123456789ABCDEF";
+        var request = DigestRequest(Sha256Lower(hardwareId));
+        await EvaluateAsync(fixture, request);
+        await AddBanAsync(fixture, hardwareId, BannedHardwareId.Categories.OutdatedVersion);
+
+        var response = await EvaluateAsync(fixture, request);
+
+        Assert.Equal("accepted", response.Decision);
+        await using var verification = await fixture.Factory.CreateDbContextAsync();
+        Assert.False((await verification.BannedHardwareIds.SingleAsync()).IsActive);
+        var decision = await verification.RuntimeDistributionHardwareDecisions.SingleAsync();
+        Assert.Equal("accepted", decision.Outcome);
+        Assert.Equal(2, decision.AttemptCount);
     }
 
     [Theory]
@@ -604,7 +672,7 @@ public sealed class RuntimeDistributionPreflightServiceTests
     public async Task UnknownInstallation_WithBannedDerivedHardware_IsRefused()
     {
         var fixture = CreateFixture();
-        var hardwareId = ComputeHardwareId(Evidence(), "DISK-LEGACY");
+        var hardwareId = MachineIdentity.FromUuid(TestUuid).HardwareId!;
         await using (var db = await fixture.Factory.CreateDbContextAsync())
         {
             db.BannedHardwareIds.Add(new BannedHardwareId
@@ -622,51 +690,20 @@ public sealed class RuntimeDistributionPreflightServiceTests
         Assert.Equal(StatusCodes.Status403Forbidden, exception.StatusCode);
     }
 
+    /// <summary>Proves known enrollment authority returns the independently assigned seat digest.</summary>
     [Fact]
-    public async Task UnknownInstallation_WithBannedStableHardware_IsRefused()
-    {
-        var fixture = CreateFixture();
-        var hardwareId = ComputeHardwareId(Evidence(), "DISK-STABLE");
-        await using (var db = await fixture.Factory.CreateDbContextAsync())
-        {
-            db.BannedHardwareIds.Add(new BannedHardwareId
-            {
-                HardwareId = hardwareId,
-                ProductId = ProductId,
-                Reason = "test",
-                IsActive = true
-            });
-            await db.SaveChangesAsync();
-        }
-
-        var exception = await Assert.ThrowsAsync<DistributionOperationException>(() =>
-            EvaluateAsync(fixture, Request(Evidence())));
-        Assert.Equal(StatusCodes.Status403Forbidden, exception.StatusCode);
-    }
-
-    [Fact]
-    public async Task KnownInstallation_UsesEnrolledDigestWithoutHardwareEvidence()
+    public async Task KnownInstallation_UsesCurrentAssignmentSeatDigestWithoutHardwareEvidence()
     {
         var fixture = CreateFixture();
         var request = Request(null);
         var enrolledDigest = new string('a', 64);
-        await using (var db = await fixture.Factory.CreateDbContextAsync())
-        {
-            db.RuntimeEnrollments.Add(new RuntimeEnrollment
-            {
-                BindingId = Guid.NewGuid(),
-                ProductId = ProductId,
-                InstallationId = request.InstallationId!,
-                KeyThumbprint = request.KeyThumbprint!,
-                HardwareIdHash = enrolledDigest,
-                State = "ACTIVE"
-            });
-            await db.SaveChangesAsync();
-        }
+        const string currentSeatHardware = "1111222233334444";
+        await SeedKnownAuthorityAsync(fixture, request, enrolledDigest, currentSeatHardware);
 
         var response = await EvaluateAsync(fixture, request);
         Assert.Equal("known-enrollment", response.AuthorityMode);
-        Assert.Equal(enrolledDigest, response.HardwareIdHash);
+        Assert.Equal(Sha256Lower(currentSeatHardware), response.HardwareIdHash);
+        Assert.NotEqual(enrolledDigest, response.HardwareIdHash);
     }
 
     [Fact]
@@ -693,21 +730,182 @@ public sealed class RuntimeDistributionPreflightServiceTests
         Assert.Equal(StatusCodes.Status403Forbidden, exception.StatusCode);
     }
 
+    /// <summary>Proves a malformed copied HWID cannot deny or grant when current assignment policy is valid.</summary>
     [Fact]
-    public async Task KnownInstallation_WithMalformedStoredDigest_FailsClosed()
+    public async Task KnownInstallation_WithMalformedCopiedDigest_UsesCurrentAssignmentSeat()
     {
         var fixture = CreateFixture();
         var request = Request(null);
+        const string currentSeatHardware = "AAAABBBBCCCCDDDD";
+        await SeedKnownAuthorityAsync(fixture, request, "malformed", currentSeatHardware);
+
+        var response = await EvaluateAsync(fixture, request);
+        Assert.Equal(Sha256Lower(currentSeatHardware), response.HardwareIdHash);
+    }
+
+    /// <summary>Proves the paid allowlist remains reachable after independent assignment validation.</summary>
+    [Fact]
+    public async Task KnownInstallation_WithAllowlistedBan_AutoUnbansForNewAndExactReplay()
+    {
+        var fixture = CreateFixture();
+        var request = Request(null);
+        const string currentSeatHardware = "AAAABBBBCCCCDDDD";
+        await SeedKnownAuthorityAsync(fixture, request, new string('a', 64), currentSeatHardware);
+        await AddBanAsync(fixture, currentSeatHardware, BannedHardwareId.Categories.OutdatedVersion);
+
+        var first = await EvaluateAsync(fixture, request);
+        var replay = await EvaluateAsync(fixture, request);
+
+        Assert.Equal(first, replay);
+        await using var verification = await fixture.Factory.CreateDbContextAsync();
+        Assert.False((await verification.BannedHardwareIds.SingleAsync()).IsActive);
+        var decision = await verification.RuntimeDistributionHardwareDecisions.SingleAsync();
+        Assert.Equal("auto-unbanned", decision.Outcome);
+        Assert.Equal(2, decision.AttemptCount);
+    }
+
+    /// <summary>Proves a nonallowlisted ban refuses replay without changing frozen success or the ban.</summary>
+    [Fact]
+    public async Task KnownInstallation_AcceptedReplayWithNonAllowlistedBan_IsRefusedWithoutMutation()
+    {
+        var fixture = CreateFixture();
+        var request = Request(null);
+        const string currentSeatHardware = "AAAABBBBCCCCDDDD";
+        await SeedKnownAuthorityAsync(fixture, request, new string('a', 64), currentSeatHardware);
+        var accepted = await EvaluateAsync(fixture, request);
+        await AddBanAsync(fixture, currentSeatHardware, BannedHardwareId.Categories.Piracy);
+
+        var exception = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            EvaluateAsync(fixture, request));
+
+        Assert.Equal(StatusCodes.Status403Forbidden, exception.StatusCode);
+        Assert.Equal("hardware_banned", exception.ReasonCode);
+        await using var verification = await fixture.Factory.CreateDbContextAsync();
+        Assert.True((await verification.BannedHardwareIds.SingleAsync()).IsActive);
+        var decision = await verification.RuntimeDistributionHardwareDecisions.SingleAsync();
+        Assert.Equal("accepted", decision.Outcome);
+        Assert.Equal(1, decision.AttemptCount);
+        Assert.Equal(accepted.HardwareIdHash, decision.HardwareIdHash);
+    }
+
+    /// <summary>Proves a new known-enrollment request cannot mutate a nonallowlisted active ban.</summary>
+    [Fact]
+    public async Task KnownInstallation_NewRequestWithNonAllowlistedBan_IsRefusedWithoutBanMutation()
+    {
+        var fixture = CreateFixture();
+        var request = Request(null);
+        const string currentSeatHardware = "AAAABBBBCCCCDDDD";
+        await SeedKnownAuthorityAsync(fixture, request, new string('a', 64), currentSeatHardware);
+        await AddBanAsync(fixture, currentSeatHardware, BannedHardwareId.Categories.Piracy);
+
+        var exception = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            EvaluateAsync(fixture, request));
+
+        Assert.Equal(StatusCodes.Status403Forbidden, exception.StatusCode);
+        Assert.Equal("hardware_banned", exception.ReasonCode);
+        await using var verification = await fixture.Factory.CreateDbContextAsync();
+        Assert.True((await verification.BannedHardwareIds.SingleAsync()).IsActive);
+        var decision = await verification.RuntimeDistributionHardwareDecisions.SingleAsync();
+        Assert.Equal("refused", decision.Outcome);
+        Assert.Equal("hardware_banned", decision.ReasonCode);
+    }
+
+    /// <summary>Proves ban deferral never bypasses another current commercial denial.</summary>
+    [Theory]
+    [InlineData("capacity", "seat_capacity_exceeded")]
+    [InlineData("version", "version_ineligible")]
+    [InlineData("component", "component_banned")]
+    public async Task KnownInstallation_AllowlistedBanWithOtherCommercialDenial_RemainsRefused(
+        string policy,
+        string expectedReason)
+    {
+        var fixture = CreateFixture();
+        var request = Request(null);
+        const string currentSeatHardware = "AAAABBBBCCCCDDDD";
+        await SeedKnownAuthorityAsync(fixture, request, new string('a', 64), currentSeatHardware);
+        await AddBanAsync(fixture, currentSeatHardware, BannedHardwareId.Categories.OutdatedVersion);
         await using (var db = await fixture.Factory.CreateDbContextAsync())
         {
-            db.RuntimeEnrollments.Add(new RuntimeEnrollment
+            switch (policy)
             {
-                BindingId = Guid.NewGuid(),
-                ProductId = ProductId,
-                InstallationId = request.InstallationId!,
-                KeyThumbprint = request.KeyThumbprint!,
-                HardwareIdHash = "malformed",
-                State = "ACTIVE"
+                case "capacity":
+                    db.LicenseSeats.Add(new LicenseSeat
+                    {
+                        LicenseId = LicenseId, HardwareId = "1111222233334444", IsActive = true
+                    });
+                    break;
+                case "version":
+                    (await db.Licenses.SingleAsync(candidate => candidate.Id == LicenseId)).AllowedVersions = "2.*";
+                    break;
+                case "component":
+                    db.BannedComponents.Add(new BannedComponent
+                    {
+                        ProductId = ProductId, ComponentType = "FP_CORE", ComponentHash = new string('a', 64),
+                        Reason = "test component policy", IsActive = true
+                    });
+                    break;
+                default:
+                    throw new InvalidOperationException("Unknown policy fixture: " + policy);
+            }
+            await db.SaveChangesAsync();
+        }
+
+        var exception = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            EvaluateAsync(fixture, request));
+
+        Assert.Equal(StatusCodes.Status403Forbidden, exception.StatusCode);
+        Assert.Equal(expectedReason, exception.ReasonCode);
+        await using var verification = await fixture.Factory.CreateDbContextAsync();
+        Assert.True((await verification.BannedHardwareIds.SingleAsync()).IsActive);
+    }
+
+    /// <summary>Proves missing and quarantined assignment graphs fail closed with distinct bounded reasons.</summary>
+    [Theory]
+    [InlineData(false, "assignment_missing")]
+    [InlineData(true, "assignment_quarantined")]
+    public async Task KnownInstallation_WithoutActiveAssignment_IsCommerciallyRefused(
+        bool quarantined,
+        string expectedReason)
+    {
+        var fixture = CreateFixture();
+        var request = Request(null);
+        await SeedKnownAuthorityAsync(fixture, request, new string('a', 64), "1111222233334444");
+        await using (var db = await fixture.Factory.CreateDbContextAsync())
+        {
+            var assignment = await db.EnrollmentLicenseAssignments.SingleAsync();
+            db.EnrollmentLicenseAssignments.Remove(assignment);
+            if (quarantined)
+                db.EnrollmentLicenseAssignmentQuarantines.Add(new EnrollmentLicenseAssignmentQuarantine
+                {
+                    EnrollmentId = assignment.EnrollmentId,
+                    Reason = "test_ambiguous_authority",
+                    ObservedAtUtc = DateTime.UtcNow
+                });
+            await db.SaveChangesAsync();
+        }
+
+        var exception = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            EvaluateAsync(fixture, request));
+        Assert.Equal(StatusCodes.Status403Forbidden, exception.StatusCode);
+        Assert.Equal(expectedReason, exception.ReasonCode);
+    }
+
+    /// <summary>Proves duplicated ACTIVE assignment authority remains infrastructure-unavailable.</summary>
+    [Fact]
+    public async Task KnownInstallation_WithDuplicateActiveAssignments_IsUnavailable()
+    {
+        var fixture = CreateFixture();
+        var request = Request(null);
+        await SeedKnownAuthorityAsync(fixture, request, new string('a', 64), "1111222233334444");
+        await using (var db = await fixture.Factory.CreateDbContextAsync())
+        {
+            var enrollment = await db.RuntimeEnrollments.SingleAsync();
+            var seat = new LicenseSeat { LicenseId = LicenseId, HardwareId = "AAAABBBBCCCCDDDD", IsActive = true };
+            db.LicenseSeats.Add(seat);
+            db.EnrollmentLicenseAssignments.Add(new EnrollmentLicenseAssignment
+            {
+                EnrollmentId = enrollment.Id, LicenseId = LicenseId, LicenseSeatId = seat.Id,
+                State = "ACTIVE", ActivatedAtUtc = DateTime.UtcNow, Revision = 2
             });
             await db.SaveChangesAsync();
         }
@@ -715,6 +913,47 @@ public sealed class RuntimeDistributionPreflightServiceTests
         var exception = await Assert.ThrowsAsync<DistributionOperationException>(() =>
             EvaluateAsync(fixture, request));
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, exception.StatusCode);
+        Assert.Equal("assignment_duplicate_active", exception.ReasonCode);
+    }
+
+    /// <summary>Seeds complete cryptographic evidence plus one independent active commercial assignment.</summary>
+    /// <param name="fixture">Isolated in-memory provider shared with the service.</param>
+    /// <param name="request">Known-installation request whose installation and key identify the enrollment.</param>
+    /// <param name="copiedHardwareDigest">Historical enrollment value that must not grant authority.</param>
+    /// <param name="currentSeatHardware">Current assignment seat value that determines the returned digest.</param>
+    /// <returns>A task that completes after all A and B fixture rows are durable.</returns>
+    private static async Task SeedKnownAuthorityAsync(
+        Fixture fixture,
+        RuntimeDistributionPreflightRequest request,
+        string copiedHardwareDigest,
+        string currentSeatHardware)
+    {
+        await using var db = await fixture.Factory.CreateDbContextAsync();
+        var enrollment = new RuntimeEnrollment
+        {
+            BindingId = Guid.NewGuid(), ProductId = ProductId, LicenseId = LicenseId,
+            InstallationId = request.InstallationId!, KeyThumbprint = request.KeyThumbprint!,
+            HardwareIdHash = copiedHardwareDigest, ReleaseVersion = "1.0.0",
+            ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion, Algorithm = "PS256",
+            PublicKeySpkiCiphertext = "ciphertext", PublicKeySpkiKeyId = "key",
+            PublicKeySpkiSha256 = new string('1', 64), State = "ACTIVE", Epoch = 1, SecurityEpoch = 1
+        };
+        var seat = new LicenseSeat { LicenseId = LicenseId, HardwareId = currentSeatHardware, IsActive = true };
+        enrollment.LicenseSeatId = seat.Id;
+        db.RuntimeEnrollments.Add(enrollment);
+        db.LicenseSeats.Add(seat);
+        db.EnrollmentLicenseAssignments.Add(new EnrollmentLicenseAssignment
+        {
+            EnrollmentId = enrollment.Id, LicenseId = LicenseId, LicenseSeatId = seat.Id,
+            State = "ACTIVE", ActivatedAtUtc = DateTime.UtcNow, Revision = 1
+        });
+        foreach (var (key, hashCharacter) in new[] { ("FP_CORE", 'a'), ("FP_DLL", 'b'), ("FP_EXE", 'c') })
+            db.ApprovedBinaries.Add(new ApprovedBinary
+            {
+                ProductId = ProductId, Version = enrollment.ReleaseVersion, Key = key,
+                Hash = new string(hashCharacter, 64), Source = ApprovedBinaryService.ReleaseSource
+            });
+        await db.SaveChangesAsync();
     }
 
     /// <summary>Builds one canonical authority request with optional fresh-install observations.</summary>
@@ -742,25 +981,15 @@ public sealed class RuntimeDistributionPreflightServiceTests
         HardwareIdHash = hardwareIdHash
     };
 
-    /// <summary>Returns deterministic observations shared by derivation and ban fixtures.</summary>
+    /// <summary>System UUID of the deterministic test machine.</summary>
+    private const string TestUuid = "4C4C4544-0051-3610-8052-B7C04F4A4E32";
+
+    /// <summary>Returns deterministic UUID observations shared by derivation and ban fixtures.</summary>
     private static RuntimeDistributionHardwareEvidence Evidence() => new()
     {
-        CpuId = "CPU",
-        MotherboardId = "BOARD",
-        BiosId = "BIOS",
-        LegacyDiskId = "DISK-LEGACY",
-        StableDiskId = "DISK-STABLE",
-        MachineName = "HOST"
+        SystemUuid = TestUuid,
+        MachineEvidence = System.Text.Json.JsonDocument.Parse("{\"BiosSerial\":{\"Status\":\"Present\"}}").RootElement.Clone()
     };
-
-    /// <summary>Mirrors the pinned SDK identity solely to arrange a known banned fixture.</summary>
-    private static string ComputeHardwareId(RuntimeDistributionHardwareEvidence evidence, string disk)
-    {
-        var bytes = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(
-            string.Concat(evidence.CpuId, evidence.MotherboardId, evidence.BiosId, disk,
-                evidence.MachineName)));
-        return Convert.ToHexString(bytes)[..16];
-    }
 
     /// <summary>Creates the exact lowercase digest that the Website is permitted to persist.</summary>
     private static string Sha256Lower(string value) => Convert.ToHexString(
@@ -800,7 +1029,7 @@ public sealed class RuntimeDistributionPreflightServiceTests
             db.Licenses.Add(new License
             {
                 Id = LicenseId, ProductId = ProductId, LicenseTypeId = typeId,
-                LicenseKey = "TEST-ONLY", IsActive = true
+                LicenseKey = "TEST-ONLY", IsActive = true, MaxSeats = 1, AllowedVersions = "*"
             });
             db.DistributionEntitlements.Add(new DistributionEntitlement
             {

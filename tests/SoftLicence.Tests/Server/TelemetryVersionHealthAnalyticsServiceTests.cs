@@ -24,10 +24,16 @@ public sealed class TelemetryVersionHealthAnalyticsServiceTests
             .ReturnsAsync(() => new LicenseDbContext(_dbOptions));
     }
 
+    /// <summary>
+    /// Verifies version and daily error aggregates from five events on one past UTC day.
+    /// A shared midday anchor keeps every offset inside that day and the rolling seven-day
+    /// query window, including when the test runs across midnight.
+    /// </summary>
     [Fact]
     public async Task GetVersionHealthForProductKeyAsync_AggregatesErrorsByVersion()
     {
         var productId = Guid.NewGuid();
+        var anchorUtc = DateTime.UtcNow.Date.AddDays(-1).AddHours(12);
 
         await using (var db = new LicenseDbContext(_dbOptions))
         {
@@ -40,11 +46,11 @@ public sealed class TelemetryVersionHealthAnalyticsServiceTests
                 ApiSecret = "secret"
             });
 
-            AddEvent(db, productId, "HW-A", "2.1.857", "Startup_AppStarted", DateTime.UtcNow.AddHours(-5));
-            AddEvent(db, productId, "HW-B", "2.1.857", "Mcp_ToolCall", DateTime.UtcNow.AddHours(-4));
-            AddDiagnostic(db, productId, "HW-A", "2.1.900", DateTime.UtcNow.AddHours(-3));
-            AddError(db, productId, "HW-A", "2.1.900", "UnhandledException", "FatalUnhandled", DateTime.UtcNow.AddHours(-2));
-            AddError(db, productId, "HW-B", "2.1.900", "CertPinningFailed", "CertificatePinning", DateTime.UtcNow.AddHours(-1));
+            AddEvent(db, productId, "HW-A", "2.1.857", "Startup_AppStarted", anchorUtc.AddHours(-5));
+            AddEvent(db, productId, "HW-B", "2.1.857", "Mcp_ToolCall", anchorUtc.AddHours(-4));
+            AddDiagnostic(db, productId, "HW-A", "2.1.900", anchorUtc.AddHours(-3));
+            AddError(db, productId, "HW-A", "2.1.900", "UnhandledException", "FatalUnhandled", anchorUtc.AddHours(-2));
+            AddError(db, productId, "HW-B", "2.1.900", "CertPinningFailed", "CertificatePinning", anchorUtc.AddHours(-1));
 
             await db.SaveChangesAsync();
         }
@@ -60,7 +66,9 @@ public sealed class TelemetryVersionHealthAnalyticsServiceTests
         Assert.Equal(2, summary.UniqueDevices);
         Assert.Contains(summary.TopErrorTypes, e => e.Name == "FatalUnhandled" && e.Count == 1);
         Assert.Contains(summary.TopErrorEvents, e => e.Name == "CertPinningFailed" && e.Count == 1);
-        Assert.Single(summary.DailyErrors);
+        var dailyErrors = Assert.Single(summary.DailyErrors);
+        Assert.Equal(anchorUtc.Date, dailyErrors.DateUtc);
+        Assert.Equal(2, dailyErrors.Count);
 
         var regressionVersion = Assert.Single(summary.Versions, v => v.Version == "2.1.900");
         Assert.Equal(3, regressionVersion.Records);

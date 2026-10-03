@@ -268,44 +268,47 @@ public class DocumentationService
     // ── Section 4: Hardware Fingerprinting ────────────────────────────
 
     private static string GetHardware() => """
-        ## 4. Hardware Fingerprinting
+        ## 4. Hardware Identity (SDK 2.0.0, system UUID)
 
-        ### Components (5 WMI properties)
+        ### Source
 
-        | # | WMI Class | Property | Example |
-        |---|-----------|----------|---------|
-        | 1 | `Win32_Processor` | `ProcessorId` | `BFEBFBFF000906EA` |
-        | 2 | `Win32_BaseBoard` | `SerialNumber` | `PF1RXXXX` |
-        | 3 | `Win32_BIOS` | `SerialNumber` | `XXXXX-XXXXX` |
-        | 4 | `Win32_DiskDrive` | `SerialNumber` | `WD-WMXXXXXXX` |
-        | 5 | (Environment) | `MachineName` | `DESKTOP-ABC123` |
+        The licence identifier is derived from one value only: the SMBIOS system UUID
+        (`Win32_ComputerSystemProduct.UUID`). Processor, board, BIOS, disk and machine name are no
+        longer part of the identifier; they are collected as investigation evidence only.
 
         ### Algorithm
 
         ```
-        raw = GetCpuId() + GetMotherboardId() + GetBiosId() + GetDiskId() + MachineName
-        hash = SHA256(UTF8.GetBytes(raw))
-        hardwareId = BitConverter.ToString(hash).Replace("-", "")[..16].ToUpper()
+        uuid = trim(raw), one pair of braces removed, ASCII hex uppercased, form 8-4-4-4-12
+        hash = SHA256(UTF8.GetBytes("SOFTLICENCE-MACHINE-UUID|" + uuid))
+        hardwareId = first 16 characters of the uppercase hexadecimal hash
         ```
 
-        Result: **16-character uppercase hexadecimal string** (e.g., `A1B2C3D4E5F67890`)
+        Result: **16-character uppercase hexadecimal string**. The SDK (`HardwareInfo.GetHardwareId()`)
+        and the server (`MachineIdentity.FromUuid`) apply exactly the same rule.
 
-        ### Fallback Behavior
+        ### Refusals
 
-        | Scenario | Result |
-        |----------|--------|
-        | Non-Windows platform | Each component returns `"NON-WINDOWS"` |
-        | WMI query fails | Component returns `"UNKNOWN"` |
-        | Component not present | Component returns `"UNKNOWN"` |
+        No identifier is ever invented. The customer sees "Device refused (code AR-xx)"; the reason is
+        logged server-side only.
 
-        ### When Hardware ID Changes
+        | Support code | Reason | Meaning |
+        |--------------|--------|---------|
+        | AR-01 | `UUID_ABSENT` | No system UUID |
+        | AR-02 | `UUID_ILLISIBLE` | UUID could not be read |
+        | AR-03 | `UUID_FORMAT_INVALIDE` | Value is not a UUID |
+        | AR-04 | `UUID_GENERIQUE_CONNU` | Known placeholder shared by unrelated machines |
+        | AR-05 | `UUID_IDENTIFIANT_INCOHERENT` | Identifier sent is not derived from the UUID sent (server) |
 
-        The ID changes when any of these components is replaced:
-        - CPU replacement → different `ProcessorId`
-        - Motherboard replacement → different `SerialNumber`
-        - BIOS update (rare) → potentially different `SerialNumber`
-        - Primary disk replacement → different `SerialNumber`
-        - Machine rename → different `MachineName`
+        Activation, check and trial answer `DEVICE_REFUSED`; the WebSetup preflight answers
+        `device_refused` with the support code as `reasonCode`.
+
+        ### When the Identifier Changes
+
+        The identifier changes only when the system UUID changes (mainboard replacement, or a virtual
+        machine whose UUID is regenerated). A client holding a licence file for its previous identifier
+        activates with `PreviousHardwareId`: the server detaches that seat and attaches the new identifier
+        in one transaction, consuming one daily seat change.
 
         Users can self-reset their license via the reset-request/reset-confirm API flow,
         or an admin can unlink via the admin UI.

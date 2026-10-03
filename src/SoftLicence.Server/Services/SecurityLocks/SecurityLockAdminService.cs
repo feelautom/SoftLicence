@@ -20,17 +20,23 @@ public static class SecurityLockAdminOutcomes
     public const string Forbidden = "forbidden";
     /// <summary>A banned lock can never be released.</summary>
     public const string LockBannedIrreversible = "lock_banned_irreversible";
+    /// <summary>The reported hardware has no provable assignment or alias at server receipt time.</summary>
+    public const string HardwareUnlinked = "hardware_unlinked";
 }
 
 /// <summary>Result of one admin decision.</summary>
 /// <param name="Outcome">Closed outcome code.</param>
 /// <param name="Row">Updated row when <paramref name="Outcome"/> is ok.</param>
-public sealed record SecurityLockAdminDecisionResult(string Outcome, SecurityLockReport? Row);
+/// <param name="DiagnosticCode">Bounded internal cause; never includes reported hardware or credentials.</param>
+public sealed record SecurityLockAdminDecisionResult(
+    string Outcome, SecurityLockReport? Row, string? DiagnosticCode = null);
 
 /// <summary>
 /// Admin decisions on security locks (TKT-001177), shared by the admin API and the "Verrous" page so both apply the
-/// exact same rules. Security contract: BAN adds a permanent hardware ban immediately unless a live ban already
-/// exists (historical bans are matched case-insensitively and expired ones are ignored); RELEASE is delivered as a
+/// exact same rules. Security contract: BAN requires authoritative hardware linkage at the server's first receipt
+/// time from the immutable report snapshot and adds a permanent ban unless a live ban already exists
+/// (historical bans are matched case-insensitively);
+/// RELEASE is delivered as a
 /// signed verdict at the next report; a banned lock can never be released, because levels 4 and 5 are irreversible.
 /// </summary>
 public sealed class SecurityLockAdminService
@@ -72,21 +78,47 @@ public sealed class SecurityLockAdminService
             return new(SecurityLockAdminOutcomes.ReasonTooLong, null);
 
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
-        var row = await db.SecurityLockReports.SingleOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
-        if (row == null) return new(SecurityLockAdminOutcomes.NotFound, null);
-        if (scopedProductId.HasValue && scopedProductId.Value != row.ProductId)
+        // This immutable pre-read selects the hardware advisory key without taking the report row lock.
+        var preflight = await db.SecurityLockReports.AsNoTracking()
+            .SingleOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
+        if (preflight == null) return new(SecurityLockAdminOutcomes.NotFound, null);
+        if (scopedProductId.HasValue && scopedProductId.Value != preflight.ProductId)
             return new(SecurityLockAdminOutcomes.Forbidden, null);
-        if (string.Equals(decision, SecurityLockAdminDecisions.Release, StringComparison.Ordinal)
-            && string.Equals(row.State, SecurityLockReportStates.Banned, StringComparison.Ordinal))
-            return new(SecurityLockAdminOutcomes.LockBannedIrreversible, null);
-
-        var now = DateTime.UtcNow;
-        row.AdminDecision = decision;
-        row.AdminDecisionAtUtc = now;
-        row.AdminDecisionBy = admin;
-        row.AdminDecisionReason = reason;
+        if (decision == SecurityLockAdminDecisions.Ban && !IsCanonicalHardwareId(preflight.HardwareId))
+            return Unlinked("report_hardware_noncanonical");
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         if (string.Equals(decision, SecurityLockAdminDecisions.Ban, StringComparison.Ordinal))
         {
+            // BAN can insert or reactivate BannedHardwareIds. Global authority must precede the
+            // hardware and report locks; otherwise Runtime can hold global/shared while this path
+            // holds hardware/report and both wait on the other side.
+            await SecurityService.AcquireHardwareBanWriteAuthorityAsync(db, preflight.HardwareId);
+        }
+        // RELEASE never waits for the hardware advisory while holding the report row.
+        var row = await db.SecurityLockReports.FromSqlInterpolated($"""
+            SELECT * FROM public."SecurityLockReports" WHERE "Id" = {id} FOR UPDATE
+            """).SingleOrDefaultAsync(cancellationToken);
+        if (row is null) return new(SecurityLockAdminOutcomes.NotFound, null);
+        if (scopedProductId.HasValue && scopedProductId.Value != row.ProductId)
+            return new(SecurityLockAdminOutcomes.Forbidden, null);
+        if (decision == SecurityLockAdminDecisions.Release
+            && row.State == SecurityLockReportStates.Banned)
+            return new(SecurityLockAdminOutcomes.LockBannedIrreversible, null);
+        if (decision == SecurityLockAdminDecisions.Ban)
+        {
+            if (!string.Equals(row.HardwareId, preflight.HardwareId, StringComparison.Ordinal)
+                || !IsCanonicalHardwareId(row.HardwareId))
+                return Unlinked("report_hardware_changed");
+            if (row.LinkStatus is not (SecurityLockReportLinkStatuses.VerifiedSeat
+                or SecurityLockReportLinkStatuses.VerifiedAlias))
+                return Unlinked(row.LinkStatus == SecurityLockReportLinkStatuses.UnknownLegacy
+                    ? "report_link_legacy_unknown" : row.LinkReasonCode ?? "report_hardware_unlinked");
+
+            var now = DateTime.UtcNow;
+            row.AdminDecision = decision;
+            row.AdminDecisionAtUtc = now;
+            row.AdminDecisionBy = admin;
+            row.AdminDecisionReason = reason;
             row.State = SecurityLockReportStates.Banned;
             // row.HardwareId is the validated canonical upper-case value; historical ban rows may use any case.
             var alreadyBanned = await db.BannedHardwareIds.AnyAsync(ban =>
@@ -102,10 +134,28 @@ public sealed class SecurityLockAdminService
                         : BannedHardwareId.Categories.Manual,
                     now, cancellationToken);
             }
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return new(SecurityLockAdminOutcomes.Ok, row);
         }
+        var releaseTime = DateTime.UtcNow;
+        row.AdminDecision = decision;
+        row.AdminDecisionAtUtc = releaseTime;
+        row.AdminDecisionBy = admin;
+        row.AdminDecisionReason = reason;
         await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         return new(SecurityLockAdminOutcomes.Ok, row);
     }
+
+    /// <summary>Returns a stable public refusal with a bounded internal diagnostic and no hardware value.</summary>
+    private static SecurityLockAdminDecisionResult Unlinked(string diagnosticCode) =>
+        new(SecurityLockAdminOutcomes.HardwareUnlinked, null, diagnosticCode);
+
+    /// <summary>Requires the report's exact upper-case ASCII hardware alphabet without normalization.</summary>
+    private static bool IsCanonicalHardwareId(string? hardwareId) =>
+        hardwareId is { Length: >= 1 and <= 128 }
+        && hardwareId.All(character => character is >= 'A' and <= 'Z' or >= '0' and <= '9' or '_' or '.' or '-');
 
     /// <summary>
     /// Sets the server mode of one level-4/5 cause for a product. Security contract: only catalogued irreversible

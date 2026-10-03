@@ -109,6 +109,8 @@ public partial class AdminController
     /// Records an admin decision. Security contract: BAN adds an active hardware ban immediately; RELEASE is
     /// delivered as a signed verdict at the next report (within five minutes); a lock already banned by ENFORCE
     /// can never be released, because levels 4 and 5 enforced are irreversible by decision of the owner.
+    /// BAN without an immutable first-receipt hardware link returns 422 hardware_unlinked; the bounded
+    /// internal reason is logged without the hardware identifier or proof material.
     /// </summary>
     /// <param name="id">Report row identifier.</param>
     /// <param name="request">Decision payload.</param>
@@ -134,6 +136,10 @@ public partial class AdminController
                 return Forbid();
             case SecurityLockAdminOutcomes.LockBannedIrreversible:
                 return Conflict(new { error = result.Outcome });
+            case SecurityLockAdminOutcomes.HardwareUnlinked:
+                _logger.LogWarning("Security-lock admin BAN refused for report {ReportId}: {DiagnosticCode}",
+                    id, result.DiagnosticCode ?? "report_hardware_unlinked");
+                return UnprocessableEntity(new { error = SecurityLockAdminOutcomes.HardwareUnlinked });
             default:
                 return BadRequest(new { error = result.Outcome });
         }

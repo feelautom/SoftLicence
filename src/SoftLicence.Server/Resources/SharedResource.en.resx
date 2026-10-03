@@ -485,6 +485,7 @@
   <data name="Api_PrivateKeyInvalid" xml:space="preserve"><value>Invalid private key: {0}</value></data>
   <data name="Api_TransactionUsed" xml:space="preserve"><value>This transaction has already been used for a renewal.</value></data>
   <data name="Api_Extended" xml:space="preserve"><value>License extended by {0} days.</value></data>
+  <data name="Api_DeviceRefused" xml:space="preserve"><value>Device refused (code {0}).</value></data>
   <data name="Api_AppUnknown" xml:space="preserve"><value>Application '{0}' unknown.</value></data>
   <data name="Api_VersionNotAllowed" xml:space="preserve"><value>This license is not valid for version {0} of the software.</value></data>
   <data name="Api_ProductNotFound" xml:space="preserve"><value>Product not found.</value></data>

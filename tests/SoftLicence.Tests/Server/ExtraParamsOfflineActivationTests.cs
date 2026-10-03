@@ -261,10 +261,17 @@ public sealed class ExtraParamsOfflineActivationTests : IClassFixture<WebApplica
         Assert.Equal("offline_activation_denied", await ReadErrorAsync(response));
     }
 
+    /// <summary>Offline activation cannot exceed full multi-seat capacity or replace either existing hardware row.</summary>
     [Fact]
     public async Task OfflineActivation_PreservesSeatAndHardwareControls()
     {
-        var fixture = await SeedLicenseAsync(maxSeats: 1, existingSeatHardwareId: "HW-BOUND");
+        var fixture = await SeedLicenseAsync(maxSeats: 2, existingSeatHardwareId: "HW-BOUND");
+        using (var seedScope = _factory.Services.CreateScope())
+        {
+            var seed = seedScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            seed.LicenseSeats.Add(new LicenseSeat { LicenseId = fixture.LicenseId, HardwareId = "HW-SECOND", IsActive = true });
+            await seed.SaveChangesAsync();
+        }
         var response = await PostOfflineAsync(
             CreateAdminClient(fixture.ProductSecret),
             fixture,
@@ -275,8 +282,10 @@ public sealed class ExtraParamsOfflineActivationTests : IClassFixture<WebApplica
         using var scope = _factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
         var activeSeats = await db.LicenseSeats.Where(s => s.LicenseId == fixture.LicenseId && s.IsActive).ToListAsync();
-        Assert.Single(activeSeats);
-        Assert.Equal("HW-BOUND", activeSeats[0].HardwareId);
+        Assert.Equal(2, activeSeats.Count);
+        Assert.Contains(activeSeats, seat => seat.HardwareId == "HW-BOUND");
+        Assert.Contains(activeSeats, seat => seat.HardwareId == "HW-SECOND");
+        Assert.DoesNotContain(activeSeats, seat => seat.HardwareId == "HW-WRONG");
     }
 
     [Fact]

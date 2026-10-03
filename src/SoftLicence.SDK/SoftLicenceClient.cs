@@ -1,16 +1,22 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace SoftLicence.SDK
 {
     public class SoftLicenceClient : ISoftLicenceClient
     {
-        private const string SdkVersion = "1.1.14";
+        private const string SdkVersion = "2.0.0";
         private const string ErrorCodeHeader = "X-SoftLicence-Error-Code";
         private const string CorrelationIdHeader = "X-SoftLicence-Correlation-Id";
-        private const string LegacyHardwareIdAlgorithm = "legacy-wmi-first-disk";
-        private const string StableHardwareIdAlgorithm = "v2-wmi-disk-index-0";
+        private const string DeviceRefusedServerCode = "DEVICE_REFUSED";
+
+        /// <summary>Serializes request payloads; evidence statuses are sent as their names, not numbers.</summary>
+        private static readonly JsonSerializerOptions PayloadJsonOptions = new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() }
+        };
 
         private readonly string _serverUrl;
         private readonly string? _publicKeyXml;
@@ -26,22 +32,39 @@ namespace SoftLicence.SDK
         /// <inheritdoc />
         public Task<ActivationResult> ActivateAsync(string licenseKey, string appName, string? appId = null, string? appVersion = null, string? customerEmail = null, string? customerName = null)
         {
-            var migrationInfo = HardwareInfo.GetHardwareIdMigrationInfo();
-            return ActivateCoreAsync(licenseKey, appName, appId, appVersion, customerEmail, customerName, migrationInfo.LegacyHardwareId, migrationInfo, TryGetComponentFingerprints());
+            var identity = MachineIdentity.Resolve();
+            if (!identity.IsAccepted)
+                return Task.FromResult(ActivationResult.Fail(ActivationErrorCode.DeviceRefused, DeviceRefusedMessage(identity), DeviceRefusedServerCode, null));
+            return ActivateCoreAsync(licenseKey, appName, appId, appVersion, customerEmail, customerName, identity.HardwareId!, identity.CanonicalUuid!);
         }
 
+        // LEGACY-EXPIRY(TKT-001430, 2026-12-31): caller-held identifier overload, used while a seat still carries its pre-UUID
+        // identifier (TKT-001277 lot 5). Remove by 31/12/2026 (see TKT-001430).
         /// <inheritdoc />
         public Task<ActivationResult> ActivateAsync(string licenseKey, string appName, string? appId, string? appVersion, string? customerEmail, string? customerName, string authoritativeHardwareId)
         {
             ValidateAuthoritativeHardwareId(authoritativeHardwareId);
-            return ActivateCoreAsync(licenseKey, appName, appId, appVersion, customerEmail, customerName, authoritativeHardwareId, null, TryGetComponentFingerprints());
+            return ActivateCoreAsync(licenseKey, appName, appId, appVersion, customerEmail, customerName, authoritativeHardwareId, SystemUuidDerivingTo(authoritativeHardwareId));
+        }
+
+        // LEGACY-EXPIRY(TKT-001430, 2026-12-31): pre-UUID to UUID identifier switch. Remove by 31/12/2026 (see TKT-001430).
+        /// <inheritdoc />
+        public Task<ActivationResult> ActivateReplacingHardwareIdAsync(string licenseKey, string appName, string previousHardwareId, string? appId = null, string? appVersion = null, string? customerEmail = null, string? customerName = null)
+        {
+            ValidateAuthoritativeHardwareId(previousHardwareId);
+            var identity = MachineIdentity.Resolve();
+            if (!identity.IsAccepted)
+                return Task.FromResult(ActivationResult.Fail(ActivationErrorCode.DeviceRefused, DeviceRefusedMessage(identity), DeviceRefusedServerCode, null));
+            return ActivateCoreAsync(licenseKey, appName, appId, appVersion, customerEmail, customerName, identity.HardwareId!, identity.CanonicalUuid!, previousHardwareId);
         }
 
         /// <summary>
-        /// Sends the activation payload with one caller-selected primary identity and bounded migration observations.
+        /// Sends the activation payload with the hardware identifier, the system UUID it must derive from, and the
+        /// machine evidence. The server applies the UUID rule and refuses with "device refused" and a support code.
+        /// When <paramref name="previousHardwareId"/> is set, the server replaces that seat with the current identifier.
+        /// A <see langword="null"/> <paramref name="systemUuid"/> sends neither the UUID nor the evidence (pre-UUID identifier).
         /// </summary>
-        /// <remarks>The migration observations never authorize an alias. Only the signed Runtime migration endpoint can create that server-side relationship.</remarks>
-        private async Task<ActivationResult> ActivateCoreAsync(string licenseKey, string appName, string? appId, string? appVersion, string? customerEmail, string? customerName, string hardwareId, HardwareIdMigrationInfo? migrationInfo, Dictionary<string, string>? fingerprints)
+        private async Task<ActivationResult> ActivateCoreAsync(string licenseKey, string appName, string? appId, string? appVersion, string? customerEmail, string? customerName, string hardwareId, string? systemUuid, string? previousHardwareId = null)
         {
             try
             {
@@ -54,15 +77,13 @@ namespace SoftLicence.SDK
                     ["AppVersion"] = appVersion,
                     ["CustomerEmail"] = customerEmail,
                     ["CustomerName"] = customerName,
-                    ["ComponentFingerprints"] = fingerprints,
-                    ["HardwareIdV2"] = migrationInfo?.StableHardwareId,
-                    ["HardwareIdV2Differs"] = migrationInfo?.HasStableHardwareId == true ? migrationInfo.HasDistinctHardwareIds : null,
-                    ["HardwareIdAlgorithm"] = migrationInfo == null ? null : LegacyHardwareIdAlgorithm,
-                    ["HardwareIdV2Algorithm"] = migrationInfo?.HasStableHardwareId == true ? StableHardwareIdAlgorithm : null,
+                    ["SystemUuid"] = systemUuid,
+                    ["MachineEvidence"] = systemUuid == null ? null : TryCollectEvidence(),
+                    ["PreviousHardwareId"] = previousHardwareId,
                     ["SdkVersion"] = SdkVersion
                 }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
 
-                var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+                var content = new StringContent(JsonSerializer.Serialize(payload, PayloadJsonOptions), Encoding.UTF8, "application/json");
                 var response = await _httpClient.PostAsync($"{_serverUrl}/api/activation", content);
 
                 if (response.IsSuccessStatusCode)
@@ -93,28 +114,25 @@ namespace SoftLicence.SDK
         {
             try
             {
-                var migrationInfo = HardwareInfo.GetHardwareIdMigrationInfo();
-                Dictionary<string, string>? fingerprints = null;
-                try { fingerprints = HardwareInfo.GetComponentFingerprints(); } catch { }
+                var identity = MachineIdentity.Resolve();
+                if (!identity.IsAccepted)
+                    return ActivationResult.Fail(ActivationErrorCode.DeviceRefused, DeviceRefusedMessage(identity), DeviceRefusedServerCode, null);
 
                 var payload = new Dictionary<string, object?>
                 {
-                    ["HardwareId"] = migrationInfo.LegacyHardwareId,
+                    ["HardwareId"] = identity.HardwareId,
                     ["AppName"] = appName,
                     ["AppId"] = appId,
                     ["TypeSlug"] = typeSlug,
                     ["AppVersion"] = appVersion,
                     ["CustomerEmail"] = customerEmail,
                     ["CustomerName"] = customerName,
-                    ["ComponentFingerprints"] = fingerprints,
-                    ["HardwareIdV2"] = migrationInfo.StableHardwareId,
-                    ["HardwareIdV2Differs"] = migrationInfo.HasStableHardwareId ? migrationInfo.HasDistinctHardwareIds : null,
-                    ["HardwareIdAlgorithm"] = LegacyHardwareIdAlgorithm,
-                    ["HardwareIdV2Algorithm"] = migrationInfo.HasStableHardwareId ? StableHardwareIdAlgorithm : null,
+                    ["SystemUuid"] = identity.CanonicalUuid,
+                    ["MachineEvidence"] = TryCollectEvidence(),
                     ["SdkVersion"] = SdkVersion
                 }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
 
-                var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+                var content = new StringContent(JsonSerializer.Serialize(payload, PayloadJsonOptions), Encoding.UTF8, "application/json");
                 var response = await _httpClient.PostAsync($"{_serverUrl}/api/activation/trial", content);
 
                 if (response.IsSuccessStatusCode)
@@ -144,21 +162,27 @@ namespace SoftLicence.SDK
         /// <inheritdoc />
         public Task<LicenseStatusResult> CheckStatusAsync(string licenseKey, string appName, string? appId = null, string? appVersion = null)
         {
-            var migrationInfo = HardwareInfo.GetHardwareIdMigrationInfo();
-            return CheckStatusCoreAsync(licenseKey, appName, appId, appVersion, migrationInfo.LegacyHardwareId, migrationInfo, TryGetComponentFingerprints());
+            var identity = MachineIdentity.Resolve();
+            if (!identity.IsAccepted)
+                return Task.FromResult(LicenseStatusResult.Fail(StatusErrorCode.DeviceRefused, DeviceRefusedMessage(identity), DeviceRefusedServerCode, null));
+            return CheckStatusCoreAsync(licenseKey, appName, appId, appVersion, identity.HardwareId!, identity.CanonicalUuid!);
         }
 
+        // LEGACY-EXPIRY(TKT-001430, 2026-12-31): caller-held identifier overload, used while a seat still carries its pre-UUID
+        // identifier (TKT-001277 lot 5). Remove by 31/12/2026 (see TKT-001430).
         /// <inheritdoc />
         public Task<LicenseStatusResult> CheckStatusAsync(string licenseKey, string appName, string? appId, string? appVersion, string authoritativeHardwareId)
         {
             ValidateAuthoritativeHardwareId(authoritativeHardwareId);
-            return CheckStatusCoreAsync(licenseKey, appName, appId, appVersion, authoritativeHardwareId, null, TryGetComponentFingerprints());
+            return CheckStatusCoreAsync(licenseKey, appName, appId, appVersion, authoritativeHardwareId, SystemUuidDerivingTo(authoritativeHardwareId));
         }
 
         /// <summary>
-        /// Sends a status request with one caller-selected primary identity and non-authoritative migration observations.
+        /// Sends a status request with the hardware identifier, the system UUID it must derive from, and the machine
+        /// evidence. A refused UUID comes back as the logical status <c>DEVICE_REFUSED</c> with a support code.
+        /// A <see langword="null"/> <paramref name="systemUuid"/> sends neither the UUID nor the evidence (pre-UUID identifier).
         /// </summary>
-        private async Task<LicenseStatusResult> CheckStatusCoreAsync(string licenseKey, string appName, string? appId, string? appVersion, string hardwareId, HardwareIdMigrationInfo? migrationInfo, Dictionary<string, string>? fingerprints)
+        private async Task<LicenseStatusResult> CheckStatusCoreAsync(string licenseKey, string appName, string? appId, string? appVersion, string hardwareId, string? systemUuid)
         {
             try
             {
@@ -169,15 +193,12 @@ namespace SoftLicence.SDK
                     ["AppName"] = appName,
                     ["AppId"] = appId,
                     ["AppVersion"] = appVersion,
-                    ["ComponentFingerprints"] = fingerprints,
-                    ["HardwareIdV2"] = migrationInfo?.StableHardwareId,
-                    ["HardwareIdV2Differs"] = migrationInfo?.HasStableHardwareId == true ? migrationInfo.HasDistinctHardwareIds : null,
-                    ["HardwareIdAlgorithm"] = migrationInfo == null ? null : LegacyHardwareIdAlgorithm,
-                    ["HardwareIdV2Algorithm"] = migrationInfo?.HasStableHardwareId == true ? StableHardwareIdAlgorithm : null,
+                    ["SystemUuid"] = systemUuid,
+                    ["MachineEvidence"] = systemUuid == null ? null : TryCollectEvidence(),
                     ["SdkVersion"] = SdkVersion
                 }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
 
-                var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+                var content = new StringContent(JsonSerializer.Serialize(payload, PayloadJsonOptions), Encoding.UTF8, "application/json");
                 var response = await _httpClient.PostAsync($"{_serverUrl}/api/activation/check", content);
 
                 if (response.StatusCode == HttpStatusCode.NotFound)
@@ -262,7 +283,15 @@ namespace SoftLicence.SDK
 
         public (bool IsValid, LicenseModel? License, string ErrorMessage) ValidateForCurrentMachine(string licenseString)
         {
-            var hwId = HardwareInfo.GetHardwareId();
+            string hwId;
+            try
+            {
+                hwId = HardwareInfo.GetHardwareId();
+            }
+            catch (MachineIdentityRefusedException ex)
+            {
+                return (false, null, ex.Message);
+            }
             return ValidateLocal(licenseString, hwId);
         }
 
@@ -273,7 +302,15 @@ namespace SoftLicence.SDK
 
         public async Task<DeactivationResult> DeactivateAsync(string licenseKey, string appName, string? appId = null)
         {
-            var hwId = HardwareInfo.GetHardwareId();
+            string hwId;
+            try
+            {
+                hwId = HardwareInfo.GetHardwareId();
+            }
+            catch (MachineIdentityRefusedException ex)
+            {
+                return DeactivationResult.Fail(ex.Message, DeviceRefusedServerCode, null);
+            }
             return await DeactivateAsync(licenseKey, appName, hwId, "settings_button", appId);
         }
 
@@ -369,15 +406,36 @@ namespace SoftLicence.SDK
                 throw new ArgumentException("The authoritative hardware ID must contain exactly 16 uppercase ASCII hexadecimal characters.", nameof(hardwareId));
         }
 
+        /// <summary>Builds the customer message for a machine without an acceptable UUID; it only carries the support code.</summary>
+        /// <param name="identity">A refused identity.</param>
+        /// <returns>For example "Device refused (code AR-01).".</returns>
+        private static string DeviceRefusedMessage(MachineIdentityResult identity) =>
+            "Device refused (code " + identity.SupportCode + ").";
+
+        // LEGACY-EXPIRY(TKT-001430, 2026-12-31): a caller-held identifier that is not derived from this machine's UUID is the
+        // pre-UUID seat identifier and is sent without UUID. Remove by 31/12/2026 (see TKT-001430).
         /// <summary>
-        /// Collects optional legacy component observations for compatibility calls without making collection failures fatal.
+        /// Returns the canonical system UUID to send with a caller-held identifier: only when that identifier is the one
+        /// derived from this machine's accepted UUID. Otherwise it is a pre-UUID seat identifier and nothing is sent, so the
+        /// server keeps its pre-UUID rule instead of refusing the identifier as not derived (AR-05).
         /// </summary>
-        /// <returns>The available component fingerprints, or <see langword="null"/> when WMI collection is unavailable.</returns>
-        private static Dictionary<string, string>? TryGetComponentFingerprints()
+        /// <param name="hardwareId">Canonical identifier held by the caller.</param>
+        /// <returns>The canonical UUID, or <see langword="null"/>.</returns>
+        private static string? SystemUuidDerivingTo(string hardwareId)
+        {
+            var identity = MachineIdentity.Resolve();
+            return identity.IsAccepted && string.Equals(identity.HardwareId, hardwareId, StringComparison.Ordinal)
+                ? identity.CanonicalUuid
+                : null;
+        }
+
+        /// <summary>Collects the machine evidence sent for investigation; a collection failure never blocks the call.</summary>
+        /// <returns>The evidence, or <see langword="null"/> when it could not be collected.</returns>
+        private static MachineEvidence? TryCollectEvidence()
         {
             try
             {
-                return HardwareInfo.GetComponentFingerprints();
+                return MachineIdentity.CollectEvidence();
             }
             catch
             {
@@ -444,9 +502,10 @@ namespace SoftLicence.SDK
             "INVALID_LICENSE_KEY" => ActivationErrorCode.InvalidKey,
             "LICENSE_DISABLED" or "PARTNER_INVALID" or "BANNED" or "COMPONENT_BANNED" => ActivationErrorCode.LicenseDisabled,
             "LICENSE_EXPIRED" => ActivationErrorCode.LicenseExpired,
-            "SEAT_LIMIT" or "MAX_DAILY_ACTIVATIONS_REACHED" => ActivationErrorCode.MaxActivationsReached,
+            "SEAT_LIMIT" or "MAX_DAILY_ACTIVATIONS_REACHED" or "MAX_DAILY_DEACTIVATIONS_REACHED" => ActivationErrorCode.MaxActivationsReached,
             "VERSION_NOT_ALLOWED" or "UPDATE_REQUIRED" => ActivationErrorCode.VersionNotAllowed,
             "APP_UNKNOWN" => ActivationErrorCode.AppNotFound,
+            DeviceRefusedServerCode => ActivationErrorCode.DeviceRefused,
             _ => ActivationErrorCode.ServerError
         };
 

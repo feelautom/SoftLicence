@@ -29,7 +29,10 @@ internal static class RuntimeAuthorityTransitionResolver
     /// <param name="binding">The candidate binding; it must be invalidated as <c>seat_released</c>.</param>
     /// <param name="enrollments">Every enrollment persisted for that binding; exactly one is required.</param>
     /// <param name="now">The database clock used to refuse terminal instants in the future.</param>
-    /// <returns><see langword="true"/> only when the complete binding/enrollment graph matches.</returns>
+    /// <returns>
+    /// <see langword="true"/> only when the non-hardware Runtime identity graph and exact terminal
+    /// timeline match; retained enrollment HWID compatibility data is not an identity predicate.
+    /// </returns>
     internal static bool IsCoherentSeatRelease(
         DistributionInstallationBinding binding, IReadOnlyList<RuntimeEnrollment> enrollments, DateTime now)
     {
@@ -73,7 +76,6 @@ internal static class RuntimeAuthorityTransitionResolver
             && enrollment.LicenseId == binding.LicenseId
             && enrollment.LicenseSeatId == binding.LicenseSeatId
             && enrollment.InstallationId == binding.InstallationId
-            && enrollment.HardwareIdHash == binding.HardwareIdHash
             && enrollment.SubjectRefDigestSha256 == binding.SubjectRefDigestSha256
             && enrollment.HandoffDigestSha256 == binding.HandoffDigestSha256
             && enrollment.ReleaseVersion == binding.Version
@@ -227,13 +229,15 @@ internal static class RuntimeBindingEligibilityEvaluator
     /// <param name="now">Database-aligned decision time.</param>
     /// <param name="allowIneligibleSourceLicense">Preserves the bounded transfer-source exception.</param>
     /// <param name="cancellationToken">Cancels database reads.</param>
+    /// <param name="migrationCrypto">Authenticates server migration receipts when historical and current digests differ.</param>
     /// <returns>A version-only outcome only when every non-version predicate remains eligible.</returns>
     internal static async Task<RuntimeBindingEligibility> EvaluateAsync(
         LicenseDbContext db,
         DistributionInstallationBinding binding,
         DateTimeOffset now,
         bool allowIneligibleSourceLicense,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IRuntimeEnrollmentCryptoService? migrationCrypto = null)
     {
         var license = await db.Licenses.AsNoTracking().Include(candidate => candidate.Product)
             .SingleOrDefaultAsync(candidate => candidate.Id == binding.LicenseId, cancellationToken);
@@ -244,11 +248,18 @@ internal static class RuntimeBindingEligibilityEvaluator
             || (!allowIneligibleSourceLicense && (!license.IsActive || license.RevokedAt != null
                 || (license.ExpirationDate.HasValue && license.ExpirationDate.Value <= now.UtcDateTime)
                 || license.MaxSeats < 1))
-            || !seat.IsActive || seat.LicenseId != license.Id
-            || HardwareAuthorityAliasResolver.Sha256(seat.HardwareId) != binding.HardwareIdHash)
+            || !seat.IsActive || seat.LicenseId != license.Id)
         {
             return RuntimeBindingEligibility.AuthorityIneligible;
         }
+
+        var seatDigest = HardwareAuthorityAliasResolver.Sha256(seat.HardwareId);
+        // A receipt establishes identity continuity only. Every current policy below still applies,
+        // including the version-only refusal that prevents obsolete Runtime execution.
+        if (seatDigest != binding.HardwareIdHash
+            && !await RuntimeEnrollmentService.HasAcceptedBindingHardwareAsync(
+                db, binding, seatDigest, migrationCrypto, cancellationToken))
+            return RuntimeBindingEligibility.AuthorityIneligible;
 
         var activeSeatCount = await db.LicenseSeats.AsNoTracking()
             .CountAsync(candidate => candidate.LicenseId == license.Id && candidate.IsActive, cancellationToken);

@@ -81,6 +81,8 @@ namespace SoftLicence.Server.Data
         public DbSet<BannedHardwareId> BannedHardwareIds { get; set; }
         public DbSet<ResellerPartner> ResellerPartners { get; set; }
         public DbSet<HardwareFingerprint> HardwareFingerprints { get; set; }
+        /// <summary>Gets distinct machine-identity evidence reports from UUID-aware clients (TKT-001277 lot 2a).</summary>
+        public DbSet<MachineEvidenceObservation> MachineEvidenceObservations { get; set; }
         public DbSet<BannedComponent> BannedComponents { get; set; }
         public DbSet<CanaryAlert> CanaryAlerts { get; set; }
         public DbSet<SecurityIncident> SecurityIncidents { get; set; }
@@ -101,10 +103,21 @@ namespace SoftLicence.Server.Data
         public DbSet<DistributionLicenseBootstrapCapability> DistributionLicenseBootstrapCapabilities { get; set; }
         public DbSet<DistributionLicenseBootstrapRequest> DistributionLicenseBootstrapRequests { get; set; }
         public DbSet<RuntimeEnrollment> RuntimeEnrollments { get; set; }
+        /// <summary>Current and historical commercial assignments, independent of hardware identity.</summary>
+        public DbSet<EnrollmentLicenseAssignment> EnrollmentLicenseAssignments { get; set; }
+        /// <summary>Legacy enrollment graphs that could not be mapped to one proven seat.</summary>
+        public DbSet<EnrollmentLicenseAssignmentQuarantine> EnrollmentLicenseAssignmentQuarantines { get; set; }
+        /// <summary>Single-row open/closed switch of the commercial-assignment controls (TKT-001277 lot 2d).</summary>
+        public DbSet<AssignmentEnforcementSetting> AssignmentEnforcementSettings { get; set; }
+        /// <summary>Places where an assignment control would have blocked while the switch was open.</summary>
+        public DbSet<AssignmentEnforcementEvent> AssignmentEnforcementEvents { get; set; }
         public DbSet<RuntimeEnrollmentWebSetupTransition> RuntimeEnrollmentWebSetupTransitions { get; set; }
         public DbSet<RuntimeEnrollmentWebSetupTransitionRequest> RuntimeEnrollmentWebSetupTransitionRequests { get; set; }
         public DbSet<RuntimeEnrollmentRequest> RuntimeEnrollmentRequests { get; set; }
         public DbSet<RuntimeEnrollmentProofNonce> RuntimeEnrollmentProofNonces { get; set; }
+
+        /// <summary>Gets durable migration acceptance facts, separate from replay-nonce retention.</summary>
+        public DbSet<HardwareAuthorityMigrationReceipt> HardwareAuthorityMigrationReceipts { get; set; }
         public DbSet<RuntimeCanaryProofNonce> RuntimeCanaryProofNonces { get; set; }
         public DbSet<SecurityLockReport> SecurityLockReports { get; set; }
         public DbSet<SecurityLockReportNonce> SecurityLockReportNonces { get; set; }
@@ -638,6 +651,14 @@ namespace SoftLicence.Server.Data
             modelBuilder.Entity<HardwareFingerprint>()
                 .HasIndex(f => f.ClusterId);
 
+            // TKT-001277 lot 2a: one row per product, canonical hardware identifier and evidence digest.
+            // All three keys are server-validated canonical ASCII values compared ordinally.
+            modelBuilder.Entity<MachineEvidenceObservation>()
+                .HasIndex(o => new { o.ProductId, o.HardwareId, o.EvidenceSha256 })
+                .IsUnique();
+            modelBuilder.Entity<MachineEvidenceObservation>()
+                .HasIndex(o => o.SystemUuidCanonical);
+
             // Banned components
             modelBuilder.Entity<BannedComponent>()
                 .HasIndex(b => new { b.ComponentType, b.ComponentHash, b.ProductId })
@@ -1028,6 +1049,73 @@ namespace SoftLicence.Server.Data
                 .HasForeignKey(enrollment => enrollment.BindingId)
                 .OnDelete(DeleteBehavior.Restrict);
 
+            modelBuilder.Entity<EnrollmentLicenseAssignment>(assignment =>
+            {
+                assignment.HasOne<RuntimeEnrollment>().WithMany()
+                    .HasForeignKey(item => item.EnrollmentId).OnDelete(DeleteBehavior.Restrict);
+                assignment.HasOne<License>().WithMany()
+                    .HasForeignKey(item => item.LicenseId).OnDelete(DeleteBehavior.Restrict);
+                assignment.HasOne<LicenseSeat>().WithMany()
+                    .HasForeignKey(item => new { item.LicenseSeatId, item.LicenseId })
+                    .HasPrincipalKey(seat => new { seat.Id, seat.LicenseId })
+                    .OnDelete(DeleteBehavior.Restrict);
+                assignment.HasIndex(item => new { item.EnrollmentId, item.Revision }).IsUnique();
+                assignment.HasIndex(item => item.EnrollmentId)
+                    .HasFilter("\"State\" = 'ACTIVE'").IsUnique();
+                assignment.HasIndex(item => item.LicenseSeatId)
+                    .HasFilter("\"State\" = 'ACTIVE'").IsUnique();
+                assignment.HasIndex(item => new { item.LicenseSeatId, item.LicenseId });
+                assignment.HasIndex(item => new { item.LicenseId, item.State });
+                assignment.ToTable(table =>
+                {
+                    table.HasCheckConstraint("CK_EnrollmentLicenseAssignments_Revision", "\"Revision\" >= 1");
+                    table.HasCheckConstraint("CK_EnrollmentLicenseAssignments_StateAndTimes",
+                        "(\"State\" = 'ACTIVE' AND \"EndedAtUtc\" IS NULL AND \"EndReason\" IS NULL) OR (\"State\" = 'ENDED' AND \"EndedAtUtc\" IS NOT NULL AND \"EndReason\" IS NOT NULL AND \"EndedAtUtc\" >= \"ActivatedAtUtc\")");
+                    table.HasCheckConstraint("CK_EnrollmentLicenseAssignments_EndReason",
+                        "\"EndReason\" IS NULL OR length(\"EndReason\") BETWEEN 1 AND 64");
+                });
+            });
+
+            modelBuilder.Entity<AssignmentEnforcementSetting>(setting =>
+            {
+                setting.Property(item => item.Id).ValueGeneratedNever();
+                setting.ToTable(table =>
+                {
+                    table.HasCheckConstraint("CK_AssignmentEnforcementSettings_SingleRow", "\"Id\" = 1");
+                    table.HasCheckConstraint("CK_AssignmentEnforcementSettings_Mode", "\"Mode\" IN ('open', 'closed')");
+                });
+                setting.HasData(new AssignmentEnforcementSetting
+                {
+                    Id = 1,
+                    Mode = AssignmentEnforcementSetting.Open,
+                    UpdatedAtUtc = new DateTime(2026, 9, 29, 0, 0, 0, DateTimeKind.Utc),
+                    UpdatedBy = "migration"
+                });
+            });
+
+            modelBuilder.Entity<AssignmentEnforcementEvent>(enforcementEvent =>
+            {
+                enforcementEvent.HasIndex(item => item.ObservedAtUtc);
+                enforcementEvent.HasIndex(item => item.AlertedAtUtc);
+                enforcementEvent.HasIndex(item => item.EnrollmentId);
+                enforcementEvent.ToTable(table =>
+                {
+                    table.HasCheckConstraint("CK_AssignmentEnforcementEvents_Source", "\"Source\" IN ('database', 'application')");
+                    table.HasCheckConstraint("CK_AssignmentEnforcementEvents_CaseNumber", "\"CaseNumber\" IS NULL OR \"CaseNumber\" BETWEEN 1 AND 8");
+                });
+            });
+
+            modelBuilder.Entity<EnrollmentLicenseAssignmentQuarantine>(quarantine =>
+            {
+                quarantine.HasOne<RuntimeEnrollment>().WithOne()
+                    .HasForeignKey<EnrollmentLicenseAssignmentQuarantine>(item => item.EnrollmentId)
+                    .OnDelete(DeleteBehavior.Restrict);
+                quarantine.HasIndex(item => item.Reason);
+                quarantine.ToTable(table => table.HasCheckConstraint(
+                    "CK_EnrollmentLicenseAssignmentQuarantines_Reason",
+                    "\"Reason\" IN ('binding_missing', 'binding_mismatch', 'seat_missing', 'seat_mismatch', 'license_missing', 'license_mismatch', 'live_state_mismatch', 'live_seat_ambiguous', 'terminal_time_invalid')"));
+            });
+
             modelBuilder.Entity<RuntimeEnrollment>()
                 .Property(enrollment => enrollment.PublicKeySpkiKeyPurpose)
                 .HasDefaultValue("encryption");
@@ -1139,6 +1227,25 @@ namespace SoftLicence.Server.Data
             modelBuilder.Entity<RuntimeEnrollmentProofNonce>()
                 .HasIndex(nonce => nonce.ExpiresAtUtc);
 
+            // Durable accepted lineage is append-only and cannot be cascade-deleted with credentials or keys.
+            modelBuilder.Entity<HardwareAuthorityMigrationReceipt>(entity =>
+            {
+                entity.HasKey(receipt => receipt.Id);
+                entity.HasIndex(receipt => new { receipt.EnrollmentId, receipt.RequestId }).IsUnique();
+                entity.HasIndex(receipt => new { receipt.EnrollmentId, receipt.Jti }).IsUnique();
+                entity.HasOne<RuntimeEnrollment>().WithMany().HasForeignKey(receipt => receipt.EnrollmentId)
+                    .OnDelete(DeleteBehavior.Restrict);
+                entity.HasOne<HardwareAuthorityMigrationReceipt>().WithMany()
+                    .HasForeignKey(receipt => receipt.ParentReceiptId).OnDelete(DeleteBehavior.Restrict);
+                entity.HasOne<RuntimeEnrollmentKeyRegistry>().WithMany()
+                    .HasForeignKey(receipt => new { receipt.KeyPurpose, receipt.KeyId })
+                    .HasPrincipalKey(key => new { key.Purpose, key.KeyId }).OnDelete(DeleteBehavior.Restrict);
+                entity.ToTable(table => table.HasCheckConstraint("CK_MigrationReceipt_Envelope",
+                    "\"KeyPurpose\" = 'encryption' AND \"EnrollmentEpoch\" >= 1 AND length(\"Ciphertext\") > 0"));
+            });
+            modelBuilder.Entity<HardwareAuthorityAlias>().HasOne<HardwareAuthorityMigrationReceipt>().WithMany()
+                .HasForeignKey(alias => alias.MigrationReceiptId).OnDelete(DeleteBehavior.Restrict);
+
             modelBuilder.Entity<RuntimeCanaryProofNonce>()
                 .HasKey(nonce => new { nonce.EnrollmentId, nonce.Jti });
 
@@ -1180,8 +1287,23 @@ namespace SoftLicence.Server.Data
                     .WithMany()
                     .HasForeignKey(report => report.EnrollmentId)
                     .OnDelete(DeleteBehavior.Cascade);
+                entity.HasOne<EnrollmentLicenseAssignment>().WithMany()
+                    .HasForeignKey(report => report.LinkAssignmentId).OnDelete(DeleteBehavior.Restrict);
+                entity.HasOne<LicenseSeat>().WithMany()
+                    .HasForeignKey(report => report.LinkLicenseSeatId).OnDelete(DeleteBehavior.Restrict);
+                entity.HasOne<HardwareAuthorityAlias>().WithMany()
+                    .HasForeignKey(report => report.LinkAliasId).OnDelete(DeleteBehavior.Restrict);
                 entity.ToTable(table =>
                 {
+                    // PostgreSQL repeats this shape rule in the hand-written trigger migration.
+                    table.HasCheckConstraint("CK_SecurityLockReports_LinkProof", """
+                        ("LinkStatus" = 'UNKNOWN_LEGACY' AND "LinkVerifiedAtUtc" IS NULL AND "LinkAssignmentId" IS NULL AND "LinkLicenseSeatId" IS NULL AND "LinkAliasId" IS NULL AND "LinkReasonCode" = 'legacy_unknown')
+                        OR ("LinkStatus" = 'UNLINKED' AND "LinkVerifiedAtUtc" IS NOT NULL AND "LinkAssignmentId" IS NULL AND "LinkLicenseSeatId" IS NULL AND "LinkAliasId" IS NULL AND "LinkReasonCode" IN ('enrollment_mismatch','assignment_missing','assignment_ambiguous','assignment_relation_missing','hardware_unlinked','alias_ambiguous'))
+                        OR ("LinkStatus" = 'VERIFIED_SEAT' AND "LinkVerifiedAtUtc" IS NOT NULL AND "LinkAssignmentId" IS NOT NULL AND "LinkLicenseSeatId" IS NOT NULL AND "LinkAliasId" IS NULL AND "LinkReasonCode" IS NULL)
+                        OR ("LinkStatus" = 'VERIFIED_ALIAS' AND "LinkVerifiedAtUtc" IS NOT NULL AND "LinkAssignmentId" IS NOT NULL AND "LinkLicenseSeatId" IS NOT NULL AND "LinkAliasId" IS NOT NULL AND "LinkReasonCode" IS NULL)
+                        """);
+                    table.HasCheckConstraint("CK_SecurityLockReports_BanDecision",
+                        "\"State\" <> 'BANNED' OR \"AdminDecision\" IS DISTINCT FROM 'RELEASE'");
                     table.HasCheckConstraint("CK_SecurityLockReports_Level", "\"Level\" BETWEEN 0 AND 5");
                     table.HasCheckConstraint("CK_SecurityLockReports_State",
                         "\"State\" IN ('OPEN', 'RELEASED', 'BANNED')");
@@ -1197,6 +1319,7 @@ namespace SoftLicence.Server.Data
                             : "length(\"LockId\") = 32 AND length(\"EvidenceDigestSha256\") = 64");
                 });
             });
+
 
             modelBuilder.Entity<SecurityLockReportNonce>(entity =>
             {

@@ -32,8 +32,9 @@ public sealed class PrivateValidationTestResetException : Exception
     public string ErrorCode { get; }
     public int StatusCode { get; }
 
-    public PrivateValidationTestResetException(string errorCode, int statusCode)
-        : base(errorCode)
+    /// <summary>Preserves the bounded API failure and its internal cause without exposing receipt material.</summary>
+    public PrivateValidationTestResetException(string errorCode, int statusCode, Exception? innerException = null)
+        : base(errorCode, innerException)
     {
         ErrorCode = errorCode;
         StatusCode = statusCode;
@@ -57,20 +58,26 @@ public sealed partial class PrivateValidationTestResetService : IPrivateValidati
     private readonly IRuntimeEnrollmentAuthorityService _authority;
     private readonly TimeProvider _timeProvider;
     private readonly HashSet<Guid> _allowedLicenseIds;
+    /// <summary>Authenticates migration continuity without relaxing reset allowlists or current rights.</summary>
+    private readonly IRuntimeEnrollmentCryptoService? _migrationCrypto;
 
+    /// <summary>Uses the host's receipt authenticator for both preview and execution; missing crypto fails closed.</summary>
     public PrivateValidationTestResetService(
         IDbContextFactory<LicenseDbContext> dbFactory,
         IRuntimeEnrollmentAuthorityService authority,
         TimeProvider timeProvider,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        IRuntimeEnrollmentCryptoService? migrationCrypto = null)
     {
         _dbFactory = dbFactory;
         _authority = authority;
         _timeProvider = timeProvider;
+        _migrationCrypto = migrationCrypto;
         _allowedLicenseIds = ParseAllowedLicenseIds(
             configuration["PrivateValidationTestReset:AllowedLicenseIds"]);
     }
 
+    /// <summary>Previews only the explicitly allowlisted test identity, preserving current eligibility and cryptographic failures.</summary>
     public async Task<PrivateValidationTestResetResult> ValidateAsync(
         PrivateValidationTestResetRequest request,
         CancellationToken cancellationToken = default)
@@ -80,6 +87,7 @@ public sealed partial class PrivateValidationTestResetService : IPrivateValidati
         return await InspectAsync(db, validated, executed: false, cancellationToken);
     }
 
+    /// <summary>Locks and revalidates the allowlisted identity before atomically invalidating its test generation.</summary>
     public async Task<PrivateValidationTestResetResult> ExecuteAsync(
         PrivateValidationTestResetRequest request,
         CancellationToken cancellationToken = default)
@@ -117,11 +125,11 @@ public sealed partial class PrivateValidationTestResetService : IPrivateValidati
         try
         {
             await RuntimeEnrollmentService.ValidateEnrollmentAuthorityAsync(
-                db, enrollment, now, cancellationToken);
+                db, enrollment, now, cancellationToken, _migrationCrypto);
         }
-        catch (RuntimeEnrollmentException)
+        catch (RuntimeEnrollmentException exception)
         {
-            throw Reject("authority_ineligible", StatusCodes.Status409Conflict);
+            throw MapAuthorityFailure(exception);
         }
 
         binding.State = "invalidated";
@@ -156,6 +164,7 @@ public sealed partial class PrivateValidationTestResetService : IPrivateValidati
             Executed: true);
     }
 
+    /// <summary>Performs the same scoped eligibility proof as execution without changing the supplied generation.</summary>
     private async Task<PrivateValidationTestResetResult> InspectAsync(
         LicenseDbContext db,
         ValidatedRequest request,
@@ -176,16 +185,26 @@ public sealed partial class PrivateValidationTestResetService : IPrivateValidati
             try
             {
                 await RuntimeEnrollmentService.ValidateEnrollmentAuthorityAsync(
-                    db, enrollment, _timeProvider.GetUtcNow(), cancellationToken);
+                    db, enrollment, _timeProvider.GetUtcNow(), cancellationToken, _migrationCrypto);
             }
-            catch (RuntimeEnrollmentException)
+            catch (RuntimeEnrollmentException exception)
             {
-                throw Reject("authority_ineligible", StatusCodes.Status409Conflict);
+                throw MapAuthorityFailure(exception);
             }
         }
         return result;
     }
 
+    /// <summary>
+    /// Classifies the exact private-validation binding and Runtime pair without using the retained
+    /// Runtime HWID compatibility value as identity authority.
+    /// </summary>
+    /// <param name="enrollment">Server-owned Runtime credential selected by canonical identifier.</param>
+    /// <param name="binding">Server-owned installation binding linked to the enrollment.</param>
+    /// <param name="request">Strict validated reset scope.</param>
+    /// <param name="executed">Whether the caller requested mutation rather than read-only validation.</param>
+    /// <returns>The current or already-applied reset state when all non-hardware identity fields match.</returns>
+    /// <exception cref="PrivateValidationTestResetException">The identity scope or lifecycle state is inconsistent.</exception>
     private static PrivateValidationTestResetResult Inspect(
         RuntimeEnrollment enrollment,
         DistributionInstallationBinding binding,
@@ -203,7 +222,6 @@ public sealed partial class PrivateValidationTestResetService : IPrivateValidati
             || enrollment.SecurityEpoch != request.SecurityEpoch
             || enrollment.LicenseId != binding.LicenseId
             || enrollment.LicenseSeatId != binding.LicenseSeatId
-            || enrollment.HardwareIdHash != binding.HardwareIdHash
             || enrollment.HandoffDigestSha256 != binding.HandoffDigestSha256)
         {
             throw Reject("identity_mismatch", StatusCodes.Status409Conflict);
@@ -233,6 +251,12 @@ public sealed partial class PrivateValidationTestResetService : IPrivateValidati
             alreadyApplied,
             executed);
     }
+
+    /// <summary>Never converts an unavailable receipt authenticator into a commercial refusal.</summary>
+    private static PrivateValidationTestResetException MapAuthorityFailure(RuntimeEnrollmentException exception) =>
+        exception.ErrorCode == "authority_unavailable"
+            ? new("authority_unavailable", StatusCodes.Status503ServiceUnavailable, exception)
+            : new("authority_ineligible", StatusCodes.Status409Conflict, exception);
 
     private void EnsureAllowedLicense(Guid licenseId)
     {

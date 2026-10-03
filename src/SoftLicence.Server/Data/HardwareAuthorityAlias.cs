@@ -41,6 +41,9 @@ public sealed class HardwareAuthorityAlias
     /// <summary>Gets or sets the canonical request identifier of the signed migration operation.</summary>
     public Guid? MigrationRequestId { get; set; }
 
+    /// <summary>Gets or sets the latest durable signed-migration receipt; historical aliases remain unproved when null.</summary>
+    public Guid? MigrationReceiptId { get; set; }
+
     /// <summary>Gets or sets the lowercase SHA-256 digest of the exact canonical legacy hardware identifier.</summary>
     [MaxLength(64)]
     public string LegacyHardwareIdSha256 { get; set; } = string.Empty;

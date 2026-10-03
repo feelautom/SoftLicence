@@ -609,7 +609,11 @@
                             <hr class="my-4 border-secondary" />
 
                             <h6>Version Minimum Autorisee</h6>
-                            <p class="small text-muted">Les HWID envoyant de la telemetrie avec une version inferieure seront automatiquement bannis.</p>
+                            @if (SoftLicence.Server.Services.LegacyMinimumVersionPolicy.AppliesTo(selectedProduct?.Name ?? ""))
+                            {
+                                <p class="small text-muted">Activation et contrôle de licence : une version absente, invalide ou inférieure au minimum impose une mise à jour, même sans télémétrie et avec une licence payante. Ce refus ne révoque pas la licence.</p>
+                            }
+                            <p class="small text-muted">Le bannissement par télémétrie est distinct : il dépend des événements reçus, des délais de grâce et des exemptions applicables.</p>
                             <div class="input-group">
                                 <input class="form-control form-control-sm font-monospace" @bind="minVersionInput" @bind:event="oninput" placeholder="ex: 2.1.602" />
                                 <button class="btn btn-sm btn-outline-warning" @onclick="SaveMinimumVersion"
@@ -626,7 +630,7 @@
                             @if (!string.IsNullOrEmpty(selectedProduct?.MinimumAllowedVersion))
                             {
                                 <div class="mt-2">
-                                    <span class="badge bg-warning text-dark">Actif : &lt; @selectedProduct.MinimumAllowedVersion = auto-ban</span>
+                                    <span class="badge bg-warning text-dark">Minimum configuré : @selectedProduct.MinimumAllowedVersion</span>
                                 </div>
                             }
                         </div>

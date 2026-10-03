@@ -29,7 +29,7 @@ public interface IPortalDeactivationService
 }
 
 /// <summary>
-/// Implements portal deactivation with atomic seat and Runtime invalidation under the global mutation lock.
+/// Implements portal deactivation with atomic seat and commercial-assignment termination.
 /// Exact request replays return their original terminal without affecting a later activation.
 /// </summary>
 public sealed class PortalDeactivationService : IPortalDeactivationService
@@ -83,16 +83,12 @@ public sealed class PortalDeactivationService : IPortalDeactivationService
     {
         var parsed = Validate(clientId, exactPayloadDigest, request);
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
-        await using var transaction = db.Database.IsRelational()
-            ? await db.Database.BeginTransactionAsync(cancellationToken)
-            : null;
+        await using var transaction = await SeatRuntimeReleaseAuthority.BeginAsync(db, cancellationToken);
 
         if (string.Equals(db.Database.ProviderName, "Npgsql.EntityFrameworkCore.PostgreSQL", StringComparison.Ordinal))
         {
-            // Acquire the existing authority lock before reading seats. Protected-table triggers
-            // take this same lock during SaveChanges; this order avoids a row/global inversion.
-            // This serializes portal quota decisions, without claiming legacy pre-read safety.
-            await db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(999831, 1)", cancellationToken);
+            // Global and item2 authority are already held. The exact request lock now serializes
+            // receipt classification without creating a row/barrier inversion.
             await db.Database.ExecuteSqlInterpolatedAsync(
                 $"SELECT pg_advisory_xact_lock(hashtextextended({request.RequestId!}, 798))",
                 cancellationToken);
@@ -121,7 +117,10 @@ public sealed class PortalDeactivationService : IPortalDeactivationService
 
         var activeSeat = license.Seats.SingleOrDefault(candidate =>
             candidate.IsActive && string.Equals(candidate.HardwareId, request.HardwareId, StringComparison.Ordinal));
-        var now = _timeProvider.GetUtcNow().UtcDateTime;
+        var now = db.Database.IsRelational()
+            ? (await RuntimeEnrollmentService.DatabaseNowAsync(db, cancellationToken)).UtcDateTime
+            : _timeProvider.GetUtcNow().UtcDateTime;
+        SeatRuntimeReleaseAuthority.SeatReleaseScope? releaseScope = null;
         string outcome;
         if (activeSeat == null)
         {
@@ -136,6 +135,9 @@ public sealed class PortalDeactivationService : IPortalDeactivationService
         }
         else
         {
+            releaseScope = await SeatRuntimeReleaseAuthority.PrepareAsync(
+                db, license.ProductId, license, [activeSeat], now, cancellationToken);
+            now = releaseScope.ObservedAtUtc;
             // The shared event-based seat-change quota (TKT-001206) replaces the former
             // inactive-seat count, which forgot a seat once it was reactivated. The limit is read
             // live from the licence type; non-positive limits are unlimited. Exact successful
@@ -169,7 +171,6 @@ public sealed class PortalDeactivationService : IPortalDeactivationService
 
             activeSeat.IsActive = false;
             activeSeat.UnlinkedAt = now;
-            await SeatRuntimeReleaseAuthority.InvalidateAsync(db, license.ProductId, activeSeat, now, cancellationToken);
             SyncLegacyHardwareStateFromSeats(license);
             db.LicenseHistories.Add(new LicenseHistory
             {
@@ -194,7 +195,10 @@ public sealed class PortalDeactivationService : IPortalDeactivationService
             Outcome = outcome,
             CreatedAtUtc = now
         });
-        await db.SaveChangesAsync(cancellationToken);
+        if (releaseScope != null)
+            await SeatRuntimeReleaseAuthority.CompleteAsync(db, releaseScope, [activeSeat!], cancellationToken);
+        else
+            await db.SaveChangesAsync(cancellationToken);
         if (transaction != null)
             await transaction.CommitAsync(cancellationToken);
 

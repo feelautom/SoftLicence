@@ -2,6 +2,9 @@ namespace SoftLicence.SDK
 {
     public interface ISoftLicenceClient
     {
+        // LEGACY-EXPIRY(TKT-001430, 2026-12-31): pre-UUID to UUID identifier switch. Remove by 31/12/2026 (see TKT-001430).
+        // LEGACY-EXPIRY(TKT-001430, 2026-12-31): caller-held identifier overloads, used by T-IA Connect while a seat still carries
+        // its pre-UUID identifier (TKT-001277 lot 5). Remove by 31/12/2026 (see TKT-001430).
         /// <summary>
         /// Active une licence en ligne pour cette machine.
         /// </summary>
@@ -21,10 +24,27 @@ namespace SoftLicence.SDK
         Task<ActivationResult> ActivateAsync(string licenseKey, string appName, string? appId, string? appVersion, string? customerEmail, string? customerName, string authoritativeHardwareId);
 
         /// <summary>
+        /// Activates this machine's current identifier in place of the identifier held by the client's existing
+        /// licence file (TKT-001277). The server detaches the previous identifier and attaches the current one in one
+        /// operation, consuming one daily seat change; when the quota is exhausted the activation is refused and the
+        /// previous seat stays attached.
+        /// </summary>
+        /// <param name="licenseKey">License key to activate.</param>
+        /// <param name="appName">Server product name.</param>
+        /// <param name="previousHardwareId">Identifier read from the existing signed licence file (16 uppercase hexadecimal characters).</param>
+        /// <param name="appId">Optional canonical product identifier.</param>
+        /// <param name="appVersion">Optional client version used by server compatibility policy.</param>
+        /// <param name="customerEmail">Optional customer email required by some license types.</param>
+        /// <param name="customerName">Optional customer display name.</param>
+        /// <returns>The activation result for the current identifier. Invalid previous identifier syntax throws before any network request.</returns>
+        Task<ActivationResult> ActivateReplacingHardwareIdAsync(string licenseKey, string appName, string previousHardwareId, string? appId = null, string? appVersion = null, string? customerEmail = null, string? customerName = null);
+
+        /// <summary>
         /// Effectue une demande de version d'essai (Auto-Trial) pour cette machine.
         /// </summary>
         Task<ActivationResult> RequestTrialAsync(string appName, string? appId = null, string typeSlug = "TRIAL", string? appVersion = null, string? customerEmail = null, string? customerName = null);
 
+        // LEGACY-EXPIRY(TKT-001430, 2026-12-31): caller-held identifier overload (TKT-001277 lot 5). Remove by 31/12/2026 (see TKT-001430).
         /// <summary>
         /// Vérifie le statut d'une licence en ligne.
         /// </summary>

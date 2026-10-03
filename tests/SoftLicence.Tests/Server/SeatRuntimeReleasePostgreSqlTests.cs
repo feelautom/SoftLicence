@@ -1,9 +1,13 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Data.Common;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using SoftLicence.Server.Data;
 using SoftLicence.Server.Models;
 using SoftLicence.Server.Services;
@@ -14,8 +18,8 @@ namespace SoftLicence.Tests.Server;
 public sealed partial class RuntimeEnrollmentPostgreSqlTests
 {
     /// <summary>
-    /// A real portal unlink must allow a fresh, server-owned Finalize generation while keeping
-    /// the released credential terminal, including when legacy activation occupied another seat.
+    /// A persisted pre-B1 portal unlink must allow a fresh, server-owned Finalize generation while
+    /// keeping the released credential terminal, including when legacy activation occupied another seat.
     /// The <c>stale-runtime-call</c> variants replay the TKT-001198 incident: the still installed
     /// client calls Runtime after the unlink, which must refuse it without rewriting the
     /// <c>seat_released</c> evidence. The <c>late-binding-ineligible</c> variants reproduce the
@@ -56,10 +60,11 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var oldEnrollment = await db.RuntimeEnrollments.SingleAsync(row => row.Id == scenario.EnrollmentId);
         var oldEpoch = oldEnrollment.SecurityEpoch;
         DateTime? priorTerminalAt = null;
-        if (variant.Contains("prior-authority-ineligible", StringComparison.Ordinal)
+        var hasHistoricalTerminal = variant.Contains("prior-authority-ineligible", StringComparison.Ordinal)
             || variant.Contains("prior-version-ineligible", StringComparison.Ordinal)
             || variant.Contains("prior-security", StringComparison.Ordinal)
-            || variant.Contains("future-authority-ineligible", StringComparison.Ordinal))
+            || variant.Contains("future-authority-ineligible", StringComparison.Ordinal);
+        if (hasHistoricalTerminal)
         {
             var terminalNow = DateTime.UtcNow;
             priorTerminalAt = new DateTime(
@@ -73,13 +78,21 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                     ? "version_ineligible"
                     : "authority_ineligible";
             await db.SaveChangesAsync();
+            // These variants model a complete pre-B1 release graph. Materialize that graph before
+            // invoking the new release service so it observes an already-inactive commercial seat
+            // instead of attempting to release an enrollment that item2 already terminalized.
+            await PersistHistoricalSeatReleaseAsync(db, source, oldEnrollment, releaseSeat: true);
         }
         var portal = new PortalDeactivationService(scenario.Factory, TimeProvider.System,
             NullLogger<PortalDeactivationService>.Instance);
         var unlink = await portal.DeactivateAsync("website-step1", Sha256("new-finalize-unlink"),
             new PortalDeactivationRequest(PortalDeactivationService.RequestSchema, Guid.NewGuid().ToString("D"),
                 source.ProductId.ToString("D"), source.LicenseId.ToString("D"), StableHardwareId, "settings_button"));
-        Assert.Equal("deactivated", unlink.Response.Outcome);
+        Assert.Equal(hasHistoricalTerminal ? "already_inactive" : "deactivated", unlink.Response.Outcome);
+        // This test protects compatibility with terminal evidence written before B1. New releases
+        // intentionally leave these Runtime rows untouched and are covered by the B1 endpoint tests.
+        if (!hasHistoricalTerminal)
+            await PersistHistoricalSeatReleaseAsync(db, source, oldEnrollment);
         if (variant.StartsWith("stale-runtime-call", StringComparison.Ordinal))
         {
             // The client installed on the released machine keeps calling Runtime. Its binding check
@@ -106,7 +119,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                     Proof(scenario.EnrollmentKey, "milestone", scenario.EnrollmentId,
                         scenario.Options.ConfirmAudience, "-", milestoneDigest),
                     IPAddress.Loopback));
-            Assert.Equal("binding_ineligible", stale.ErrorCode);
+            Assert.Equal("enrollment_inactive", stale.ErrorCode);
             await db.Entry(oldEnrollment).ReloadAsync();
             Assert.Equal("INVALIDATED", oldEnrollment.State);
             Assert.Equal("seat_released", oldEnrollment.InvalidationReason);
@@ -133,7 +146,12 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             case "security": source.InvalidationReason = "security_lockdown"; break;
             case "timestamp": oldEnrollment.InvalidatedAtUtc = oldEnrollment.InvalidatedAtUtc!.Value.AddSeconds(-1); break;
             case "subject": oldEnrollment.SubjectRefDigestSha256 = Sha256("different-subject"); break;
-            case "epoch": oldEnrollment.SecurityEpoch = 1; break;
+            case "epoch":
+            {
+                var alias = await db.HardwareAuthorityAliases.SingleAsync();
+                alias.SecurityEpoch = checked(oldEnrollment.SecurityEpoch + 1);
+                break;
+            }
             case "revoked":
                 var revoked = await db.Licenses.SingleAsync(row => row.Id == source.LicenseId);
                 revoked.IsActive = false;
@@ -259,16 +277,131 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.Empty(await db.PortalDeactivationOperations.ToListAsync());
         license.IsActive = false;
         await db.SaveChangesAsync();
+        var revokedAssignment = await db.EnrollmentLicenseAssignments.AsNoTracking()
+            .SingleAsync(row => row.EnrollmentId == scenario.EnrollmentId);
+        Assert.Equal("ENDED", revokedAssignment.State);
+        Assert.Equal("license_revoked", revokedAssignment.EndReason);
+        var runtimeBeforeTermination = await db.RuntimeEnrollments.AsNoTracking()
+            .SingleAsync(row => row.Id == scenario.EnrollmentId);
 
         var terminal = await service.DeactivateAsync("website-step1", Sha256("termination"),
             request with { Reason = "subscription_termination" });
 
         Assert.Equal("deactivated", terminal.Response.Outcome);
-        Assert.Equal("invalidated", (await db.DistributionInstallationBindings.AsNoTracking().SingleAsync(row => row.Id == binding.Id)).State);
-        Assert.Equal("INVALIDATED", (await db.RuntimeEnrollments.AsNoTracking().SingleAsync(row => row.Id == scenario.EnrollmentId)).State);
+        Assert.Equal("active", (await db.DistributionInstallationBindings.AsNoTracking()
+            .SingleAsync(row => row.Id == binding.Id)).State);
+        var runtimeAfterTermination = await db.RuntimeEnrollments.AsNoTracking()
+            .SingleAsync(row => row.Id == scenario.EnrollmentId);
+        Assert.Equal(runtimeBeforeTermination.State, runtimeAfterTermination.State);
+        Assert.Equal(runtimeBeforeTermination.SecurityEpoch, runtimeAfterTermination.SecurityEpoch);
+        Assert.Equal(runtimeBeforeTermination.AuthorityEpoch, runtimeAfterTermination.AuthorityEpoch);
+        Assert.Equal(runtimeBeforeTermination.InvalidatedAtUtc, runtimeAfterTermination.InvalidatedAtUtc);
+        Assert.Equal(runtimeBeforeTermination.InvalidationReason, runtimeAfterTermination.InvalidationReason);
+        var preservedAssignment = await db.EnrollmentLicenseAssignments.AsNoTracking()
+            .SingleAsync(row => row.Id == revokedAssignment.Id);
+        Assert.Equal(revokedAssignment.State, preservedAssignment.State);
+        Assert.Equal(revokedAssignment.EndReason, preservedAssignment.EndReason);
+        Assert.Equal(revokedAssignment.EndedAtUtc, preservedAssignment.EndedAtUtc);
+        Assert.Equal(revokedAssignment.Revision, preservedAssignment.Revision);
         Assert.Single(await db.PortalDeactivationOperations.ToListAsync());
         await db.Entry(license).ReloadAsync();
         Assert.False(license.IsActive);
+    }
+
+    /// <summary>
+    /// A subscription cleanup may preserve the immutable item2 licence-revocation terminal, but no
+    /// other terminal reason can substitute for that exact commercial relation.
+    /// </summary>
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("duplicate")]
+    [InlineData("divergent-seat")]
+    [InlineData("unexpected-terminal")]
+    public async Task SeatRelease_SubscriptionTerminationRejectsInvalidTerminalRelation(string mutation)
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        await using var db = await scenario.Factory.CreateDbContextAsync();
+        var binding = await db.DistributionInstallationBindings.AsNoTracking()
+            .SingleAsync(row => row.Id == scenario.Fixture.BindingId);
+        var license = await db.Licenses.Include(row => row.Type)
+            .SingleAsync(row => row.Id == binding.LicenseId);
+        var seat = await db.LicenseSeats.SingleAsync(row => row.Id == binding.LicenseSeatId);
+        var unrelatedSeat = new LicenseSeat
+        {
+            LicenseId = license.Id,
+            HardwareId = "TERMINAL-RELATION-DIVERGENCE",
+            IsActive = false,
+            FirstActivatedAt = DateTime.UtcNow.AddHours(-2),
+            LastCheckInAt = DateTime.UtcNow.AddHours(-1),
+            UnlinkedAt = DateTime.UtcNow.AddHours(-1)
+        };
+        db.LicenseSeats.Add(unrelatedSeat);
+        seat.FirstActivatedAt = DateTime.UtcNow.AddHours(-1);
+        license.IsActive = false;
+        await db.SaveChangesAsync();
+        await using (var admin = new NpgsqlConnection(scenario.AdminConnectionString))
+        {
+            await admin.OpenAsync();
+            await using var command = admin.CreateCommand();
+            command.CommandText = mutation switch
+            {
+                "missing" => """
+                    DELETE FROM public."EnrollmentLicenseAssignments"
+                    WHERE "EnrollmentId" = @enrollmentId;
+                    """,
+                "duplicate" => """
+                    INSERT INTO public."EnrollmentLicenseAssignments"
+                        ("Id", "EnrollmentId", "LicenseId", "LicenseSeatId", "State",
+                         "ActivatedAtUtc", "EndedAtUtc", "Revision", "EndReason")
+                    SELECT @duplicateId, "EnrollmentId", "LicenseId", "LicenseSeatId", "State",
+                           "ActivatedAtUtc", "EndedAtUtc", "Revision" + 1, "EndReason"
+                    FROM public."EnrollmentLicenseAssignments"
+                    WHERE "EnrollmentId" = @enrollmentId;
+                    """,
+                "divergent-seat" => """
+                    UPDATE public."EnrollmentLicenseAssignments"
+                    SET "LicenseSeatId" = @otherSeatId
+                    WHERE "EnrollmentId" = @enrollmentId;
+                    """,
+                _ => """
+                    UPDATE public."EnrollmentLicenseAssignments"
+                    SET "EndReason" = 'unexpected_terminal'
+                    WHERE "EnrollmentId" = @enrollmentId;
+                    """
+            };
+            command.Parameters.AddWithValue("enrollmentId", scenario.EnrollmentId);
+            if (mutation == "duplicate")
+                command.Parameters.AddWithValue("duplicateId", Guid.NewGuid());
+            if (mutation == "divergent-seat")
+                command.Parameters.AddWithValue("otherSeatId", unrelatedSeat.Id);
+            Assert.Equal(1, await command.ExecuteNonQueryAsync());
+        }
+        var runtimeBefore = await db.RuntimeEnrollments.AsNoTracking()
+            .SingleAsync(row => row.Id == scenario.EnrollmentId);
+        var service = new PortalDeactivationService(
+            scenario.Factory, TimeProvider.System, NullLogger<PortalDeactivationService>.Instance);
+        var request = new PortalDeactivationRequest(
+            PortalDeactivationService.RequestSchema,
+            Guid.NewGuid().ToString("D"),
+            binding.ProductId.ToString("D"),
+            binding.LicenseId.ToString("D"),
+            LegacyHardwareId,
+            "subscription_termination");
+
+        var failure = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            service.DeactivateAsync("website-step1", Sha256("unexpected-terminal"), request));
+
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, failure.StatusCode);
+        Assert.Equal("authority_unavailable", failure.ErrorCode);
+        await db.Entry(seat).ReloadAsync();
+        Assert.True(seat.IsActive);
+        Assert.Empty(await db.PortalDeactivationOperations.ToListAsync());
+        var runtimeAfter = await db.RuntimeEnrollments.AsNoTracking()
+            .SingleAsync(row => row.Id == scenario.EnrollmentId);
+        Assert.Equal(runtimeBefore.State, runtimeAfter.State);
+        Assert.Equal(runtimeBefore.SecurityEpoch, runtimeAfter.SecurityEpoch);
+        Assert.Equal(runtimeBefore.AuthorityEpoch, runtimeAfter.AuthorityEpoch);
     }
 
     /// <summary>
@@ -305,19 +438,25 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
 
     /// <summary>
     /// Exercises each real legacy HTTP release entry point against the application database role.
-    /// Successful release must terminalize both Runtime records before the response is returned.
+    /// Successful release ends only the commercial assignment and preserves Runtime identity.
     /// </summary>
     [Theory]
     [InlineData("admin")]
     [InlineData("client")]
     [InlineData("reset")]
-    public async Task SeatRelease_HttpEndpoints_InvalidateExactRuntimeGraph(string route)
+    public async Task SeatRelease_HttpEndpoints_EndAssignmentAndPreserveRuntimeGraph(string route)
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
         await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
         await using var db = await scenario.Factory.CreateDbContextAsync();
         var binding = await db.DistributionInstallationBindings.AsNoTracking()
             .SingleAsync(row => row.Id == scenario.Fixture.BindingId);
+        var enrollmentBefore = await db.RuntimeEnrollments.AsNoTracking()
+            .SingleAsync(row => row.Id == scenario.EnrollmentId);
+        var assignmentBefore = await db.EnrollmentLicenseAssignments.AsNoTracking()
+            .SingleAsync(row => row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE");
+        var proofNonceCountBefore = await db.RuntimeEnrollmentProofNonces.AsNoTracking()
+            .CountAsync(row => row.EnrollmentId == scenario.EnrollmentId);
         var license = await db.Licenses.Include(row => row.Product).SingleAsync(row => row.Id == binding.LicenseId);
         license.LicenseKey = license.LicenseKey.ToUpperInvariant();
         license.ResetCode = "123456";
@@ -346,13 +485,33 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         };
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.False((await db.LicenseSeats.AsNoTracking().SingleAsync(row => row.Id == binding.LicenseSeatId)).IsActive);
-        Assert.Equal("invalidated", (await db.DistributionInstallationBindings.AsNoTracking().SingleAsync(row => row.Id == binding.Id)).State);
-        Assert.Equal("INVALIDATED", (await db.RuntimeEnrollments.AsNoTracking().SingleAsync(row => row.Id == scenario.EnrollmentId)).State);
+        var bindingAfter = await db.DistributionInstallationBindings.AsNoTracking()
+            .SingleAsync(row => row.Id == binding.Id);
+        Assert.Equal("active", bindingAfter.State);
+        Assert.Null(bindingAfter.InvalidatedAtUtc);
+        Assert.Null(bindingAfter.InvalidationReason);
+        var enrollmentAfter = await db.RuntimeEnrollments.AsNoTracking()
+            .SingleAsync(row => row.Id == scenario.EnrollmentId);
+        Assert.Equal(enrollmentBefore.State, enrollmentAfter.State);
+        Assert.Equal(enrollmentBefore.SecurityEpoch, enrollmentAfter.SecurityEpoch);
+        Assert.Equal(enrollmentBefore.AuthorityEpoch, enrollmentAfter.AuthorityEpoch);
+        Assert.Null(enrollmentAfter.InvalidatedAtUtc);
+        Assert.Null(enrollmentAfter.InvalidationReason);
+        var assignmentAfter = await db.EnrollmentLicenseAssignments.AsNoTracking()
+            .SingleAsync(row => row.Id == assignmentBefore.Id);
+        Assert.Equal("ENDED", assignmentAfter.State);
+        Assert.Equal("seat_released", assignmentAfter.EndReason);
+        Assert.Equal(assignmentBefore.Revision, assignmentAfter.Revision);
+        Assert.Empty(await db.EnrollmentLicenseAssignments.AsNoTracking()
+            .Where(row => row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE")
+            .ToListAsync());
+        Assert.Equal(proofNonceCountBefore, await db.RuntimeEnrollmentProofNonces.AsNoTracking()
+            .CountAsync(row => row.EnrollmentId == scenario.EnrollmentId));
     }
 
     /// <summary>
     /// Reproduces the old inactive stable seat plus active binding incident, then proves a signed
-    /// migration terminalizes that historical graph and exact replay preserves the new authority.
+    /// licensing-only migration leaves the historical Runtime graph untouched and replays exactly.
     /// </summary>
     [Fact]
     public async Task SeatRelease_HistoricalOrphan_MigratesAndReplaysWithoutRevivingOldRights()
@@ -360,6 +519,15 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
         await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
         var orphan = await SeedReleasedRuntimeAsync(scenario, "eligible");
+        await using (var historical = await scenario.Factory.CreateDbContextAsync())
+        {
+            var historicalBinding = await historical.DistributionInstallationBindings
+                .SingleAsync(row => row.Id == orphan.BindingId);
+            var historicalEnrollment = await historical.RuntimeEnrollments
+                .SingleAsync(row => row.Id == orphan.EnrollmentId);
+            await PersistHistoricalSeatReleaseAsync(
+                historical, historicalBinding, historicalEnrollment, releaseSeat: true);
+        }
         var request = MigrationRequest(scenario, LegacyHardwareId, StableHardwareId);
         var digest = Sha256("seat-release-migration-" + Guid.NewGuid());
         var proof = Proof(scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId,
@@ -379,7 +547,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.Equal("seat_released", oldBinding.InvalidationReason);
         Assert.Equal("INVALIDATED", (await db.RuntimeEnrollments.SingleAsync(row => row.Id == orphan.EnrollmentId)).State);
         Assert.Equal("ACTIVE", (await db.RuntimeEnrollments.SingleAsync(row => row.Id == scenario.EnrollmentId)).State);
-        Assert.Single(await db.LicenseHistories.Where(row => row.Action == "RUNTIME_RELEASE_RECONCILED").ToListAsync());
+        Assert.Empty(await db.LicenseHistories.Where(row => row.Action == "RUNTIME_RELEASE_RECONCILED").ToListAsync());
+        Assert.Single(await db.LicenseHistories.Where(row => row.Action == "HWID_V2_MIGRATED").ToListAsync());
     }
 
     /// <summary>
@@ -406,8 +575,11 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         await service.DeactivateAsync("website-step1", Sha256("alias-release"),
             new PortalDeactivationRequest(PortalDeactivationService.RequestSchema, Guid.NewGuid().ToString("D"),
                 binding.ProductId.ToString("D"), binding.LicenseId.ToString("D"), StableHardwareId, "settings_button"));
-        await db.Entry(binding).ReloadAsync();
         var enrollment = await db.RuntimeEnrollments.SingleAsync(row => row.Id == scenario.EnrollmentId);
+        // Alias resolution must continue to understand immutable release evidence persisted by
+        // earlier server versions even though B1 no longer writes that Runtime terminal shape.
+        await PersistHistoricalSeatReleaseAsync(db, binding, enrollment);
+        await db.Entry(binding).ReloadAsync();
         var alias = await db.HardwareAuthorityAliases.SingleAsync();
         switch (mutation)
         {
@@ -491,11 +663,11 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     }
 
     /// <summary>
-    /// Real portal requests terminalize the exact live Runtime graph and serialize different
-    /// request IDs on the same seat. An exact replay cannot revoke a later seat reactivation.
+    /// Real portal requests end the exact commercial assignment and serialize different request
+    /// IDs on the same seat. An exact replay cannot end a later seat reactivation assignment.
     /// </summary>
     [Fact]
-    public async Task SeatRelease_PortalConcurrentRequests_TerminalizeOnceAndReplayDoesNotUnlinkAgain()
+    public async Task SeatRelease_PortalConcurrentRequests_EndOnceAndReplayDoesNotEndReactivation()
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
         await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
@@ -512,23 +684,361 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             service.DeactivateAsync("website-step1", Sha256("release-b"), request with { RequestId = Guid.NewGuid().ToString("D") }));
         Assert.Single(responses, row => row.Response.Outcome == "deactivated");
         Assert.Single(responses, row => row.Response.Outcome == "already_inactive");
-        Assert.Equal("invalidated", (await db.DistributionInstallationBindings.AsNoTracking()
+        Assert.Equal("active", (await db.DistributionInstallationBindings.AsNoTracking()
             .SingleAsync(row => row.Id == binding.Id)).State);
-        Assert.Equal("INVALIDATED", (await db.RuntimeEnrollments.AsNoTracking()
+        Assert.Equal("ACTIVE", (await db.RuntimeEnrollments.AsNoTracking()
             .SingleAsync(row => row.Id == scenario.EnrollmentId)).State);
+        var ended = await db.EnrollmentLicenseAssignments.AsNoTracking()
+            .SingleAsync(row => row.EnrollmentId == scenario.EnrollmentId);
+        Assert.Equal("ENDED", ended.State);
+        Assert.Equal("seat_released", ended.EndReason);
         var seat = await db.LicenseSeats.SingleAsync(row => row.Id == binding.LicenseSeatId);
         seat.IsActive = true;
         seat.UnlinkedAt = null;
         await db.SaveChangesAsync();
+        var replacement = await db.EnrollmentLicenseAssignments.AsNoTracking()
+            .SingleAsync(row => row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE");
 
         var replay = await service.DeactivateAsync("website-step1", Sha256("release-a"), request);
 
         Assert.True(replay.Idempotent);
         await db.Entry(seat).ReloadAsync();
         Assert.True(seat.IsActive);
-        await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => MigrateScenarioAsync(scenario));
-        Assert.Equal("invalidated", (await db.DistributionInstallationBindings.AsNoTracking()
+        Assert.Equal(replacement.Id, (await db.EnrollmentLicenseAssignments.AsNoTracking()
+            .SingleAsync(row => row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE")).Id);
+        // Slice A legitimately migrates the reactivated assignment. The exact portal replay above
+        // must leave that assignment active so the signed migration can use current authority.
+        await MigrateScenarioAsync(scenario);
+        Assert.Equal("active", (await db.DistributionInstallationBindings.AsNoTracking()
             .SingleAsync(row => row.Id == binding.Id)).State);
+    }
+
+    /// <summary>
+    /// Proves both commit orders between the production portal release and a separate commercial
+    /// grant transaction. PostgreSQL blocking evidence identifies the exact owning backend; each
+    /// order leaves a complete assignment history without changing Runtime identity.
+    /// </summary>
+    /// <param name="releaseFirst">True pauses the release after both barriers; false holds the grant first.</param>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SeatRelease_TwoConnectionReleaseAndGrantSerializeWithoutPartialAuthority(bool releaseFirst)
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        await using var snapshot = await scenario.Factory.CreateDbContextAsync();
+        var binding = await snapshot.DistributionInstallationBindings.AsNoTracking()
+            .SingleAsync(row => row.Id == scenario.Fixture.BindingId);
+        var enrollmentBefore = await snapshot.RuntimeEnrollments.AsNoTracking()
+            .SingleAsync(row => row.Id == scenario.EnrollmentId);
+        var originalAssignment = await snapshot.EnrollmentLicenseAssignments.AsNoTracking()
+            .SingleAsync(row => row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE");
+        var request = new PortalDeactivationRequest(
+            PortalDeactivationService.RequestSchema,
+            Guid.NewGuid().ToString("D"),
+            binding.ProductId.ToString("D"),
+            binding.LicenseId.ToString("D"),
+            LegacyHardwareId,
+            "settings_button");
+        var digest = Sha256("two-connection-release-grant-" + releaseFirst + Guid.NewGuid().ToString("N"));
+        var portalApplication = "tkt001312-b1-release-" + Guid.NewGuid().ToString("N");
+        var writerApplication = "tkt001312-b1-grant-" + Guid.NewGuid().ToString("N");
+        var portalConnectionString = new NpgsqlConnectionStringBuilder(scenario.AppConnectionString)
+        {
+            ApplicationName = portalApplication,
+            Pooling = false
+        }.ConnectionString;
+        var writerConnectionString = new NpgsqlConnectionStringBuilder(scenario.AdminConnectionString)
+        {
+            ApplicationName = writerApplication,
+            Pooling = false
+        }.ConnectionString;
+        var pause = releaseFirst ? new SeatReleaseBarrierPauseInterceptor() : null;
+        var portalFactory = new SeatReleaseTestDbFactory(portalConnectionString, pause);
+        var portal = new PortalDeactivationService(
+            portalFactory, TimeProvider.System, NullLogger<PortalDeactivationService>.Instance);
+        await using var writer = new NpgsqlConnection(writerConnectionString);
+        await writer.OpenAsync();
+        await using var writerTransaction = await writer.BeginTransactionAsync();
+        Task<PortalDeactivationResult>? pendingRelease = null;
+        Task<int>? pendingGrant = null;
+        var writerCommitted = false;
+        try
+        {
+            if (releaseFirst)
+            {
+                pendingRelease = portal.DeactivateAsync("website-step1", digest, request);
+                var releaseBackendPid = await pause!.BarrierHeld.WaitAsync(TimeSpan.FromSeconds(15));
+                pendingGrant = ExecuteCommercialGrantAsync(writer, writerTransaction, binding.LicenseSeatId);
+                await WaitForBlockedBackendAsync(
+                    scenario.AdminConnectionString, writer.ProcessID, releaseBackendPid, writerApplication);
+                Assert.False(pendingGrant.IsCompleted);
+                pause.Release();
+                var released = await pendingRelease;
+                Assert.Equal("deactivated", released.Response.Outcome);
+                Assert.False(released.Idempotent);
+                await pendingGrant;
+                await writerTransaction.CommitAsync();
+                writerCommitted = true;
+            }
+            else
+            {
+                await ExecuteCommercialGrantAsync(writer, writerTransaction, binding.LicenseSeatId);
+                pendingRelease = portal.DeactivateAsync("website-step1", digest, request);
+                await WaitForApplicationBlockedAsync(
+                    scenario.AdminConnectionString, portalApplication, writer.ProcessID);
+                Assert.False(pendingRelease.IsCompleted);
+                await writerTransaction.CommitAsync();
+                writerCommitted = true;
+                var released = await pendingRelease;
+                Assert.Equal("deactivated", released.Response.Outcome);
+                Assert.False(released.Idempotent);
+            }
+        }
+        finally
+        {
+            pause?.Release();
+            if (pendingRelease != null)
+                await pendingRelease;
+            if (pendingGrant != null)
+                await pendingGrant;
+            if (!writerCommitted)
+                await writerTransaction.RollbackAsync();
+        }
+
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        var bindingAfter = await check.DistributionInstallationBindings.AsNoTracking()
+            .SingleAsync(row => row.Id == binding.Id);
+        var enrollmentAfter = await check.RuntimeEnrollments.AsNoTracking()
+            .SingleAsync(row => row.Id == scenario.EnrollmentId);
+        Assert.Equal("active", bindingAfter.State);
+        Assert.Equal(enrollmentBefore.State, enrollmentAfter.State);
+        Assert.Equal(enrollmentBefore.SecurityEpoch, enrollmentAfter.SecurityEpoch);
+        Assert.Equal(enrollmentBefore.AuthorityEpoch, enrollmentAfter.AuthorityEpoch);
+        Assert.Equal(enrollmentBefore.InvalidatedAtUtc, enrollmentAfter.InvalidatedAtUtc);
+        Assert.Equal(enrollmentBefore.InvalidationReason, enrollmentAfter.InvalidationReason);
+        var assignments = await check.EnrollmentLicenseAssignments.AsNoTracking()
+            .Where(row => row.EnrollmentId == scenario.EnrollmentId)
+            .OrderBy(row => row.Revision).ToListAsync();
+        Assert.Equal(originalAssignment.Id, assignments[0].Id);
+        if (releaseFirst)
+        {
+            Assert.Equal(2, assignments.Count);
+            Assert.Equal("ENDED", assignments[0].State);
+            Assert.Equal("seat_released", assignments[0].EndReason);
+            Assert.Equal("ACTIVE", assignments[1].State);
+            Assert.Null(assignments[1].EndReason);
+            var replay = await portal.DeactivateAsync("website-step1", digest, request);
+            Assert.True(replay.Idempotent);
+            Assert.Equal(assignments[1].Id, (await check.EnrollmentLicenseAssignments.AsNoTracking()
+                .SingleAsync(row => row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE")).Id);
+        }
+        else
+        {
+            Assert.Equal(2, assignments.Count);
+            Assert.All(assignments, row => Assert.Equal("ENDED", row.State));
+            Assert.All(assignments, row => Assert.Equal("seat_released", row.EndReason));
+            Assert.DoesNotContain(assignments, row => row.State == "ACTIVE");
+        }
+    }
+
+    /// <summary>Runs the real item2 deactivation/reactivation trigger sequence in one writer transaction.</summary>
+    /// <param name="connection">The separate tagged PostgreSQL writer connection.</param>
+    /// <param name="transaction">The writer transaction that owns all commercial locks.</param>
+    /// <param name="seatId">The exact seat whose commercial grant is regenerated.</param>
+    /// <returns>The number of rows affected by the final activation update.</returns>
+    private static async Task<int> ExecuteCommercialGrantAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        Guid seatId)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandTimeout = 20;
+        command.CommandText = """
+            SET LOCAL lock_timeout = '15000ms';
+            SET LOCAL statement_timeout = '20000ms';
+            SELECT pg_catalog.pg_advisory_xact_lock(999831, 1);
+            SELECT pg_catalog.pg_advisory_xact_lock(1312, 1);
+            UPDATE public."LicenseSeats"
+            SET "IsActive" = FALSE, "UnlinkedAt" = pg_catalog.clock_timestamp()
+            WHERE "Id" = @seatId;
+            SET CONSTRAINTS "TR_LicenseSeats_AssignmentDualWrite" IMMEDIATE;
+            SET CONSTRAINTS "TR_LicenseSeats_AssignmentDualWrite" DEFERRED;
+            UPDATE public."LicenseSeats"
+            SET "IsActive" = TRUE, "UnlinkedAt" = NULL,
+                "LastCheckInAt" = pg_catalog.clock_timestamp()
+            WHERE "Id" = @seatId;
+            SET CONSTRAINTS "TR_LicenseSeats_AssignmentDualWrite" IMMEDIATE;
+            SET CONSTRAINTS "TR_LicenseSeats_AssignmentDualWrite" DEFERRED;
+            """;
+        command.Parameters.AddWithValue("seatId", seatId);
+        return await command.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>Waits for one exact backend to be blocked by another exact backend.</summary>
+    /// <param name="adminConnectionString">The isolated database administrator connection.</param>
+    /// <param name="waitingBackendPid">The backend expected to wait.</param>
+    /// <param name="blockingBackendPid">The backend expected to own the blocking lock.</param>
+    /// <param name="applicationName">The exact waiting application tag.</param>
+    private static async Task WaitForBlockedBackendAsync(
+        string adminConnectionString,
+        int waitingBackendPid,
+        int blockingBackendPid,
+        string applicationName)
+    {
+        await using var observer = new NpgsqlConnection(adminConnectionString);
+        await observer.OpenAsync();
+        for (var attempt = 0; attempt < 150; attempt++)
+        {
+            await using var command = observer.CreateCommand();
+            command.CommandText = """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_stat_activity
+                    WHERE pid = @waitingPid
+                      AND application_name = @applicationName
+                      AND wait_event_type = 'Lock'
+                      AND @blockingPid = ANY(pg_catalog.pg_blocking_pids(pid)));
+                """;
+            command.Parameters.AddWithValue("waitingPid", waitingBackendPid);
+            command.Parameters.AddWithValue("blockingPid", blockingBackendPid);
+            command.Parameters.AddWithValue("applicationName", applicationName);
+            if ((bool)(await command.ExecuteScalarAsync())!)
+                return;
+            await Task.Delay(20);
+        }
+        throw new TimeoutException("The commercial writer was not observed behind the release backend.");
+    }
+
+    /// <summary>Waits for one tagged application backend to be blocked by the exact writer.</summary>
+    /// <param name="adminConnectionString">The isolated database administrator connection.</param>
+    /// <param name="applicationName">The exact waiting application tag.</param>
+    /// <param name="blockingBackendPid">The writer backend expected to own the blocking lock.</param>
+    private static async Task WaitForApplicationBlockedAsync(
+        string adminConnectionString,
+        string applicationName,
+        int blockingBackendPid)
+    {
+        await using var observer = new NpgsqlConnection(adminConnectionString);
+        await observer.OpenAsync();
+        for (var attempt = 0; attempt < 150; attempt++)
+        {
+            await using var command = observer.CreateCommand();
+            command.CommandText = """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_stat_activity
+                    WHERE application_name = @applicationName
+                      AND wait_event_type = 'Lock'
+                      AND @blockingPid = ANY(pg_catalog.pg_blocking_pids(pid)));
+                """;
+            command.Parameters.AddWithValue("applicationName", applicationName);
+            command.Parameters.AddWithValue("blockingPid", blockingBackendPid);
+            if ((bool)(await command.ExecuteScalarAsync())!)
+                return;
+            await Task.Delay(20);
+        }
+        throw new TimeoutException("The portal release was not observed behind the commercial writer.");
+    }
+
+    /// <summary>Creates isolated contexts with an optional command interceptor.</summary>
+    private sealed class SeatReleaseTestDbFactory(
+        string connectionString,
+        DbCommandInterceptor? interceptor) : IDbContextFactory<LicenseDbContext>
+    {
+        /// <summary>Creates one caller-owned context using the production model.</summary>
+        /// <returns>A new context for the isolated scenario database.</returns>
+        public LicenseDbContext CreateDbContext()
+        {
+            var options = new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(connectionString);
+            if (interceptor != null)
+                options.AddInterceptors(interceptor);
+            return new LicenseDbContext(options.Options);
+        }
+
+        /// <summary>Creates one caller-owned context asynchronously.</summary>
+        /// <param name="cancellationToken">Unused because context construction performs no I/O.</param>
+        /// <returns>The newly created context.</returns>
+        public Task<LicenseDbContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(CreateDbContext());
+    }
+
+    /// <summary>Pauses a portal release immediately after it acquires global and item2 barriers.</summary>
+    private sealed class SeatReleaseBarrierPauseInterceptor : DbCommandInterceptor
+    {
+        private readonly TaskCompletionSource<int> _barrierHeld =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _captured;
+
+        /// <summary>Completes with the release backend PID while both barriers are held.</summary>
+        internal Task<int> BarrierHeld => _barrierHeld.Task;
+
+        /// <summary>Allows the paused production command to return to its caller.</summary>
+        internal void Release() => _release.TrySetResult();
+
+        /// <inheritdoc />
+        public override async ValueTask<int> NonQueryExecutedAsync(
+            DbCommand command,
+            CommandExecutedEventData eventData,
+            int result,
+            CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("pg_advisory_xact_lock(999831, 1)", StringComparison.Ordinal)
+                && command.CommandText.Contains("pg_advisory_xact_lock(1312, 1)", StringComparison.Ordinal)
+                && Interlocked.Exchange(ref _captured, 1) == 0)
+            {
+                _barrierHeld.TrySetResult(((NpgsqlConnection)command.Connection!).ProcessID);
+                await _release.Task.WaitAsync(cancellationToken);
+            }
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// Materializes the immutable Runtime terminal shape produced by server versions before B1.
+    /// Already-terminal enrollment evidence remains unchanged, matching the historical writer.
+    /// </summary>
+    /// <param name="db">The isolated PostgreSQL scenario context.</param>
+    /// <param name="binding">The historical binding to terminalize.</param>
+    /// <param name="enrollment">The historical enrollment to terminalize when it is live.</param>
+    /// <param name="releaseSeat">Whether to materialize the historical inactive-seat projection too.</param>
+    private static async Task PersistHistoricalSeatReleaseAsync(
+        LicenseDbContext db,
+        DistributionInstallationBinding binding,
+        RuntimeEnrollment enrollment,
+        bool releaseSeat = false)
+    {
+        var connectionWasClosed = db.Database.GetDbConnection().State != System.Data.ConnectionState.Open;
+        if (connectionWasClosed)
+            await db.Database.OpenConnectionAsync();
+        try
+        {
+            var terminalAtUtc = (await RuntimeEnrollmentService.DatabaseNowAsync(db, CancellationToken.None)).UtcDateTime;
+            binding.State = "invalidated";
+            binding.InvalidatedAtUtc = terminalAtUtc;
+            binding.InvalidationReason = "seat_released";
+            if (enrollment.State is "PENDING" or "ACTIVE")
+            {
+                enrollment.State = "INVALIDATED";
+                enrollment.InvalidatedAtUtc = terminalAtUtc;
+                enrollment.InvalidationReason = "seat_released";
+            }
+            if (releaseSeat)
+            {
+                var seat = await db.LicenseSeats.SingleAsync(row => row.Id == binding.LicenseSeatId);
+                seat.IsActive = false;
+                seat.UnlinkedAt = terminalAtUtc;
+            }
+            await db.SaveChangesAsync();
+        }
+        finally
+        {
+            if (connectionWasClosed)
+                await db.Database.CloseConnectionAsync();
+        }
     }
 
     /// <summary>

@@ -23,7 +23,7 @@ public sealed class SecurityLockReport
     /// <summary>Installation identifier of the enrollment.</summary>
     [MaxLength(36)]
     public string InstallationId { get; set; } = string.Empty;
-    /// <summary>Upper-case hardware identifier reported (validated against the enrollment hash).</summary>
+    /// <summary>Upper-case hardware evidence reported by the enrolled key; policy links it to the active assignment or alias.</summary>
     [MaxLength(128)]
     public string HardwareId { get; set; } = string.Empty;
     /// <summary>Release version reported.</summary>
@@ -48,8 +48,22 @@ public sealed class SecurityLockReport
     public string EvidenceDigestSha256 { get; set; } = string.Empty;
     /// <summary>First local detection reported by the client.</summary>
     public DateTime FirstSeenUtc { get; set; }
-    /// <summary>First time the server received this lock.</summary>
+    /// <summary>Server receipt time staged before authority locking; may precede the link capture.</summary>
     public DateTime FirstReportedUtc { get; set; }
+    /// <summary>Frozen first-receipt link: UNKNOWN_LEGACY, UNLINKED, VERIFIED_SEAT or VERIFIED_ALIAS.</summary>
+    [MaxLength(20)]
+    public string LinkStatus { get; set; } = SecurityLockReportLinkStatuses.UnknownLegacy;
+    /// <summary>Assignment proved at first receipt, present only for a verified link.</summary>
+    public Guid? LinkAssignmentId { get; set; }
+    /// <summary>Authoritative seat proved at first receipt, present only for a verified link.</summary>
+    public Guid? LinkLicenseSeatId { get; set; }
+    /// <summary>Authenticated alias proved at first receipt, present only for an alias link.</summary>
+    public Guid? LinkAliasId { get; set; }
+    /// <summary>Authoritative database UTC instant of link capture after authority locking.</summary>
+    public DateTime? LinkVerifiedAtUtc { get; set; }
+    /// <summary>Closed, bounded reason for UNKNOWN_LEGACY or UNLINKED; never contains hardware.</summary>
+    [MaxLength(64)]
+    public string? LinkReasonCode { get; set; } = SecurityLockReportLinkStatuses.LegacyUnknownReason;
     /// <summary>Latest report time.</summary>
     public DateTime LastReportedUtc { get; set; }
     /// <summary>Number of reports received for this lock.</summary>
@@ -71,6 +85,21 @@ public sealed class SecurityLockReport
     /// <summary>Free-text reason recorded with the decision.</summary>
     [MaxLength(500)]
     public string? AdminDecisionReason { get; set; }
+}
+
+/// <summary>Closed first-receipt hardware-link states and diagnostic reasons.</summary>
+public static class SecurityLockReportLinkStatuses
+{
+    /// <summary>Pre-migration report whose first-receipt graph cannot be reconstructed.</summary>
+    public const string UnknownLegacy = "UNKNOWN_LEGACY";
+    /// <summary>No authoritative link was proved at first receipt.</summary>
+    public const string Unlinked = "UNLINKED";
+    /// <summary>Reported hardware matched the authoritative active seat at first receipt.</summary>
+    public const string VerifiedSeat = "VERIFIED_SEAT";
+    /// <summary>Reported hardware matched an authenticated, server-authoritative active alias at capture.</summary>
+    public const string VerifiedAlias = "VERIFIED_ALIAS";
+    /// <summary>Legacy row deliberately has no historical proof.</summary>
+    public const string LegacyUnknownReason = "legacy_unknown";
 }
 
 /// <summary>

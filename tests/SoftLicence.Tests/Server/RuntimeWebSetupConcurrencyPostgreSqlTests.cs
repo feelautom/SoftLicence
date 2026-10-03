@@ -32,6 +32,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// </summary>
     [Theory]
     [InlineData("license", false)]
+    [InlineData("license_wait", false)]
+    [InlineData("expiry_wait", false)]
     [InlineData("seat", false)]
     [InlineData("source", false)]
     [InlineData("security_epoch", false)]
@@ -199,6 +201,92 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var firstRelay = Relay(completed);
         var completedResult = await service.UpgradeFromWebSetupAsync("website-step1", "s2s-test", firstRelay.Digest, firstRelay.Request);
         Assert.False(completedResult.Idempotent);
+        if (mutation is "license_wait" or "expiry_wait")
+        {
+            var raceRelay = Relay(pending);
+            await using var writer = new Npgsql.NpgsqlConnection(connections.App);
+            await writer.OpenAsync();
+            await using var lookup = await factory.CreateDbContextAsync();
+            var pendingLicenseId = (await lookup.DistributionInstallationBindings.AsNoTracking()
+                .SingleAsync(row => row.Id == fixtures[pending].BindingId)).LicenseId;
+            if (mutation == "expiry_wait")
+            {
+                await using var setExpiry = writer.CreateCommand();
+                setExpiry.CommandText = "UPDATE public.\"Licenses\" SET \"ExpirationDate\" = pg_catalog.clock_timestamp() + interval '2 seconds' WHERE \"Id\" = @licenseId";
+                setExpiry.Parameters.AddWithValue("licenseId", pendingLicenseId);
+                Assert.Equal(1, await setExpiry.ExecuteNonQueryAsync());
+            }
+            await using var writerTransaction = await writer.BeginTransactionAsync();
+            Task<RuntimeEnrollmentOperationResult<RuntimeWebSetupUpgradeResponse>>? waitingConsume = null;
+            var writerCommitted = false;
+            try
+            {
+                await using (var hold = writer.CreateCommand())
+                {
+                    hold.Transaction = writerTransaction;
+                    hold.CommandText = mutation == "license_wait"
+                        ? "UPDATE public.\"Licenses\" SET \"RevokedAt\" = pg_catalog.clock_timestamp() WHERE \"Id\" = @licenseId"
+                        : "SELECT pg_catalog.pg_advisory_xact_lock(999831, 1)";
+                    if (mutation == "license_wait")
+                        hold.Parameters.AddWithValue("licenseId", pendingLicenseId);
+                    await hold.ExecuteNonQueryAsync();
+                }
+                waitingConsume = service.UpgradeFromWebSetupAsync(
+                    "website-step1", "s2s-test", raceRelay.Digest, raceRelay.Request);
+                await using var observer = new Npgsql.NpgsqlConnection(connections.Admin);
+                await observer.OpenAsync();
+                var blocked = false;
+                for (var attempt = 0; attempt < 30; attempt++)
+                {
+                    await using var query = observer.CreateCommand();
+                    query.CommandText = "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE @writerPid = ANY(pg_catalog.pg_blocking_pids(pid))";
+                    query.Parameters.AddWithValue("writerPid", writer.ProcessID);
+                    if ((long)(await query.ExecuteScalarAsync())! > 0) { blocked = true; break; }
+                    await Task.Delay(100);
+                }
+                Assert.True(blocked);
+                Assert.False(waitingConsume.IsCompleted);
+                if (mutation == "expiry_wait")
+                {
+                    var expired = false;
+                    for (var attempt = 0; attempt < 35; attempt++)
+                    {
+                        await using var query = observer.CreateCommand();
+                        query.CommandText = "SELECT \"ExpirationDate\" <= pg_catalog.clock_timestamp() FROM public.\"Licenses\" WHERE \"Id\" = @licenseId";
+                        query.Parameters.AddWithValue("licenseId", pendingLicenseId);
+                        if ((bool)(await query.ExecuteScalarAsync())!) { expired = true; break; }
+                        await Task.Delay(100);
+                    }
+                    Assert.True(expired);
+                    Assert.False(waitingConsume.IsCompleted);
+                }
+                await writerTransaction.CommitAsync();
+                writerCommitted = true;
+                var denied = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => waitingConsume!);
+                Assert.Equal(422, denied.StatusCode);
+                Assert.Equal("authority_ineligible", denied.ErrorCode);
+                await using var verify = await factory.CreateDbContextAsync();
+                var enrollment = await verify.RuntimeEnrollments.AsNoTracking()
+                    .SingleAsync(row => row.Id == enrollmentIds[pending]);
+                Assert.Equal("ACTIVE", enrollment.State);
+                Assert.Equal(fixtures[pending].Version, enrollment.ReleaseVersion);
+                Assert.Equal(1, enrollment.SecurityEpoch);
+                Assert.Equal("ISSUED", (await verify.RuntimeEnrollmentWebSetupTransitions.AsNoTracking()
+                    .SingleAsync(row => row.Id == Guid.Parse(issued[pending].Response.TransitionId))).State);
+                Assert.Empty(await verify.RuntimeEnrollmentProofNonces.Where(row =>
+                    row.EnrollmentId == enrollmentIds[pending] && row.Operation == "websetup-upgrade").ToListAsync());
+                Assert.Equal(mutation == "expiry_wait", await verify.EnrollmentLicenseAssignments.AnyAsync(row =>
+                    row.EnrollmentId == enrollmentIds[pending] && row.State == "ACTIVE"));
+            }
+            finally
+            {
+                if (!writerCommitted)
+                    await writerTransaction.RollbackAsync();
+                if (waitingConsume is not null)
+                    try { await waitingConsume; } catch (RuntimeEnrollmentException) { }
+            }
+            return;
+        }
         await using (var check = await factory.CreateDbContextAsync())
         {
             var transitionId = Guid.Parse(issued[pending].Response.TransitionId);
@@ -209,6 +297,11 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             if (mutation != null)
             {
                 var binding = await check.DistributionInstallationBindings.SingleAsync(row => row.Id == fixtures[pending].BindingId);
+                var originalBindingVersion = binding.Version;
+                var originalInstallationId = binding.InstallationId;
+                var originalLicenseId = binding.LicenseId;
+                var originalSeatId = binding.LicenseSeatId;
+                var originalTransitionEpoch = transition.AuthorityEpoch;
                 if (mutation == "license")
                     (await check.Licenses.SingleAsync(row => row.Id == binding.LicenseId)).RevokedAt = DateTime.UtcNow;
                 else if (mutation == "seat")
@@ -231,6 +324,29 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                         && row.Version == target && row.Key == "FP_EXE")).Hash = new string('9', 64);
                 else
                     throw new InvalidOperationException("Unknown authority mutation.");
+                if (mutation is "source" or "installation")
+                {
+                    // Item 2 rejects a live binding that diverges from its ACTIVE enrollment at
+                    // commit. These historical fixtures can no longer reach the WebSetup call.
+                    var rejected = await Assert.ThrowsAsync<DbUpdateException>(() => check.SaveChangesAsync());
+                    var postgres = Assert.IsType<Npgsql.PostgresException>(rejected.InnerException);
+                    Assert.Equal(Npgsql.PostgresErrorCodes.CheckViolation, postgres.SqlState);
+                    Assert.Contains("binding_mismatch", postgres.MessageText);
+                    await using var unchanged = await factory.CreateDbContextAsync();
+                    var persistedBinding = await unchanged.DistributionInstallationBindings.AsNoTracking()
+                        .SingleAsync(row => row.Id == fixtures[pending].BindingId);
+                    var persistedTransition = await unchanged.RuntimeEnrollmentWebSetupTransitions.AsNoTracking()
+                        .SingleAsync(row => row.Id == transitionId);
+                    Assert.Equal(originalBindingVersion, persistedBinding.Version);
+                    Assert.Equal(originalInstallationId, persistedBinding.InstallationId);
+                    Assert.Equal(originalLicenseId, persistedBinding.LicenseId);
+                    Assert.Equal(originalSeatId, persistedBinding.LicenseSeatId);
+                    Assert.Equal("ISSUED", persistedTransition.State);
+                    Assert.Equal(originalTransitionEpoch, persistedTransition.AuthorityEpoch);
+                    Assert.Equal(transition.SourceVersion, persistedTransition.SourceVersion);
+                    Assert.Equal(transition.TargetVersion, persistedTransition.TargetVersion);
+                    return;
+                }
                 await check.SaveChangesAsync();
             }
         }
@@ -260,6 +376,23 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 "security_epoch" or "future_epoch" => "websetup_transition_binding_changed",
                 "target_baseline" => "release_unapproved", _ => "authority_ineligible"
             }, error.ErrorCode);
+            if (mutation is "license" or "seat")
+            {
+                await using var denied = await factory.CreateDbContextAsync();
+                var deniedEnrollment = await denied.RuntimeEnrollments.AsNoTracking()
+                    .SingleAsync(row => row.Id == enrollmentIds[pending]);
+                var deniedTransition = await denied.RuntimeEnrollmentWebSetupTransitions.AsNoTracking()
+                    .SingleAsync(row => row.Id == Guid.Parse(issued[pending].Response.TransitionId));
+                Assert.Equal("ACTIVE", deniedEnrollment.State);
+                Assert.Equal(fixtures[pending].Version, deniedEnrollment.ReleaseVersion);
+                Assert.Equal(1, deniedEnrollment.SecurityEpoch);
+                Assert.Equal("ISSUED", deniedTransition.State);
+                Assert.Null(deniedTransition.ConsumedAtUtc);
+                Assert.Empty(await denied.RuntimeEnrollmentRequests.Where(row =>
+                    row.EnrollmentId == enrollmentIds[pending] && row.Operation == "websetup-upgrade").ToListAsync());
+                Assert.Empty(await denied.RuntimeEnrollmentProofNonces.Where(row =>
+                    row.EnrollmentId == enrollmentIds[pending] && row.Operation == "websetup-upgrade").ToListAsync());
+            }
             return;
         }
         var result = await service.UpgradeFromWebSetupAsync("website-step1", "s2s-test", pendingRelay.Digest, pendingRelay.Request);

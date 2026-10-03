@@ -128,7 +128,10 @@ public sealed class DistributionInstallationBindingsController : ControllerBase
             _logger.LogWarning(exception,
                 "TEMP-DIAG hardware-authority operation exception errorCode={ErrorCode} status={StatusCode} remoteIp={RemoteIp}",
                 exception.ErrorCode, exception.StatusCode, HttpContext.Connection.RemoteIpAddress);
-            return StatusCode(exception.StatusCode, new DistributionApiError(exception.ErrorCode));
+            // TKT-001277: a UUID refusal exposes only its customer support code (AR-xx); every other denial
+            // stays opaque.
+            return StatusCode(exception.StatusCode, new DistributionApiError(exception.ErrorCode,
+                exception.ErrorCode == RuntimeDistributionPreflightService.DeviceRefusedErrorCode ? exception.ReasonCode : null));
         }
         catch (InvalidDataException exception)
         {

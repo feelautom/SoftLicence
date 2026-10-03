@@ -31,7 +31,7 @@ public sealed class LicenseRenewalIdempotencyPostgreSqlTests
     public async Task Migration_HistoricalRenewalRemainsUnverifiedAndReplayFailsClosed()
     {
         await using var provision = await PostgreSqlProvision.CreateAsync(PreviousMigration);
-        var fixture = await SeedRecurringLicenseAsync(provision.ConnectionString, "historical");
+        var fixture = await SeedRecurringLicenseAsync(provision.ConnectionString, "historical", historicalSchema: true);
         const string transactionId = "TX-794-PG-HISTORICAL";
         await using (var connection = new NpgsqlConnection(provision.ConnectionString))
         {
@@ -200,12 +200,19 @@ public sealed class LicenseRenewalIdempotencyPostgreSqlTests
     /// <summary>Seeds one recurring provider-owned license without creating any renewal ledger row.</summary>
     /// <param name="connectionString">The isolated database connection string.</param>
     /// <param name="suffix">A deterministic semantic label used to keep fixtures distinct.</param>
+    /// <param name="historicalSchema">Uses only the known pre-AuthorityVersion model at PreviousMigration.</param>
     /// <returns>The identifiers and exact expiration required by the HTTP assertions.</returns>
     private static async Task<RenewalFixture> SeedRecurringLicenseAsync(
         string connectionString,
-        string suffix)
+        string suffix,
+        bool historicalSchema = false)
     {
-        await using var db = CreateDb(connectionString);
+        // The August boundary predates this generated column; all other mapped fields remain strict.
+        await using var db = historicalSchema
+            ? HistoricalSchemaModel.CreateContext(connectionString, [(typeof(License), nameof(License.AuthorityVersion))])
+            : CreateDb(connectionString);
+        if (historicalSchema)
+            Assert.Equal(PreviousMigration, (await db.Database.GetAppliedMigrationsAsync()).Last());
         var product = new Product
         {
             Id = Guid.NewGuid(),

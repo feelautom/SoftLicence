@@ -23,6 +23,22 @@ public sealed class PrivateValidationTestResetServiceTests
         Assert.Equal("active", result.BindingState);
     }
 
+    /// <summary>
+    /// Proves the retained Runtime HWID compatibility column does not participate in current identity
+    /// when installation, key lineage, binding, assignment, licence, and seat authority remain coherent.
+    /// </summary>
+    [Fact]
+    public async Task Validate_WithHistoricalRuntimeHardwareDivergence_ReturnsMutationReadySnapshot()
+    {
+        var fixture = await Fixture.CreateAsync(runtimeHardwareDiverges: true);
+
+        var result = await fixture.Service.ValidateAsync(fixture.Request);
+
+        Assert.False(result.AlreadyApplied);
+        Assert.Equal("ACTIVE", result.EnrollmentState);
+        Assert.Equal("active", result.BindingState);
+    }
+
     [Fact]
     public async Task Validate_WithDifferentInstallationId_FailsClosed()
     {
@@ -90,7 +106,8 @@ public sealed class PrivateValidationTestResetServiceTests
             bool alreadyApplied = false,
             bool bindingOnlyInvalidated = false,
             bool allowLicense = true,
-            bool licenseActive = true)
+            bool licenseActive = true,
+            bool runtimeHardwareDiverges = false)
         {
             var options = new DbContextOptionsBuilder<LicenseDbContext>()
                 .UseInMemoryDatabase($"private-validation-reset-{Guid.NewGuid():N}")
@@ -173,7 +190,7 @@ public sealed class PrivateValidationTestResetServiceTests
                     LicenseId = licenseId,
                     LicenseSeatId = seatId,
                     InstallationId = installationId,
-                    HardwareIdHash = hardwareIdHash,
+                    HardwareIdHash = runtimeHardwareDiverges ? new string('f', 64) : hardwareIdHash,
                     HandoffDigestSha256 = new string('b', 64),
                     ClientId = clientId,
                     ReleaseVersion = "2.2.944",

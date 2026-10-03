@@ -81,21 +81,25 @@ public class StatsServiceTests
         Assert.Equal(1, stats.CheckInCount); // Only the SUCCESS one
     }
 
+    /// <summary>
+    /// Verifies success and failure counts for two distinct days inside the dashboard window.
+    /// Past midday UTC anchors keep the existing hour offsets on the same Paris calendar
+    /// dates and avoid reading a different current day between arrangement and assertions.
+    /// </summary>
     [Fact]
     public async Task GetDashboardStatsAsync_ShouldGenerateActivityChart()
     {
         // Arrange
+        var anchorUtc = DateTime.UtcNow.Date.AddDays(-1).AddHours(12);
+        var previousAnchorUtc = anchorUtc.AddDays(-1);
         using (var db = new LicenseDbContext(_dbOptions))
         {
-            var today = DateTime.UtcNow.Date;
-            var yesterday = today.AddDays(-1);
+            // Anchor day: 2 total, 1 error.
+            db.AccessLogs.Add(new AccessLog { Timestamp = anchorUtc.AddHours(1), ResultStatus = "VALID", IsSuccess = true, ClientIp="1", Path="/", Method="P", AppName="A", Endpoint="E" });
+            db.AccessLogs.Add(new AccessLog { Timestamp = anchorUtc.AddHours(2), ResultStatus = "ERROR", IsSuccess = false, ClientIp="1", Path="/", Method="P", AppName="A", Endpoint="E" });
 
-            // Today: 2 total, 1 error
-            db.AccessLogs.Add(new AccessLog { Timestamp = today.AddHours(1), ResultStatus = "VALID", IsSuccess = true, ClientIp="1", Path="/", Method="P", AppName="A", Endpoint="E" });
-            db.AccessLogs.Add(new AccessLog { Timestamp = today.AddHours(2), ResultStatus = "ERROR", IsSuccess = false, ClientIp="1", Path="/", Method="P", AppName="A", Endpoint="E" });
-
-            // Yesterday: 1 total, 0 error
-            db.AccessLogs.Add(new AccessLog { Timestamp = yesterday.AddHours(5), ResultStatus = "SUCCESS", IsSuccess = true, ClientIp="1", Path="/", Method="P", AppName="A", Endpoint="E" });
+            // Previous day: 1 total, 0 error.
+            db.AccessLogs.Add(new AccessLog { Timestamp = previousAnchorUtc.AddHours(5), ResultStatus = "SUCCESS", IsSuccess = true, ClientIp="1", Path="/", Method="P", AppName="A", Endpoint="E" });
 
             await db.SaveChangesAsync();
         }
@@ -108,11 +112,11 @@ public class StatsServiceTests
         // Assert
         Assert.Equal(7, stats.ActivityChart.Count);
         
-        var todayData = stats.ActivityChart.First(c => c.Date == DateTime.UtcNow.Date);
+        var todayData = stats.ActivityChart.First(c => c.Date == anchorUtc.Date);
         Assert.Equal(2, todayData.Total);
         Assert.Equal(1, todayData.Errors);
 
-        var yesterdayData = stats.ActivityChart.First(c => c.Date == DateTime.UtcNow.Date.AddDays(-1));
+        var yesterdayData = stats.ActivityChart.First(c => c.Date == previousAnchorUtc.Date);
         Assert.Equal(1, yesterdayData.Total);
         Assert.Equal(0, yesterdayData.Errors);
     }

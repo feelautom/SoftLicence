@@ -10,7 +10,9 @@ namespace SoftLicence.SDK
         VersionNotAllowed,
         AppNotFound,
         ServerError,
-        NetworkError
+        NetworkError,
+        /// <summary>The machine has no acceptable system UUID (device refused, support code in the message).</summary>
+        DeviceRefused
     }
 
     public class ActivationResult

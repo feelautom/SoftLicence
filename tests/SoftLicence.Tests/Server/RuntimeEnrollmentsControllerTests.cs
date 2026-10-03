@@ -346,9 +346,9 @@ public sealed class RuntimeEnrollmentsControllerTests
         var body = "{\"schema\":\"runtime-hardware-authority-migration-v1\"," +
             "\"protocolVersion\":\"runtime-enrollment-v1\",\"requestId\":\"22222222-2222-4222-8222-222222222222\"," +
             "\"enrollmentId\":\"" + enrollmentId + "\",\"epoch\":1,\"securityEpoch\":1," +
-            "\"legacyHardwareId\":\"A00272B768FFD6AF\",\"hardwareIdV2\":\"A6D3EED115BC84AD\"," +
-            "\"legacyAlgorithm\":\"legacy-wmi-first-disk\",\"hardwareIdV2Algorithm\":\"v2-wmi-disk-index-0\"," +
-            "\"sdkVersion\":\"1.1.13\"}";
+            "\"legacyHardwareId\":\"A00272B768FFD6AF\",\"hardwareIdV2\":\"6B775195D2F86F36\"," +
+            "\"legacyAlgorithm\":\"licensed-hardware-id\",\"hardwareIdV2Algorithm\":\"smbios-uuid-v1\"," +
+            "\"sdkVersion\":\"2.0.0\",\"systemUuid\":\"4C4C4544-0051-3610-8052-B7C04F4A4E32\"}";
         var service = new Mock<IRuntimeEnrollmentService>(MockBehavior.Strict);
         var exact = Encoding.UTF8.GetBytes("{\"migrated\":true}");
         service.Setup(runtime => runtime.MigrateHardwareAuthorityAsync(
@@ -361,7 +361,7 @@ public sealed class RuntimeEnrollmentsControllerTests
                     "22222222-2222-4222-8222-222222222222", enrollmentId,
                     "33333333-3333-4333-8333-333333333333",
                     "44444444-4444-4444-8444-444444444444", 1, 2,
-                    "A6D3EED115BC84AD", "signed-license", "2026-08-16T13:00:00.0000000Z"),
+                    "6B775195D2F86F36", "signed-license", "2026-08-16T13:00:00.0000000Z"),
                 false, exact));
         var controller = CreateController(new(MockBehavior.Strict), service, "enabled",
             $"/api/v1/runtime-enrollments/{enrollmentId}/hardware-authority-migrations", body);
@@ -388,9 +388,9 @@ public sealed class RuntimeEnrollmentsControllerTests
         var body = "{\"schema\":\"runtime-hardware-authority-migration-v1\"," +
             "\"protocolVersion\":\"runtime-enrollment-v1\",\"requestId\":\"22222222-2222-4222-8222-222222222222\"," +
             "\"enrollmentId\":\"" + enrollmentId + "\",\"epoch\":1,\"securityEpoch\":1," +
-            "\"legacyHardwareId\":\"A00272B768FFD6AF\",\"hardwareIdV2\":\"A6D3EED115BC84AD\"," +
-            "\"legacyAlgorithm\":\"legacy-wmi-first-disk\",\"hardwareIdV2Algorithm\":\"v2-wmi-disk-index-0\"," +
-            "\"sdkVersion\":\"1.1.13\"}";
+            "\"legacyHardwareId\":\"A00272B768FFD6AF\",\"hardwareIdV2\":\"6B775195D2F86F36\"," +
+            "\"legacyAlgorithm\":\"licensed-hardware-id\",\"hardwareIdV2Algorithm\":\"smbios-uuid-v1\"," +
+            "\"sdkVersion\":\"2.0.0\",\"systemUuid\":\"4C4C4544-0051-3610-8052-B7C04F4A4E32\"}";
         var service = new Mock<IRuntimeEnrollmentService>(MockBehavior.Strict);
         service.Setup(runtime => runtime.MigrateHardwareAuthorityAsync(
                 Guid.Parse(enrollmentId), It.IsAny<string>(),

@@ -14,4 +14,9 @@ public static class HistoryActions
     public const string Renewed = "RENEWED";
     public const string AutoUnlinkedProductScope = "Auto-Unlinked (Product Scope)";
     public const string HardwareIdV2Observed = "HWID_V2_OBSERVED";
+    /// <summary>
+    /// A seat moved in place to a new hardware identifier by the signed Runtime migration. Counted by
+    /// <see cref="Services.SeatChangeQuota"/> as one customer seat change (TKT-001277).
+    /// </summary>
+    public const string HardwareIdMigrated = "HWID_V2_MIGRATED";
 }

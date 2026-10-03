@@ -13,10 +13,11 @@ public sealed partial class RuntimeEnrollmentService
     private const string RuntimeSourceHistorySavepoint = "runtime_source_decision_identity";
 
     /// <summary>Persists one pre-effect refusal for the established source, or for a fully validated target that replaced it.</summary>
-    /// <remarks>Source facts are identity-only and omit all claimed target identifiers and HWIDs. SQL inspection proves the checkpoint follows the original locks and precedes business DML. Rollback plus terminal Clear affects only this private delegate context; the lease owns no tracked entities. Target business history uses its original later savepoint and cannot enter this handler. Five seconds linked to host shutdown cover rollback/save/commit; no fallback or internal retry follows failure or uncertain commit. Public500 from invalid target entitlement is retained, with its internal canonical refusal in ReasonCode.</remarks>
+    /// <remarks>Source facts are identity-only and omit all claimed target identifiers and HWIDs. Only after source authority and target entitlement validation may the caller supply the server source-seat identity. SQL inspection proves the checkpoint follows the original locks and precedes business DML. Rollback plus terminal Clear affects only this private delegate context; the lease owns no tracked entities. Target business history uses its original later savepoint and cannot enter this handler. Five seconds linked to host shutdown cover rollback/save/commit; no fallback or internal retry follows failure or uncertain commit. Public500 from invalid target entitlement is retained, with its internal canonical refusal in ReasonCode.</remarks>
     private async Task PersistRuntimeIdentityRefusalAsync(LicenseDbContext db, RuntimeAuthorityLease lease,
         LicenseDecisionSnapshot snapshot, string phase, RuntimeWebSetupTransitionIssueRequest request,
-        string clientId, string payloadDigest, string code, string? reasonCode, int status, DateTimeOffset occurredAt)
+        string clientId, string payloadDigest, string code, string? reasonCode, int status, DateTimeOffset occurredAt,
+        string? resolvedHardwareId)
     {
         using var finalization = CancellationTokenSource.CreateLinkedTokenSource(_historyApplicationStopping);
         finalization.CancelAfter(TimeSpan.FromSeconds(5));
@@ -26,7 +27,7 @@ public sealed partial class RuntimeEnrollmentService
             await db.Database.CurrentTransaction!.RollbackToSavepointAsync(RuntimeSourceHistorySavepoint, finalization.Token);
             db.ChangeTracker.Clear();
             var decision = new LicenseDecisionHistory(1, phase, request.RequestId!, "refused", code, reasonCode,
-                status, null, null, null, null, snapshot,
+                status, null, resolvedHardwareId, null, resolvedHardwareId == null ? null : "provider_binding", snapshot,
                 phase == "runtime_license_transfer" ? request.TargetVersion : request.SourceVersion);
             await LicenseDecisionHistoryWriter.AddAsync(db, decision, clientId, payloadDigest, occurredAt, finalization.Token);
             await db.SaveChangesAsync(finalization.Token);

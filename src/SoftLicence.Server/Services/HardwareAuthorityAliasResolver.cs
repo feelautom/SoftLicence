@@ -49,6 +49,31 @@ public interface IHardwareAuthorityAliasResolver
 }
 
 /// <summary>
+/// Resolves a canonical Finalize identifier back to one server-authenticated historical source.
+/// This compatibility lookup is internal to Finalize and never grants commercial eligibility.
+/// </summary>
+internal interface ICanonicalFinalizeHardwareAuthorityResolver
+{
+    /// <summary>
+    /// Resolves one canonical hardware identifier to an exact alias source when the server graph
+    /// proves the alias references and immutable Runtime evidence. Unknown, ambiguous, disabled,
+    /// or structurally broken reverse graphs retain the historical direct-identity behavior.
+    /// </summary>
+    /// <param name="authorityDb">Database context whose transaction owns the Finalize decision.</param>
+    /// <param name="productId">Exact product boundary.</param>
+    /// <param name="licenseId">Exact target licence boundary.</param>
+    /// <param name="submittedCanonicalHardwareId">Canonical identifier submitted to Finalize.</param>
+    /// <param name="cancellationToken">Cancels the database reads.</param>
+    /// <returns>An authenticated source resolution, or <c>NoAlias</c> when reverse compatibility must not alter existing behavior.</returns>
+    Task<HardwareAuthorityResolution> ResolveFinalizeSourceByCanonicalAsync(
+        LicenseDbContext authorityDb,
+        Guid productId,
+        Guid licenseId,
+        string submittedCanonicalHardwareId,
+        CancellationToken cancellationToken = default);
+}
+
+/// <summary>
 /// Identifies whether alias resolution is locating authority for activation, status, or an active-seat mutation.
 /// </summary>
 public enum HardwareAuthorityResolutionIntent
@@ -99,6 +124,9 @@ public sealed record HardwareAuthorityResolution(
 
     /// <summary>Gets whether a known alias was refused and must never fall back to a new legacy seat.</summary>
     public bool Refused => Status == HardwareAuthorityResolutionStatus.Refused;
+
+    /// <summary>Internal diagnostic witness only: exact historical authority survived, but its current assignment changed. Never grants resolution or exposes a canonical digest.</summary>
+    internal bool CommercialAssignmentOnlyRefusal { get; init; }
 }
 
 /// <summary>
@@ -196,11 +224,15 @@ public sealed class HardwareAuthorityAliasOptionsValidator : IValidateOptions<Ha
 /// </summary>
 /// <param name="db">Scoped database context used by read-only compatibility consumers.</param>
 /// <param name="options">Product-scoped alias compatibility policy.</param>
+/// <param name="migrationCrypto">Server receipt authenticator; missing evidence never relaxes eligibility.</param>
 /// <param name="logger">Bounded security telemetry sink. Security refusals never record hardware identifiers or digests; the deliberate HWID_DIAGNOSIS lines (TKT-001277/TKT-001294) do, on purpose, until the hardware-authority investigation ends.</param>
 public sealed class HardwareAuthorityAliasResolver(
     LicenseDbContext db,
     IOptions<HardwareAuthorityAliasOptions> options,
-    ILogger<HardwareAuthorityAliasResolver> logger) : IHardwareAuthorityAliasResolver
+    ILogger<HardwareAuthorityAliasResolver> logger,
+    IRuntimeEnrollmentCryptoService? migrationCrypto = null) :
+    IHardwareAuthorityAliasResolver,
+    ICanonicalFinalizeHardwareAuthorityResolver
 {
     private static readonly TimeSpan ObservationInterval = TimeSpan.FromHours(1);
 
@@ -357,6 +389,69 @@ public sealed class HardwareAuthorityAliasResolver(
         return resolution;
     }
 
+    /// <inheritdoc />
+    public async Task<HardwareAuthorityResolution> ResolveFinalizeSourceByCanonicalAsync(
+        LicenseDbContext authorityDb,
+        Guid productId,
+        Guid licenseId,
+        string submittedCanonicalHardwareId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsCanonicalHardwareId(submittedCanonicalHardwareId))
+            return NoAlias(submittedCanonicalHardwareId);
+
+        var canonicalDigest = Sha256(submittedCanonicalHardwareId);
+        var aliases = await authorityDb.HardwareAuthorityAliases
+            .AsNoTracking()
+            .Include(candidate => candidate.Product)
+            .Include(candidate => candidate.License)
+            .Include(candidate => candidate.LicenseSeat)
+            .Include(candidate => candidate.RuntimeEnrollment)
+            .Include(candidate => candidate.Binding)
+            .Where(candidate =>
+                candidate.ProductId == productId
+                && candidate.LicenseId == licenseId
+                && candidate.CanonicalHardwareIdSha256 == canonicalDigest)
+            .Take(2)
+            .ToListAsync(cancellationToken);
+        if (aliases.Count != 1)
+            return NoAlias(submittedCanonicalHardwareId);
+
+        var alias = aliases[0];
+        var sourceShape = EvaluateAuthenticatedSourceShape(alias, productId, licenseId, canonicalDigest);
+        if (!sourceShape.StableAuthorityGraph && !sourceShape.ImmutableLegacyRuntimeEvidence)
+            return NoAlias(submittedCanonicalHardwareId);
+
+        var resolution = await EvaluateAliasAsync(
+            authorityDb,
+            alias,
+            productId,
+            licenseId,
+            submittedCanonicalHardwareId,
+            HardwareAuthorityResolutionIntent.Finalize,
+            cancellationToken);
+        if (!resolution.Refused
+            || resolution.RefusalReason == HardwareAuthorityRefusalReason.SameLicenseSeatTransitionRequired)
+        {
+            return resolution;
+        }
+
+        if (resolution.RefusalReason != HardwareAuthorityRefusalReason.AuthorityGraphDiverged)
+            return NoAlias(submittedCanonicalHardwareId);
+
+        if (!IsAuthenticatedFinalizeTerminalSource(alias))
+            return NoAlias(submittedCanonicalHardwareId);
+
+        // Coherent business terminals remain recoverable historical proof. Security terminals and
+        // invalid future chronology are authenticated sources but never grants: Finalize loads them
+        // only so its existing recovery classifier can retain the precise closed conflict.
+        return resolution with
+        {
+            Status = HardwareAuthorityResolutionStatus.Resolved,
+            RefusalReason = null
+        };
+    }
+
     /// <summary>
     /// Evaluates one loaded alias against its complete authority graph for the submitted identifier.
     /// Shared by the legacy and canonical directions so both apply exactly the same invariants.
@@ -398,30 +493,19 @@ public sealed class HardwareAuthorityAliasResolver(
         var enrollment = alias.RuntimeEnrollment;
         var binding = alias.Binding;
         var canonicalDigest = IsCanonicalHardwareId(seat.HardwareId) ? Sha256(seat.HardwareId) : string.Empty;
-        var stableAuthorityGraph = alias.ProductId == productId
-            && alias.Product.Id == productId
-            && alias.LicenseId == licenseId
-            && license.Id == licenseId
-            && license.ProductId == productId
-            && seat.Id == alias.LicenseSeatId
-            && seat.LicenseId == licenseId
-            && canonicalDigest == alias.CanonicalHardwareIdSha256
-            && enrollment.Id == alias.RuntimeEnrollmentId
-            && enrollment.BindingId == alias.BindingId
-            && enrollment.ProductId == productId
-            && enrollment.LicenseId == licenseId
-            && enrollment.LicenseSeatId == seat.Id
-            // Alias epochs are minimum authenticated generations. Monotonic progress is valid
-            // while rollback and every authority or identity divergence remain fail-closed.
-            && enrollment.SecurityEpoch >= alias.SecurityEpoch
-            && enrollment.AuthorityEpoch >= alias.AuthorityEpoch
-            && enrollment.HardwareIdHash == alias.CanonicalHardwareIdSha256
-            && binding.Id == alias.BindingId
-            && binding.ProductId == productId
-            && binding.LicenseId == licenseId
-            && binding.LicenseSeatId == seat.Id
-            && binding.InstallationId == enrollment.InstallationId
-            && binding.HardwareIdHash == alias.CanonicalHardwareIdSha256;
+        var sourceShape = EvaluateAuthenticatedSourceShape(alias, productId, licenseId, canonicalDigest);
+        var stableAuthorityGraph = sourceShape.StableAuthorityGraph;
+        var immutableLegacyRuntimeEvidence = sourceShape.ImmutableLegacyRuntimeEvidence;
+        var exactAuthenticatedRuntimeEvidence = stableAuthorityGraph || immutableLegacyRuntimeEvidence;
+        var currentAssignments = await authorityDb.EnrollmentLicenseAssignments.AsNoTracking()
+            .Where(candidate => candidate.EnrollmentId == enrollment.Id && candidate.State == "ACTIVE")
+            .Take(2)
+            .ToListAsync(cancellationToken);
+        var currentAssignmentMatches = currentAssignments.Count == 1
+            && currentAssignments[0].LicenseId == licenseId
+            && currentAssignments[0].LicenseSeatId == seat.Id;
+        var currentAuthorityGraph = currentAssignmentMatches
+            && (stableAuthorityGraph || immutableLegacyRuntimeEvidence);
         var licenseIsEligible = license.IsActive
             && license.RevokedAt == null
             && (!license.ExpirationDate.HasValue || license.ExpirationDate.Value > now);
@@ -441,7 +525,7 @@ public sealed class HardwareAuthorityAliasResolver(
         // Historical rows used the broad authority_ineligible reason, so Finalize may reuse that
         // lineage only after the complete current provider graph proves version-only ineligibility.
         var versionTerminalCandidate = IsFinalizeLike(intent)
-            && stableAuthorityGraph
+            && exactAuthenticatedRuntimeEvidence
             && enrollment.State == RuntimeAuthorityTransitionResolver.InvalidatedState
             && enrollment.InvalidationReason is "authority_ineligible" or "version_ineligible"
             && enrollment.InvalidatedAtUtc.HasValue
@@ -458,19 +542,28 @@ public sealed class HardwareAuthorityAliasResolver(
                 binding,
                 now,
                 allowIneligibleSourceLicense: false,
-                cancellationToken) == RuntimeBindingEligibility.VersionIneligible;
-        var authorityIsCurrent = stableAuthorityGraph
-            && !releasedSeatTransitionRequired
+                cancellationToken, migrationCrypto) == RuntimeBindingEligibility.VersionIneligible;
+        // TKT-001492: ending the exact commercial assignment preserves identity evidence only.
+        // Activation retains quota/MaxSeats; StatusCheck only locates the inactive seat, never grants rights.
+        var releasedCommercialAssignmentProof = (intent is HardwareAuthorityResolutionIntent.Activation or HardwareAuthorityResolutionIntent.StatusCheck)
+            && exactAuthenticatedRuntimeEvidence
+            && currentAssignments.Count == 0
+            && enrollment.State == "ACTIVE" && enrollment.InvalidationReason == null && enrollment.InvalidatedAtUtc == null
+            && binding.State == "active" && binding.InvalidationReason == null && binding.InvalidatedAtUtc == null
+            && !seat.IsActive
+            && (!seat.UnlinkedAt.HasValue || (seat.UnlinkedAt >= alias.CreatedAtUtc && seat.UnlinkedAt <= now))
+            && await HasExactReleasedAssignmentAsync(authorityDb, alias, now, cancellationToken);
+        var authorityIsCurrent = !releasedSeatTransitionRequired
             && licenseIsEligible
             && (intent != HardwareAuthorityResolutionIntent.Deactivation || seat.IsActive)
-            && ((enrollment.State == "ACTIVE" && binding.State == "active")
-                || releasedHardwareProof
-                || versionTerminalAuthorityProof);
+            && ((currentAuthorityGraph && enrollment.State == "ACTIVE" && binding.State == "active")
+                || (exactAuthenticatedRuntimeEvidence && (releasedHardwareProof || versionTerminalAuthorityProof))
+                || releasedCommercialAssignmentProof);
         if (!authorityIsCurrent)
         {
             var refusalReason = HardwareAuthorityRefusalReason.AuthorityGraphDiverged;
             if (intent == HardwareAuthorityResolutionIntent.Finalize
-                && stableAuthorityGraph
+                && exactAuthenticatedRuntimeEvidence
                 && licenseIsEligible
                 && !seat.IsActive
                 && seat.UnlinkedAt.HasValue
@@ -644,7 +737,23 @@ public sealed class HardwareAuthorityAliasResolver(
                     : submittedHardwareId,
                 alias.Id,
                 HardwareAuthorityResolutionStatus.Refused,
-                binding.Id, seat.Id, refusalReason);
+                binding.Id, seat.Id, refusalReason)
+            {
+                CommercialAssignmentOnlyRefusal = refusalReason == HardwareAuthorityRefusalReason.AuthorityGraphDiverged
+                    && intent == HardwareAuthorityResolutionIntent.Finalize
+                    && exactAuthenticatedRuntimeEvidence && licenseIsEligible
+                    && alias.IsActive && alias.DisabledAtUtc == null
+                    && enrollment.State == "ACTIVE" && enrollment.InvalidatedAtUtc == null
+                    && enrollment.InvalidationReason == null
+                    && binding.State == "active" && binding.InvalidatedAtUtc == null
+                    && binding.InvalidationReason == null
+                    && enrollment.ProtocolVersion == RuntimeEnrollmentService.ProtocolVersion
+                    && enrollment.Epoch == 1
+                    && string.Equals(enrollment.HandoffDigestSha256, binding.HandoffDigestSha256, StringComparison.Ordinal)
+                    && string.Equals(enrollment.SubjectRefDigestSha256, binding.SubjectRefDigestSha256, StringComparison.Ordinal)
+                    && string.Equals(enrollment.ReleaseVersion, binding.Version, StringComparison.Ordinal)
+                    && currentAssignments.Count == 1 && !currentAssignmentMatches
+            };
         }
 
         var observationCutoff = now - ObservationInterval;
@@ -684,6 +793,150 @@ public sealed class HardwareAuthorityAliasResolver(
             binding.Id,
             seat.Id);
     }
+
+    /// <summary>
+    /// Recognizes only the latest exact seat-release assignment as historical machine evidence.
+    /// It grants no commercial right and never changes an enrollment, assignment or seat. A later
+    /// different assignment, quarantine, active seat owner or incoherent chronology fails closed.
+    /// </summary>
+    /// <param name="db">Caller context owning the activation transaction or read-only commercial status evaluation.</param>
+    /// <param name="alias">Alias whose complete product, license, seat and Runtime graph already matched.</param>
+    /// <param name="nowUtc">UTC observation time bounding the persisted release evidence.</param>
+    /// <param name="cancellationToken">Cancels the evidence reads before any activation mutation.</param>
+    /// <returns>True only for a latest ENDED seat_released record in the exact authenticated scope.</returns>
+    private static async Task<bool> HasExactReleasedAssignmentAsync(
+        LicenseDbContext db, HardwareAuthorityAlias alias, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var latest = await db.EnrollmentLicenseAssignments.AsNoTracking()
+            .Where(row => row.EnrollmentId == alias.RuntimeEnrollmentId)
+            .OrderByDescending(row => row.Revision)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (latest == null || latest.State != "ENDED" || latest.EndReason != "seat_released"
+            || latest.LicenseId != alias.LicenseId || latest.LicenseSeatId != alias.LicenseSeatId
+            || latest.Revision < 1 || !latest.EndedAtUtc.HasValue
+            || latest.EndedAtUtc < latest.ActivatedAtUtc || latest.EndedAtUtc < alias.CreatedAtUtc
+            || latest.EndedAtUtc > nowUtc)
+            return false;
+        if (await db.EnrollmentLicenseAssignmentQuarantines.AsNoTracking()
+            .AnyAsync(row => row.EnrollmentId == alias.RuntimeEnrollmentId, cancellationToken))
+            return false;
+        return !await db.EnrollmentLicenseAssignments.AsNoTracking()
+            .AnyAsync(row => row.LicenseSeatId == alias.LicenseSeatId && row.State == "ACTIVE", cancellationToken);
+    }
+
+    /// <summary>
+    /// Evaluates immutable server-owned alias references and the binding's licensing HWID evidence.
+    /// The retained Runtime enrollment HWID is deliberately excluded from identity. State and
+    /// commercial eligibility remain caller-owned so historical proof cannot authorize mixed data.
+    /// </summary>
+    /// <param name="alias">Loaded alias and related authority rows.</param>
+    /// <param name="productId">Exact product boundary.</param>
+    /// <param name="licenseId">Exact licence boundary.</param>
+    /// <param name="canonicalDigest">SHA-256 digest of the canonical submitted identifier.</param>
+    /// <returns>Whether the binding carries canonical or exact immutable legacy licensing evidence.</returns>
+    private static AuthenticatedSourceShape EvaluateAuthenticatedSourceShape(
+        HardwareAuthorityAlias alias,
+        Guid productId,
+        Guid licenseId,
+        string canonicalDigest)
+    {
+        if (alias.Product == null
+            || alias.License == null
+            || alias.LicenseSeat == null
+            || alias.RuntimeEnrollment == null
+            || alias.Binding == null)
+        {
+            return default;
+        }
+
+        var license = alias.License;
+        var seat = alias.LicenseSeat;
+        var enrollment = alias.RuntimeEnrollment;
+        var binding = alias.Binding;
+        var coherentAliasReferences = alias.ProductId == productId
+            && alias.Product.Id == productId
+            && alias.LicenseId == licenseId
+            && license.Id == licenseId
+            && license.ProductId == productId
+            && seat.Id == alias.LicenseSeatId
+            && seat.LicenseId == licenseId
+            && canonicalDigest == alias.CanonicalHardwareIdSha256
+            && enrollment.Id == alias.RuntimeEnrollmentId
+            && enrollment.BindingId == alias.BindingId
+            && enrollment.ProductId == productId
+            && enrollment.LicenseId == licenseId
+            && enrollment.LicenseSeatId == seat.Id
+            // Alias epochs are minimum authenticated generations. Monotonic progress is valid
+            // while rollback and every authority or identity divergence remain fail-closed.
+            && enrollment.SecurityEpoch >= alias.SecurityEpoch
+            && enrollment.AuthorityEpoch >= alias.AuthorityEpoch
+            && binding.Id == alias.BindingId
+            && binding.ProductId == productId
+            && binding.LicenseId == licenseId
+            && binding.LicenseSeatId == seat.Id
+            && binding.InstallationId == enrollment.InstallationId;
+        return new AuthenticatedSourceShape(
+            coherentAliasReferences
+                && binding.HardwareIdHash == alias.CanonicalHardwareIdSha256,
+            coherentAliasReferences
+                && binding.HardwareIdHash == alias.LegacyHardwareIdSha256);
+    }
+
+    /// <summary>
+    /// Creates the historical no-alias result used when reverse lookup must preserve direct
+    /// canonical compatibility instead of introducing a new refusal.
+    /// </summary>
+    /// <param name="submittedHardwareId">Exact canonical identifier received by Finalize.</param>
+    /// <returns>A direct-identity result with no alias authority.</returns>
+    private static HardwareAuthorityResolution NoAlias(string submittedHardwareId) =>
+        new(submittedHardwareId, submittedHardwareId, null, HardwareAuthorityResolutionStatus.NoAlias);
+
+    /// <summary>
+    /// Restricts reverse-source recovery to a coherent released generation or to the two explicit
+    /// terminal classes that Finalize must rediscover in order to preserve its closed conflict.
+    /// Other state or commercial divergences retain the historical direct-canonical behavior.
+    /// </summary>
+    /// <param name="alias">Exact alias whose structural source shape already passed.</param>
+    /// <returns><see langword="true"/> only for coherent release, security terminal, or invalid future business-terminal chronology.</returns>
+    private static bool IsAuthenticatedFinalizeTerminalSource(HardwareAuthorityAlias alias)
+    {
+        var enrollment = alias.RuntimeEnrollment!;
+        var binding = alias.Binding!;
+        if (RuntimeAuthorityTransitionResolver.IsCoherentSeatRelease(
+                binding,
+                [enrollment],
+                DateTime.UtcNow))
+        {
+            return true;
+        }
+
+        var decision = RuntimeAuthorityTransitionResolver.ClassifyEnrollments(
+            [new RuntimeAuthorityEnrollmentSnapshot(
+                enrollment.State,
+                enrollment.InvalidationReason,
+                enrollment.ChallengeExpiresAtUtc,
+                enrollment.ChallengeConsumedAtUtc,
+                enrollment.ActivatedAtUtc,
+                enrollment.InvalidatedAtUtc)],
+            DateTime.UtcNow);
+        if (decision == RuntimeAuthorityEnrollmentDecision.RejectSecurity)
+            return true;
+
+        return binding.InvalidationReason == SeatRuntimeReleaseAuthority.Reason
+            && binding.InvalidatedAtUtc.HasValue
+            && enrollment.State == RuntimeAuthorityTransitionResolver.InvalidatedState
+            && enrollment.InvalidationReason is "authority_ineligible" or "version_ineligible"
+            && enrollment.InvalidatedAtUtc > binding.InvalidatedAtUtc;
+    }
+
+    /// <summary>
+    /// Describes the two exact copied Runtime evidence shapes accepted by signed alias provenance.
+    /// </summary>
+    /// <param name="StableAuthorityGraph">Both Runtime copies contain the canonical alias digest.</param>
+    /// <param name="ImmutableLegacyRuntimeEvidence">Both Runtime copies retain the legacy alias digest.</param>
+    private readonly record struct AuthenticatedSourceShape(
+        bool StableAuthorityGraph,
+        bool ImmutableLegacyRuntimeEvidence);
 
     /// <summary>
     /// Keeps explicit security decisions blocking inside the TEMP-FAIL-OPEN(TKT-001262) branch: an

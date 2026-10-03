@@ -1,9 +1,9 @@
-using Microsoft.Extensions.Options;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
+using SoftLicence.SDK;
 using SoftLicence.Server.Data;
 using SoftLicence.Server.Models;
 
@@ -40,34 +40,68 @@ public sealed partial class RuntimeDistributionPreflightService : IRuntimeDistri
     private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
     /// <summary>Writes privacy-bounded operational evidence after authentication.</summary>
     private readonly ILogger<RuntimeDistributionPreflightService> _logger;
+    /// <summary>Stores the machine evidence reported with an unknown installation (TKT-001277).</summary>
+    private readonly MachineIdentityObservationService _machineIdentityObservations;
+
     /// <summary>Creates the provider authority over the shared relational decision boundary.</summary>
+    /// <param name="dbFactory">Factory for isolated decision contexts.</param>
+    /// <param name="logger">Logger for decisions and diagnostics.</param>
+    /// <param name="machineIdentityObservations">Evidence store; a private instance is created when omitted (tests).</param>
     public RuntimeDistributionPreflightService(
         IDbContextFactory<LicenseDbContext> dbFactory,
         ILogger<RuntimeDistributionPreflightService> logger,
-        IOptions<HardwareAuthorityAliasOptions>? aliasOptions = null,
-        ILoggerFactory? loggerFactory = null)
+        MachineIdentityObservationService? machineIdentityObservations = null)
     {
         _dbFactory = dbFactory;
         _logger = logger;
-        _aliasOptions = aliasOptions ?? Options.Create(new HardwareAuthorityAliasOptions());
-        _loggerFactory = loggerFactory ?? Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance;
+        _machineIdentityObservations = machineIdentityObservations ?? new MachineIdentityObservationService(
+            dbFactory, Microsoft.Extensions.Logging.Abstractions.NullLogger<MachineIdentityObservationService>.Instance);
     }
-
-    private readonly IOptions<HardwareAuthorityAliasOptions> _aliasOptions;
-    private readonly ILoggerFactory _loggerFactory;
 
     /// <summary>
     /// Serializes one authenticated logical request, reuses exact replays, verifies entitlement and
     /// machine authority, and commits the decision atomically with any eligible paid auto-unban.
     /// </summary>
     /// <remarks>
-    /// Raw observations remain request-local. PostgreSQL uses a request lock plus canonical hardware-ban
-    /// locks; a registry write failure prevents success. Divergent request reuse is rejected.
+    /// Raw observations remain request-local. PostgreSQL uses a request lock, commercial graph locks,
+    /// the item-2 shared barrier for a known enrollment, and canonical hardware-ban locks. Accepted
+    /// replays recheck current authority before returning frozen bytes; refused replays stay inert.
+    /// A paid allowlisted ban causes one side-effect-free read pass to roll back and one mutation pass
+    /// to recompute authority after acquiring exclusive global authority first. A registry write failure
+    /// prevents success and divergent request reuse is rejected.
     /// </remarks>
     public async Task<RuntimeDistributionPreflightResponse> EvaluateAsync(
         string clientId,
         string payloadDigestSha256,
         RuntimeDistributionPreflightRequest request,
+        CancellationToken cancellationToken)
+    {
+        var response = await EvaluatePassAsync(
+            clientId, payloadDigestSha256, request, mutationPass: false, cancellationToken);
+        if (response is not null) return response;
+
+        return await EvaluatePassAsync(
+                clientId, payloadDigestSha256, request, mutationPass: true, cancellationToken)
+            ?? throw ServiceUnavailable("auto_unban_restart_exhausted");
+    }
+
+    /// <summary>
+    /// Evaluates one bounded preflight pass. The read pass returns <see langword="null"/> only when
+    /// paid auto-unban is required; its transaction is rolled back before the caller starts the sole
+    /// mutation pass with exclusive global authority. No entity, timestamp, or classification crosses
+    /// that restart boundary.
+    /// </summary>
+    /// <param name="clientId">Exact authenticated S2S principal.</param>
+    /// <param name="payloadDigestSha256">Digest of the authenticated exact request bytes.</param>
+    /// <param name="request">Closed authenticated request.</param>
+    /// <param name="mutationPass">Whether exclusive global authority must precede every narrower lock.</param>
+    /// <param name="cancellationToken">Cancels database access without granting authority.</param>
+    /// <returns>The completed response, or null after a side-effect-free PostgreSQL restart request.</returns>
+    private async Task<RuntimeDistributionPreflightResponse?> EvaluatePassAsync(
+        string clientId,
+        string payloadDigestSha256,
+        RuntimeDistributionPreflightRequest request,
+        bool mutationPass,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -90,6 +124,8 @@ public sealed partial class RuntimeDistributionPreflightService : IRuntimeDistri
                     : System.Data.IsolationLevel.Serializable,
                 cancellationToken)
             : null;
+        if (mutationPass)
+            await SecurityService.AcquireHardwareBanGlobalMutationAsync(db);
         if (db.Database.IsNpgsql())
         {
             var replayLock = $"runtime-distribution-preflight:{clientId}:{requestId}";
@@ -108,46 +144,28 @@ public sealed partial class RuntimeDistributionPreflightService : IRuntimeDistri
                     clientId, requestId, replay.Id);
                 throw InvalidRequest();
             }
-            replay.AttemptCount++;
-            replay.LastSeenAtUtc = DateTime.UtcNow;
-            await db.SaveChangesAsync(cancellationToken);
-            if (transaction is not null) await transaction.CommitAsync(cancellationToken);
-            LogDecision(replay, replay: true);
-            if (replay.Outcome == "refused") throw NotEligible(replay.ReasonCode);
-            if (replay.HardwareIdHash is null) throw ServiceUnavailable();
-            return Accepted(requestId, replay.HardwareIdHash, replay.AuthorityMode);
+            if (replay.Outcome == "refused")
+            {
+                replay.AttemptCount++;
+                replay.LastSeenAtUtc = await ReadDatabaseClockAsync(db, cancellationToken);
+                await db.SaveChangesAsync(cancellationToken);
+                if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+                LogDecision(replay, replay: true);
+                throw Denial(replay.ReasonCode);
+            }
         }
 
-        var now = DateTime.UtcNow;
         await AcquireCommercialAuthorityReadLocksAsync(
             db, clientId, productId, licenseId, request.GrantRefDigestSha256!, cancellationToken);
-        var entitlement = await db.DistributionEntitlements.AsNoTracking().SingleOrDefaultAsync(candidate =>
-            candidate.ClientId == clientId && candidate.ProductId == productId
-            && candidate.LicenseId == licenseId
-            && candidate.GrantRefDigestSha256 == request.GrantRefDigestSha256
-            && (candidate.State == "issued" || candidate.State == "finalized")
-            && candidate.ExpiresAtUtc > now,
-            cancellationToken);
-        var license = await db.Licenses.Include(candidate => candidate.Type).SingleOrDefaultAsync(candidate =>
-            candidate.Id == licenseId && candidate.ProductId == productId,
-            cancellationToken);
-        var licenseActive = license?.IsActive == true;
-        var licenseRevoked = license?.RevokedAt is not null;
-        var licenseExpired = license?.ExpirationDate is DateTime expiration && now > expiration;
-        var paidAutoUnbanEligible = license is not null
-            && SecurityService.IsPaidLicenseEligibleForAutoUnban(license, now);
         var requestedAuthorityMode = request.HardwareIdHash is null ? "server-derived" : "digest-revalidation";
-
-        if (entitlement is null || license is null || !licenseActive || licenseRevoked || licenseExpired)
-            return await RefuseAsync(db, transaction, clientId, requestId, payloadDigestSha256,
-                productId, licenseId, request.GrantRefDigestSha256!, request, null, requestedAuthorityMode,
-                "commercial_authority_invalid", [], licenseActive, licenseRevoked, licenseExpired,
-                paidAutoUnbanEligible, cancellationToken);
 
         string hardwareIdHash;
         string authorityMode;
         string? installationIdHash = null;
-        List<BannedHardwareId> activeBans;
+        IReadOnlyCollection<string?> hardwareCandidates;
+        RuntimeEnrollment? knownEnrollment = null;
+        Action? emitHardwareDiagnosis = null;
+        string? identityRefusal = null;
         if (request.HardwareIdHash is not null)
         {
             if (request.HardwareEvidence is not null || request.InstallationId is not null
@@ -156,7 +174,8 @@ public sealed partial class RuntimeDistributionPreflightService : IRuntimeDistri
                 throw InvalidRequest();
             hardwareIdHash = request.HardwareIdHash;
             authorityMode = "digest-revalidation";
-            activeBans = await FindBansByDigestAsync(db, hardwareIdHash, productId, now, cancellationToken);
+            await SecurityService.AcquireHardwareBanDigestMutationAsync(db, hardwareIdHash);
+            hardwareCandidates = [];
         }
         else if (!TryCanonicalUuid(request.InstallationId, out var installationId)
             || request.KeyThumbprint is null
@@ -175,81 +194,226 @@ public sealed partial class RuntimeDistributionPreflightService : IRuntimeDistri
                     && candidate.KeyThumbprint == request.KeyThumbprint && candidate.State == "ACTIVE",
                 cancellationToken);
             if (installationExists && known is null)
-                return await RefuseAsync(db, transaction, clientId, requestId, payloadDigestSha256,
+            {
+                var mismatchNow = await ReadDatabaseClockAsync(db, cancellationToken);
+                var mismatchLicense = await db.Licenses.Include(candidate => candidate.Type)
+                    .SingleOrDefaultAsync(candidate => candidate.Id == licenseId && candidate.ProductId == productId,
+                        cancellationToken);
+                var mismatchActive = mismatchLicense?.IsActive == true;
+                var mismatchRevoked = mismatchLicense?.RevokedAt is not null;
+                var mismatchExpired = mismatchLicense?.ExpirationDate is DateTime mismatchExpiry
+                    && mismatchNow > mismatchExpiry;
+                return await RefuseAsync(db, transaction, replay, clientId, requestId, payloadDigestSha256,
                     productId, licenseId, request.GrantRefDigestSha256!, request, installationIdHash,
-                    "known-enrollment", "installation_key_mismatch", [], licenseActive, licenseRevoked,
-                    licenseExpired, paidAutoUnbanEligible, cancellationToken);
+                    "known-enrollment", "installation_key_mismatch", [], mismatchActive, mismatchRevoked,
+                    mismatchExpired, mismatchLicense is not null
+                        && SecurityService.IsPaidLicenseEligibleForAutoUnban(mismatchLicense, mismatchNow),
+                    cancellationToken);
+            }
             if (known is not null)
             {
                 if (request.HardwareEvidence is not null) throw InvalidRequest();
-                if (!Sha256Pattern().IsMatch(known.HardwareIdHash)) throw ServiceUnavailable();
-                hardwareIdHash = known.HardwareIdHash;
+                if (db.Database.IsNpgsql())
+                {
+                    // Match item-2's enrollment-row -> commercial-barrier order. A writer that already
+                    // changed identity wins, commits its deferred trigger, and is observed by the reread.
+                    await db.Database.ExecuteSqlInterpolatedAsync(
+                        $"SELECT 1 FROM \"RuntimeEnrollments\" WHERE \"Id\" = {known.Id} FOR SHARE",
+                        cancellationToken);
+                    await RuntimeCommercialEligibilityValidator.AcquireReadBarrierAsync(db, cancellationToken);
+                    known = await db.RuntimeEnrollments.AsNoTracking().SingleOrDefaultAsync(
+                        candidate => candidate.Id == known.Id && candidate.ProductId == productId
+                            && candidate.InstallationId == installationId
+                            && candidate.KeyThumbprint == request.KeyThumbprint && candidate.State == "ACTIVE",
+                        cancellationToken);
+                    if (known is null)
+                    {
+                        var changedNow = await ReadDatabaseClockAsync(db, cancellationToken);
+                        var changedLicense = await db.Licenses.Include(candidate => candidate.Type)
+                            .SingleOrDefaultAsync(candidate => candidate.Id == licenseId
+                                && candidate.ProductId == productId, cancellationToken);
+                        var changedActive = changedLicense?.IsActive == true;
+                        var changedRevoked = changedLicense?.RevokedAt is not null;
+                        var changedExpired = changedLicense?.ExpirationDate is DateTime changedExpiry
+                            && changedNow > changedExpiry;
+                        return await RefuseAsync(db, transaction, replay, clientId, requestId,
+                            payloadDigestSha256, productId, licenseId, request.GrantRefDigestSha256!, request,
+                            installationIdHash, "known-enrollment", "identity_authority_changed", [],
+                            changedActive, changedRevoked, changedExpired, changedLicense is not null
+                                && SecurityService.IsPaidLicenseEligibleForAutoUnban(changedLicense, changedNow),
+                            cancellationToken);
+                    }
+                }
+                var assignments = await db.EnrollmentLicenseAssignments.AsNoTracking()
+                    .Where(candidate => candidate.EnrollmentId == known.Id && candidate.State == "ACTIVE")
+                    .Take(2).ToListAsync(cancellationToken);
+                if (assignments.Count > 1) throw ServiceUnavailable("assignment_duplicate_active");
+                if (assignments.Count == 0)
+                {
+                    var quarantined = await db.EnrollmentLicenseAssignmentQuarantines.AsNoTracking()
+                        .AnyAsync(candidate => candidate.EnrollmentId == known.Id, cancellationToken);
+                    return await RefuseAsync(db, transaction, replay, clientId, requestId, payloadDigestSha256,
+                        productId, licenseId, request.GrantRefDigestSha256!, request, installationIdHash,
+                        "known-enrollment", quarantined ? "assignment_quarantined" : "assignment_missing",
+                        [], false, false, false, false, cancellationToken);
+                }
+                var seatHardware = await db.LicenseSeats.AsNoTracking()
+                    .Where(candidate => candidate.Id == assignments[0].LicenseSeatId)
+                    .Select(candidate => candidate.HardwareId).SingleOrDefaultAsync(cancellationToken);
+                if (string.IsNullOrWhiteSpace(seatHardware)) throw ServiceUnavailable("assignment_relation_missing");
+                hardwareIdHash = Sha256Lower(seatHardware);
                 authorityMode = "known-enrollment";
-                activeBans = await FindBansByDigestAsync(db, hardwareIdHash, productId, now, cancellationToken);
+                knownEnrollment = known;
+                await SecurityService.AcquireHardwareBanDigestMutationAsync(db, hardwareIdHash);
+                hardwareCandidates = [];
             }
             else
             {
+                // TKT-001277 lot 2c: the identifier is derived from the system UUID only, with the exact SDK rule.
+                // The WebSetup sends observations and never an identifier; a refused UUID is refused with its
+                // support code after the commercial checks below, and the evidence is stored for investigation.
                 var evidence = ValidateEvidence(request.HardwareEvidence);
-                var legacyHardwareId = ComputeHardwareId(evidence, evidence.LegacyDiskId!);
-                var stableHardwareId = IsMissing(evidence.StableDiskId)
-                    ? null : ComputeHardwareId(evidence, evidence.StableDiskId!);
-                hardwareIdHash = Sha256Lower(legacyHardwareId);
+                var identity = MachineIdentity.FromUuid(evidence.SystemUuid);
                 authorityMode = "server-derived";
-                // TKT-001296: a machine the server no longer recognizes by installation and key may still be
-                // known through the authenticated alias created by its signed migration. When the complete
-                // alias graph proves that the legacy candidate maps to this exact stable candidate, the stable
-                // digest is chosen so a Desktop that kept its stable marker matches at Finalize. Every
-                // compatibility refusal keeps the historical legacy choice and is only diagnosed: no client
-                // that is tolerated today becomes blocked here. Bans on both candidates are verified below.
-                var recognition = "no-alias";
-                Guid? recognizedAliasId = null;
-                if (stableHardwareId is not null
-                    && !string.Equals(legacyHardwareId, stableHardwareId, StringComparison.Ordinal))
-                {
-                    var resolver = new HardwareAuthorityAliasResolver(
-                        db, _aliasOptions, _loggerFactory.CreateLogger<HardwareAuthorityAliasResolver>());
-                    var recognized = await resolver.ResolveAsync(
-                        db, productId, licenseId, legacyHardwareId,
-                        HardwareAuthorityResolutionIntent.DistributionPreflight, cancellationToken);
-                    if (recognized.Status == HardwareAuthorityResolutionStatus.Resolved
-                        && string.Equals(recognized.EffectiveHardwareId, stableHardwareId, StringComparison.Ordinal))
-                    {
-                        hardwareIdHash = Sha256Lower(stableHardwareId);
-                        // Contract TKT-001296: the accepted mode names the recognition so Website and WebSetup
-                        // can tell a recognized machine from a plain server derivation. Website must tolerate
-                        // this mode before this server version is deployed.
-                        authorityMode = "alias-recognized";
-                        recognition = "alias-recognized";
-                        recognizedAliasId = recognized.AliasId;
-                    }
-                    else if (recognized.Status == HardwareAuthorityResolutionStatus.Refused)
-                    {
-                        recognition = "compat-refused:" + recognized.RefusalReason;
-                        recognizedAliasId = recognized.AliasId;
-                    }
-                }
-                // Diagnostic HWID volontaire (TKT-001277/TKT-001294) : conserve tant que les cas d'incoherence
-                // d'autorite materielle sont analyses ; son retrait est une decision explicite, pas un nettoyage.
-                // Les identifiants produit/licence/installation permettent de dedupliquer par client, pas par ligne.
-                _logger.LogWarning(
-                    "HWID_DIAGNOSIS preflight requestId={RequestId} productId={ProductId} licenseId={LicenseId} installationId={InstallationId} CpuId={CpuId} MotherboardId={MotherboardId} BiosId={BiosId} LegacyDiskId={LegacyDiskId} StableDiskId={StableDiskId} MachineName={MachineName} LegacyHardwareId={LegacyHardwareId} StableHardwareId={StableHardwareId} hardwareIdHash={HardwareIdHash} recognition={Recognition} recognizedAliasId={RecognizedAliasId} serverVersion={ServerVersion}",
-                    requestId, productId, licenseId, request.InstallationId, evidence.CpuId, evidence.MotherboardId, evidence.BiosId,
-                    evidence.LegacyDiskId, evidence.StableDiskId, evidence.MachineName,
-                    legacyHardwareId, stableHardwareId, hardwareIdHash, recognition, recognizedAliasId,
-                    typeof(RuntimeDistributionPreflightService).Assembly.GetName().Version);
-                activeBans = await FindBansByHardwareIdsAsync(
-                    db, [legacyHardwareId, stableHardwareId], productId, now, cancellationToken);
+                identityRefusal = identity.RefusalCode;
+                // TKT-001277 review M1: a UUID the WebSetup could not read is reported as unreadable (AR-02), like the
+                // SDK does, instead of absent (AR-01). The unsigned indicator only chooses between two refusals, and the
+                // same final classification feeds the response, the stored observation and the diagnosis log.
+                if (identityRefusal == MachineIdentity.RefusalUuidAbsent && ReportsUnreadableUuid(evidence.MachineEvidence))
+                    identityRefusal = MachineIdentity.RefusalUuidUnreadable;
+                await _machineIdentityObservations.ObserveDerivedAsync(
+                    productId, evidence.SystemUuid, evidence.MachineEvidence, "PREFLIGHT", cancellationToken,
+                    identityRefusal);
+                hardwareIdHash = identity.IsAccepted ? Sha256Lower(identity.HardwareId!) : string.Empty;
+                // Diagnostic volontaire (TKT-001277/TKT-001294) : identifiants produit/licence/installation pour
+                // dedupliquer par client ; son retrait est une decision explicite, pas un nettoyage.
+                emitHardwareDiagnosis = () => _logger.LogWarning(
+                    "HWID_DIAGNOSIS preflight requestId={RequestId} productId={ProductId} licenseId={LicenseId} installationId={InstallationId} systemUuid={SystemUuid} hardwareId={HardwareId} hardwareIdHash={HardwareIdHash} refusal={Refusal} serverVersion={ServerVersion}",
+                    requestId, productId, licenseId, request.InstallationId, identity.CanonicalUuid, identity.HardwareId,
+                    hardwareIdHash, identityRefusal, typeof(RuntimeDistributionPreflightService).Assembly.GetName().Version);
+                hardwareCandidates = identity.IsAccepted ? [identity.HardwareId] : [];
+                if (identity.IsAccepted)
+                    await SecurityService.AcquireHardwareBanMutationsAsync(db, [identity.HardwareId!]);
             }
         }
+
+        var now = await ReadDatabaseClockAsync(db, cancellationToken);
+        var entitlement = await db.DistributionEntitlements.AsNoTracking().SingleOrDefaultAsync(candidate =>
+            candidate.ClientId == clientId && candidate.ProductId == productId
+            && candidate.LicenseId == licenseId
+            && candidate.GrantRefDigestSha256 == request.GrantRefDigestSha256
+            && (candidate.State == "issued" || candidate.State == "finalized")
+            && candidate.ExpiresAtUtc > now,
+            cancellationToken);
+        var license = await db.Licenses.Include(candidate => candidate.Type).SingleOrDefaultAsync(candidate =>
+            candidate.Id == licenseId && candidate.ProductId == productId,
+            cancellationToken);
+        var licenseActive = license?.IsActive == true;
+        var licenseRevoked = license?.RevokedAt is not null;
+        var licenseExpired = license?.ExpirationDate is DateTime expiration && now > expiration;
+        var paidAutoUnbanEligible = license is not null
+            && SecurityService.IsPaidLicenseEligibleForAutoUnban(license, now);
+        if (entitlement is null || license is null || !licenseActive || licenseRevoked || licenseExpired)
+        {
+            emitHardwareDiagnosis?.Invoke();
+            return await RefuseAsync(db, transaction, replay, clientId, requestId, payloadDigestSha256,
+                productId, licenseId, request.GrantRefDigestSha256!, request, installationIdHash, requestedAuthorityMode,
+                "commercial_authority_invalid", [], licenseActive, licenseRevoked, licenseExpired,
+                paidAutoUnbanEligible, cancellationToken);
+        }
+
+        if (identityRefusal is not null)
+        {
+            emitHardwareDiagnosis?.Invoke();
+            return await RefuseAsync(db, transaction, replay, clientId, requestId, payloadDigestSha256,
+                productId, licenseId, request.GrantRefDigestSha256!, request, installationIdHash, authorityMode,
+                identityRefusal, [], licenseActive, licenseRevoked, licenseExpired,
+                paidAutoUnbanEligible, cancellationToken);
+        }
+
+        if (knownEnrollment is not null)
+        {
+            try
+            {
+                var approved = await RuntimeEnrollmentIdentityValidator.ValidateBootstrapAsync(
+                    db, knownEnrollment, cancellationToken);
+                var assessment = await RuntimeCommercialEligibilityValidator.AssessAsync(
+                    db, knownEnrollment, approved.Binaries, new DateTimeOffset(now, TimeSpan.Zero),
+                    null, RuntimeCommercialEligibilityValidator.HardwareBanAssessmentMode.DeferToCaller,
+                    cancellationToken);
+                var assignment = assessment.Assignment;
+                if (assignment is null)
+                    throw new RuntimeEnrollmentException(
+                        "authority_ineligible", StatusCodes.Status422UnprocessableEntity,
+                        assessment.DenialReason ?? "commercial_authority_ineligible");
+                if (assignment.LicenseId != licenseId
+                    || !string.Equals(hardwareIdHash, Sha256Lower(assignment.HardwareId), StringComparison.Ordinal))
+                    return await RefuseAsync(db, transaction, replay, clientId, requestId, payloadDigestSha256,
+                        productId, licenseId, request.GrantRefDigestSha256!, request, installationIdHash, authorityMode,
+                        "assignment_scope_mismatch", [], licenseActive, licenseRevoked, licenseExpired,
+                        paidAutoUnbanEligible, cancellationToken);
+            }
+            catch (RuntimeEnrollmentException exception) when (
+                exception.StatusCode == StatusCodes.Status422UnprocessableEntity)
+            {
+                return await RefuseAsync(db, transaction, replay, clientId, requestId, payloadDigestSha256,
+                    productId, licenseId, request.GrantRefDigestSha256!, request, installationIdHash, authorityMode,
+                    exception.DiagnosticCode ?? "commercial_authority_ineligible", [], licenseActive, licenseRevoked, licenseExpired,
+                    paidAutoUnbanEligible, cancellationToken);
+            }
+            catch (RuntimeEnrollmentException exception) when (
+                exception.StatusCode == StatusCodes.Status503ServiceUnavailable)
+            {
+                throw ServiceUnavailable(exception.DiagnosticCode ?? "commercial_authority_unavailable");
+            }
+        }
+
+        var activeBans = request.HardwareIdHash is not null || knownEnrollment is not null
+            ? await LoadBansByDigestAsync(db, hardwareIdHash, productId, now, cancellationToken)
+            : await LoadBansByHardwareIdsAsync(db, hardwareCandidates, productId, now, cancellationToken);
 
         var categories = activeBans.Select(candidate => candidate.BanCategory ?? BannedHardwareId.Categories.Manual)
             .Distinct(StringComparer.Ordinal).OrderBy(candidate => candidate, StringComparer.Ordinal).ToArray();
         if (activeBans.Count > 0 && (!paidAutoUnbanEligible
             || !SecurityService.AreAllHardwareBansAutoUnbannable(activeBans)))
-            return await RefuseAsync(db, transaction, clientId, requestId, payloadDigestSha256,
+        {
+            emitHardwareDiagnosis?.Invoke();
+            return await RefuseAsync(db, transaction, replay, clientId, requestId, payloadDigestSha256,
                 productId, licenseId, request.GrantRefDigestSha256!, request, installationIdHash,
                 authorityMode, "hardware_banned", categories, licenseActive, licenseRevoked,
                 licenseExpired, paidAutoUnbanEligible, cancellationToken, hardwareIdHash);
+        }
+
+        if (replay is not null)
+        {
+            if (replay.HardwareIdHash is null
+                || !string.Equals(replay.HardwareIdHash, hardwareIdHash, StringComparison.Ordinal)
+                || !string.Equals(replay.AuthorityMode, authorityMode, StringComparison.Ordinal))
+            {
+                emitHardwareDiagnosis?.Invoke();
+                throw NotEligible("replay_authority_changed");
+            }
+        }
+
+        if (activeBans.Count > 0 && !mutationPass && db.Database.IsNpgsql())
+        {
+            if (transaction is not null) await transaction.RollbackAsync(cancellationToken);
+            return null;
+        }
+
+        emitHardwareDiagnosis?.Invoke();
+        if (replay is not null)
+        {
+            // A paid allowlisted ban is current commercial policy, not frozen replay evidence.
+            // Apply the same atomic auto-unban as a new accepted decision after scope equality is proved.
+            foreach (var ban in activeBans) ban.IsActive = false;
+            replay.AttemptCount++;
+            replay.LastSeenAtUtc = now;
+            await db.SaveChangesAsync(cancellationToken);
+            if (transaction is not null) await transaction.CommitAsync(cancellationToken);
+            LogDecision(replay, replay: true);
+            return Accepted(requestId, replay.HardwareIdHash!, replay.AuthorityMode);
+        }
 
         foreach (var ban in activeBans) ban.IsActive = false;
         var outcome = activeBans.Count == 0 ? "accepted" : "auto-unbanned";
@@ -289,14 +453,19 @@ public sealed partial class RuntimeDistributionPreflightService : IRuntimeDistri
     }
 
     /// <summary>
-    /// Locks one irreversible digest before reading live product-compatible bans. Every ban writer takes
-    /// the same digest lock before mutation, including creation when no matching row exists yet.
+    /// Reads live product-compatible bans after the caller has acquired the irreversible digest lock
+    /// and sampled fresh provider time. Every ban writer takes the same lock before mutation.
     /// </summary>
-    private static async Task<List<BannedHardwareId>> FindBansByDigestAsync(
+    /// <param name="db">Transaction that already owns the canonical hardware digest lock.</param>
+    /// <param name="hardwareIdHash">Lowercase SHA-256 digest selected by the preflight mode.</param>
+    /// <param name="productId">Product scope; global bans also apply.</param>
+    /// <param name="now">Provider time sampled after lock acquisition.</param>
+    /// <param name="cancellationToken">Cancels the database read.</param>
+    /// <returns>Tracked active bans whose canonical hardware digest matches exactly.</returns>
+    private static async Task<List<BannedHardwareId>> LoadBansByDigestAsync(
         LicenseDbContext db, string hardwareIdHash, Guid productId, DateTime now,
         CancellationToken cancellationToken)
     {
-        await SecurityService.AcquireHardwareBanDigestMutationAsync(db, hardwareIdHash);
         var lockedCandidates = await db.BannedHardwareIds.Where(ban => ban.IsActive
             && (ban.ProductId == null || ban.ProductId == productId)
             && (ban.ExpiresAt == null || ban.ExpiresAt > now)).ToListAsync(cancellationToken);
@@ -306,16 +475,21 @@ public sealed partial class RuntimeDistributionPreflightService : IRuntimeDistri
     }
 
     /// <summary>
-    /// Locks each exact canonical candidate in ordinal order, then returns tracked live bans applicable
-    /// to the product. The deterministic order prevents deadlocks for legacy/stable dual identity.
+    /// Reads tracked live bans after the caller has locked each exact canonical candidate in ordinal
+    /// order and sampled fresh provider time. The caller's deterministic order prevents deadlocks.
     /// </summary>
-    private static async Task<List<BannedHardwareId>> FindBansByHardwareIdsAsync(
+    /// <param name="db">Transaction holding every candidate hardware lock.</param>
+    /// <param name="hardwareIds">Canonical legacy and stable candidates; null values are ignored.</param>
+    /// <param name="productId">Product scope; global bans also apply.</param>
+    /// <param name="now">Provider time sampled after lock acquisition.</param>
+    /// <param name="cancellationToken">Cancels the database read.</param>
+    /// <returns>Tracked active bans matching one exact candidate.</returns>
+    private static async Task<List<BannedHardwareId>> LoadBansByHardwareIdsAsync(
         LicenseDbContext db, IEnumerable<string?> hardwareIds, Guid productId, DateTime now,
         CancellationToken cancellationToken)
     {
         var candidates = hardwareIds.Where(value => value is not null).Select(value => value!.ToUpperInvariant())
             .ToHashSet(StringComparer.Ordinal);
-        await SecurityService.AcquireHardwareBanMutationsAsync(db, candidates);
         var rows = await db.BannedHardwareIds.Where(ban => ban.IsActive
             && (ban.ProductId == null || ban.ProductId == productId)
             && (ban.ExpiresAt == null || ban.ExpiresAt > now)).ToListAsync(cancellationToken);
@@ -324,25 +498,62 @@ public sealed partial class RuntimeDistributionPreflightService : IRuntimeDistri
 
     /// <summary>
     /// Commits a privacy-bounded refusal in the caller transaction, logs its audit reference, and then
-    /// throws the opaque public denial. Persistence failure propagates instead of losing evidence.
+    /// throws the opaque public denial. An accepted replay denial changes no frozen decision or attempt
+    /// count. Persistence failure propagates instead of losing evidence.
     /// </summary>
+    /// <param name="db">Decision transaction.</param>
+    /// <param name="transaction">Relational transaction to commit after a new refusal is durable.</param>
+    /// <param name="replay">Existing accepted decision, which must remain immutable on current denial.</param>
+    /// <param name="clientId">Authenticated S2S principal.</param>
+    /// <param name="requestId">Canonical idempotency identifier.</param>
+    /// <param name="payloadDigestSha256">Digest of exact authenticated request bytes.</param>
+    /// <param name="productId">Validated product scope.</param>
+    /// <param name="licenseId">Requested distribution licence.</param>
+    /// <param name="grantRefDigestSha256">Authenticated grant reference digest.</param>
+    /// <param name="request">Validated request used only for bounded audit fields.</param>
+    /// <param name="installationIdHash">Optional irreversible installation correlation.</param>
+    /// <param name="authorityMode">Closed evaluated authority mode.</param>
+    /// <param name="reasonCode">Bounded internal refusal reason.</param>
+    /// <param name="categories">Current matching ban categories.</param>
+    /// <param name="licenseActive">Frozen licence-active observation.</param>
+    /// <param name="licenseRevoked">Frozen licence-revoked observation.</param>
+    /// <param name="licenseExpired">Frozen licence-expired observation.</param>
+    /// <param name="paidAutoUnbanEligible">Frozen paid-policy observation.</param>
+    /// <param name="cancellationToken">Cancels persistence without returning authority.</param>
+    /// <param name="hardwareIdHash">Optional irreversible hardware correlation.</param>
+    /// <returns>This method never returns; its task type permits use in return expressions.</returns>
+    /// <exception cref="DistributionOperationException">Always throws the bounded public denial after required persistence.</exception>
     private async Task<RuntimeDistributionPreflightResponse> RefuseAsync(
         LicenseDbContext db, Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction? transaction,
+        RuntimeDistributionHardwareDecision? replay,
         string clientId, string requestId, string payloadDigestSha256, Guid productId, Guid licenseId,
         string grantRefDigestSha256, RuntimeDistributionPreflightRequest request, string? installationIdHash,
         string authorityMode, string reasonCode, IReadOnlyCollection<string> categories,
         bool licenseActive, bool licenseRevoked, bool licenseExpired, bool paidAutoUnbanEligible,
         CancellationToken cancellationToken, string? hardwareIdHash = null)
     {
+        if (replay is not null)
+            throw Denial(reasonCode);
         db.RuntimeDistributionHardwareDecisions.Add(BuildDecision(clientId, requestId, payloadDigestSha256,
             productId, licenseId, grantRefDigestSha256, request, hardwareIdHash, installationIdHash,
             authorityMode, "refused", reasonCode, categories, licenseActive, licenseRevoked,
-            licenseExpired, paidAutoUnbanEligible, 0, DateTime.UtcNow));
+            licenseExpired, paidAutoUnbanEligible, 0, await ReadDatabaseClockAsync(db, cancellationToken)));
         await db.SaveChangesAsync(cancellationToken);
         if (transaction is not null) await transaction.CommitAsync(cancellationToken);
         LogDecision(db.RuntimeDistributionHardwareDecisions.Local.Single(), replay: false);
-        throw NotEligible(reasonCode);
+        throw Denial(reasonCode);
     }
+
+    /// <summary>Reads provider time after all decisive waits so expiry policy never uses a stale client clock.</summary>
+    /// <param name="db">Current authority context.</param>
+    /// <param name="cancellationToken">Cancels the provider query.</param>
+    /// <returns>PostgreSQL clock time, or process UTC for the nonrelational unit-test provider.</returns>
+    private static async Task<DateTime> ReadDatabaseClockAsync(
+        LicenseDbContext db,
+        CancellationToken cancellationToken) => db.Database.IsNpgsql()
+            ? await db.Database.SqlQueryRaw<DateTime>(
+                "SELECT pg_catalog.clock_timestamp() AS \"Value\"").SingleAsync(cancellationToken)
+            : DateTime.UtcNow;
 
     /// <summary>
     /// Creates one first-seen decision row with irreversible correlations and frozen commercial facts;
@@ -379,50 +590,30 @@ public sealed partial class RuntimeDistributionPreflightService : IRuntimeDistri
             decision.AutoUnbannedCount, decision.AttemptCount, replay);
 
     /// <summary>
-    /// Admits only the closed six-observation shape with bounded, pre-trimmed values. The returned
-    /// object remains request-local and is never attached to an entity or logger.
+    /// Admits only the closed UUID evidence shape. A missing or malformed UUID is not a contract error: it is a
+    /// machine refusal decided by <see cref="MachineIdentity.FromUuid"/>. Only an unknown member, a missing evidence
+    /// object, or a UUID longer than the stored bound is rejected as an invalid request.
     /// </summary>
+    /// <summary>
+    /// Returns whether the WebSetup observations state that the UUID read itself failed
+    /// (<c>"systemUuidRead": "error"</c>, exact ordinal value). Used only to pick AR-02 over AR-01 for an already
+    /// refused machine; it can never turn a refusal into an acceptance.
+    /// </summary>
+    /// <param name="machineEvidence">Unsigned observation object, or null.</param>
+    /// <returns><see langword="true"/> for an explicit read error.</returns>
+    internal static bool ReportsUnreadableUuid(JsonElement? machineEvidence) =>
+        machineEvidence is { ValueKind: JsonValueKind.Object } evidence
+        && evidence.TryGetProperty("systemUuidRead", out var status)
+        && status.ValueKind == JsonValueKind.String
+        && string.Equals(status.GetString(), "error", StringComparison.Ordinal);
+
     private static RuntimeDistributionHardwareEvidence ValidateEvidence(
         RuntimeDistributionHardwareEvidence? evidence)
     {
         if (evidence is null || evidence.ExtensionData is { Count: > 0 }
-            || !ValidObservation(evidence.CpuId) || IsMissing(evidence.CpuId)
-            || !ValidObservation(evidence.MotherboardId) || IsMissing(evidence.MotherboardId)
-            || !ValidObservation(evidence.BiosId) || IsMissing(evidence.BiosId)
-            || !ValidObservation(evidence.LegacyDiskId) || IsMissing(evidence.LegacyDiskId)
-            || !ValidObservation(evidence.MachineName)
-            || (evidence.StableDiskId is not null && !ValidObservation(evidence.StableDiskId)))
+            || evidence.SystemUuid is { Length: > MachineIdentityObservationService.MaxSystemUuidLength })
             throw InvalidRequest();
         return evidence;
-    }
-
-    /// <summary>Reports whether one observation is bounded, trimmed, non-empty, and control-free.</summary>
-    private static bool ValidObservation(string? value) =>
-        value is { Length: >= 1 and <= 256 }
-        && string.Equals(value, value.Trim(), StringComparison.Ordinal)
-        && !value.Any(char.IsControl);
-
-    /// <summary>
-    /// Recognizes the SDK's explicit missing-value sentinels. Applied to every WMI-derived
-    /// component (CPU/motherboard/BIOS/disk) so a failed local read is refused up front instead
-    /// of silently becoming part of the authoritative hardware identity. MachineName is exempt:
-    /// it is never WMI-derived (Environment.MachineName), so it cannot legitimately produce these
-    /// sentinels, and a machine literally named "UNKNOWN" must not be refused.
-    /// </summary>
-    private static bool IsMissing(string? value) => string.IsNullOrWhiteSpace(value)
-        || string.Equals(value, "UNKNOWN", StringComparison.Ordinal)
-        || string.Equals(value, "NON-WINDOWS", StringComparison.Ordinal);
-
-    /// <summary>
-    /// Reproduces the pinned SDK five-component identity and returns its first sixteen uppercase
-    /// SHA-256 hexadecimal characters; no client-supplied final HWID is accepted.
-    /// </summary>
-    private static string ComputeHardwareId(RuntimeDistributionHardwareEvidence evidence, string diskId)
-    {
-        var raw = string.Concat(evidence.CpuId, evidence.MotherboardId, evidence.BiosId,
-            diskId, evidence.MachineName);
-        using var sha256 = SHA256.Create();
-        return Convert.ToHexString(sha256.ComputeHash(Encoding.UTF8.GetBytes(raw)))[..16];
     }
 
     /// <summary>Creates the irreversible lowercase digest allowed to cross back into Website storage.</summary>
@@ -447,9 +638,33 @@ public sealed partial class RuntimeDistributionPreflightService : IRuntimeDistri
     private static DistributionOperationException NotEligible(string? reasonCode = null) =>
         new("not_eligible", StatusCodes.Status403Forbidden, reasonCode);
 
+    /// <summary>Public error code of a machine refused by the UUID rule (TKT-001277).</summary>
+    internal const string DeviceRefusedErrorCode = "device_refused";
+
+    /// <summary>
+    /// Maps an internal refusal reason to its public denial. UUID refusals become <c>device_refused</c> carrying only
+    /// the customer support code (AR-xx) so the WebSetup can show "Appareil refusé (code AR-xx)"; every other reason
+    /// keeps the indistinguishable <c>not_eligible</c> denial.
+    /// </summary>
+    /// <param name="reasonCode">Internal refusal reason recorded in the decision.</param>
+    /// <returns>The public exception to throw.</returns>
+    private static DistributionOperationException Denial(string? reasonCode)
+    {
+        var supportCode = MachineIdentity.ToSupportCode(reasonCode);
+        return supportCode is not null && !string.Equals(supportCode, "AR-00", StringComparison.Ordinal)
+            ? new DistributionOperationException(DeviceRefusedErrorCode, StatusCodes.Status403Forbidden, supportCode)
+            : NotEligible(reasonCode);
+    }
+
     /// <summary>Creates a fail-closed response for malformed provider-owned enrollment state.</summary>
     private static DistributionOperationException ServiceUnavailable() =>
         new("service_unavailable", StatusCodes.Status503ServiceUnavailable);
+
+    /// <summary>Preserves one bounded internal infrastructure diagnostic without changing the public 503.</summary>
+    /// <param name="diagnosticCode">Internal closed reason that contains no credential or hardware value.</param>
+    /// <returns>A public service-unavailable exception with the bounded internal reason.</returns>
+    private static DistributionOperationException ServiceUnavailable(string diagnosticCode) =>
+        new("service_unavailable", StatusCodes.Status503ServiceUnavailable, diagnosticCode);
 
     /// <summary>Accepts only lowercase canonical D-format UUID spelling without normalization.</summary>
     private static bool TryCanonicalUuid(string? value, out string canonical)

@@ -24,6 +24,55 @@ namespace SoftLicence.Tests.Server;
 /// <summary>Real local HTTP/PG evidence for additive migrations, atomic paid issuance, races and authority preservation.</summary>
 public sealed class PersonalDayPassPostgreSqlTests
 {
+    /// <summary>Proves an actual purchased pass keeps all paid time deferred on version refusal, then starts once after updating.</summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("2.1.357")]
+    [InlineData("2.4.299")]
+    public async Task Tkt1469_MinimumVersion_DoesNotConsumePurchasedPass(string? version)
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var issued = await fixture.ReadResponseAsync(fixture.Request());
+        Assert.True(issued.CurrentPendingFirstActivation);
+        await using (var setup = fixture.Db())
+        {
+            var product = await setup.Products.SingleAsync();
+            product.Name = "TIAConnect";
+            product.MinimumAllowedVersion = "2.4.300";
+            await setup.SaveChangesAsync();
+        }
+        await using var before = fixture.Db();
+        var licenseBefore = JsonSerializer.Serialize(await before.Licenses.AsNoTracking().SingleAsync());
+        var passBefore = JsonSerializer.Serialize(await before.PersonalDayPasses.AsNoTracking().SingleAsync());
+        var receiptsBefore = JsonSerializer.Serialize(await before.PersonalDayPassOperations.AsNoTracking().ToListAsync());
+        using var refused = await fixture.Client.PostAsJsonAsync("/api/activation", new
+        {
+            AppName = "TIAConnect", issued.LicenseKey, HardwareId = "A146900000000002",
+            AppVersion = version, CustomerEmail = "buyer@example.test"
+        });
+        Assert.Equal(HttpStatusCode.OK, refused.StatusCode);
+        using var result = JsonDocument.Parse(await refused.Content.ReadAsStringAsync());
+        Assert.Equal("UPDATE_REQUIRED", result.RootElement.GetProperty("status").GetString());
+        await using var after = fixture.Db();
+        Assert.Equal(licenseBefore, JsonSerializer.Serialize(await after.Licenses.AsNoTracking().SingleAsync()));
+        Assert.Equal(passBefore, JsonSerializer.Serialize(await after.PersonalDayPasses.AsNoTracking().SingleAsync()));
+        Assert.Equal(receiptsBefore, JsonSerializer.Serialize(await after.PersonalDayPassOperations.AsNoTracking().ToListAsync()));
+        Assert.Empty(await after.LicenseSeats.ToListAsync());
+        Assert.False(await after.LicenseHistories.AnyAsync(row => row.Action == "PERSONAL_PASS_FIRST_ACTIVATION_STARTED"));
+
+        using var accepted = await fixture.Client.PostAsJsonAsync("/api/activation", new
+        {
+            AppName = "TIAConnect", issued.LicenseKey, HardwareId = "A146900000000002",
+            AppVersion = "2.4.300", CustomerEmail = "buyer@example.test"
+        });
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        using var acceptedBody = JsonDocument.Parse(await accepted.Content.ReadAsStringAsync());
+        Assert.False(string.IsNullOrEmpty(acceptedBody.RootElement.GetProperty("licenseFile").GetString()));
+        Assert.NotNull((await after.PersonalDayPasses.AsNoTracking().SingleAsync()).InitialPaidThroughUtc);
+        Assert.Single(await after.LicenseSeats.ToListAsync());
+        Assert.Equal(1, await after.LicenseHistories.CountAsync(row => row.Action == "PERSONAL_PASS_FIRST_ACTIVATION_STARTED"));
+    }
+
     /// <summary>Representative fixture values; production capability authority remains in the persisted catalogue.</summary>
     private static readonly IReadOnlyDictionary<string, string> FixturePaidFeatures = new Dictionary<string, string>(StringComparer.Ordinal)
     {

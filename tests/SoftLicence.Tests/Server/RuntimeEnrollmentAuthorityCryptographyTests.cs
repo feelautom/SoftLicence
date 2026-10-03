@@ -70,6 +70,44 @@ public sealed class RuntimeEnrollmentAuthorityCryptographyTests
         Assert.Equal((byte)'{', signed.Value.StatementUtf8[0]);
     }
 
+    /// <summary>
+    /// Proves persisted generic generations are reverified with their exact configured operational key and
+    /// that payload, key, and signature substitution fail closed without relying on a fresh registry snapshot.
+    /// </summary>
+    [Fact]
+    public void PersistedGeneration_RequiresExactConfiguredOperationalSignature()
+    {
+        using var keys = new TestKeys();
+        var options = keys.CreateOptions();
+        var crypto = Crypto(keys.Registry);
+        var payload = ValidPayloadBytes();
+        var signed = crypto.SignGeneration(options, payload).Value!;
+
+        Assert.Equal(RuntimeEnrollmentAuthorityCryptography.Failure.None,
+            crypto.VerifyGenerationSignature(options, signed.CanonicalPayloadUtf8, signed.KeyId, signed.Signature));
+        Assert.Equal(RuntimeEnrollmentAuthorityCryptography.Failure.SignatureInvalid,
+            crypto.VerifyGenerationSignature(options, signed.CanonicalPayloadUtf8, signed.KeyId,
+                (signed.Signature[0] == 'A' ? "B" : "A") + signed.Signature[1..]));
+        Assert.Equal(RuntimeEnrollmentAuthorityCryptography.Failure.KeyNotAuthorized,
+            crypto.VerifyGenerationSignature(options, signed.CanonicalPayloadUtf8,
+                "recovery-2026-01", signed.Signature));
+        Assert.NotEqual(RuntimeEnrollmentAuthorityCryptography.Failure.None,
+            crypto.VerifyGenerationSignature(options,
+                MutatedPayload(root => root["providerGrantRef"] = "substituted"),
+                signed.KeyId, signed.Signature));
+
+        var rotated = keys.CreateOptions(includeSecondOperational: true);
+        var historical = crypto.SignGeneration(rotated, payload).Value!;
+        rotated.Keys.Single(key => key.KeyId == "operational-2026-01").PrivateKeyPem = null;
+        rotated.Keys.Single(key => key.KeyId == "operational-next").PrivateKeyPem =
+            keys.Other.ExportPkcs8PrivateKeyPem();
+        rotated.ActiveSigningKeyId = "operational-next";
+        Assert.Empty(RuntimeAuthorityGenerationConfigurationValidator.Validate(rotated));
+        Assert.Equal(RuntimeEnrollmentAuthorityCryptography.Failure.None,
+            crypto.VerifyGenerationSignature(rotated, historical.CanonicalPayloadUtf8,
+                historical.KeyId, historical.Signature));
+    }
+
     /// <summary>Proves request-only transition shape, requestedAtUtc, and genesis expected-ID relations are closed.</summary>
     [Fact]
     public void RequestParser_RejectsCrossedTransitionAndGenesisRelations()

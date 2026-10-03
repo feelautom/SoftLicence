@@ -139,6 +139,12 @@ public sealed class RuntimeEnrollmentKeyRegistryService(
         END;
         """;
 
+    /// <summary>
+    /// Validates application-role isolation, registry and durable-receipt guards, configured key material,
+    /// and every persisted encryption reference before the runtime accepts work.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels database and catalog reads.</param>
+    /// <exception cref="InvalidOperationException">Required key or storage authority is missing or inconsistent.</exception>
     public async Task ValidateAsync(CancellationToken cancellationToken = default)
     {
         if (options.Value.Mode == "off")
@@ -283,6 +289,7 @@ public sealed class RuntimeEnrollmentKeyRegistryService(
                 throw Invalid();
         }
 
+        await ValidateMigrationReceiptInfrastructureAsync(connection, cancellationToken);
         await ValidateConfiguredKeysAsync(db, cancellationToken);
 
         var expected = BuildExpected(options.Value);
@@ -302,6 +309,7 @@ public sealed class RuntimeEnrollmentKeyRegistryService(
             .Concat(db.RuntimeEnrollments.AsNoTracking().Select(row => row.ChallengeKeyId))
             .Concat(db.RuntimeEnrollmentRequests.AsNoTracking().Select(row => row.ResponseKeyId))
             .Concat(db.RuntimeEnrollmentProofNonces.AsNoTracking().Select(row => row.ResponseKeyId))
+            .Concat(db.HardwareAuthorityMigrationReceipts.AsNoTracking().Select(row => row.KeyId))
             .Concat(db.RuntimeCanaryProofNonces.AsNoTracking().Select(row => row.ResponseKeyId))
             .Concat(db.DistributionLicenseBootstrapAuthorizations.AsNoTracking()
                 .Where(row => row.ResponseKeyId != null).Select(row => row.ResponseKeyId!))
@@ -311,6 +319,55 @@ public sealed class RuntimeEnrollmentKeyRegistryService(
             .Distinct().ToListAsync(cancellationToken);
         if (referencedEncryptionIds.Any(keyId =>
                 !expected.TryGetValue(("encryption", keyId), out var key) || key.State == "retired"))
+            throw Invalid();
+    }
+
+    /// <summary>
+    /// Verifies the durable-receipt guards' exact function bodies, owners, ACLs and enabled trigger bindings.
+    /// Missing or modified infrastructure is a startup failure rather than a silent loss of historical proof.
+    /// </summary>
+    /// <param name="connection">Open provider connection under the application role.</param>
+    /// <param name="cancellationToken">Cancels catalog validation.</param>
+    private static async Task ValidateMigrationReceiptInfrastructureAsync(NpgsqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT (
+                SELECT count(*) = 2 FROM pg_catalog.pg_proc p
+                JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+                JOIN pg_catalog.pg_roles r ON r.oid = p.proowner
+                WHERE n.nspname = 'public' AND r.rolname = 'softlicence_runtime_authority_owner'
+                  AND NOT r.rolcanlogin AND p.pronargs = 0 AND p.proargtypes = ''::oidvector
+                  AND p.proconfig @> ARRAY['search_path=pg_catalog, pg_temp']::text[]
+                  AND NOT pg_catalog.has_function_privilege('public', p.oid, 'EXECUTE')
+                  AND NOT pg_catalog.has_function_privilege(current_user, p.oid, 'EXECUTE')
+                  AND ((p.proname = 'runtime_migration_receipt_immutable' AND NOT p.prosecdef
+                        AND p.prosrc COLLATE "C" = @immutable COLLATE "C")
+                    OR (p.proname = 'runtime_migration_receipt_key_retirement' AND p.prosecdef
+                        AND p.prosrc COLLATE "C" = @retention COLLATE "C"))
+            ) AND (
+                SELECT count(*) = 3 FROM pg_catalog.pg_trigger t
+                JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid
+                JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace
+                WHERE n.nspname = 'public' AND pn.nspname = 'public'
+                  AND t.tgenabled = 'O' AND NOT t.tgisinternal AND octet_length(t.tgargs) = 0
+                  AND t.tgqual IS NULL AND t.tgattr = ''::int2vector
+                  AND ((c.relname = 'HardwareAuthorityMigrationReceipts'
+                        AND p.proname = 'runtime_migration_receipt_immutable'
+                        AND ((t.tgname = 'TR_MigrationReceipt_Immutable' AND t.tgtype = 27)
+                          OR (t.tgname = 'TR_MigrationReceipt_NoTruncate' AND t.tgtype = 34)))
+                    OR (c.relname = 'RuntimeEnrollmentKeyRegistries'
+                        AND p.proname = 'runtime_migration_receipt_key_retirement'
+                        AND t.tgname = 'TR_MigrationReceipt_KeyRetention' AND t.tgtype = 19))
+            ) AND pg_catalog.has_table_privilege('softlicence_runtime_authority_owner',
+                    'public."HardwareAuthorityMigrationReceipts"', 'SELECT');
+            """;
+        command.Parameters.AddWithValue("immutable", Migrations.MigrationReceiptGuards.ImmutableSource);
+        command.Parameters.AddWithValue("retention", Migrations.MigrationReceiptGuards.KeyRetentionSource);
+        if (await command.ExecuteScalarAsync(cancellationToken) is not true)
             throw Invalid();
     }
 

@@ -895,6 +895,18 @@ public sealed partial class DistributionInstallationBindingServiceTests : IDispo
     [Fact]
     public async Task Finalize_FullSeatCapacityOrNonReleaseBaseline_FailsClosedWithoutBinding()
     {
+        // Automatic replacement is exclusive to single-seat licences. Keep this capacity
+        // refusal contract on a genuinely full multi-seat licence.
+        await using (var setup = new LicenseDbContext(_options))
+        {
+            (await setup.Licenses.SingleAsync(row => row.Id == LicenseId)).MaxSeats = 2;
+            setup.LicenseSeats.Add(new LicenseSeat
+            {
+                LicenseId = LicenseId, HardwareId = "SECOND-CAPACITY-SEAT", IsActive = true,
+                FirstActivatedAt = Now.UtcDateTime, LastCheckInAt = Now.UtcDateTime
+            });
+            await setup.SaveChangesAsync();
+        }
         var entitlement = (await _service.IssueEntitlementAsync(
             ClientId, Hash("issue"), IssueRequest())).Response.EntitlementRef;
         var wrongHardware = FinalizeRequest(entitlement);
@@ -1276,8 +1288,8 @@ public sealed partial class DistributionInstallationBindingServiceTests : IDispo
     }
 
     /// <summary>
-    /// Proves seat release refuses a divergent enrollment, then atomically retires only the exact seat authority
-    /// and returns the frozen response for an exact retry.
+    /// Proves seat release refuses a divergent assignment scope, ignores the retained Runtime HWID compatibility
+    /// value after the scope is repaired, atomically retires only the exact seat authority, and replays exactly.
     /// </summary>
     [Fact]
     public async Task Invalidate_SeatReleased_AtomicallyRetiresOnlyExactAuthorityAndExactlyReplays()
@@ -1353,6 +1365,7 @@ public sealed partial class DistributionInstallationBindingServiceTests : IDispo
             var correctedEnrollment = await cleanup.RuntimeEnrollments
                 .SingleAsync(candidate => candidate.Id == enrollmentId);
             correctedEnrollment.LicenseSeatId = SeatId;
+            correctedEnrollment.HardwareIdHash = new string('f', 64);
             await cleanup.SaveChangesAsync();
         }
 

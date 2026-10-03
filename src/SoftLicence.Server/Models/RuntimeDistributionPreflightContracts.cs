@@ -31,23 +31,17 @@ public sealed class RuntimeDistributionPreflightRequest
 }
 
 /// <summary>
-/// Contains bounded observations used to reproduce the pinned SDK identities on the server.
-/// These transient values must never be logged or persisted.
+/// Machine observations sent by the WebSetup for an installation not yet enrolled (TKT-001277 lot 2c). The server
+/// alone derives the licence identifier from <see cref="SystemUuid"/> with the SDK rule; the WebSetup computes and
+/// decides nothing. <see cref="MachineEvidence"/> is investigation evidence stored by
+/// <c>MachineIdentityObservationService</c> and never takes part in the decision.
 /// </summary>
 public sealed class RuntimeDistributionHardwareEvidence
 {
-    /// <summary>Gets or sets the trimmed processor identifier or UNKNOWN sentinel.</summary>
-    public string? CpuId { get; set; }
-    /// <summary>Gets or sets the trimmed baseboard serial or UNKNOWN sentinel.</summary>
-    public string? MotherboardId { get; set; }
-    /// <summary>Gets or sets the trimmed BIOS serial or UNKNOWN sentinel.</summary>
-    public string? BiosId { get; set; }
-    /// <summary>Gets or sets the first non-empty disk serial used by the contractual identity.</summary>
-    public string? LegacyDiskId { get; set; }
-    /// <summary>Gets or sets the index-zero disk serial used only as a secondary ban signal.</summary>
-    public string? StableDiskId { get; set; }
-    /// <summary>Gets or sets the exact Windows machine name used by the pinned SDK algorithm.</summary>
-    public string? MachineName { get; set; }
+    /// <summary>Gets or sets the raw <c>Win32_ComputerSystemProduct.UUID</c>, or <c>null</c> when the machine exposes none.</summary>
+    public string? SystemUuid { get; set; }
+    /// <summary>Gets or sets the raw machine evidence object collected by the SDK, or <c>null</c>.</summary>
+    public JsonElement? MachineEvidence { get; set; }
 
     /// <summary>Captures unknown JSON members so the service can reject contract widening.</summary>
     [JsonExtensionData]

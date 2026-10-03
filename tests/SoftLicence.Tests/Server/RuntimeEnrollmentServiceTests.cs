@@ -18,40 +18,74 @@ namespace SoftLicence.Tests.Server;
 public sealed class RuntimeEnrollmentServiceTests
 {
     /// <summary>
-    /// Proves positive v2 authority evidence requires the exact active relational seat and compares the
-    /// hardware identity by digest without repairing, recasing, or otherwise normalizing the stored value.
+    /// Proves the global availability gate keeps its stable 503 precedence even when the
+    /// caller supplies an unknown additive release-transition schema.
     /// </summary>
-    [Fact]
-    public void AuthorityEvidence_RequiresExactActiveSeatWithoutRepairingHardwareIdentity()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReleaseTransition_WhenDisabledAndSchemaUnknown_Returns503BeforeSchemaValidation(
+        bool rollback)
     {
-        var licenseId = Guid.NewGuid();
-        var seatId = Guid.NewGuid();
-        const string hardwareId = "OPAQUE-HARDWARE:Exact";
-        var license = new License { Id = licenseId };
-        var seat = new LicenseSeat
+        var service = new RuntimeEnrollmentService(
+            null!, null!, null!, null!, Options.Create(new RuntimeEnrollmentOptions { Mode = "off" }));
+        var request = new RuntimeEnrollmentUpgradeRelayRequest
         {
-            Id = seatId,
-            LicenseId = licenseId,
-            HardwareId = hardwareId,
-            IsActive = true
-        };
-        var enrollment = new RuntimeEnrollment { LicenseSeatId = seatId };
-        var binding = new DistributionInstallationBinding
-        {
-            LicenseId = licenseId,
-            LicenseSeatId = seatId,
-            HardwareIdHash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(hardwareId)))
+            Schema = "runtime-enrollment-release-unknown-v99"
         };
 
-        Assert.True(RuntimeEnrollmentAuthorityV2Coordinator.MatchesExactActiveSeat(
-            seat, enrollment, license, binding));
-        seat.IsActive = false;
-        Assert.False(RuntimeEnrollmentAuthorityV2Coordinator.MatchesExactActiveSeat(
-            seat, enrollment, license, binding));
-        seat.IsActive = true;
-        seat.HardwareId = hardwareId.ToLowerInvariant();
-        Assert.False(RuntimeEnrollmentAuthorityV2Coordinator.MatchesExactActiveSeat(
-            seat, enrollment, license, binding));
+        var exception = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => rollback
+            ? service.RollbackAsync("website-step1", "test-key", "invalid", request)
+            : service.UpgradeAsync("website-step1", "test-key", "invalid", request));
+
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, exception.StatusCode);
+        Assert.Equal("runtime_enrollment_unavailable", exception.ErrorCode);
+    }
+
+    /// <summary>Proves current Prepare responses never expose the provider-owned assignment.</summary>
+    /// <param name="schema">Exact temporarily supported response boundary being serialized.</param>
+    [Theory]
+    [InlineData(RuntimeEnrollmentService.PrepareResponseSchema)]
+    [InlineData(RuntimeEnrollmentService.PrepareV2ResponseSchema)]
+    public void PrepareResponse_DoesNotSerializeAssignment(string schema)
+    {
+        var response = new RuntimeEnrollmentPrepareResponse(
+            schema, RuntimeEnrollmentService.ProtocolVersion, "pending",
+            "11111111-1111-4111-8111-111111111111", 1, "challenge",
+            "2026-09-25T07:00:00.0000000Z", "https://runtime.example.test")
+        {
+            SecurityEpoch = schema == RuntimeEnrollmentService.PrepareResponseSchema ? null : 1
+        };
+
+        var json = JsonSerializer.Serialize(response, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.DoesNotContain("\"assignmentId\"", json, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Proves v2 evidence binds the immutable lineage-root seat independently from the requested current seat.
+    /// </summary>
+    [Fact]
+    public void AuthorityEvidenceScope_BindsRootAndRequestedSeatsIndependently()
+    {
+        var scope = new RuntimeEnrollmentAuthorityEvidenceScope(
+            "website-step1", Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+        var exact = RuntimeEnrollmentAuthorityTransitionPolicy.ResolveScopedEvidence(
+            "SEAT_REASSIGNED", scope,
+            [new RuntimeEnrollmentAuthorityScopedDecision("SEAT_ACQUISITION_PROOF", scope)]);
+
+        Assert.True(exact.Contains("SEAT_ACQUISITION_PROOF"));
+        Assert.False(RuntimeEnrollmentAuthorityTransitionPolicy.ResolveScopedEvidence(
+            "SEAT_REASSIGNED", scope,
+            [new RuntimeEnrollmentAuthorityScopedDecision("SEAT_ACQUISITION_PROOF",
+                scope with { LineageRootSeatId = Guid.NewGuid() })])
+            .Contains("SEAT_ACQUISITION_PROOF"));
+        Assert.False(RuntimeEnrollmentAuthorityTransitionPolicy.ResolveScopedEvidence(
+            "SEAT_REASSIGNED", scope,
+            [new RuntimeEnrollmentAuthorityScopedDecision("SEAT_ACQUISITION_PROOF",
+                scope with { RequestedCurrentSeatId = Guid.NewGuid() })])
+            .Contains("SEAT_ACQUISITION_PROOF"));
     }
 
     /// <summary>
@@ -426,7 +460,7 @@ public sealed class RuntimeEnrollmentServiceTests
     {
         var scope = new RuntimeEnrollmentAuthorityEvidenceScope(
             "website-step1", Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(),
-            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
         foreach (var rule in RuntimeEnrollmentAuthorityTransitionPolicy.Registry)
         foreach (var label in rule.Evidence)
         {
@@ -438,7 +472,9 @@ public sealed class RuntimeEnrollmentServiceTests
             {
                 scope with { ClientId = "website-step2" }, scope with { ProductId = Guid.NewGuid() },
                 scope with { BindingId = Guid.NewGuid() }, scope with { EnrollmentId = Guid.NewGuid() },
-                scope with { LicenseId = Guid.NewGuid() }, scope with { SeatId = Guid.NewGuid() },
+                scope with { LicenseId = Guid.NewGuid() },
+                scope with { LineageRootSeatId = Guid.NewGuid() },
+                scope with { RequestedCurrentSeatId = Guid.NewGuid() },
                 scope with { LineageId = Guid.NewGuid() }, scope with { HeadGenerationId = Guid.NewGuid() }
             };
             foreach (var crossScope in crossScopes)
@@ -467,6 +503,22 @@ public sealed class RuntimeEnrollmentServiceTests
         var releaseChanged = ValidTransition("RECOVERY_AUTHORIZED");
         releaseChanged.Current.Release.Version = "2.3.446";
         Assert.Equal("TRANSITION_SCOPE_VIOLATION", Evaluate(releaseChanged).ErrorCode);
+    }
+
+    /// <summary>Proves recovery authority is commercial only for live resulting enrollment states.</summary>
+    [Theory]
+    [InlineData("pending", 0)]
+    [InlineData("active", 0)]
+    [InlineData("expired", 1)]
+    [InlineData("revoked", 1)]
+    public void AuthorityRecovery_ResultClassFollowsResultingState(
+        string resultingState,
+        int expected)
+    {
+        var (_, payload) = ValidTransition("RECOVERY_AUTHORIZED");
+        payload.Enrollment.State = resultingState;
+
+        Assert.Equal(expected, (int)RuntimeEnrollmentAuthorityV2Coordinator.ClassifyResult(payload));
     }
 
     /// <summary>Proves every epoch-changing transition rejects a silent numeric jump.</summary>
@@ -675,6 +727,8 @@ public sealed class RuntimeEnrollmentServiceTests
     [InlineData("legacy-algorithm")]
     [InlineData("stable-algorithm")]
     [InlineData("sdk-old")]
+    [InlineData("pre-uuid-legacy-algorithm")]
+    [InlineData("pre-uuid-stable-algorithm")]
     [InlineData("schema-case")]
     [InlineData("extension")]
     public void HardwareAuthorityMigration_ValidationRejectsNearMisses(string mutation)
@@ -689,7 +743,9 @@ public sealed class RuntimeEnrollmentServiceTests
             case "stable-short": request.HardwareIdV2 = "A6D3EED115BC84A"; break;
             case "legacy-algorithm": request.LegacyAlgorithm = "legacy-wmi-any-disk"; break;
             case "stable-algorithm": request.HardwareIdV2Algorithm = "v2-wmi-first-disk"; break;
-            case "sdk-old": request.SdkVersion = "1.1.12"; break;
+            case "sdk-old": request.SdkVersion = "1.1.14"; break;
+            case "pre-uuid-legacy-algorithm": request.LegacyAlgorithm = "legacy-wmi-first-disk"; break;
+            case "pre-uuid-stable-algorithm": request.HardwareIdV2Algorithm = "v2-wmi-disk-index-0"; break;
             case "schema-case": request.Schema = request.Schema!.ToUpperInvariant(); break;
             case "extension": request.ExtensionData = new() { ["unexpected"] = default }; break;
         }
@@ -704,6 +760,56 @@ public sealed class RuntimeEnrollmentServiceTests
         Assert.Equal("invalid_request", invalid.ErrorCode);
     }
 
+    /// <summary>
+    /// TKT-001277 lot 5: the target identifier must be the one the SDK 2.0 rule derives from an accepted UUID.
+    /// Absent, generic, malformed or oversized UUIDs and non-derived targets are refused as device_refused.
+    /// </summary>
+    [Theory]
+    [InlineData(null, "6B775195D2F86F36")]
+    [InlineData("", "6B775195D2F86F36")]
+    [InlineData("03000200-0400-0500-0006-000700080009", "6B775195D2F86F36")]
+    [InlineData("FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF", "6B775195D2F86F36")]
+    [InlineData("not-a-uuid", "6B775195D2F86F36")]
+    [InlineData("4C4C4544-0051-3610-8052-B7C04F4A4E33", "6B775195D2F86F36")]
+    [InlineData("4C4C4544-0051-3610-8052-B7C04F4A4E32", "6B775195D2F86F37")]
+    public void HardwareAuthorityMigration_ValidationRefusesTargetsNotDerivedFromAnAcceptedUuid(
+        string? systemUuid, string hardwareIdV2)
+    {
+        var validate = typeof(RuntimeEnrollmentService).GetMethod(
+            "ValidateHardwareAuthorityMigration", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var enrollmentId = Guid.Parse("11111111-1111-4111-8111-111111111111");
+        var request = ValidHardwareMigrationRequest(enrollmentId);
+        request.SystemUuid = systemUuid;
+        request.HardwareIdV2 = hardwareIdV2;
+
+        var thrown = Assert.Throws<TargetInvocationException>(() => validate.Invoke(null,
+        [
+            enrollmentId, request, ValidMigrationProofHeaders(), new string('d', 64)
+        ]));
+
+        var refused = Assert.IsType<RuntimeEnrollmentException>(thrown.InnerException);
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, refused.StatusCode);
+        Assert.Equal("device_refused", refused.ErrorCode);
+    }
+
+    /// <summary>The UUID is canonicalized by the SDK rule: braces and lowercase hex derive the same target.</summary>
+    [Theory]
+    [InlineData("{4c4c4544-0051-3610-8052-b7c04f4a4e32}")]
+    [InlineData(" 4C4C4544-0051-3610-8052-B7C04F4A4E32 ")]
+    public void HardwareAuthorityMigration_ValidationAcceptsCanonicallyEquivalentUuid(string systemUuid)
+    {
+        var validate = typeof(RuntimeEnrollmentService).GetMethod(
+            "ValidateHardwareAuthorityMigration", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var enrollmentId = Guid.Parse("11111111-1111-4111-8111-111111111111");
+        var request = ValidHardwareMigrationRequest(enrollmentId);
+        request.SystemUuid = systemUuid;
+
+        Assert.NotNull(validate.Invoke(null,
+        [
+            enrollmentId, request, ValidMigrationProofHeaders(), new string('d', 64)
+        ]));
+    }
+
     /// <summary>Builds the canonical request shared by strict contract tests.</summary>
     private static RuntimeHardwareAuthorityMigrationRequest ValidHardwareMigrationRequest(Guid enrollmentId) => new()
     {
@@ -714,10 +820,11 @@ public sealed class RuntimeEnrollmentServiceTests
         Epoch = 1,
         SecurityEpoch = 3,
         LegacyHardwareId = "A00272B768FFD6AF",
-        HardwareIdV2 = "A6D3EED115BC84AD",
-        LegacyAlgorithm = "legacy-wmi-first-disk",
-        HardwareIdV2Algorithm = "v2-wmi-disk-index-0",
-        SdkVersion = "1.1.13"
+        HardwareIdV2 = "6B775195D2F86F36",
+        LegacyAlgorithm = RuntimeEnrollmentService.HardwareMigrationSourceAlgorithm,
+        HardwareIdV2Algorithm = RuntimeEnrollmentService.HardwareMigrationTargetAlgorithm,
+        SdkVersion = "2.0.0",
+        SystemUuid = "4C4C4544-0051-3610-8052-B7C04F4A4E32"
     };
 
     /// <summary>Builds syntactically canonical detached proof headers for validator tests.</summary>
@@ -1125,47 +1232,92 @@ public sealed class RuntimeEnrollmentServiceTests
         Assert.Equal("invalid_request", invalid.ErrorCode);
     }
 
+    /// <summary>
+    /// Proves the exact historical capability shape is admitted only for an ACTIVE enrollment on the
+    /// one allowlisted release; no distribution-binding version participates in Runtime authority.
+    /// </summary>
+    /// <param name="enrollmentVersion">The authoritative release stored on the Runtime enrollment.</param>
+    /// <param name="enrollmentState">The authoritative Runtime enrollment lifecycle state.</param>
+    /// <param name="expectedStatusCode">Zero for admission, otherwise the expected stable rejection status.</param>
+    /// <param name="expectedErrorCode">The stable rejection code, or <see langword="null"/> for admission.</param>
     [Theory]
-    [InlineData("2.2.916", "2.2.916", true)]
-    [InlineData("2.2.915", "2.2.915", false)]
-    [InlineData("2.2.916", "2.2.915", false)]
-    public void LegacyCapabilityBinding_IsRestrictedToExactAuthoritativeRelease(
-        string enrollmentVersion, string bindingVersion, bool accepted)
+    [InlineData("2.2.916", "ACTIVE", 0, null)]
+    [InlineData("2.2.915", "ACTIVE", StatusCodes.Status409Conflict, "capability_binding_mismatch")]
+    [InlineData("2.2.916", "PENDING", StatusCodes.Status422UnprocessableEntity, "enrollment_inactive")]
+    public async Task HistoricalCapability_IsRestrictedToExactActiveEnrollmentRelease(
+        string enrollmentVersion, string enrollmentState, int expectedStatusCode, string? expectedErrorCode)
     {
         var validate = typeof(RuntimeEnrollmentService).GetMethod(
             "ValidateCapability", BindingFlags.NonPublic | BindingFlags.Static)!;
-        var validateBinding = typeof(RuntimeEnrollmentService).GetMethod(
-            "ValidateCapabilityBinding", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var validateIdentity = typeof(RuntimeEnrollmentService).GetMethod(
+            "ValidateCapabilityIdentityAsync", BindingFlags.NonPublic | BindingFlags.Static)!;
         var enrollmentId = Guid.Parse("11111111-1111-4111-8111-111111111111");
         var bindingId = Guid.Parse("33333333-3333-4333-8333-333333333333");
         const string installationId = "44444444-4444-4444-8444-444444444444";
         var capability = validate.Invoke(null,
             [enrollmentId, LegacyCapabilityRequest(enrollmentId), ValidProofHeaders(), new string('b', 64)]);
+        var factory = new InMemoryFactory();
+        await using var db = await factory.CreateDbContextAsync();
+        foreach (var (key, hash) in new[]
+        {
+            ("FP_CORE", new string('c', 64)),
+            ("FP_DLL", new string('d', 64)),
+            ("FP_EXE", new string('e', 64))
+        })
+        {
+            db.ApprovedBinaries.Add(new ApprovedBinary
+            {
+                ProductId = enrollmentId,
+                Version = enrollmentVersion,
+                Key = key,
+                Hash = hash,
+                Source = ApprovedBinaryService.ReleaseSource
+            });
+        }
+        await db.SaveChangesAsync();
         var enrollment = new RuntimeEnrollment
         {
             Id = enrollmentId,
+            ProductId = enrollmentId,
             BindingId = bindingId,
             InstallationId = installationId,
-            ReleaseVersion = enrollmentVersion
-        };
-        var binding = new DistributionInstallationBinding
-        {
-            Id = bindingId,
-            InstallationId = installationId,
-            Version = bindingVersion
+            ReleaseVersion = enrollmentVersion,
+            ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion,
+            Algorithm = "PS256",
+            Epoch = 1,
+            SecurityEpoch = 1,
+            PublicKeySpkiCiphertext = "sealed",
+            PublicKeySpkiKeyId = "test-key",
+            PublicKeySpkiSha256 = new string('a', 64),
+            KeyThumbprint = new string('A', 43),
+            State = enrollmentState
         };
 
-        if (accepted)
+        RuntimeEnrollmentException? rejection = null;
+        try
         {
-            validateBinding.Invoke(null, [enrollment, binding, capability]);
+            var validation = Assert.IsAssignableFrom<Task>(validateIdentity.Invoke(
+                null, [db, enrollment, capability, CancellationToken.None]));
+            await validation;
+        }
+        catch (TargetInvocationException exception)
+        {
+            rejection = Assert.IsType<RuntimeEnrollmentException>(exception.InnerException);
+        }
+        catch (RuntimeEnrollmentException exception)
+        {
+            rejection = exception;
+        }
+
+        if (expectedStatusCode == 0)
+        {
+            Assert.Null(rejection);
             return;
         }
 
-        var thrown = Assert.Throws<TargetInvocationException>(() =>
-            validateBinding.Invoke(null, [enrollment, binding, capability]));
-        var rejected = Assert.IsType<RuntimeEnrollmentException>(thrown.InnerException);
-        Assert.Equal(StatusCodes.Status409Conflict, rejected.StatusCode);
-        Assert.Equal("capability_binding_mismatch", rejected.ErrorCode);
+        var rejected = Assert.IsType<RuntimeEnrollmentException>(rejection);
+        Assert.Equal(expectedStatusCode, rejected.StatusCode);
+        Assert.Equal(expectedErrorCode, rejected.ErrorCode);
     }
 
     private static List<RuntimeEnrollmentBinaryEvidenceRequest> CapabilityBinaries() =>
@@ -1392,6 +1544,7 @@ public sealed class RuntimeEnrollmentServiceTests
         Assert.Equal(expectedAllowed, (bool)method.Invoke(null, [version, mask])!);
     }
 
+    /// <summary>Proves Prepare rejects a non-canonical semantic version before consulting open version policies.</summary>
     [Fact]
     public void PrepareValidation_RejectsNonCanonicalSemVerBeforeOpenVersionPolicies()
     {
@@ -1422,8 +1575,11 @@ public sealed class RuntimeEnrollmentServiceTests
     [InlineData("runtime-enrollment-prepare-v1", true)]
     [InlineData("runtime-enrollment-prepare-v2", true)]
     [InlineData("Runtime-enrollment-prepare-v2", false)]
-    [InlineData("runtime-enrollment-prepare-v3", false)]
-    public void PrepareValidation_AcceptsOnlyExactVersionedSchemas(string schema, bool accepted)
+    [InlineData("runtime-enrollment-prepare-v4", false)]
+    /// <summary>Proves the boundary adapter accepts only the two temporarily supported exact wire schemas.</summary>
+    /// <param name="schema">Case-sensitive external schema identifier presented to Prepare.</param>
+    /// <param name="accepted">Whether the identifier is an explicitly supported compatibility boundary.</param>
+    public void PrepareValidation_AcceptsOnlySupportedBoundarySchemas(string schema, bool accepted)
     {
         var method = typeof(RuntimeEnrollmentService).GetMethod(
             "ValidatePrepare", BindingFlags.NonPublic | BindingFlags.Static)!;

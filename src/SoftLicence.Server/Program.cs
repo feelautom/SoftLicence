@@ -263,6 +263,8 @@ builder.Services.AddScoped<SoftLicence.Server.Services.IDistributionS2SAuthentic
     SoftLicence.Server.Services.DistributionS2SAuthenticationService>();
 builder.Services.AddScoped<SoftLicence.Server.Services.IDistributionInstallationBindingService,
     SoftLicence.Server.Services.DistributionInstallationBindingService>();
+// Observe the server request transport for Runtime seat-change history, never client-supplied audit fields.
+builder.Services.AddHttpContextAccessor();
 // Keep raw machine observations inside a request-scoped provider authority and outside durable bindings.
 builder.Services.AddScoped<SoftLicence.Server.Services.IRuntimeDistributionPreflightService,
     SoftLicence.Server.Services.RuntimeDistributionPreflightService>();
@@ -375,6 +377,7 @@ builder.Services.AddScoped<SoftLicence.Server.Services.TelemetryRejectionService
 builder.Services.AddScoped<SoftLicence.Server.Services.RecoveryTelemetryService>(); // Strict Recovery v1 ingestion and FSM
 builder.Services.AddScoped<SoftLicence.Server.Services.ActivationIncidentService>();
 builder.Services.AddScoped<SoftLicence.Server.Services.FingerprintService>(); // Hardware Fingerprints
+builder.Services.AddScoped<SoftLicence.Server.Services.MachineIdentityObservationService>(); // TKT-001277 UUID identity
 builder.Services.AddScoped<SoftLicence.Server.Services.SeatCleanupService>(); // Enforcement un HWID par produit
 builder.Services.AddTransient<SoftLicence.Server.Services.PiracyDetectionService>(); // Détection piratage
 // One process-wide quota ledger makes concurrent SUP reservations atomic; restart clears the
@@ -389,6 +392,8 @@ builder.Services.AddSingleton<SoftLicence.Server.Services.IBugTraceAutoReportSer
 builder.Services.AddHostedService<SoftLicence.Server.Services.BugTraceAutoReportOutboxWorker>();
 builder.Services.AddTransient<SoftLicence.Server.Services.AiAnalysisService>(); // Analyse IA télémétrie
 builder.Services.AddHostedService<SoftLicence.Server.Services.CleanupService>(); // Nettoyage Automatique
+builder.Services.AddHostedService<SoftLicence.Server.Services.AssignmentEnforcementModeSynchronizer>(); // TKT-001277 interrupteur open/closed
+builder.Services.AddHostedService<SoftLicence.Server.Services.AssignmentEnforcementAlertWorker>(); // TKT-001277 alertes groupées
 builder.Services.Configure<SoftLicence.Server.Services.SmtpSettings>(builder.Configuration.GetSection("SmtpSettings"));
 builder.Services.AddHttpClient(); // Pour GeoIP et Webhooks
 builder.Services.AddHttpClient("BugTrace")

@@ -22,6 +22,21 @@ namespace SoftLicence.Tests.Server;
 /// <summary>Proves production absence, explicit test registration, gates, and exact safe HTTP serialization.</summary>
 public sealed class Tkt000672SourceCAuthorityHttpTests
 {
+    /// <summary>Preserves production controllers while excluding unrelated historical test controllers.</summary>
+    [Fact]
+    public void TestApplication_DiscoversProductionAndOnlySourceCTestController()
+    {
+        using var factory = CreateFactory(true, true, true, new HttpScenarioExecutor());
+        var manager = factory.Services.GetRequiredService<ApplicationPartManager>();
+        var feature = new ControllerFeature();
+        manager.PopulateFeature(feature);
+        Assert.Contains(typeof(SoftLicence.Server.Controllers.ActivationController).GetTypeInfo(), feature.Controllers);
+        Assert.DoesNotContain(typeof(SoftLicence.Server.Controllers.Tkt976BaselineActivationController).GetTypeInfo(), feature.Controllers);
+        Assert.Equal(
+            [typeof(Tkt000672SourceCAuthorityController).GetTypeInfo()],
+            feature.Controllers.Where(type => type.Assembly == typeof(Tkt000672SourceCAuthorityController).Assembly).ToArray());
+    }
+
     /// <summary>Proves the test-only route is absent when the production application parts are unchanged.</summary>
     [Fact]
     public async Task ProductionApplication_DoesNotDiscoverSourceCAuthorityRoute()
@@ -210,6 +225,10 @@ public sealed class Tkt000672SourceCAuthorityHttpTests
                 services.AddControllers().ConfigureApplicationPartManager(manager =>
                 {
                     manager.ApplicationParts.Add(new AssemblyPart(typeof(Tkt000672SourceCAuthorityController).Assembly));
+                    // Replace default discovery so it cannot independently admit unrelated test controllers.
+                    foreach (var provider in manager.FeatureProviders
+                        .Where(provider => provider.GetType() == typeof(ControllerFeatureProvider)).ToArray())
+                        manager.FeatureProviders.Remove(provider);
                     manager.FeatureProviders.Add(new InternalControllerFeatureProvider());
                 }).AddControllersAsServices();
             });

@@ -303,6 +303,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.Equal("PARTNER_INVALID", log.ResultStatus);
     }
 
+    /// <summary>A full multi-seat licence retains the public capacity error and matching audit result.</summary>
     [Fact]
     public async Task PostActivation_WhenSeatLimitReached_ShouldExposeSeatLimitCode()
     {
@@ -326,15 +327,16 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
                 HardwareId = "D000000000000003",
                 ActivationDate = firstActivatedAt,
                 IsActive = true,
-                MaxSeats = 1,
+                MaxSeats = 2,
                 AllowedVersions = "*"
             };
 
             db.Licenses.Add(license);
+            foreach (var hardware in new[] { "D000000000000003", "D000000000000005" })
             db.LicenseSeats.Add(new LicenseSeat
             {
                 LicenseId = license.Id,
-                HardwareId = "D000000000000003",
+                HardwareId = hardware,
                 FirstActivatedAt = firstActivatedAt,
                 LastCheckInAt = firstActivatedAt,
                 IsActive = true

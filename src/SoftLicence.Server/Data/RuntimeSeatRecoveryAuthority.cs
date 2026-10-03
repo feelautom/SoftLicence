@@ -21,7 +21,7 @@ public sealed class RuntimeSeatRecoveryAuthority
     public Guid LicenseSeatId { get; set; }
     /// <summary>Gets or sets the canonical future installation identifier.</summary>
     public Guid InstallationId { get; set; }
-    /// <summary>Gets or sets the hardware digest frozen into the generation.</summary>
+    /// <summary>Gets or sets the lowercase SHA-256 hardware digest retained only as immutable signed evidence.</summary>
     public string HardwareIdDigestSha256 { get; set; } = string.Empty;
     /// <summary>Gets or sets the exact release version frozen into the generation.</summary>
     public string ReleaseVersion { get; set; } = string.Empty;

@@ -4,54 +4,49 @@ using Xunit;
 
 namespace SoftLicence.Tests.Core;
 
+[Collection(MachineIdentityReadersCollection.Name)]
 public class PackageReadmeExamplesTests
 {
     [Fact]
-    public void ObservationFirstExample_UsesThePublicMigrationContract()
+    public void RefusalHandlingExample_UsesThePublicContract()
     {
-        using var _ = HardwareInfo.UseWmiPropertyReaderForTests((className, propertyName, whereClause) =>
-            className switch
+        using var _ = MachineIdentity.UseWmiQueryReaderForTests((className, properties) =>
+            WmiQueryResult.Success(new IReadOnlyDictionary<string, string?>[]
             {
-                "Win32_Processor" => "CPU-DOC-TEST",
-                "Win32_BaseBoard" => "MB-DOC-TEST",
-                "Win32_BIOS" => "BIOS-DOC-TEST",
-                "Win32_DiskDrive" when whereClause == "Index=0" => "STABLE-DOC-TEST",
-                "Win32_DiskDrive" => "LEGACY-DOC-TEST",
-                _ => "UNKNOWN"
-            });
+                new Dictionary<string, string?> { [properties[0]] = className == "Win32_ComputerSystemProduct" ? "03000200-0400-0500-0006-000700080009" : "X" }
+            }));
 
-        string licenseHardwareId = HardwareInfo.GetHardwareId();
-        HardwareIdMigrationInfo migration = HardwareInfo.GetHardwareIdMigrationInfo();
-
-        var hardwareIdObservation = new
+        string? shownToCustomer = null;
+        string? loggedInternally = null;
+        try
         {
-            HardwareId = licenseHardwareId,
-            migration.LegacyHardwareId,
-            migration.StableHardwareId,
-            migration.HasStableHardwareId,
-            migration.HasDistinctHardwareIds
-        };
+            string hardwareId = HardwareInfo.GetHardwareId();
+            Assert.Fail("A generic UUID must not produce an identifier: " + hardwareId);
+        }
+        catch (MachineIdentityRefusedException refused)
+        {
+            shownToCustomer = refused.Message;
+            loggedInternally = refused.RefusalCode;
+        }
 
-        Assert.Equal(migration.LegacyHardwareId, hardwareIdObservation.HardwareId);
-        Assert.True(hardwareIdObservation.HasStableHardwareId);
-        Assert.True(hardwareIdObservation.HasDistinctHardwareIds);
-        Assert.NotNull(hardwareIdObservation.StableHardwareId);
+        Assert.Equal("Device refused (code AR-04).", shownToCustomer);
+        Assert.Equal(MachineIdentity.RefusalUuidGenericKnown, loggedInternally);
     }
 
     [Fact]
-    public void PackageReadme_DocumentsTheLegacyAndV2SafetyBoundary()
+    public void PackageReadme_DocumentsTheUuidIdentityAndSupportCodes()
     {
         string repositoryRoot = FindRepositoryRoot();
         string readmePath = Path.Combine(repositoryRoot, "src", "SoftLicence.SDK", "PACKAGE_README.md");
         string readme = File.ReadAllText(readmePath);
 
         Assert.Contains("HardwareInfo.GetHardwareId()", readme, StringComparison.Ordinal);
-        Assert.Contains("HardwareInfo.GetStableHardwareId()", readme, StringComparison.Ordinal);
-        Assert.Contains("HardwareInfo.GetHardwareIdMigrationInfo()", readme, StringComparison.Ordinal);
-        Assert.Contains("HasStableHardwareId", readme, StringComparison.Ordinal);
-        Assert.Contains("HasDistinctHardwareIds", readme, StringComparison.Ordinal);
-        Assert.Contains("V2 is observation-only", readme, StringComparison.Ordinal);
-        Assert.Contains("Do not use it as the primary", readme, StringComparison.Ordinal);
+        Assert.Contains("Win32_ComputerSystemProduct.UUID", readme, StringComparison.Ordinal);
+        Assert.Contains("MachineIdentityRefusedException", readme, StringComparison.Ordinal);
+        foreach (var code in new[] { "AR-01", "AR-02", "AR-03", "AR-04", "AR-05" })
+            Assert.Contains(code, readme, StringComparison.Ordinal);
+        Assert.DoesNotContain("HardwareInfo.GetStableHardwareId()", readme, StringComparison.Ordinal);
+        Assert.DoesNotContain("HardwareInfo.GetHardwareIdMigrationInfo()", readme, StringComparison.Ordinal);
         Assert.DoesNotMatch(new Regex(@"\b[A-F0-9]{16}\b", RegexOptions.IgnoreCase), readme);
     }
 

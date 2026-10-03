@@ -70,8 +70,9 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
 
     /// <summary>
     /// An uncommitted administrative type/ledger mutation must block capability classification until
-    /// its final state is visible. An ordinary license expiring during a coherent type-name update
-    /// separately proves time is re-read after that wait. Observe PG lock and clock facts, not a fixed sleep.
+    /// its final state is visible. For expiry, hold the type row before setting a future database
+    /// deadline, then prove the reader waits through that deadline and re-reads current time.
+    /// Observe PostgreSQL blocking and clock facts with a separate autocommit connection.
     /// Roll back on every assertion failure and await the worker so no background query escapes the test.
     /// </summary>
     [Theory]
@@ -80,9 +81,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     public async Task Compat991_ClassificationWaitsForConcurrentAuthorityRows(string mutation)
     {
         using var scenario = await CreateCompatScenarioAsync(false);
-        var expiryDuringWait = (await scenario.DatabaseNowAsync()).AddSeconds(1);
-        if (mutation == "expiry-during-wait") await scenario.SetExpiryAsync(expiryDuringWait);
-        else await scenario.MakePassAsync(DateTime.UtcNow.AddSeconds(90), true);
+        if (mutation != "expiry-during-wait")
+            await scenario.MakePassAsync(DateTime.UtcNow.AddSeconds(90), true);
         await using var writer = await scenario.Factory.CreateDbContextAsync();
         var replacement = new LicenseType { ProductId = scenario.ProductId, Name = "Ordinary replacement", Slug = "ordinary" };
         writer.Add(replacement);
@@ -96,6 +96,17 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             await writer.Database.ExecuteSqlInterpolatedAsync($"UPDATE \"Licenses\" SET \"LicenseTypeId\"={replacement.Id} WHERE \"Id\"={scenario.LicenseId}");
         else
             await writer.Database.ExecuteSqlInterpolatedAsync($"UPDATE \"PersonalDayPasses\" SET \"PaidThroughUtc\"=\"PaidThroughUtc\" + interval '10 seconds' WHERE \"LicenseId\"={scenario.LicenseId}");
+        DateTime? expiryDuringWait = null;
+        if (mutation == "expiry-during-wait")
+        {
+            // Set the ordinary licence deadline after the writer holds its type row. The service
+            // must enter its FOR SHARE classification wait before expiry, and its lock timeout
+            // must outlast that bounded wait so a 503 cannot substitute for the expected 422.
+            scenario.Options.LockTimeoutMilliseconds = 12000;
+            scenario.Options.StatementTimeoutMilliseconds = 20000;
+            expiryDuringWait = (await scenario.DatabaseNowAsync()).AddSeconds(6);
+            await scenario.SetExpiryAsync(expiryDuringWait);
+        }
         var pending = scenario.IssueAsync();
         try
         {
@@ -103,11 +114,26 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             // filtered by current_database(), so the shared harness database would never show the wait.
             await using var observer = new NpgsqlConnection(scenario.AdminConnection);
             await observer.OpenAsync();
-            var deadline = DateTime.UtcNow.AddSeconds(3);
+            var deadline = DateTime.UtcNow.AddSeconds(5);
             var observedWait = false;
             while (!pending.IsCompleted && DateTime.UtcNow < deadline)
             {
-                await using var command = new NpgsqlCommand("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND usename='softlicence_runtime_test_app')", observer);
+                var blockedTable = mutation switch
+                {
+                    "license-type" => "Licenses",
+                    "ledger" => "PersonalDayPasses",
+                    _ => "LicenseTypes"
+                };
+                await using var command = new NpgsqlCommand("""
+                    SELECT EXISTS (
+                        SELECT 1 FROM pg_catalog.pg_stat_activity
+                        WHERE datname = pg_catalog.current_database()
+                          AND usename = 'softlicence_runtime_test_app'
+                          AND wait_event_type = 'Lock'
+                          AND query LIKE @table_pattern
+                          AND pg_catalog.cardinality(pg_catalog.pg_blocking_pids(pid)) > 0)
+                    """, observer);
+                command.Parameters.AddWithValue("table_pattern", $"%{blockedTable}%");
                 observedWait = (bool)(await command.ExecuteScalarAsync())!;
                 if (observedWait) break;
                 await Task.Delay(20);
@@ -116,8 +142,9 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             if (mutation == "expiry-during-wait")
             {
                 // The type remains ordinary and coherent: only real elapsed database time can cause rejection.
-                await using var clock = new NpgsqlCommand("SELECT clock_timestamp() >= @expiry", observer);
-                clock.Parameters.AddWithValue("expiry", expiryDuringWait);
+                await using var clock = new NpgsqlCommand("SELECT pg_catalog.clock_timestamp() >= @expiry", observer);
+                clock.Parameters.AddWithValue("expiry", expiryDuringWait!.Value);
+                deadline = DateTime.UtcNow.AddSeconds(8);
                 while (!(bool)(await clock.ExecuteScalarAsync())!)
                 {
                     Assert.True(DateTime.UtcNow < deadline, "PostgreSQL did not reach the fixture deadline within the bounded lock test.");

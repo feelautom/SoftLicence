@@ -21,9 +21,10 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// reason promotion and leaves every authority row otherwise unchanged.
     /// </summary>
     [Fact]
+    [Trait("Category", "PrivateRepository")]
     public async Task Tkt000557RepairScript_RealPsqlRejectsWrongTargetThenAppliesExactSnapshot()
     {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        using var scenario = await CreateHistoricalAliasScenarioAsync();
         var repair = await PrepareTkt000557RepairGraphAsync(scenario);
         var environment = Tkt000557PostgreSqlEnvironment(scenario.AdminConnectionString);
         var temporaryDirectory = Directory.CreateTempSubdirectory("softlicence-tkt000557-real-psql-");
@@ -70,9 +71,10 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// migration proof as the Runtime resolver instead of accepting jsonb's last-key value.
     /// </summary>
     [Fact]
+    [Trait("Category", "PrivateRepository")]
     public async Task Tkt000557RepairScript_DuplicateHistoryPropertyFailsClosed()
     {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        using var scenario = await CreateHistoricalAliasScenarioAsync();
         var repair = await PrepareTkt000557RepairGraphAsync(scenario);
         await using (var mutate = new NpgsqlConnection(scenario.AdminConnectionString))
         {
@@ -109,9 +111,10 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// The losing process observes the promoted reason and fails before a second mutation.
     /// </summary>
     [Fact]
+    [Trait("Category", "PrivateRepository")]
     public async Task Tkt000557RepairScript_ConcurrentApplyCommitsExactlyOnce()
     {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        using var scenario = await CreateHistoricalAliasScenarioAsync();
         var repair = await PrepareTkt000557RepairGraphAsync(scenario);
         var environment = Tkt000557PostgreSqlEnvironment(scenario.AdminConnectionString);
         var temporaryDirectory = Directory.CreateTempSubdirectory("softlicence-tkt000557-concurrent-");
@@ -150,44 +153,14 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Creates an authenticated historical alias graph that the migration leaves ambiguous and
     /// therefore requires the bounded operator repair before Finalize may consume it.
     /// </summary>
+    /// <param name="scenario">Fresh database seeded at the pre-alias schema; this helper applies every subsequent production migration.</param>
+    /// <returns>The exact backfilled alias and licence identifiers used by the real repair wrapper.</returns>
     private static async Task<Tkt000557RepairGraph> PrepareTkt000557RepairGraphAsync(
         PreparedBootstrapScenario scenario)
     {
-        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
-        await MigrateScenarioAsync(scenario);
+        var historicalGraph = await ReleaseHistoricalAliasSeatAsync(scenario);
+        var licenseId = historicalGraph.LicenseId;
         var adminFactory = new TestDbFactory(scenario.AdminConnectionString);
-        await using (var downgrade = await adminFactory.CreateDbContextAsync())
-        {
-            await downgrade.GetService<IMigrator>().MigrateAsync(
-                "20260816131533_AllowRuntimeHardwareAuthorityMigrationProofs");
-        }
-
-        Guid licenseId;
-        await using (var diverge = await scenario.Factory.CreateDbContextAsync())
-        {
-            var binding = await diverge.DistributionInstallationBindings.SingleAsync(candidate =>
-                candidate.Id == scenario.Fixture.BindingId);
-            var enrollment = await diverge.RuntimeEnrollments.SingleAsync(candidate =>
-                candidate.Id == scenario.EnrollmentId);
-            var seat = await diverge.LicenseSeats.SingleAsync(candidate => candidate.Id == binding.LicenseSeatId);
-            licenseId = binding.LicenseId;
-            seat.IsActive = false;
-            seat.UnlinkedAt = DateTime.UtcNow.AddMinutes(-5);
-            enrollment.State = "INVALIDATED";
-            enrollment.InvalidatedAtUtc = DateTime.UtcNow.AddMinutes(-4);
-            enrollment.InvalidationReason = "authority_ineligible";
-            diverge.LicenseSeats.Add(new LicenseSeat
-            {
-                Id = Guid.NewGuid(),
-                LicenseId = licenseId,
-                HardwareId = LegacyHardwareId,
-                IsActive = true,
-                FirstActivatedAt = DateTime.UtcNow.AddMinutes(-3),
-                LastCheckInAt = DateTime.UtcNow.AddMinutes(-3),
-                AppVersion = scenario.Fixture.Version
-            });
-            await diverge.SaveChangesAsync();
-        }
         await using (var upgrade = await adminFactory.CreateDbContextAsync())
         {
             await upgrade.GetService<IMigrator>().MigrateAsync();

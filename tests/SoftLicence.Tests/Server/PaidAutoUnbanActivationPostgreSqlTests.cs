@@ -1,6 +1,7 @@
 using System.Data.Common;
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
@@ -31,6 +32,11 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
 
         var response = await scenario.Client.PostAsJsonAsync("/api/activation", scenario.Request);
 
+        if (failure == PaidActivationFailure.Cleanup)
+        {
+            Assert.NotNull(scenario.CleanupInterceptor);
+            Assert.True(scenario.CleanupInterceptor.Triggered);
+        }
         Assert.Equal(
             failure == PaidActivationFailure.SeatLimit
                 ? HttpStatusCode.BadRequest
@@ -77,11 +83,16 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     }
 
     [Fact]
-    public async Task PaidAutoUnbanActivation_PostgreSql_ConcurrentRebanWaitsForActivationAndAdvancesAuthorityEpoch()
+    public async Task PaidAutoUnbanActivation_PostgreSql_ConcurrentRebanPreservesIdentityAndRevokesCommercialUse()
     {
         var signer = new BlockingSignedLicenseFileService();
         using var scenario = await CreatePaidAutoUnbanScenarioAsync(PaidActivationFailure.None, signer);
         var epochBefore = (await SnapshotPaidAutoUnbanScenarioAsync(scenario)).GlobalAuthorityEpoch;
+        var identityBefore = await SnapshotRetainedRuntimeIdentityAsync(scenario.Factory, scenario.EnrollmentId);
+        EnrollmentLicenseAssignment assignmentBefore;
+        await using (var original = await scenario.Factory.CreateDbContextAsync())
+            assignmentBefore = await original.EnrollmentLicenseAssignments.AsNoTracking()
+                .SingleAsync(row => row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE");
 
         var activation = scenario.Client.PostAsJsonAsync("/api/activation", scenario.Request);
         await signer.Entered.Task.WaitAsync(TimeSpan.FromSeconds(15));
@@ -93,7 +104,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             scenario.ProductId,
             banCategory: BannedHardwareId.Categories.Piracy,
             silent: true);
-        await WaitForHardwareBanWaiterAsync(scenario.AdminConnectionString, scenario.HardwareId);
+        await WaitForGlobalAuthorityWaitersAsync(scenario.AdminConnectionString, 1);
         Assert.False(reban.IsCompleted);
 
         signer.Release.TrySetResult();
@@ -101,15 +112,31 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         await reban;
 
         Assert.Equal(HttpStatusCode.OK, activationResponse.StatusCode);
+        var activationBody = await activationResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.False(string.IsNullOrEmpty(activationBody.GetProperty("licenseFile").GetString()));
         var after = await SnapshotPaidAutoUnbanScenarioAsync(scenario);
         Assert.False(after.EligibleBanActive);
         Assert.True(after.PiracyBanActive);
         Assert.True(after.TargetSeatActive);
         Assert.False(after.ConflictingSeatActive);
-        Assert.Equal("invalidated", after.BindingState);
-        Assert.Equal("INVALIDATED", after.EnrollmentState);
-        Assert.True(after.EnrollmentAuthorityEpoch > epochBefore);
+        Assert.Equal(identityBefore, await SnapshotRetainedRuntimeIdentityAsync(scenario.Factory, scenario.EnrollmentId));
+        Assert.True(after.GlobalAuthorityEpoch > epochBefore);
         Assert.True(after.GlobalAuthorityEpoch > after.EnrollmentAuthorityEpoch);
+        await using (var check = await scenario.Factory.CreateDbContextAsync())
+        {
+            var ended = await check.EnrollmentLicenseAssignments.SingleAsync(row => row.Id == assignmentBefore.Id);
+            Assert.Equal("ENDED", ended.State);
+            Assert.Equal("seat_released", ended.EndReason);
+            Assert.NotNull(ended.EndedAtUtc);
+            Assert.Equal(assignmentBefore.Revision, ended.Revision);
+            Assert.Empty(await check.EnrollmentLicenseAssignments.Where(row =>
+                row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE").ToListAsync());
+        }
+        await AssertEndedAssignmentDeniesRuntimeAsync(scenario.Factory, scenario.EnrollmentId);
+        using var statusResponse = await scenario.Client.PostAsJsonAsync("/api/activation/check", scenario.Request);
+        Assert.Equal(HttpStatusCode.OK, statusResponse.StatusCode);
+        var statusBody = await statusResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("REVOKED", statusBody.GetProperty("status").GetString());
         scenario.Notification.Verify(
             notifier => notifier.Notify(
                 NotificationService.Triggers.SecurityIpBanned,
@@ -117,6 +144,63 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 It.IsAny<string>(),
                 It.IsAny<object?>()),
             Times.Once);
+    }
+
+    /// <summary>
+    /// Proves the opposite commit order: a standalone permanent ban queued first on the global
+    /// authority commits before paid activation, which then observes the ban and changes no
+    /// activation graph. Both production operations wait on the same PostgreSQL authority key.
+    /// </summary>
+    [Fact]
+    public async Task PaidAutoUnbanActivation_PostgreSql_StandaloneBanCommittedFirstRefusesWithoutPartialActivation()
+    {
+        using var scenario = await CreatePaidAutoUnbanScenarioAsync(PaidActivationFailure.None);
+        var before = await SnapshotPaidAutoUnbanScenarioAsync(scenario);
+        await using var blocker = new NpgsqlConnection(scenario.AdminConnectionString);
+        await blocker.OpenAsync();
+        await using var blockerTransaction = await blocker.BeginTransactionAsync();
+        await using (var hold = new NpgsqlCommand(
+            "SELECT pg_catalog.pg_advisory_xact_lock(999831, 1)", blocker, blockerTransaction))
+        {
+            await hold.ExecuteNonQueryAsync();
+        }
+
+        var security = CreateHardwareSecurityService(scenario.Factory);
+        var ban = security.BanHardwareIdAsync(
+            scenario.HardwareId,
+            "Standalone operator piracy ban",
+            scenario.ProductId,
+            banCategory: BannedHardwareId.Categories.Piracy,
+            silent: true);
+        await WaitForGlobalAuthorityWaitersAsync(scenario.AdminConnectionString, 1);
+        Assert.False(ban.IsCompleted);
+
+        var activation = scenario.Client.PostAsJsonAsync("/api/activation", scenario.Request);
+        await WaitForGlobalAuthorityWaitersAsync(scenario.AdminConnectionString, 2);
+        Assert.False(activation.IsCompleted);
+
+        await blockerTransaction.CommitAsync();
+        await ban.WaitAsync(TimeSpan.FromSeconds(15));
+        var response = await activation.WaitAsync(TimeSpan.FromSeconds(15));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("BANNED", response.Headers.GetValues("X-SoftLicence-Error-Code").Single());
+        using (var payload = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync()))
+            Assert.Equal("BANNED", payload.RootElement.GetProperty("errorCode").GetString());
+        var after = await SnapshotPaidAutoUnbanScenarioAsync(scenario);
+        Assert.True(after.PiracyBanActive);
+        Assert.False(after.TargetSeatActive);
+        Assert.Equal(before.ConflictingSeatActive, after.ConflictingSeatActive);
+        Assert.Equal(before.BindingState, after.BindingState);
+        Assert.Equal(before.EnrollmentState, after.EnrollmentState);
+        Assert.Equal(before.EnrollmentAuthorityEpoch, after.EnrollmentAuthorityEpoch);
+        scenario.Notification.Verify(
+            notifier => notifier.Notify(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<object?>()),
+            Times.Never);
     }
 
     private static async Task<PaidAutoUnbanScenario> CreatePaidAutoUnbanScenarioAsync(
@@ -168,6 +252,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var targetLicenseId = Guid.NewGuid();
         var conflictingLicenseId = Guid.NewGuid();
         var conflictingSeatId = Guid.NewGuid();
+        if (cleanupInterceptor != null)
+            cleanupInterceptor.LosingSeatId = conflictingSeatId;
         var bindingId = Guid.NewGuid();
         var enrollmentId = Guid.NewGuid();
         var eligibleBanId = Guid.NewGuid();
@@ -205,7 +291,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 CustomerEmail = "paid@example.test",
                 CustomerName = "Paid customer",
                 IsActive = true,
-                MaxSeats = failure == PaidActivationFailure.SeatLimit ? 1 : 2,
+                MaxSeats = 2,
                 AllowedVersions = "*",
                 ExpirationDate = now.AddDays(30)
             };
@@ -235,6 +321,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             });
             if (failure == PaidActivationFailure.SeatLimit)
             {
+                // Keep a real multi-seat capacity refusal; mono-seat replacement is intentional.
+                for (var capacitySeat = 0; capacitySeat < 2; capacitySeat++)
                 db.LicenseSeats.Add(new LicenseSeat
                 {
                     Id = Guid.NewGuid(),
@@ -248,6 +336,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
 
             var grantRef = Guid.NewGuid().ToString("D");
             var handoffDigest = Sha256("paid-auto-unban-handoff-" + Guid.NewGuid().ToString("N"));
+            var installationId = Guid.NewGuid().ToString("D");
             db.DistributionInstallationBindings.Add(new DistributionInstallationBinding
             {
                 Id = bindingId,
@@ -259,7 +348,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 GrantRef = grantRef,
                 GrantRefDigestSha256 = Sha256(grantRef),
                 HandoffDigestSha256 = handoffDigest,
-                InstallationId = Guid.NewGuid().ToString("D"),
+                InstallationId = installationId,
                 HardwareIdHash = Sha256(hardwareId),
                 Version = "2.2.999",
                 InstallerFilename = "TiaConnect-Setup_v2.2.999.msi",
@@ -293,7 +382,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 ProductId = productId,
                 LicenseId = conflictingLicenseId,
                 LicenseSeatId = conflictingSeatId,
-                InstallationId = Guid.NewGuid().ToString("D"),
+                InstallationId = installationId,
                 HardwareIdHash = Sha256(hardwareId),
                 ReleaseVersion = "2.2.999",
                 HandoffDigestSha256 = handoffDigest,
@@ -337,6 +426,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             factory,
             connections.Admin,
             notification,
+            cleanupInterceptor,
             productId,
             targetLicenseId,
             conflictingSeatId,
@@ -395,17 +485,14 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     }
 
     /// <summary>
-    /// Waits until another PostgreSQL session is blocked on one of the hardware-ban advisory locks of
-    /// <paramref name="hardwareId"/>, proving that a concurrent ban writer is serialized behind the
-    /// activation holding them. Since the digest serialization of 2026-09-12, writers take the canonical
-    /// digest lock (<c>hardware-ban-digest|</c> lowercase SHA-256 of the uppercase HWID) before the
-    /// historical <c>hardware-ban-v1|</c> raw lock, so a waiter normally appears on the digest key; both
-    /// namespaces are observed so the proof does not depend on that acquisition order.
+    /// Waits until the requested number of PostgreSQL sessions are blocked on the repository-wide
+    /// commercial mutation key. This proves standalone ban and activation writers serialize before
+    /// either can acquire narrower hardware, product, licence, seat or ban-row authority.
     /// </summary>
     /// <param name="connectionString">An administrator connection able to read <c>pg_locks</c>.</param>
-    /// <param name="hardwareId">The raw HWID whose ban locks are observed.</param>
+    /// <param name="minimumWaiters">Minimum number of non-granted global authority locks.</param>
     /// <exception cref="TimeoutException">No waiter appeared within about ten seconds.</exception>
-    private static async Task WaitForHardwareBanWaiterAsync(string connectionString, string hardwareId)
+    private static async Task WaitForGlobalAuthorityWaitersAsync(string connectionString, int minimumWaiters)
     {
         await using var observer = new NpgsqlConnection(connectionString);
         await observer.OpenAsync();
@@ -413,31 +500,24 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         {
             await using var command = observer.CreateCommand();
             command.CommandText = """
-                WITH target AS (
-                    SELECT pg_catalog.hashtextextended(name, 999095)::bigint AS key
-                    FROM unnest(ARRAY[@digest_lock_name, @legacy_lock_name]) AS name
-                )
                 SELECT count(*)
                 FROM pg_catalog.pg_locks AS held
-                CROSS JOIN target
                 WHERE held.locktype = 'advisory'
                   AND held.database = (
                       SELECT oid FROM pg_catalog.pg_database
                       WHERE datname = pg_catalog.current_database())
-                  AND held.classid = (((target.key >> 32) & 4294967295)::bigint)::oid
-                  AND held.objid = ((target.key & 4294967295)::bigint)::oid
-                  AND held.objsubid = 1
+                  AND held.classid = 999831::oid
+                  AND held.objid = 1::oid
+                  AND held.objsubid = 2
                   AND NOT held.granted;
                 """;
-            command.Parameters.AddWithValue(
-                "digest_lock_name", $"hardware-ban-digest|{SecurityService.ComputeHardwareBanDigest(hardwareId)}");
-            command.Parameters.AddWithValue("legacy_lock_name", $"hardware-ban-v1|{hardwareId.ToUpperInvariant()}");
-            if (Convert.ToInt32(await command.ExecuteScalarAsync()) >= 1)
+            if (Convert.ToInt32(await command.ExecuteScalarAsync()) >= minimumWaiters)
                 return;
             await Task.Delay(50);
         }
 
-        throw new TimeoutException("Expected a PostgreSQL waiter on the hardware-ban authority lock.");
+        throw new TimeoutException(
+            $"Expected at least {minimumWaiters} PostgreSQL waiter(s) on the global mutation authority lock.");
     }
 
     private static class PaidActivationFailure
@@ -481,14 +561,19 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         }
     }
 
+    /// <summary>Injects failure only when the fixture's losing seat is written inactive by commercial cleanup.</summary>
     private sealed class DistributionBindingCleanupFailureInterceptor : DbCommandInterceptor
     {
+        /// <summary>Exact synthetic losing seat; unrelated updates must not trigger the fault.</summary>
+        internal Guid LosingSeatId { get; set; }
+        /// <summary>Proves the expected cleanup command was intercepted, preventing a vacuous rollback test.</summary>
+        internal bool Triggered { get; private set; }
         public override InterceptionResult<int> NonQueryExecuting(
             DbCommand command,
             CommandEventData eventData,
             InterceptionResult<int> result)
         {
-            ThrowIfCleanup(command);
+            ThrowIfCleanup(command, eventData);
             return result;
         }
 
@@ -498,7 +583,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             InterceptionResult<int> result,
             CancellationToken cancellationToken = default)
         {
-            ThrowIfCleanup(command);
+            ThrowIfCleanup(command, eventData);
             return ValueTask.FromResult(result);
         }
 
@@ -507,7 +592,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             CommandEventData eventData,
             InterceptionResult<DbDataReader> result)
         {
-            ThrowIfCleanup(command);
+            ThrowIfCleanup(command, eventData);
             return result;
         }
 
@@ -517,17 +602,23 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             InterceptionResult<DbDataReader> result,
             CancellationToken cancellationToken = default)
         {
-            ThrowIfCleanup(command);
+            ThrowIfCleanup(command, eventData);
             return ValueTask.FromResult(result);
         }
 
-        private static void ThrowIfCleanup(DbCommand command)
+        /// <summary>Matches the real seat write and its exact tracked transition without changing SQL or constraints.</summary>
+        private void ThrowIfCleanup(DbCommand command, CommandEventData eventData)
         {
-            if (command.CommandText.Contains(
-                    "UPDATE \"DistributionInstallationBindings\"",
-                    StringComparison.Ordinal))
+            if (LosingSeatId != Guid.Empty
+                && command.CommandText.Contains("UPDATE \"LicenseSeats\"", StringComparison.Ordinal)
+                && command.Parameters.Cast<DbParameter>().Any(parameter => Equals(parameter.Value, LosingSeatId))
+                && eventData.Context is LicenseDbContext db
+                && db.ChangeTracker.Entries<LicenseSeat>().Any(entry =>
+                    entry.Entity.Id == LosingSeatId && entry.State == EntityState.Modified
+                    && !entry.Entity.IsActive && entry.Property(seat => seat.IsActive).OriginalValue))
             {
-                throw new InvalidOperationException("Injected distribution cleanup failure.");
+                Triggered = true;
+                throw new InvalidOperationException("Injected commercial seat cleanup failure.");
             }
         }
     }
@@ -564,6 +655,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         public Guid EligibleBanId { get; }
         public string HardwareId { get; }
         public object Request { get; }
+        /// <summary>Optional synthetic cleanup fault whose execution the failure scenario must prove.</summary>
+        public DistributionBindingCleanupFailureInterceptor? CleanupInterceptor { get; }
 
         public PaidAutoUnbanScenario(
             WebApplicationFactory<Program> webFactory,
@@ -571,6 +664,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             TestDbFactory factory,
             string adminConnectionString,
             Mock<NotificationService> notification,
+            DistributionBindingCleanupFailureInterceptor? cleanupInterceptor,
             Guid productId,
             Guid targetLicenseId,
             Guid conflictingSeatId,
@@ -585,6 +679,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             Factory = factory;
             AdminConnectionString = adminConnectionString;
             Notification = notification;
+            CleanupInterceptor = cleanupInterceptor;
             ProductId = productId;
             TargetLicenseId = targetLicenseId;
             ConflictingSeatId = conflictingSeatId;

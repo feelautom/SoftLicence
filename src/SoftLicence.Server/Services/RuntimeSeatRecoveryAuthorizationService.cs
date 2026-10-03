@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using SoftLicence.Server.Data;
@@ -74,14 +75,19 @@ public interface IRuntimeSeatRecoveryAuthorizationService
 }
 
 /// <summary>
-/// Owns the short Serializable provider transactions that authorize one seat, prove the future key,
-/// and later commit only the closed recovery cutover from one durable PROVED receipt.
+/// Owns short ReadCommitted provider transactions that authorize one seat, prove the future key,
+/// and later commit only the closed recovery cutover from one durable PROVED receipt. Row locks and
+/// the item-2 advisory barrier serialize decisions while post-barrier statements receive snapshots
+/// that include a commercial writer which committed during an earlier lock wait.
 /// </summary>
 public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecoveryAuthorizationService
 {
     private const string ContentType = "application/json; charset=utf-8";
     private const string UtcFormat = "yyyy-MM-dd'T'HH:mm:ss.ffffff'Z'";
     private const string ProofUtcFormat = "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'";
+    /// <summary>Closed terminal reason written when canonical recovery consumes its derived source assignment.</summary>
+    private const string IdentityRecoveredAssignmentEndReason = "identity_recovered";
+    /// <summary>Exact v1 proof audience retained for all canonical recovery key confirmations.</summary>
     private const string ConfirmationAudience = "softlicence:runtime-identity-recovery:confirm:v1";
     /// <summary>Names the only authorized-resource 23505 constraints eligible for bounded reread.</summary>
     private static readonly HashSet<string> ExpectedRecoveryUniqueConstraints = new(StringComparer.Ordinal)
@@ -100,18 +106,28 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
     private readonly IRuntimeEnrollmentCryptoService crypto;
     private readonly RuntimeEnrollmentOptions options;
     private readonly TimeProvider clock;
+    /// <summary>Protected sink for redacted recovery-generation integrity diagnostics.</summary>
+    private readonly ILogger<RuntimeSeatRecoveryAuthorizationService> logger;
 
     /// <summary>
-    /// Creates the scoped recovery authority with provider database, v2 signer, and the signing-policy
+    /// Creates the scoped recovery authority with provider database, generic authority-generation signer, and the signing-policy
     /// clock; business decision timestamps are always read from PostgreSQL after decisive locks.
     /// </summary>
+    /// <param name="dbFactory">Factory for isolated provider transactions.</param>
+    /// <param name="authorityPersistence">Persistence boundary for immutable signed authority generations.</param>
+    /// <param name="seatClaimCryptography">Cryptography boundary for optional historical seat claims.</param>
+    /// <param name="crypto">Envelope cryptography for recovery key material.</param>
+    /// <param name="options">Validated Runtime authority and timeout configuration.</param>
+    /// <param name="clock">Signing-policy clock; never used for mutable commercial decisions.</param>
+    /// <param name="logger">Protected diagnostic sink; payload, key, HWID, customer, and secret data are excluded.</param>
     public RuntimeSeatRecoveryAuthorizationService(
         IDbContextFactory<LicenseDbContext> dbFactory,
         RuntimeEnrollmentAuthorityService authorityPersistence,
         RuntimeSeatRecoverySeatClaimCryptography seatClaimCryptography,
         IRuntimeEnrollmentCryptoService crypto,
         IOptions<RuntimeEnrollmentOptions> options,
-        TimeProvider clock)
+        TimeProvider clock,
+        ILogger<RuntimeSeatRecoveryAuthorizationService> logger)
     {
         this.dbFactory = dbFactory;
         this.authorityPersistence = authorityPersistence;
@@ -119,6 +135,7 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         this.crypto = crypto;
         this.options = options.Value;
         this.clock = clock;
+        this.logger = logger;
     }
 
     /// <inheritdoc />
@@ -132,7 +149,7 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         for (var attempt = 0; attempt < 3; attempt++)
         {
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
             try
             {
                 await SetTransactionGuardsAsync(db, cancellationToken);
@@ -141,15 +158,36 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
                     Guid.Parse(parsed.Request.RequestId), cancellationToken);
                 if (replay is not null)
                 {
-                    var conflictCompletedAtUtc = string.Equals(
-                        replay.RequestDigestSha256, parsed.RequestDigestSha256, StringComparison.Ordinal)
-                        ? (DateTime?)null
-                        : await ReadDatabaseClockAsync(db, cancellationToken);
+                    if (!string.Equals(replay.RequestDigestSha256,
+                            parsed.RequestDigestSha256, StringComparison.Ordinal))
+                    {
+                        var conflictCompletedAtUtc = await ReadDatabaseClockAsync(db, cancellationToken);
+                        await transaction.RollbackAsync(cancellationToken);
+                        return SemanticError(parsed.Request, parsed.RequestDigestSha256,
+                            "idempotency_conflict", StatusCodes.Status409Conflict, conflictCompletedAtUtc);
+                    }
+
+                    // Frozen refusals are inert. A successful authorization still advances a live grant,
+                    // so current source authority is rechecked before its original bytes are returned.
+                    if (!string.Equals(replay.Decision, "AUTHORIZED", StringComparison.Ordinal))
+                    {
+                        await transaction.RollbackAsync(cancellationToken);
+                        return new(replay.HttpStatusCode, replay.ContentType, [.. replay.ExactResponseUtf8]);
+                    }
+
+                    var replayAuthority = await RevalidateAuthorizedReplayAsync(
+                        db, replay, parsed.Request, cancellationToken);
                     await transaction.RollbackAsync(cancellationToken);
-                    return conflictCompletedAtUtc is null
-                        ? new(replay.HttpStatusCode, replay.ContentType, [.. replay.ExactResponseUtf8])
-                        : SemanticError(parsed.Request, parsed.RequestDigestSha256,
-                            "idempotency_conflict", StatusCodes.Status409Conflict, conflictCompletedAtUtc.Value);
+                    return replayAuthority.Outcome switch
+                    {
+                        PreviousAuthorityOutcome.Eligible =>
+                            new(replay.HttpStatusCode, replay.ContentType, [.. replay.ExactResponseUtf8]),
+                        PreviousAuthorityOutcome.Denied =>
+                            CommercialAuthorityDenial(),
+                        PreviousAuthorityOutcome.Unavailable =>
+                            Transport(StatusCodes.Status503ServiceUnavailable, "provider_unavailable"),
+                        _ => Transport(StatusCodes.Status409Conflict, "authority_state_conflict")
+                    };
                 }
 
                 var result = await CreateTerminalAsync(db, authenticatedClientId, parsed, cancellationToken);
@@ -199,7 +237,7 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken);
+        await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
         var requestId = Guid.Parse(request.RequestId);
         var reservationRef = Guid.Parse(request.ReservationRef);
         var recoveryRef = Guid.Parse(request.RecoveryOperationRef);
@@ -211,39 +249,73 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
             .SingleOrDefaultAsync(item => item.ReservationRef == reservationRef, cancellationToken);
         var authority = await db.RuntimeSeatRecoveryAuthorities.AsNoTracking()
             .SingleOrDefaultAsync(item => item.ReservationRef == reservationRef, cancellationToken);
-        var grantDigest = reservation is null ? null : Convert.ToHexStringLower(
-            SHA256.HashData(Encoding.UTF8.GetBytes(reservation.ProviderGrantRef)));
-        var grant = grantDigest is null ? null : await db.RuntimeRecoveryGrantOwnerships.AsNoTracking()
-            .SingleOrDefaultAsync(item => item.ProductId == productId
-                && item.ProviderGrantRefDigestSha256 == grantDigest, cancellationToken);
-        var owner = reservation is null ? null : await db.RuntimeRecoveryCommercialOwnerships.AsNoTracking()
-            .SingleOrDefaultAsync(item => item.ProductId == productId && item.LicenseId == reservation.LicenseId
-                && item.State == "ACTIVE", cancellationToken);
-        var seatExists = reservation is not null && await db.LicenseSeats.AsNoTracking().AnyAsync(item =>
-            item.Id == reservation.LicenseSeatId && item.LicenseId == reservation.LicenseId, cancellationToken);
         if (ledger is null || reservation is null || authority is null
             || ledger.ReservationRef != reservationRef || ledger.RecoveryOperationRef != recoveryRef
             || reservation.RecoveryOperationRef != recoveryRef || reservation.ProductId != productId
             || reservation.AuthenticatedClientId != authenticatedClientId || reservation.RequestId != requestId
-            || !string.Equals(ledger.RequestDigestSha256, request.RequestDigestSha256, StringComparison.Ordinal)
-            || grant is null || owner is null || !seatExists
-            || grant.AuthenticatedClientId != authenticatedClientId || grant.LicenseId != reservation.LicenseId
-            || grant.CommercialOwnershipId != owner.Id
-            || grant.OwnerSubjectId != owner.OwnerSubjectId || grant.RecoveryOperationRef != recoveryRef
-            || grant.RecoveryDigestSha256 != ledger.RecoveryDigestSha256 || grant.RequestId != requestId
-            || authority.SubjectRefDigestSha256 != SubjectDigest(owner.OwnerSubjectId))
+            || !string.Equals(ledger.RequestDigestSha256, request.RequestDigestSha256, StringComparison.Ordinal))
         {
             await transaction.RollbackAsync(cancellationToken);
             return Transport(StatusCodes.Status403Forbidden, "recovery_not_authorized");
         }
-        var previousAuthority = await ResolvePreviousActiveAuthorityAsync(db, reservation.ProductId,
-            reservation.LicenseId, reservation.LicenseSeatId, cancellationToken);
+        if (!await ValidateRecoveryGenerationAsync(db, authority, cancellationToken))
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return Transport(StatusCodes.Status503ServiceUnavailable, "provider_unavailable");
+        }
+        var previousResolution = await ResolvePreviousActiveAuthorityAsync(
+            db, reservation.ProductId, reservation.LicenseId, reservation.LicenseSeatId,
+            authority.ReleaseVersion, authority.ArtifactSetDigestSha256, cancellationToken);
+        if (previousResolution.Outcome == PreviousAuthorityOutcome.Unavailable)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return Transport(StatusCodes.Status503ServiceUnavailable, "provider_unavailable");
+        }
+        if (previousResolution.Outcome == PreviousAuthorityOutcome.Denied)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return CommercialAuthorityDenial();
+        }
+
+        var grantDigest = Convert.ToHexStringLower(
+            SHA256.HashData(Encoding.UTF8.GetBytes(reservation.ProviderGrantRef)));
+        var grant = await db.RuntimeRecoveryGrantOwnerships.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.ProductId == productId
+                && item.ProviderGrantRefDigestSha256 == grantDigest, cancellationToken);
+        var owner = await db.RuntimeRecoveryCommercialOwnerships.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.ProductId == productId && item.LicenseId == reservation.LicenseId
+                && item.State == "ACTIVE", cancellationToken);
+        if (grant is null || owner is null
+            || grant.AuthenticatedClientId != authenticatedClientId || grant.LicenseId != reservation.LicenseId
+            || grant.CommercialOwnershipId != owner.Id || grant.OwnerSubjectId != owner.OwnerSubjectId
+            || grant.RecoveryOperationRef != recoveryRef || grant.RecoveryDigestSha256 != ledger.RecoveryDigestSha256
+            || grant.RequestId != requestId || authority.SubjectRefDigestSha256 != SubjectDigest(owner.OwnerSubjectId))
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return Transport(StatusCodes.Status403Forbidden, "recovery_not_authorized");
+        }
+
+        var observed = await ReadDatabaseClockAsync(db, cancellationToken);
+        previousResolution = await ReassessResolvedCommercialAuthorityAsync(
+            db, previousResolution, reservation.LicenseId, reservation.LicenseSeatId,
+            authority.ReleaseVersion, observed, cancellationToken);
+        if (previousResolution.Outcome == PreviousAuthorityOutcome.Unavailable)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return Transport(StatusCodes.Status503ServiceUnavailable, "provider_unavailable");
+        }
+        if (previousResolution.Outcome == PreviousAuthorityOutcome.Denied)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            return CommercialAuthorityDenial();
+        }
+
+        var previousAuthority = previousResolution.Authority;
         var previousAuthorityState = previousAuthority is not null
             && previousAuthority.HeadLineageId == authority.PreviousAuthorityLineageId
             && previousAuthority.HeadGenerationId == authority.PreviousAuthorityGenerationId
             ? authority.PreviousAuthorityState.ToLowerInvariant()
             : "conflict";
-        var observed = await ReadDatabaseClockAsync(db, cancellationToken);
         var status = RuntimeSeatRecoveryContractCodec.ClassifyCurrentReadback(
             reservation.State.ToLowerInvariant(), authority.State.ToLowerInvariant(), authority.IsCurrentHead,
             previousAuthorityState, observed >= reservation.ExpiresAtUtc);
@@ -276,19 +348,18 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
             for (var attempt = 0; attempt < 3; attempt++)
             {
                 await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-                await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+                await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
                 try
                 {
                     await SetTransactionGuardsAsync(db, cancellationToken);
                     await AcquireKeyProofLockAsync(db, authenticatedClientId, request.RequestId, cancellationToken);
                     var existing = await ReadPreparationForUpdateAsync(db, authenticatedClientId,
                         Guid.Parse(request.RequestId), cancellationToken);
-                    if (existing is not null)
+                    if (existing is not null
+                        && !CryptographicOperations.FixedTimeEquals(existing.CanonicalRequestUtf8, parsed.CanonicalUtf8))
                     {
                         await transaction.RollbackAsync(cancellationToken);
-                        return CryptographicOperations.FixedTimeEquals(existing.CanonicalRequestUtf8, parsed.CanonicalUtf8)
-                            ? new(StatusCodes.Status200OK, ContentType, [.. existing.ExactResponseUtf8])
-                            : Transport(StatusCodes.Status403Forbidden, "recovery_not_authorized");
+                        return Transport(StatusCodes.Status403Forbidden, "recovery_not_authorized");
                     }
 
                     var scope = await LockAndValidateKeyScopeAsync(db, authenticatedClientId, request.ProductId,
@@ -299,6 +370,11 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
                     {
                         await transaction.RollbackAsync(cancellationToken);
                         return Transport(StatusCodes.Status403Forbidden, "recovery_not_authorized");
+                    }
+                    if (existing is not null)
+                    {
+                        await transaction.RollbackAsync(cancellationToken);
+                        return new(StatusCodes.Status200OK, ContentType, [.. existing.ExactResponseUtf8]);
                     }
 
                     var now = await ReadDatabaseClockAsync(db, cancellationToken);
@@ -360,6 +436,11 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
                     throw new OperationCanceledException("Runtime recovery key preparation was canceled by the caller.",
                         exception, cancellationToken);
                 }
+                catch (RuntimeEnrollmentException exception)
+                {
+                    await transaction.RollbackAsync(CancellationToken.None);
+                    return Transport(exception.StatusCode, exception.ErrorCode);
+                }
                 catch (Exception exception) when (IsRetryableTransientDatabaseFailure(exception, cancellationToken)
                     || IsKeyProofUniqueViolation(exception))
                 {
@@ -396,7 +477,7 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         for (var attempt = 0; attempt < 3; attempt++)
         {
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
             try
             {
                 await SetTransactionGuardsAsync(db, cancellationToken);
@@ -405,14 +486,20 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
                     Guid.Parse(request.PrepareRef), cancellationToken);
                 if (existing is not null)
                 {
-                    var conflictAt = string.Equals(existing.ConfirmationRequestSha256,
-                        parsed.ConfirmationRequestSha256, StringComparison.Ordinal)
-                        ? (DateTime?)null : await ReadDatabaseClockAsync(db, cancellationToken);
-                    await transaction.RollbackAsync(cancellationToken);
-                    return conflictAt is null
-                        ? new(existing.HttpStatusCode, existing.ContentType, [.. existing.ExactResponseUtf8])
-                        : KeyConfirmationError(request, "idempotency_conflict", StatusCodes.Status409Conflict,
-                            conflictAt.Value);
+                    if (!string.Equals(existing.ConfirmationRequestSha256,
+                            parsed.ConfirmationRequestSha256, StringComparison.Ordinal))
+                    {
+                        var conflictAt = await ReadDatabaseClockAsync(db, cancellationToken);
+                        await transaction.RollbackAsync(cancellationToken);
+                        return KeyConfirmationError(request, "idempotency_conflict",
+                            StatusCodes.Status409Conflict, conflictAt);
+                    }
+                    if (!string.Equals(existing.State, "PROVED", StringComparison.Ordinal)
+                        || existing.HttpStatusCode != StatusCodes.Status200OK)
+                    {
+                        await transaction.RollbackAsync(cancellationToken);
+                        return new(existing.HttpStatusCode, existing.ContentType, [.. existing.ExactResponseUtf8]);
+                    }
                 }
 
                 var preparation = await ReadPreparationByReferenceForUpdateAsync(db, authenticatedClientId,
@@ -429,8 +516,19 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
                     request.PublicKeySpkiSha256, null, cancellationToken);
                 if (scope is null || preparation.ChallengeConsumedAtUtc is not null)
                 {
+                    if (existing is not null && scope is not null)
+                    {
+                        await transaction.RollbackAsync(cancellationToken);
+                        return new(existing.HttpStatusCode, existing.ContentType, [.. existing.ExactResponseUtf8]);
+                    }
                     await transaction.RollbackAsync(cancellationToken);
                     return Transport(StatusCodes.Status409Conflict, "confirmation_state_conflict");
+                }
+
+                if (existing is not null)
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                    return new(existing.HttpStatusCode, existing.ContentType, [.. existing.ExactResponseUtf8]);
                 }
 
                 var now = await ReadDatabaseClockAsync(db, cancellationToken);
@@ -546,6 +644,11 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
                 throw new OperationCanceledException("Runtime recovery key confirmation was canceled by the caller.",
                     exception, cancellationToken);
             }
+            catch (RuntimeEnrollmentException exception)
+            {
+                await transaction.RollbackAsync(CancellationToken.None);
+                return Transport(exception.StatusCode, exception.ErrorCode);
+            }
             catch (Exception exception) when (IsRetryableTransientDatabaseFailure(exception, cancellationToken)
                 || IsKeyProofUniqueViolation(exception))
             {
@@ -576,7 +679,7 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         for (var attempt = 0; attempt < 3; attempt++)
         {
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+            await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
             try
             {
                 await SetTransactionGuardsAsync(db, cancellationToken);
@@ -619,7 +722,21 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
                     return conflict;
                 }
 
-                var previousBindingCount = await db.DistributionInstallationBindings
+                var sourceAssignmentCount = await db.EnrollmentLicenseAssignments
+                    .Where(item => item.Id == scope.PreviousAuthority.SourceAssignmentId
+                        && item.EnrollmentId == scope.PreviousAuthority.EnrollmentId
+                        && item.LicenseId == scope.Reservation.LicenseId
+                        && item.LicenseSeatId == scope.Reservation.LicenseSeatId
+                        && item.State == "ACTIVE"
+                        && item.EndedAtUtc == null
+                        && item.EndReason == null)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(item => item.State, "ENDED")
+                        .SetProperty(item => item.EndedAtUtc, decisionNow)
+                        .SetProperty(item => item.EndReason, IdentityRecoveredAssignmentEndReason),
+                        cancellationToken);
+                var previousBindingCount = sourceAssignmentCount == 1
+                    ? await db.DistributionInstallationBindings
                     .Where(item => item.Id == scope.PreviousAuthority.BindingId
                         && item.ProductId == scope.Reservation.ProductId
                         && item.LicenseId == scope.Reservation.LicenseId
@@ -631,14 +748,13 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
                         .SetProperty(item => item.State, "invalidated")
                         .SetProperty(item => item.InvalidatedAtUtc, decisionNow)
                         .SetProperty(item => item.InvalidationReason, "installation_superseded"),
-                        cancellationToken);
+                        cancellationToken)
+                    : 0;
                 var previousEnrollmentCount = previousBindingCount == 1
                     ? await db.RuntimeEnrollments
                         .Where(item => item.Id == scope.PreviousAuthority.EnrollmentId
                             && item.BindingId == scope.PreviousAuthority.BindingId
                             && item.ProductId == scope.Reservation.ProductId
-                            && item.LicenseId == scope.Reservation.LicenseId
-                            && item.LicenseSeatId == scope.Reservation.LicenseSeatId
                             && item.State == "ACTIVE"
                             && item.InvalidatedAtUtc == null
                             && item.InvalidationReason == null)
@@ -672,7 +788,7 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
                         .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.State, "COMMITTED"),
                             cancellationToken)
                     : 0;
-                if (previousBindingCount != 1 || previousEnrollmentCount != 1
+                if (sourceAssignmentCount != 1 || previousBindingCount != 1 || previousEnrollmentCount != 1
                     || authorityCount != 1 || reservationCount != 1)
                 {
                     await transaction.RollbackAsync(CancellationToken.None);
@@ -697,6 +813,11 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
                 await transaction.RollbackAsync(CancellationToken.None);
                 throw new OperationCanceledException("Runtime recovery activation was canceled by the caller.",
                     exception, cancellationToken);
+            }
+            catch (RuntimeEnrollmentException exception)
+            {
+                await transaction.RollbackAsync(CancellationToken.None);
+                return Transport(exception.StatusCode, exception.ErrorCode);
             }
             catch (Exception exception) when (IsRetryableTransientDatabaseFailure(exception, cancellationToken)
                 || IsActivationUniqueViolation(exception))
@@ -736,11 +857,12 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
     }
 
     /// <summary>
-    /// Creates exactly one terminal result while the global, command, license, and seat locks are held. A new
-    /// authorized grant is bound to the resolved ACTIVE commercial-ownership UUID and leaves lifecycle state
-    /// strictly RESERVED/PREPARED; divergent or historical-null bindings freeze a semantic refusal instead.
+    /// Creates exactly one terminal result after locking the source enrollment, taking the shared item 2
+    /// barrier, and revalidating immutable proof plus the source's ACTIVE assignment. Commercial ownership
+    /// remains request-lineage proof and never substitutes for assignment B. Success leaves lifecycle state
+    /// strictly RESERVED/PREPARED; divergent or historical-null proof freezes a semantic refusal instead.
     /// </summary>
-    /// <param name="db">The context enlisted in the caller's Serializable provider transaction.</param>
+    /// <param name="db">The context enlisted in the caller's locked ReadCommitted provider transaction.</param>
     /// <param name="clientId">The exact authenticated client namespace used for locking and idempotency.</param>
     /// <param name="parsed">The canonical request and byte-derived digest validated before this decision.</param>
     /// <param name="cancellationToken">Caller cancellation propagated through provider reads and persistence.</param>
@@ -758,6 +880,36 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         var recoveryRef = Guid.Parse(request.RecoveryOperationRef);
         var requestedExpiry = DateTime.ParseExact(request.ExpiresAtUtc, UtcFormat,
             CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
+
+        // Select only a candidate seat identifier before taking business-row locks. The source enrollment
+        // is then locked before the shared commercial barrier; every mutable seat and licence fact is
+        // reread below while that barrier is held.
+        RuntimeSeatRecoverySeatClaimPlaintext? claim = request.SeatClaim is null
+            ? null : seatClaimCryptography.Open(request.SeatClaim);
+        Guid? candidateSeatId = null;
+        if (request.SeatClaim is null)
+        {
+            var candidateSeatIds = await db.LicenseSeats.AsNoTracking()
+                .Where(row => row.LicenseId == licenseId && row.IsActive
+                    && !db.RuntimeSeatRecoveryReservations.Any(reservation =>
+                        reservation.LicenseSeatId == row.Id && reservation.State == "RESERVED"))
+                .OrderBy(row => row.Id)
+                .Select(row => row.Id)
+                .Take(2)
+                .ToListAsync(cancellationToken);
+            if (candidateSeatIds.Count == 1)
+                candidateSeatId = candidateSeatIds[0];
+        }
+        else if (claim is not null && Guid.TryParseExact(claim.SeatId, "D", out var claimedSeatId))
+        {
+            candidateSeatId = claimedSeatId;
+        }
+
+        var previousResolution = candidateSeatId is null
+            ? PreviousAuthorityResolution.Invalid("previous_seat_unresolved")
+            : await ResolvePreviousActiveAuthorityAsync(
+                db, productId, licenseId, candidateSeatId.Value,
+                request.Release.Version, request.Release.ArtifactSetDigestSha256, cancellationToken);
 
         var license = await db.Licenses.FromSqlInterpolated($"""
             SELECT * FROM public."Licenses" WHERE "Id" = {licenseId} FOR UPDATE
@@ -796,7 +948,6 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
             """).ToListAsync(cancellationToken);
         LicenseSeat? seat;
         string? seatSelectionError = null;
-        RuntimeSeatRecoverySeatClaimPlaintext? claim = null;
         DateTime? claimIssuedAt = null;
         DateTime? claimExpiresAt = null;
         var claimRevoked = false;
@@ -809,7 +960,6 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         }
         else
         {
-            claim = seatClaimCryptography.Open(request.SeatClaim);
             var claimedSeatId = claim is null || !Guid.TryParseExact(claim.SeatId, "D", out var parsedSeatId)
                 ? Guid.Empty : parsedSeatId;
             seat = seats.SingleOrDefault(candidate => candidate.Id == claimedSeatId);
@@ -831,20 +981,20 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
 
         var providerStateInvalid = seat is null
             || !IsProviderKeyCommitmentValid(request.NewKeyCommitment)
-            || !string.Equals(Sha256Text(seat.HardwareId), request.Installation.HardwareIdDigestSha256,
-                StringComparison.Ordinal)
             || license is null || !IsVersionAllowed(request.Release.Version, license.AllowedVersions)
             || !await HasAuthoritativeReleaseAsync(db, productId, request.Release.Version,
                 request.Release.ArtifactSetDigestSha256, cancellationToken);
 
-        var previousAuthority = seat is null ? null : await ResolvePreviousActiveAuthorityAsync(
-            db, productId, licenseId, seat.Id, cancellationToken);
         // This is the only business-decision instant for the attempt. Every decisive provider row
         // lock and immutable authority read above precedes it, so lock waits cannot extend validity.
         var decisionNow = await ReadDatabaseClockAsync(db, cancellationToken);
         if (requestedExpiry <= decisionNow)
             return await FreezeRefusalAsync(db, clientId, parsed, "authorization_expired",
                 StatusCodes.Status410Gone, decisionNow, cancellationToken);
+        if (previousResolution.Outcome == PreviousAuthorityOutcome.Unavailable)
+            return Transport(StatusCodes.Status503ServiceUnavailable, "provider_unavailable");
+        if (previousResolution.Outcome == PreviousAuthorityOutcome.Denied)
+            return CommercialAuthorityDenial();
         if (invalidLicense || license!.ExpirationDate is { } licenseExpiry && licenseExpiry <= decisionNow
             || owner is null || invalidGrantBinding)
             return await FreezeRefusalAsync(db, clientId, parsed, "recovery_not_authorized",
@@ -859,9 +1009,10 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
                 request.Release.Version, decisionNow, cancellationToken))
             return await FreezeRefusalAsync(db, clientId, parsed, "recovery_not_authorized",
                 StatusCodes.Status403Forbidden, decisionNow, cancellationToken);
-        if (previousAuthority is null)
+        if (previousResolution.Authority is null)
             return await FreezeRefusalAsync(db, clientId, parsed, "authority_state_conflict",
                 StatusCodes.Status409Conflict, decisionNow, cancellationToken);
+        var previousAuthority = previousResolution.Authority;
 
         var reservationRef = Guid.NewGuid();
         var lineageId = Guid.NewGuid();
@@ -975,7 +1126,7 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
 
     /// <summary>
     /// Revalidates the exact release registration and its three provider-owned child artifacts inside
-    /// the caller's Serializable transaction. Missing, ambiguous, cross-scope, or divergent state fails closed.
+    /// the caller's locked transaction. Missing, ambiguous, cross-scope, or divergent state fails closed.
     /// </summary>
     private static async Task<bool> HasAuthoritativeReleaseAsync(
         LicenseDbContext db,
@@ -1126,11 +1277,22 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
     /// write-capable locks so the exact binding/enrollment CAS cannot race a stale authority observation.
     /// Every comparison is ordinal and literal; recovery must not select a historical row by timestamp.
     /// </summary>
-    private static async Task<PreviousActiveAuthority?> ResolvePreviousActiveAuthorityAsync(
+    /// <param name="db">Context enlisted in the caller's provider transaction.</param>
+    /// <param name="productId">Exact recovery product.</param>
+    /// <param name="licenseId">Historical source licence scope selected by the request.</param>
+    /// <param name="seatId">Historical source seat scope selected by the request.</param>
+    /// <param name="targetReleaseVersion">Target release checked against current commercial policy.</param>
+    /// <param name="targetArtifactSetDigestSha256">Exact authoritative target release digest.</param>
+    /// <param name="cancellationToken">Cancels provider reads and lock acquisition.</param>
+    /// <param name="lockForCutover">Uses the exclusive commercial barrier and write-capable binding lock.</param>
+    /// <returns>A bounded eligible, denied, invalid, or unavailable source-authority result.</returns>
+    private async Task<PreviousAuthorityResolution> ResolvePreviousActiveAuthorityAsync(
         LicenseDbContext db,
         Guid productId,
         Guid licenseId,
         Guid seatId,
+        string targetReleaseVersion,
+        string targetArtifactSetDigestSha256,
         CancellationToken cancellationToken,
         bool lockForCutover = false)
     {
@@ -1148,25 +1310,29 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
                 FOR SHARE
                 """).ToListAsync(cancellationToken);
         if (bindings.Count != 1)
-            return null;
+            return PreviousAuthorityResolution.Invalid("previous_binding_missing_or_ambiguous");
         var binding = bindings[0];
 
-        var enrollments = lockForCutover
-            ? await db.RuntimeEnrollments.FromSqlInterpolated($"""
-                SELECT * FROM public."RuntimeEnrollments"
-                WHERE "BindingId" = {binding.Id} AND "ProductId" = {productId}
-                  AND "LicenseId" = {licenseId} AND "LicenseSeatId" = {seatId}
-                FOR UPDATE
-                """).ToListAsync(cancellationToken)
-            : await db.RuntimeEnrollments.FromSqlInterpolated($"""
-                SELECT * FROM public."RuntimeEnrollments"
-                WHERE "BindingId" = {binding.Id} AND "ProductId" = {productId}
-                  AND "LicenseId" = {licenseId} AND "LicenseSeatId" = {seatId}
-                FOR SHARE
-                """).ToListAsync(cancellationToken);
+        // Enrollment identity is locked before the commercial barrier. Item 2 writers update this
+        // row before taking the exclusive counterpart, which keeps both paths in one lock order.
+        var enrollments = await db.RuntimeEnrollments.FromSqlInterpolated($"""
+            SELECT * FROM public."RuntimeEnrollments"
+            WHERE "BindingId" = {binding.Id} AND "ProductId" = {productId}
+            FOR UPDATE
+            """).ToListAsync(cancellationToken);
         if (enrollments.Count != 1 || !string.Equals(enrollments[0].State, "ACTIVE", StringComparison.Ordinal))
-            return null;
+            return PreviousAuthorityResolution.Invalid("previous_enrollment_missing_or_inactive");
         var enrollment = enrollments[0];
+
+        if (lockForCutover)
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "SELECT pg_catalog.pg_advisory_xact_lock(1312, 1);", cancellationToken);
+        }
+        else
+        {
+            await RuntimeCommercialEligibilityValidator.AcquireReadBarrierAsync(db, cancellationToken);
+        }
 
         var lineages = lockForCutover
             ? await db.RuntimeEnrollmentAuthorityLineages.FromSqlInterpolated($"""
@@ -1183,7 +1349,7 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
                 """).ToListAsync(cancellationToken);
         if (lineages.Count != 1
             || lineages[0].ProviderGrantRefScalarCount != binding.GrantRef.EnumerateRunes().Count())
-            return null;
+            return PreviousAuthorityResolution.Invalid("previous_lineage_missing_or_ambiguous");
         var lineage = lineages[0];
 
         var generations = await db.RuntimeEnrollmentAuthorityGenerations.FromSqlInterpolated($"""
@@ -1194,17 +1360,8 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
             FOR SHARE
             """).AsNoTracking().ToListAsync(cancellationToken);
         if (generations.Count != 1)
-            return null;
+            return PreviousAuthorityResolution.Invalid("previous_generation_missing_or_ambiguous");
         var generation = generations[0];
-
-        var licenses = await db.Licenses.FromSqlInterpolated($"""
-            SELECT * FROM public."Licenses"
-            WHERE "Id" = {licenseId} AND "ProductId" = {productId}
-            FOR SHARE
-            """).AsNoTracking().ToListAsync(cancellationToken);
-        if (licenses.Count != 1)
-            return null;
-        var license = licenses[0];
 
         RuntimeEnrollmentAuthorityGenerationPayloadV2? payload;
         try
@@ -1212,48 +1369,82 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
             payload = JsonSerializer.Deserialize<RuntimeEnrollmentAuthorityGenerationPayloadV2>(
                 generation.CanonicalPayloadUtf8, AuthorityJson);
         }
-        catch (JsonException)
+        catch (JsonException exception)
         {
-            return null;
+            LogInvalidRecoveryGenerationPayload(exception, generation);
+            return PreviousAuthorityResolution.Unavailable("previous_generation_payload_invalid");
         }
-        catch (NotSupportedException)
+        catch (NotSupportedException exception)
         {
-            return null;
+            LogInvalidRecoveryGenerationPayload(exception, generation);
+            return PreviousAuthorityResolution.Unavailable("previous_generation_payload_invalid");
         }
         if (payload is null || payload.Release is null || payload.Binding is null
             || payload.Enrollment is null || payload.Key is null || payload.Installation is null
             || payload.Transition is null)
-            return null;
+            return PreviousAuthorityResolution.Invalid("previous_generation_payload_invalid");
         byte[] canonicalPayload;
         try
         {
             canonicalPayload = JsonSerializer.SerializeToUtf8Bytes(payload, AuthorityJson);
         }
-        catch (NotSupportedException)
+        catch (NotSupportedException exception)
         {
-            return null;
+            LogInvalidRecoveryGenerationPayload(exception, generation);
+            return PreviousAuthorityResolution.Unavailable("previous_generation_payload_invalid");
         }
         if (!generation.CanonicalPayloadUtf8.AsSpan().SequenceEqual(canonicalPayload)
-            || !MatchesPreviousActiveAuthorityPayload(
-                payload, lineage, generation, binding, enrollment, license))
-            return null;
-        if (!await HasAuthoritativeReleaseAsync(db, productId, payload.Release.Version,
-                payload.Release.ArtifactSetDigest, cancellationToken))
-            return null;
-        return new(lineage.AuthorityLineageId, lineage.HeadGenerationId, binding.Id, enrollment.Id);
+            || !MatchesPreviousActiveAuthorityPayload(payload, lineage, generation, binding, enrollment))
+            return PreviousAuthorityResolution.Invalid("previous_generation_payload_divergent");
+        if (!VerifyPersistedGenerationCryptography(generation, canonicalPayload))
+            return PreviousAuthorityResolution.Unavailable("previous_generation_signature_invalid");
+
+        try
+        {
+            _ = await RuntimeEnrollmentIdentityValidator.ValidateAsync(
+                db, enrollment, "ACTIVE", true, null, cancellationToken);
+        }
+        catch (RuntimeEnrollmentException exception) when (exception.StatusCode == StatusCodes.Status503ServiceUnavailable)
+        {
+            return PreviousAuthorityResolution.Unavailable(exception.DiagnosticCode ?? "source_identity_unavailable");
+        }
+        catch (RuntimeEnrollmentException exception)
+        {
+            return PreviousAuthorityResolution.Invalid(exception.DiagnosticCode ?? exception.ErrorCode);
+        }
+
+        if (!await HasAuthoritativeReleaseAsync(db, productId, targetReleaseVersion,
+                targetArtifactSetDigestSha256, cancellationToken))
+            return PreviousAuthorityResolution.Denied("target_release_unapproved");
+
+        var now = await ReadDatabaseClockAsync(db, cancellationToken);
+        var commercial = await AssessSourceCommercialAuthorityAsync(
+            db, enrollment, licenseId, seatId, targetReleaseVersion, now,
+            lockForCutover, expectedSourceAssignmentId: null, cancellationToken);
+        if (commercial.Outcome != PreviousAuthorityOutcome.Eligible)
+            return new(commercial.Outcome, null, commercial.DiagnosticCode);
+
+        return PreviousAuthorityResolution.Eligible(new(
+            lineage.AuthorityLineageId, lineage.HeadGenerationId, binding.Id, enrollment.Id,
+            commercial.SourceAssignmentId!.Value));
     }
 
     /// <summary>
     /// Checks all provider-owned scalar links represented by an ACTIVE previous authority. The payload is
     /// accepted only when it is the exact canonical projection of the durable binding and enrollment head.
     /// </summary>
+    /// <param name="payload">The canonical signed generation payload to compare.</param>
+    /// <param name="lineage">The locked authority lineage that owns the generation.</param>
+    /// <param name="generation">The persisted generation whose identifiers and epoch must match.</param>
+    /// <param name="binding">The locked installation binding represented by the generation.</param>
+    /// <param name="enrollment">The locked Runtime enrollment represented by the generation.</param>
+    /// <returns><see langword="true"/> only when every signed scalar matches the locked durable authority graph.</returns>
     private static bool MatchesPreviousActiveAuthorityPayload(
         RuntimeEnrollmentAuthorityGenerationPayloadV2 payload,
         RuntimeEnrollmentAuthorityLineage lineage,
         RuntimeEnrollmentAuthorityGeneration generation,
         DistributionInstallationBinding binding,
-        RuntimeEnrollment enrollment,
-        License license)
+        RuntimeEnrollment enrollment)
     {
         var expectedDigest = Convert.ToHexStringLower(SHA256.HashData(generation.CanonicalPayloadUtf8));
         return string.Equals(payload.Schema, "runtime-enrollment-authority-generation-v2", StringComparison.Ordinal)
@@ -1266,38 +1457,201 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
             && string.Equals(payload.ProductId, lineage.ProductId.ToString("D"), StringComparison.Ordinal)
             && string.Equals(payload.ProviderGrantRef, lineage.ProviderGrantRef, StringComparison.Ordinal)
             && string.Equals(payload.Binding.BindingId, binding.Id.ToString("D"), StringComparison.Ordinal)
-            && string.Equals(payload.Binding.HardwareIdDigest, binding.HardwareIdHash, StringComparison.Ordinal)
+            && ApprovedBinaryService.IsCanonicalSha256(payload.Binding.HardwareIdDigest)
             && string.Equals(payload.Enrollment.EnrollmentId, enrollment.Id.ToString("D"), StringComparison.Ordinal)
             && string.Equals(payload.Enrollment.State, "active", StringComparison.Ordinal)
-            && string.Equals(payload.Enrollment.IssuedAtUtc,
-                Format(license.ActivationDate ?? license.CreationDate), StringComparison.Ordinal)
-            && string.Equals(payload.Enrollment.ExpiresAtUtc,
-                license.ExpirationDate is null ? null : Format(license.ExpirationDate.Value), StringComparison.Ordinal)
             && string.Equals(payload.Key.AuthorityKeyId, generation.SignatureKeyId, StringComparison.Ordinal)
             && payload.Key.SecurityEpoch == enrollment.SecurityEpoch
             && string.Equals(payload.Installation.InstallationId, binding.InstallationId, StringComparison.Ordinal)
-            && string.Equals(payload.Installation.SeatId, binding.LicenseSeatId.ToString("D"), StringComparison.Ordinal)
-            && string.Equals(payload.Release.Version, binding.Version, StringComparison.Ordinal)
+            && string.Equals(payload.Installation.SeatId, lineage.LicenseSeatId.ToString("D"), StringComparison.Ordinal)
+            && string.Equals(payload.Release.Version, enrollment.ReleaseVersion, StringComparison.Ordinal)
             && string.Equals(enrollment.InstallationId, binding.InstallationId, StringComparison.Ordinal)
-            && string.Equals(enrollment.HardwareIdHash, binding.HardwareIdHash, StringComparison.Ordinal)
-            && string.Equals(enrollment.ReleaseVersion, binding.Version, StringComparison.Ordinal)
-            && string.Equals(enrollment.HandoffDigestSha256, binding.HandoffDigestSha256, StringComparison.Ordinal)
             && enrollment.BindingId == binding.Id
             && enrollment.ProductId == binding.ProductId
-            && enrollment.LicenseId == binding.LicenseId
-            && enrollment.LicenseSeatId == binding.LicenseSeatId
             && string.Equals(payload.Transition.RequestId, generation.RequestId.ToString("D"), StringComparison.Ordinal)
             && string.Equals(payload.Transition.OccurredAtUtc, Format(generation.OccurredAtUtc), StringComparison.Ordinal)
             && string.Equals(generation.SignatureAlgorithm, "PS256", StringComparison.Ordinal)
             && string.Equals(generation.AuthorityDigest, expectedDigest, StringComparison.Ordinal);
     }
 
-    /// <summary>Identifies the lineage-qualified immutable head that proved the previous ACTIVE authority.</summary>
+    /// <summary>Identifies the lineage-qualified immutable head and current assignment that proved the source.</summary>
+    /// <param name="HeadLineageId">The exact immutable source authority lineage.</param>
+    /// <param name="HeadGenerationId">The exact immutable current source generation.</param>
+    /// <param name="BindingId">The row-locked active source binding.</param>
+    /// <param name="EnrollmentId">The row-locked active source enrollment.</param>
+    /// <param name="SourceAssignmentId">The unique current assignment derived under the commercial barrier.</param>
     internal sealed record PreviousActiveAuthority(
         Guid HeadLineageId,
         Guid HeadGenerationId,
         Guid BindingId,
-        Guid EnrollmentId);
+        Guid EnrollmentId,
+        Guid SourceAssignmentId);
+
+    /// <summary>Classifies source authority validation without converting database faults into denials.</summary>
+    private enum PreviousAuthorityOutcome
+    {
+        /// <summary>A, signed proof and the current assignment policy all passed.</summary>
+        Eligible,
+        /// <summary>A known current commercial policy refused the source.</summary>
+        Denied,
+        /// <summary>Historical identity or signed proof no longer forms one exact authority.</summary>
+        Invalid,
+        /// <summary>Ambiguous, corrupt or unavailable provider state prevented a decision.</summary>
+        Unavailable
+    }
+
+    /// <summary>Returns the exact previous authority together with a bounded failure classification.</summary>
+    /// <param name="Outcome">Identity, proof and current commercial classification.</param>
+    /// <param name="Authority">Exact previous authority only when every layer is eligible.</param>
+    /// <param name="DiagnosticCode">Bounded internal reason without raw commercial identifiers.</param>
+    private sealed record PreviousAuthorityResolution(
+        PreviousAuthorityOutcome Outcome,
+        PreviousActiveAuthority? Authority,
+        string DiagnosticCode)
+    {
+        /// <summary>Creates an eligible result carrying the exact previous authority.</summary>
+        internal static PreviousAuthorityResolution Eligible(PreviousActiveAuthority authority) =>
+            new(PreviousAuthorityOutcome.Eligible, authority, "eligible");
+        /// <summary>Creates a known current commercial denial.</summary>
+        internal static PreviousAuthorityResolution Denied(string diagnosticCode) =>
+            new(PreviousAuthorityOutcome.Denied, null, diagnosticCode);
+        /// <summary>Creates a historical identity or proof rejection.</summary>
+        internal static PreviousAuthorityResolution Invalid(string diagnosticCode) =>
+            new(PreviousAuthorityOutcome.Invalid, null, diagnosticCode);
+        /// <summary>Creates an ambiguous, corrupt, or unavailable provider-state result.</summary>
+        internal static PreviousAuthorityResolution Unavailable(string diagnosticCode) =>
+            new(PreviousAuthorityOutcome.Unavailable, null, diagnosticCode);
+    }
+
+    /// <summary>Holds one current commercial verdict and the server-derived assignment when eligible.</summary>
+    /// <param name="Outcome">Eligible, denied, or unavailable current assignment policy.</param>
+    /// <param name="DiagnosticCode">Bounded server-only reason without hardware or customer data.</param>
+    /// <param name="SourceAssignmentId">Exact locked ACTIVE assignment, present only for an eligible verdict.</param>
+    private sealed record CommercialAuthorityAssessment(
+        PreviousAuthorityOutcome Outcome,
+        string DiagnosticCode,
+        Guid? SourceAssignmentId = null);
+
+    /// <summary>
+    /// Assesses the only current commercial grant for the already-proved source enrollment.
+    /// Historical enrollment and binding licence, seat and hardware copies never grant authority.
+    /// </summary>
+    /// <param name="db">Context holding the caller's shared or exclusive commercial barrier.</param>
+    /// <param name="sourceEnrollment">Cryptographically proved and row-locked source enrollment.</param>
+    /// <param name="expectedLicenseId">Historical request scope that the current assignment must retain.</param>
+    /// <param name="expectedSeatId">Historical request scope that the current assignment must retain.</param>
+    /// <param name="targetReleaseVersion">Target release checked against licence and product policy.</param>
+    /// <param name="now">Database time read after the commercial barrier.</param>
+    /// <param name="lockForCutover">Takes an update lock when the caller is preparing the atomic cutover.</param>
+    /// <param name="expectedSourceAssignmentId">Previously derived assignment that must remain uniquely ACTIVE.</param>
+    /// <param name="cancellationToken">Cancels the assessment and lock acquisition.</param>
+    /// <returns>A business denial or eligible result carrying the exact locked source assignment.</returns>
+    private static async Task<CommercialAuthorityAssessment> AssessSourceCommercialAuthorityAsync(
+        LicenseDbContext db,
+        RuntimeEnrollment sourceEnrollment,
+        Guid expectedLicenseId,
+        Guid expectedSeatId,
+        string targetReleaseVersion,
+        DateTimeOffset now,
+        bool lockForCutover,
+        Guid? expectedSourceAssignmentId,
+        CancellationToken cancellationToken)
+    {
+        var assignments = lockForCutover
+            ? await db.EnrollmentLicenseAssignments.FromSqlInterpolated($"""
+                SELECT * FROM public."EnrollmentLicenseAssignments"
+                WHERE "EnrollmentId" = {sourceEnrollment.Id} AND "State" = 'ACTIVE'
+                ORDER BY "Id" FOR UPDATE
+                """).AsNoTracking().ToListAsync(cancellationToken)
+            : await db.EnrollmentLicenseAssignments.FromSqlInterpolated($"""
+                SELECT * FROM public."EnrollmentLicenseAssignments"
+                WHERE "EnrollmentId" = {sourceEnrollment.Id} AND "State" = 'ACTIVE'
+                ORDER BY "Id" FOR SHARE
+                """).AsNoTracking().ToListAsync(cancellationToken);
+        if (assignments.Count > 1)
+            return new(PreviousAuthorityOutcome.Unavailable, "assignment_duplicate_active");
+        if (assignments.Count == 0)
+        {
+            var quarantined = await db.EnrollmentLicenseAssignmentQuarantines.AsNoTracking()
+                .AnyAsync(row => row.EnrollmentId == sourceEnrollment.Id, cancellationToken);
+            return new(PreviousAuthorityOutcome.Denied,
+                quarantined ? "assignment_quarantined" : "assignment_missing");
+        }
+
+        var assignment = assignments[0];
+        if (expectedSourceAssignmentId is { } expectedAssignmentId && assignment.Id != expectedAssignmentId
+            || assignment.LicenseId != expectedLicenseId || assignment.LicenseSeatId != expectedSeatId)
+            return new(PreviousAuthorityOutcome.Denied, "assignment_scope_mismatch");
+
+        var license = await db.Licenses.AsNoTracking()
+            .Include(row => row.Product)
+            .SingleOrDefaultAsync(row => row.Id == assignment.LicenseId, cancellationToken);
+        var seat = await db.LicenseSeats.AsNoTracking()
+            .SingleOrDefaultAsync(row => row.Id == assignment.LicenseSeatId, cancellationToken);
+        if (license is null || seat is null)
+            return new(PreviousAuthorityOutcome.Unavailable, "assignment_relation_missing");
+
+        if (license.ProductId != sourceEnrollment.ProductId || !license.IsActive
+            || license.RevokedAt is not null
+            || license.ExpirationDate is { } expiry && expiry <= now.UtcDateTime
+            || license.MaxSeats < 1 || !seat.IsActive || seat.LicenseId != license.Id
+            || string.IsNullOrWhiteSpace(seat.HardwareId))
+            return new(PreviousAuthorityOutcome.Denied, "commercial_authority_ineligible");
+
+        var activeSeatCount = await db.LicenseSeats.AsNoTracking()
+            .CountAsync(row => row.LicenseId == license.Id && row.IsActive, cancellationToken);
+        if (activeSeatCount > license.MaxSeats)
+            return new(PreviousAuthorityOutcome.Denied, "seat_capacity_exceeded");
+        if (!RuntimeEnrollmentService.IsVersionAllowed(targetReleaseVersion, license.AllowedVersions)
+            || RuntimeEnrollmentService.IsVersionBelow(targetReleaseVersion, license.Product?.MinimumAllowedVersion))
+            return new(PreviousAuthorityOutcome.Denied, "version_ineligible");
+        if (await HasActiveSecurityBanAsync(
+                db, sourceEnrollment.ProductId, seat.HardwareId,
+                targetReleaseVersion, now, cancellationToken))
+            return new(PreviousAuthorityOutcome.Denied, "security_policy_banned");
+
+        return new(PreviousAuthorityOutcome.Eligible, "eligible", assignment.Id);
+    }
+
+    /// <summary>
+    /// Reassesses only current commercial authority at a database instant sampled after every later
+    /// mutable-row wait. The caller uses ReadCommitted so these reads also receive a statement snapshot
+    /// created after the barrier wait. Historical identity and signed proof remain the previously resolved authority.
+    /// </summary>
+    /// <param name="db">Context holding the same commercial barrier and provider transaction.</param>
+    /// <param name="resolution">Previously resolved A/P authority and initial commercial verdict.</param>
+    /// <param name="expectedLicenseId">Exact historical licence scope retained by the assignment.</param>
+    /// <param name="expectedSeatId">Exact historical seat scope retained by the assignment.</param>
+    /// <param name="targetReleaseVersion">Target release checked against current commercial policy.</param>
+    /// <param name="decisionNow">Fresh PostgreSQL wall clock read after all decisive lock waits.</param>
+    /// <param name="cancellationToken">Cancels the final read-only assessment.</param>
+    /// <returns>The preserved A/P authority with the final current commercial outcome.</returns>
+    private static async Task<PreviousAuthorityResolution> ReassessResolvedCommercialAuthorityAsync(
+        LicenseDbContext db,
+        PreviousAuthorityResolution resolution,
+        Guid expectedLicenseId,
+        Guid expectedSeatId,
+        string targetReleaseVersion,
+        DateTime decisionNow,
+        CancellationToken cancellationToken)
+    {
+        if (resolution.Outcome != PreviousAuthorityOutcome.Eligible || resolution.Authority is null)
+            return resolution;
+
+        var enrollments = await db.RuntimeEnrollments.AsNoTracking()
+            .Where(row => row.Id == resolution.Authority.EnrollmentId)
+            .Take(2)
+            .ToListAsync(cancellationToken);
+        if (enrollments.Count != 1)
+            return PreviousAuthorityResolution.Unavailable("source_enrollment_missing_or_ambiguous");
+
+        var commercial = await AssessSourceCommercialAuthorityAsync(
+            db, enrollments[0], expectedLicenseId, expectedSeatId, targetReleaseVersion,
+            decisionNow, lockForCutover: false, resolution.Authority.SourceAssignmentId, cancellationToken);
+        return commercial.Outcome == PreviousAuthorityOutcome.Eligible
+            ? resolution
+            : new(commercial.Outcome, null, commercial.DiagnosticCode);
+    }
 
     /// <summary>Resolves exactly one pre-existing ACTIVE provider owner without inferring commercial authority.</summary>
     private static async Task<RuntimeRecoveryCommercialOwnership?> ResolveOwnerAsync(
@@ -1315,6 +1669,17 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
     }
 
     /// <summary>Creates and signs the exact sequence-zero RECOVERY_AUTHORIZED generation without predecessor proof.</summary>
+    /// <param name="request">The validated recovery authorization request that supplies the immutable release scope.</param>
+    /// <param name="requestId">The canonical request identifier bound into the generation payload.</param>
+    /// <param name="seatId">The server-derived eligible seat identifier.</param>
+    /// <param name="lineageId">The newly owned authority-lineage identifier.</param>
+    /// <param name="generationId">The newly owned generation identifier.</param>
+    /// <param name="bindingId">The locked installation-binding identifier.</param>
+    /// <param name="enrollmentId">The locked Runtime-enrollment identifier.</param>
+    /// <param name="issuedAtUtc">The database-clock issuance instant.</param>
+    /// <param name="expiresAtUtc">The bounded generation expiry instant.</param>
+    /// <returns>The canonical payload, digest, statement, signature, and exact configured operational key identity.</returns>
+    /// <exception cref="InvalidOperationException">Thrown when the configured authority signer cannot produce the required canonical signature.</exception>
     private RuntimeEnrollmentAuthorityCryptography.SignedGenerationResult SignGeneration(
         RuntimeSeatRecoveryAuthorizationRequest request,
         Guid requestId,
@@ -1530,6 +1895,76 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
             FOR UPDATE
             """).SingleOrDefaultAsync(cancellationToken);
 
+    /// <summary>
+    /// Revalidates A, immutable proof and current assignment authority before replaying a successful
+    /// recovery authorization. The newly generated enrollment identifier is never used as the source grant.
+    /// </summary>
+    /// <param name="db">The context enlisted in the caller's replay transaction.</param>
+    /// <param name="ledger">The locked successful authorization terminal.</param>
+    /// <param name="request">The exact canonical request whose digest matched the terminal.</param>
+    /// <param name="cancellationToken">Caller cancellation propagated through source and commercial locks.</param>
+    /// <returns>The current eligible, denied, invalid, or unavailable source-authority classification.</returns>
+    private async Task<PreviousAuthorityResolution> RevalidateAuthorizedReplayAsync(
+        LicenseDbContext db,
+        RuntimeSeatRecoveryAuthorization ledger,
+        RuntimeSeatRecoveryAuthorizationRequest request,
+        CancellationToken cancellationToken)
+    {
+        var reservation = await db.RuntimeSeatRecoveryReservations.FromSqlInterpolated($"""
+            SELECT * FROM public."RuntimeSeatRecoveryReservations"
+            WHERE "ReservationRef" = {ledger.ReservationRef}
+            FOR UPDATE
+            """).SingleOrDefaultAsync(cancellationToken);
+        var authority = reservation is null ? null : await db.RuntimeSeatRecoveryAuthorities.FromSqlInterpolated($"""
+            SELECT * FROM public."RuntimeSeatRecoveryAuthorities"
+            WHERE "ReservationRef" = {reservation.ReservationRef}
+            FOR UPDATE
+            """).SingleOrDefaultAsync(cancellationToken);
+        if (reservation is null || authority is null || reservation.State != "RESERVED"
+            || authority.State != "PREPARED" || !authority.IsCurrentHead
+            || reservation.RequestId != ledger.RequestId
+            || reservation.RecoveryOperationRef != ledger.RecoveryOperationRef
+            || reservation.ProductId != Guid.Parse(request.ProductId)
+            || reservation.LicenseId != Guid.Parse(request.LicenseId)
+            || authority.ReservationRef != reservation.ReservationRef
+            || authority.LicenseSeatId != reservation.LicenseSeatId)
+            return PreviousAuthorityResolution.Invalid("authorization_replay_scope_invalid");
+
+        if (!await ValidateRecoveryGenerationAsync(db, authority, cancellationToken))
+            return PreviousAuthorityResolution.Unavailable("authorization_generation_invalid");
+
+        var resolution = await ResolvePreviousActiveAuthorityAsync(
+            db, reservation.ProductId, reservation.LicenseId, reservation.LicenseSeatId,
+            authority.ReleaseVersion, authority.ArtifactSetDigestSha256, cancellationToken);
+        if (resolution.Authority is not { } previous
+            || previous.HeadLineageId != authority.PreviousAuthorityLineageId
+            || previous.HeadGenerationId != authority.PreviousAuthorityGenerationId)
+            return resolution.Outcome == PreviousAuthorityOutcome.Eligible
+                ? PreviousAuthorityResolution.Invalid("authorization_replay_previous_authority_changed")
+                : resolution;
+        return resolution;
+    }
+
+    /// <summary>
+    /// Loads and verifies the recovery authority's immutable generic generation before replay or readback.
+    /// Missing, malformed, divergent, or signature-invalid provider evidence is classified as unavailable.
+    /// </summary>
+    /// <param name="db">The context enlisted in the caller's provider transaction.</param>
+    /// <param name="authority">The recovery authority naming the exact generic generation.</param>
+    /// <param name="cancellationToken">Cancels the bounded generation lookup.</param>
+    /// <returns>True only when the exact persisted generic generation and PS256 signature remain valid.</returns>
+    private async Task<bool> ValidateRecoveryGenerationAsync(
+        LicenseDbContext db,
+        RuntimeSeatRecoveryAuthority authority,
+        CancellationToken cancellationToken)
+    {
+        var generation = await db.RuntimeEnrollmentAuthorityGenerations.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.AuthorityLineageId == authority.AuthorityLineageId
+                && item.AuthorityGenerationId == authority.AuthorityGenerationId, cancellationToken);
+        return generation is not null
+            && TryReadVerifiedSignedSecurityEpoch(generation, out _);
+    }
+
     /// <summary>Serializes preparation and confirmation replicas by exact client-scoped functional identity.</summary>
     private static async Task AcquireKeyProofLockAsync(
         LicenseDbContext db, string clientId, string identity, CancellationToken cancellationToken)
@@ -1588,9 +2023,19 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
     /// <summary>
     /// Locks and revalidates the exact PROVED receipt, W10.2 terminal, provider ledger, ownership UUID,
     /// signed heads including the positive generation epoch, and the three mutable recovery states without
-    /// rerunning proof-of-possession.
+    /// rerunning proof-of-possession. The caller owns the ambient transaction; this helper only takes locks and
+    /// throws before persistence when current commercial authority is denied or unavailable.
     /// </summary>
-    private static async Task<ActivationScope?> LockActivationScopeAsync(
+    /// <param name="db">The context enlisted in the caller's activation transaction.</param>
+    /// <param name="clientId">The exact authenticated client namespace.</param>
+    /// <param name="request">The already parsed canonical activation request.</param>
+    /// <param name="cancellationToken">Caller cancellation propagated through every provider lock.</param>
+    /// <returns>The complete locked scope, or null when historical proof identity is invalid.</returns>
+    /// <exception cref="RuntimeEnrollmentException">
+    /// Thrown with 422 for a known current commercial denial or 503 for unavailable provider state; the caller
+    /// rolls back and maps only the stable public error.
+    /// </exception>
+    private async Task<ActivationScope?> LockActivationScopeAsync(
         LicenseDbContext db,
         string clientId,
         RuntimeSeatRecoveryActivationRequest request,
@@ -1629,8 +2074,12 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
                 item.AuthorityLineageId == authority.AuthorityLineageId
                 && item.AuthorityGenerationId == authority.AuthorityGenerationId, cancellationToken);
         var securityEpoch = 0;
-        var hasSignedSecurityEpoch = generation is not null
-            && TryReadSignedSecurityEpoch(generation, out securityEpoch);
+        if (generation is not null
+            && !TryReadVerifiedSignedSecurityEpoch(generation, out securityEpoch))
+            throw new RuntimeEnrollmentException(
+                "provider_unavailable", StatusCodes.Status503ServiceUnavailable,
+                "authorization_generation_invalid");
+        var hasSignedSecurityEpoch = generation is not null;
 
         if (proof is null || preparation is null || confirmation is null || ledger is null
             || reservation is null || authority is null || !hasSignedSecurityEpoch || proof.State != "PROVED"
@@ -1673,7 +2122,19 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
             && authority.PublicKeySpkiSha256 == proof.PublicKeySpkiSha256
             && authority.LicenseSeatId == reservation.LicenseSeatId;
 
-        // The lock order below matches the TKT-000782 writer: license, ACTIVE ownership, grant.
+        var previousResolution = await ResolvePreviousActiveAuthorityAsync(
+            db, productId, reservation.LicenseId, reservation.LicenseSeatId,
+            authority.ReleaseVersion, authority.ArtifactSetDigestSha256,
+            cancellationToken, lockForCutover: true);
+        if (previousResolution.Outcome == PreviousAuthorityOutcome.Unavailable)
+            throw new RuntimeEnrollmentException(
+                "provider_unavailable", StatusCodes.Status503ServiceUnavailable,
+                previousResolution.DiagnosticCode);
+        if (previousResolution.Outcome == PreviousAuthorityOutcome.Denied)
+            throw CommercialAuthorityDenialException(previousResolution.DiagnosticCode);
+
+        // Commercial ownership rows are historical request proof. They are locked after the
+        // source enrollment and exclusive item 2 barrier and never substitute for assignment B.
         var license = await db.Licenses.FromSqlInterpolated($"""
             SELECT * FROM public."Licenses"
             WHERE "ProductId" = {productId} AND "Id" = {reservation.LicenseId}
@@ -1701,10 +2162,20 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
             WHERE "AuthorityLineageId" = {authority.AuthorityLineageId}
             FOR UPDATE
             """).AsNoTracking().SingleOrDefaultAsync(cancellationToken);
-        var previous = await ResolvePreviousActiveAuthorityAsync(db, productId, reservation.LicenseId,
-            reservation.LicenseSeatId, cancellationToken, lockForCutover: true);
+        var decisionNow = await ReadDatabaseClockAsync(db, cancellationToken);
+        previousResolution = await ReassessResolvedCommercialAuthorityAsync(
+            db, previousResolution, reservation.LicenseId, reservation.LicenseSeatId,
+            authority.ReleaseVersion, decisionNow, cancellationToken);
+        if (previousResolution.Outcome == PreviousAuthorityOutcome.Unavailable)
+            throw new RuntimeEnrollmentException(
+                "provider_unavailable", StatusCodes.Status503ServiceUnavailable,
+                previousResolution.DiagnosticCode);
+        if (previousResolution.Outcome == PreviousAuthorityOutcome.Denied)
+            throw CommercialAuthorityDenialException(previousResolution.DiagnosticCode);
+        var previous = previousResolution.Authority;
 
         providerCompatible = providerCompatible && license is not null && license.IsActive && license.RevokedAt is null
+            && previousResolution.Outcome == PreviousAuthorityOutcome.Eligible
             && owner is not null && grant is not null
             && grant.AuthenticatedClientId == clientId && grant.LicenseId == reservation.LicenseId
             && grant.CommercialOwnershipId == owner.Id && grant.OwnerSubjectId == owner.OwnerSubjectId
@@ -1724,15 +2195,34 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
             authority.PreviousAuthorityLineageId,
             authority.PreviousAuthorityGenerationId,
             Guid.Empty,
+            Guid.Empty,
             Guid.Empty);
         return new(proof, reservation, authority, lockedPrevious, providerCompatible);
     }
 
     /// <summary>
     /// Locks and revalidates the complete provider scope, including the exact positive signed-generation epoch,
-    /// without advancing any lifecycle state or inferring authority from preparation data.
+    /// without advancing any lifecycle state or inferring authority from preparation data. The caller owns the
+    /// transaction and rolls it back when the helper refuses or throws.
     /// </summary>
-    private static async Task<KeyProofScope?> LockAndValidateKeyScopeAsync(
+    /// <param name="db">The context enlisted in the caller's key-stage transaction.</param>
+    /// <param name="clientId">The exact authenticated client namespace.</param>
+    /// <param name="productIdText">The canonical lowercase-D product UUID.</param>
+    /// <param name="requestIdText">The canonical lowercase-D authorization request UUID.</param>
+    /// <param name="requestDigest">The exact lowercase authorization body digest.</param>
+    /// <param name="recoveryOperationRefText">The canonical lowercase-D recovery operation UUID.</param>
+    /// <param name="reservationRefText">The canonical lowercase-D provider reservation UUID.</param>
+    /// <param name="enrollmentIdText">The canonical lowercase-D prepared enrollment UUID.</param>
+    /// <param name="authorityGenerationIdText">The canonical lowercase-D signed generation UUID.</param>
+    /// <param name="publicKeySpkiSha256">The exact lowercase target public-key digest.</param>
+    /// <param name="keyThumbprint">The optional exact base64url key thumbprint checked during preparation.</param>
+    /// <param name="cancellationToken">Caller cancellation propagated through every provider lock.</param>
+    /// <returns>The locked proof scope, or null when historical identity or proof is invalid.</returns>
+    /// <exception cref="RuntimeEnrollmentException">
+    /// Thrown with 422 for a known current commercial denial or 503 for unavailable provider state, before
+    /// challenge consumption or stage persistence.
+    /// </exception>
+    private async Task<KeyProofScope?> LockAndValidateKeyScopeAsync(
         LicenseDbContext db,
         string clientId,
         string productIdText,
@@ -1781,12 +2271,28 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
             || authority.PublicKeySpkiSha256 != publicKeySpkiSha256
             || keyThumbprint is not null && authority.KeyThumbprint != keyThumbprint)
             return null;
-        if (generation is null || !TryReadSignedSecurityEpoch(generation, out var securityEpoch))
+        if (generation is null)
+            return null;
+        if (!TryReadVerifiedSignedSecurityEpoch(generation, out var securityEpoch))
+            throw new RuntimeEnrollmentException(
+                "provider_unavailable", StatusCodes.Status503ServiceUnavailable,
+                "authorization_generation_invalid");
+
+        var previousResolution = await ResolvePreviousActiveAuthorityAsync(
+            db, productId, reservation.LicenseId, reservation.LicenseSeatId,
+            authority.ReleaseVersion, authority.ArtifactSetDigestSha256, cancellationToken);
+        if (previousResolution.Outcome == PreviousAuthorityOutcome.Unavailable)
+            throw new RuntimeEnrollmentException(
+                "provider_unavailable", StatusCodes.Status503ServiceUnavailable,
+                previousResolution.DiagnosticCode);
+        if (previousResolution.Outcome == PreviousAuthorityOutcome.Denied)
+            throw CommercialAuthorityDenialException(previousResolution.DiagnosticCode);
+        if (previousResolution.Authority is not { } previous
+            || previous.HeadLineageId != authority.PreviousAuthorityLineageId
+            || previous.HeadGenerationId != authority.PreviousAuthorityGenerationId)
             return null;
 
         var grantDigest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(reservation.ProviderGrantRef)));
-        var seatExists = await db.LicenseSeats.AnyAsync(item => item.Id == reservation.LicenseSeatId
-            && item.LicenseId == reservation.LicenseId, cancellationToken);
 
         // This shared lock order must remain compatible with the TKT-000782 writer:
         // license -> exact ACTIVE ownership -> exact provider grant. PostgreSQL retains every row lock
@@ -1809,8 +2315,18 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
             WHERE "ProductId" = {productId} AND "ProviderGrantRefDigestSha256" = {grantDigest}
             FOR UPDATE
             """).AsNoTracking().SingleOrDefaultAsync(cancellationToken);
+        var decisionNow = await ReadDatabaseClockAsync(db, cancellationToken);
+        previousResolution = await ReassessResolvedCommercialAuthorityAsync(
+            db, previousResolution, reservation.LicenseId, reservation.LicenseSeatId,
+            authority.ReleaseVersion, decisionNow, cancellationToken);
+        if (previousResolution.Outcome == PreviousAuthorityOutcome.Unavailable)
+            throw new RuntimeEnrollmentException(
+                "provider_unavailable", StatusCodes.Status503ServiceUnavailable,
+                previousResolution.DiagnosticCode);
+        if (previousResolution.Outcome == PreviousAuthorityOutcome.Denied)
+            throw CommercialAuthorityDenialException(previousResolution.DiagnosticCode);
         if (license is null || !license.IsActive || license.RevokedAt is not null
-            || grant is null || owner is null || !seatExists || grant.AuthenticatedClientId != clientId
+            || grant is null || owner is null || grant.AuthenticatedClientId != clientId
             || grant.LicenseId != reservation.LicenseId || grant.CommercialOwnershipId != owner.Id
             || grant.OwnerSubjectId != owner.OwnerSubjectId || grant.RecoveryOperationRef != recoveryRef
             || grant.RecoveryDigestSha256 != ledger.RecoveryDigestSha256 || grant.RequestId != requestId
@@ -1828,9 +2344,37 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
     /// <returns><see langword="true"/> only when the signed-generation record and payload remain coherent.</returns>
     internal static bool TryReadSignedSecurityEpoch(
         RuntimeEnrollmentAuthorityGeneration generation,
+        out int securityEpoch) => TryReadSignedSecurityEpoch(
+            generation, out securityEpoch, out _);
+
+    /// <summary>
+    /// Reads and cryptographically verifies the positive security epoch from one persisted generic generation.
+    /// Parsing failures retain their original exception at the protected redacted logging boundary.
+    /// </summary>
+    /// <param name="generation">The immutable provider generation row being verified.</param>
+    /// <param name="securityEpoch">Receives the exact positive signed epoch on success.</param>
+    /// <returns>True only when payload, statement, digest, configured key, and PS256 signature all agree.</returns>
+    private bool TryReadVerifiedSignedSecurityEpoch(
+        RuntimeEnrollmentAuthorityGeneration generation,
         out int securityEpoch)
     {
+        if (!TryReadSignedSecurityEpoch(generation, out securityEpoch, out var parsingException))
+        {
+            if (parsingException is not null)
+                LogInvalidRecoveryGenerationPayload(parsingException, generation);
+            return false;
+        }
+        return VerifyPersistedGenerationCryptography(generation, generation.CanonicalPayloadUtf8);
+    }
+
+    /// <summary>Parses coherent generic generation bytes while returning the original bounded parser exception.</summary>
+    private static bool TryReadSignedSecurityEpoch(
+        RuntimeEnrollmentAuthorityGeneration generation,
+        out int securityEpoch,
+        out Exception? parsingException)
+    {
         securityEpoch = 0;
+        parsingException = null;
         RuntimeEnrollmentAuthorityGenerationPayloadV2? payload;
         try
         {
@@ -1839,6 +2383,7 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         }
         catch (Exception exception) when (exception is JsonException or NotSupportedException)
         {
+            parsingException = exception;
             return false;
         }
 
@@ -1865,8 +2410,9 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         {
             canonicalPayload = JsonSerializer.SerializeToUtf8Bytes(payload, AuthorityJson);
         }
-        catch (NotSupportedException)
+        catch (NotSupportedException exception)
         {
+            parsingException = exception;
             return false;
         }
         var digest = Convert.ToHexStringLower(SHA256.HashData(canonicalPayload));
@@ -1879,6 +2425,78 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
 
         securityEpoch = payload.Key.SecurityEpoch;
         return true;
+    }
+
+    /// <summary>
+    /// Verifies persisted generic generation bytes with the exact configured operational public key. Configuration,
+    /// decoding, RSA-profile, and PS256 failures are closed without exposing key material or payload bytes.
+    /// </summary>
+    /// <param name="generation">The immutable generation metadata containing exact key and signature text.</param>
+    /// <param name="canonicalPayload">The canonical payload bytes already matched to durable generation metadata.</param>
+    /// <returns>True only for the configured exact operational key and valid generic generation signature.</returns>
+    private bool VerifyPersistedGenerationCryptography(
+        RuntimeEnrollmentAuthorityGeneration generation,
+        ReadOnlySpan<byte> canonicalPayload)
+    {
+        if (!string.Equals(generation.SignatureAlgorithm, "PS256", StringComparison.Ordinal))
+            return false;
+        var digest = Convert.ToHexStringLower(SHA256.HashData(canonicalPayload));
+        var expectedStatement = Encoding.UTF8.GetBytes(
+            $"{{\"schema\":\"runtime-enrollment-signed-generation-v2\",\"payload\":{Encoding.UTF8.GetString(canonicalPayload)},\"authorityDigest\":\"{digest}\",\"signature\":{{\"algorithm\":\"PS256\",\"keyId\":\"{generation.SignatureKeyId}\",\"value\":\"{generation.SignatureValue}\"}}}}");
+        if (!string.Equals(generation.AuthorityDigest, digest, StringComparison.Ordinal)
+            || !generation.SignedStatementUtf8.AsSpan().SequenceEqual(expectedStatement))
+            return false;
+        byte[] registryPin;
+        try
+        {
+            registryPin = Convert.FromBase64String(options.AuthorityGenerationV2.RegistryAuthoritySpkiBase64);
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+        try
+        {
+            var cryptography = new RuntimeEnrollmentAuthorityCryptography(clock, registryPin);
+            return cryptography.VerifyGenerationSignature(
+                options.AuthorityGenerationSigning,
+                canonicalPayload,
+                generation.SignatureKeyId,
+                generation.SignatureValue) == RuntimeEnrollmentAuthorityCryptography.Failure.None;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(registryPin);
+        }
+    }
+
+    /// <summary>
+    /// Retains the original generic-generation parser exception with safe provider UUIDs and one stable diagnostic.
+    /// A failing sink is contained without recursion so it cannot replace the primary provider-unavailable result.
+    /// </summary>
+    /// <param name="exception">The original JSON contract exception, including its protected stack trace.</param>
+    /// <param name="generation">The generation whose payload could not be decoded.</param>
+    private void LogInvalidRecoveryGenerationPayload(
+        Exception exception,
+        RuntimeEnrollmentAuthorityGeneration generation)
+    {
+        try
+        {
+            logger.LogWarning(
+                exception,
+                "Runtime recovery authority generation payload is invalid. DiagnosticCode={DiagnosticCode} AuthorityLineageId={AuthorityLineageId} AuthorityGenerationId={AuthorityGenerationId}",
+                "authorization_generation_invalid",
+                generation.AuthorityLineageId,
+                generation.AuthorityGenerationId);
+        }
+        catch (Exception)
+        {
+            // The protected sink is best-effort. Never recurse or replace the safe provider-unavailable path.
+        }
     }
 
     /// <summary>Imports only the canonical RSA-3072/e65537 recovery SPKI and derives its public identifiers.</summary>
@@ -1928,6 +2546,10 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         catch (CryptographicException) { return false; }
     }
 
+    /// <summary>Compares a confirmation outer with the exact immutable identity frozen by its preparation.</summary>
+    /// <param name="preparation">The locked key preparation that owns the challenge.</param>
+    /// <param name="request">The validated confirmation request being authorized.</param>
+    /// <returns><see langword="true"/> only when every preparation-owned outer field matches exactly.</returns>
     private static bool MatchesPreparationOuter(
         RuntimeSeatRecoveryKeyPreparation preparation, RuntimeSeatRecoveryKeyConfirmationRequest request) =>
         preparation.ProductId == Guid.Parse(request.ProductId)
@@ -1940,6 +2562,11 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         && preparation.AuthorityGenerationId == Guid.Parse(request.AuthorityGenerationId)
         && preparation.PublicKeySpkiSha256 == request.PublicKeySpkiSha256;
 
+    /// <summary>Validates that the signed confirmation statement exactly repeats its outer and preparation identity.</summary>
+    /// <param name="outer">The validated confirmation outer.</param>
+    /// <param name="statement">The captured canonical statement embedded in the outer.</param>
+    /// <param name="preparation">The locked preparation that owns the challenge and audience.</param>
+    /// <returns><see langword="true"/> only when every statement field matches the outer and preparation without normalization.</returns>
     private static bool MatchesStatement(
         RuntimeSeatRecoveryKeyConfirmationRequest outer,
         RuntimeSeatRecoveryKeyConfirmationStatement statement,
@@ -2001,6 +2628,11 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
     }
 
     /// <summary>Serializes the immutable positive activation receipt in the contract's exact property order.</summary>
+    /// <param name="request">The validated activation command whose identity is echoed.</param>
+    /// <param name="activationRequestDigestSha256">The lowercase digest of the exact activation request bytes.</param>
+    /// <param name="scope">The locked proof, authority, enrollment, binding, seat, and source-assignment scope.</param>
+    /// <param name="activatedAtUtc">The database-clock instant at which the cutover completed.</param>
+    /// <returns>The exact terminal success bytes to persist and replay byte-for-byte.</returns>
     internal static byte[] SerializeActivationResponse(
         RuntimeSeatRecoveryActivationRequest request,
         string activationRequestDigestSha256,
@@ -2009,6 +2641,15 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         $"{{\"schema\":\"runtime-seat-recovery-activation-response-v1\",\"contractVersion\":1,\"status\":\"committed\",\"productId\":\"{request.ProductId}\",\"requestId\":\"{request.RequestId}\",\"activationRequestDigestSha256\":\"{activationRequestDigestSha256}\",\"requestDigestSha256\":\"{request.RequestDigestSha256}\",\"recoveryOperationRef\":\"{request.RecoveryOperationRef}\",\"reservationRef\":\"{request.ReservationRef}\",\"activatedAtUtc\":\"{FormatProof(activatedAtUtc)}\",\"proofReceipt\":{{\"state\":\"proved\",\"prepareRef\":\"{request.PrepareRef}\",\"confirmationRequestSha256\":\"{request.ConfirmationRequestSha256}\",\"expiresAtUtc\":\"{FormatProof(scope.Proof.ExpiresAtUtc)}\"}},\"previousAuthority\":{{\"authorityLineageId\":\"{scope.Authority.PreviousAuthorityLineageId:D}\",\"authorityGenerationId\":\"{scope.Authority.PreviousAuthorityGenerationId:D}\",\"state\":\"superseded\"}},\"newAuthority\":{{\"authorityLineageId\":\"{scope.Authority.AuthorityLineageId:D}\",\"authorityGenerationId\":\"{scope.Authority.AuthorityGenerationId:D}\",\"enrollmentId\":\"{scope.Authority.EnrollmentId:D}\",\"state\":\"active\",\"isCurrentHead\":true}},\"reservation\":{{\"state\":\"committed\"}}}}");
 
     /// <summary>Freezes one exact terminal conflict or expiry after the PROVED identity is established.</summary>
+    /// <param name="db">The caller-owned context whose active transaction owns the receipt mutation.</param>
+    /// <param name="clientId">The authenticated client identity that owns the recovery operation.</param>
+    /// <param name="parsed">The canonical activation request and digest established before persistence.</param>
+    /// <param name="scope">The locked recovery scope from which the terminal receipt identity is derived.</param>
+    /// <param name="errorCode">The stable public terminal error code.</param>
+    /// <param name="statusCode">The frozen HTTP status returned by every exact replay.</param>
+    /// <param name="completedAtUtc">The database-clock completion instant.</param>
+    /// <returns>The exact error response also added to the caller's transaction for byte-identical replay.</returns>
+    /// <remarks>This helper neither saves nor commits; the caller owns rollback, persistence, and transaction completion.</remarks>
     private static RuntimeSeatRecoveryHttpResult FreezeActivationReceipt(
         LicenseDbContext db,
         string clientId,
@@ -2027,6 +2668,11 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
     }
 
     /// <summary>Serializes one closed activation refusal in its exact frozen property order.</summary>
+    /// <param name="request">The validated activation request whose public identity is echoed.</param>
+    /// <param name="activationRequestDigestSha256">The lowercase digest of the exact activation request bytes.</param>
+    /// <param name="errorCode">The stable public refusal code; protected causes are never serialized.</param>
+    /// <param name="completedAtUtc">The database-clock completion instant.</param>
+    /// <returns>The exact terminal refusal bytes to persist and replay byte-for-byte.</returns>
     internal static byte[] SerializeActivationError(
         RuntimeSeatRecoveryActivationRequest request,
         string activationRequestDigestSha256,
@@ -2035,6 +2681,16 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         $"{{\"schema\":\"runtime-seat-recovery-activation-error-v1\",\"contractVersion\":1,\"status\":\"refused\",\"productId\":\"{request.ProductId}\",\"requestId\":\"{request.RequestId}\",\"activationRequestDigestSha256\":\"{activationRequestDigestSha256}\",\"errorCode\":\"{errorCode}\",\"completedAtUtc\":\"{FormatProof(completedAtUtc)}\"}}");
 
     /// <summary>Adds one immutable activation terminal inside the caller's cutover transaction.</summary>
+    /// <param name="db">The caller-owned context tracking the new receipt.</param>
+    /// <param name="clientId">The authenticated client identity that owns the activation.</param>
+    /// <param name="parsed">The canonical request bytes and digest frozen by the receipt.</param>
+    /// <param name="scope">The locked recovery scope that owns the receipt identity.</param>
+    /// <param name="state">The closed terminal receipt state.</param>
+    /// <param name="statusCode">The terminal HTTP status replayed from the receipt.</param>
+    /// <param name="errorCode">The stable public error code, or <see langword="null"/> for success.</param>
+    /// <param name="response">The exact response bytes owned by the receipt.</param>
+    /// <param name="completedAtUtc">The database-clock terminal instant.</param>
+    /// <remarks>This helper only attaches the receipt; the caller owns saving, commit, and rollback of the enclosing cutover transaction.</remarks>
     private static void AddActivationReceipt(
         LicenseDbContext db,
         string clientId,
@@ -2073,11 +2729,28 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         });
     }
 
+    /// <summary>Builds the public key-confirmation refusal without persisting protected diagnostic detail.</summary>
+    /// <param name="request">The validated confirmation request whose public identity is echoed.</param>
+    /// <param name="errorCode">The stable public refusal code.</param>
+    /// <param name="statusCode">The HTTP status associated with the refusal.</param>
+    /// <param name="completedAtUtc">The database-clock refusal instant.</param>
+    /// <returns>The exact refusal envelope; this helper performs no persistence or transaction work.</returns>
     private static RuntimeSeatRecoveryHttpResult KeyConfirmationError(
         RuntimeSeatRecoveryKeyConfirmationRequest request, string errorCode, int statusCode, DateTime completedAtUtc) =>
         new(statusCode, ContentType, Encoding.UTF8.GetBytes(
             $"{{\"schema\":\"runtime-seat-recovery-key-confirmation-error-v1\",\"contractVersion\":1,\"productId\":\"{request.ProductId}\",\"requestId\":\"{request.RequestId}\",\"requestDigestSha256\":\"{request.RequestDigestSha256}\",\"prepareRef\":\"{request.PrepareRef}\",\"errorCode\":\"{errorCode}\",\"completedAtUtc\":\"{Format(completedAtUtc)}\"}}"));
 
+    /// <summary>Consumes one challenge and freezes its terminal confirmation refusal for exact replay.</summary>
+    /// <param name="db">The caller-owned context whose active transaction owns the mutation.</param>
+    /// <param name="authenticatedClientId">The authenticated client identity that owns the preparation.</param>
+    /// <param name="preparation">The locked preparation whose challenge is consumed.</param>
+    /// <param name="request">The validated confirmation request whose identity is frozen.</param>
+    /// <param name="parsed">The exact canonical request bytes and digest.</param>
+    /// <param name="completedAtUtc">The database-clock refusal instant.</param>
+    /// <param name="errorCode">The stable public refusal code.</param>
+    /// <param name="statusCode">The terminal HTTP status replayed for this confirmation.</param>
+    /// <returns>The exact refusal response attached to the new immutable confirmation row.</returns>
+    /// <remarks>This helper neither saves nor commits; the caller owns rollback, persistence, and transaction completion.</remarks>
     private static RuntimeSeatRecoveryHttpResult FreezeConfirmationRefusal(
         LicenseDbContext db,
         string authenticatedClientId,
@@ -2106,6 +2779,9 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         return response;
     }
 
+    /// <summary>Recognizes only the closed set of key-proof uniqueness races that permit a bounded reread.</summary>
+    /// <param name="exception">The database exception chain to inspect without exposing its message.</param>
+    /// <returns><see langword="true"/> only for a PostgreSQL unique violation on an allowlisted key-proof constraint.</returns>
     private static bool IsKeyProofUniqueViolation(Exception exception)
     {
         var allowed = new HashSet<string>(StringComparer.Ordinal)
@@ -2142,11 +2818,29 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         return false;
     }
 
+    /// <summary>Encodes exact bytes as unpadded canonical base64url without normalizing their content.</summary>
+    /// <param name="value">The bytes to encode.</param>
+    /// <returns>The canonical unpadded base64url representation.</returns>
     private static string EncodeBase64Url(ReadOnlySpan<byte> value) =>
         Convert.ToBase64String(value).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
+    /// <summary>Builds the stable envelope owner reference for one encrypted preparation field.</summary>
+    /// <param name="prepareRef">The preparation identifier that owns the encrypted value.</param>
+    /// <param name="field">The closed field name within the preparation row.</param>
+    /// <returns>The deterministic owner reference used by envelope sealing and opening.</returns>
     private static string PreparationFieldReference(Guid prepareRef, string field) =>
         $"RuntimeSeatRecoveryKeyPreparations:{prepareRef:D}:{field}";
+
+    /// <summary>Builds the public non-terminal commercial refusal without exposing its protected cause.</summary>
+    /// <returns>The stable 422 transport envelope used at every recovery stage.</returns>
+    private static RuntimeSeatRecoveryHttpResult CommercialAuthorityDenial() =>
+        Transport(StatusCodes.Status422UnprocessableEntity, "commercial_authority_ineligible");
+
+    /// <summary>Preserves a protected commercial cause while exposing only the stable non-terminal refusal.</summary>
+    /// <param name="diagnosticCode">The bounded server-only commercial denial reason.</param>
+    /// <returns>An exception mapped by the owning transaction to the public 422 transport envelope.</returns>
+    private static RuntimeEnrollmentException CommercialAuthorityDenialException(string diagnosticCode) =>
+        new("commercial_authority_ineligible", StatusCodes.Status422UnprocessableEntity, diagnosticCode);
 
     /// <summary>Holds the locked provider authority and its exact positive signed-generation epoch.</summary>
     /// <param name="Reservation">The locked RESERVED provider reservation.</param>
@@ -2157,7 +2851,12 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         RuntimeSeatRecoveryAuthority Authority,
         int SecurityEpoch);
 
-    /// <summary>Holds the locked activation aggregate and its closed provider compatibility verdict.</summary>
+    /// <summary>Holds the locked activation aggregate and its closed non-commercial compatibility verdict.</summary>
+    /// <param name="Proof">The exact durable proof-of-possession receipt.</param>
+    /// <param name="Reservation">The row-locked recovery reservation.</param>
+    /// <param name="Authority">The row-locked prepared recovery authority.</param>
+    /// <param name="PreviousAuthority">The proved source authority and current assignment held for cutover.</param>
+    /// <param name="ProviderCompatible">Whether all historical proof and ownership relations remain coherent.</param>
     internal sealed record ActivationScope(
         RuntimeSeatRecoveryProofReceipt Proof,
         RuntimeSeatRecoveryReservation Reservation,
@@ -2174,6 +2873,7 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
             : this(proof, reservation, authority, new(
                 authority.PreviousAuthorityLineageId,
                 authority.PreviousAuthorityGenerationId,
+                Guid.Empty,
                 Guid.Empty,
                 Guid.Empty), providerCompatible)
         {
@@ -2198,6 +2898,17 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
     /// Serializes the authorized outer once with the shared W5 opaque writer while embedding the
     /// already signed statement bytes verbatim.
     /// </summary>
+    /// <param name="request">The validated authorization request whose opaque fields are preserved exactly.</param>
+    /// <param name="requestDigest">The lowercase digest of the canonical request bytes.</param>
+    /// <param name="reservationRef">The provider-owned reservation identifier.</param>
+    /// <param name="subjectDigest">The lowercase provider subject digest.</param>
+    /// <param name="seatId">The locked eligible seat identifier.</param>
+    /// <param name="bindingId">The locked installation-binding identifier.</param>
+    /// <param name="enrollmentId">The locked Runtime-enrollment identifier.</param>
+    /// <param name="authorizedAtUtc">The database-clock authorization instant.</param>
+    /// <param name="expiresAtUtc">The bounded reservation expiry instant.</param>
+    /// <param name="signedStatement">The exact canonical signed statement bytes embedded without reparsing.</param>
+    /// <returns>The canonical authorized response bytes suitable for immutable persistence and exact replay.</returns>
     private static byte[] SerializeAuthorized(
         RuntimeSeatRecoveryAuthorizationRequest request,
         string requestDigest,
@@ -2236,6 +2947,13 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
     /// Serializes one complete six-branch snapshot with the shared W5 opaque writer and no optional
     /// HTTP-200 blocks.
     /// </summary>
+    /// <param name="status">The already classified closed readback status.</param>
+    /// <param name="ledger">The immutable authorization ledger that owns request identity and signed bytes.</param>
+    /// <param name="reservation">The locked provider reservation represented in the snapshot.</param>
+    /// <param name="authority">The locked recovery authority represented in the snapshot.</param>
+    /// <param name="observedAtUtc">The database-clock observation instant.</param>
+    /// <param name="revalidatedPreviousAuthorityState">An optional freshly revalidated previous-authority state; otherwise the frozen state is emitted.</param>
+    /// <returns>The canonical readback bytes; opaque grant and signed-statement bytes are preserved without normalization.</returns>
     internal static byte[] SerializeReadback(
         string status,
         RuntimeSeatRecoveryAuthorization ledger,

@@ -52,12 +52,19 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var options = new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(connectionString).Options;
         var factory = new Tkt000672PostgreSqlFactory(options);
 
-        var observed = new DateTimeOffset(2026, 8, 26, 8, 0, 0, TimeSpan.Zero);
+        DateTimeOffset observed;
+        await using (var clock = await factory.CreateDbContextAsync())
+        {
+            await clock.Database.OpenConnectionAsync();
+            var databaseNow = await RuntimeEnrollmentService.DatabaseNowAsync(clock, CancellationToken.None);
+            // One millisecond-precision anchor keeps request timestamps and current licence policy coherent.
+            observed = DateTimeOffset.FromUnixTimeMilliseconds(databaseNow.ToUnixTimeMilliseconds());
+        }
         await using var executor = new PostgreSqlRealScenarioExecutor(factory, observed);
         using var signers = new StableSignerFactory();
         var harness = new Tkt000672SourceCAuthorityHarness(
             new Tkt000672PostgreSqlEvidenceReader(factory), executor, signers);
-        var request = Tkt000672SourceCAuthorityContract.ParseRequest(PostgreSqlRequest()).Request!;
+        var request = Tkt000672SourceCAuthorityContract.ParseRequest(PostgreSqlRequest(observed)).Request!;
         executor.InterruptAfterFirstPersistedGeneration = true;
         await Assert.ThrowsAsync<OperationCanceledException>(() =>
             harness.RunAsync(request, CancellationToken.None));
@@ -215,14 +222,15 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     }
 
     /// <summary>Serializes one closed metadata-only request for the isolated PostgreSQL execution.</summary>
+    /// <param name="observed">Shared database-clock anchor for this synthetic scenario.</param>
     /// <returns>Owned compact UTF-8 JSON bytes.</returns>
-    private static byte[] PostgreSqlRequest() => System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
+    private static byte[] PostgreSqlRequest(DateTimeOffset observed) => System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
     {
         schema = Tkt000672SourceCAuthorityContract.RequestSchema,
         runId = "run_00000000000000000000000000000003",
         environment = Tkt000672SourceCAuthorityContract.Environment,
         sourceId = "source_c_postgresql_01",
-        observedAtUtc = "2026-08-26T08:00:00.000Z",
+        observedAtUtc = observed.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
         snapshotHash = new string('1', 64), catalogHash = new string('2', 64),
         migrationsHash = new string('3', 64), oracleHash = new string('4', 64),
         generationSpecHash = new string('5', 64), providerScope = "provider_scope_pg",
@@ -426,7 +434,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                     ProductId = fixture.ProductId, LicenseId = binding.LicenseId,
                     LicenseSeatId = binding.LicenseSeatId, InstallationId = binding.InstallationId,
                     HardwareIdHash = binding.HardwareIdHash, ReleaseVersion = binding.Version,
-                    HandoffDigestSha256 = binding.HandoffDigestSha256, ProtocolVersion = "2",
+                    HandoffDigestSha256 = binding.HandoffDigestSha256,
+                    ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion,
                     Algorithm = "PS256", KeyBackend = "test", AttestationLevel = "none",
                     PublicKeySpkiCiphertext = "test", PublicKeySpkiKeyId = "test",
                     PublicKeySpkiKeyPurpose = "encryption", PublicKeySpkiSha256 = new string('1', 64),
@@ -446,6 +455,26 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                     Source = "release", RegisteredAtUtc = observed.UtcDateTime
                 });
                 await seed.SaveChangesAsync(cancellationToken);
+                try
+                {
+                    // Diagnose synthetic credential prerequisites before exercising the HTTP authority flow.
+                    var approved = await RuntimeEnrollmentIdentityValidator.ValidateBootstrapAsync(seed, enrollment, cancellationToken);
+                    await using var transaction = await seed.Database.BeginTransactionAsync(cancellationToken);
+                    await RuntimeCommercialEligibilityValidator.AcquireReadBarrierAsync(seed, cancellationToken);
+                    var databaseNow = await RuntimeEnrollmentService.DatabaseNowAsync(seed, cancellationToken);
+                    var assessment = await RuntimeCommercialEligibilityValidator.AssessAsync(
+                        seed, enrollment, approved.Binaries, databaseNow, null, cancellationToken);
+                    Assert.True(assessment.IsEligible,
+                        $"Source C seed commercial refusal: {assessment.DenialReason}; "
+                        + $"license_expired={license.ExpirationDate <= databaseNow.UtcDateTime}.");
+                    await transaction.CommitAsync(cancellationToken);
+                }
+                catch (RuntimeEnrollmentException exception)
+                {
+                    throw new InvalidOperationException(
+                        $"Source C seed credential refused: status={exception.StatusCode}; "
+                        + $"code={exception.ErrorCode}; diagnostic={exception.DiagnosticCode}.", exception);
+                }
             }
             var operational = RSA.Create(2048);
             var successor = RSA.Create(2048);

@@ -45,7 +45,14 @@ namespace SoftLicence.UI
             _appDataPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), appName, "license.lic");
             _client = new SoftLicenceClient(serverUrl, publicKeyXml);
 
-            CurrentHardwareId = HardwareInfo.GetHardwareId();
+            try
+            {
+                CurrentHardwareId = HardwareInfo.GetHardwareId();
+            }
+            catch (MachineIdentityRefusedException ex)
+            {
+                CurrentHardwareId = ex.Message;
+            }
 
             // Timer de vérification périodique (Toutes les 2 heures)
             _validationTimer = new System.Timers.Timer(TimeSpan.FromHours(2).TotalMilliseconds);

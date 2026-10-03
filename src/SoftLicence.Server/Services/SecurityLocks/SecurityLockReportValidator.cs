@@ -48,20 +48,34 @@ public static partial class SecurityLockReportValidator
     public static readonly TimeSpan MaximumClockDistance = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// Validates the request. Failures throw <see cref="SecurityLockReportValidationException"/>; nothing is
-    /// persisted before this contract succeeds.
+    /// Validates the complete request against one authoritative server instant. This compatibility adapter keeps
+    /// the original combined contract for callers that do not need to separate canonical parsing from a later
+    /// transactionally authoritative time decision.
     /// </summary>
     /// <param name="request">Deserialized request.</param>
     /// <param name="now">Authoritative server time.</param>
     /// <returns>The canonical validated report.</returns>
     public static SecurityLockValidatedReport Validate(SecurityLockReportRequest request, DateTimeOffset now)
     {
+        var report = ValidateStructure(request);
+        ValidateTime(report, now);
+        return report;
+    }
+
+    /// <summary>
+    /// Parses and validates the exact canonical request shape without deciding whether its timestamps are current.
+    /// A transaction-owning caller must invoke <see cref="ValidateTime"/> with fresh provider time after every
+    /// decisive lock wait.
+    /// </summary>
+    /// <param name="request">Deserialized request.</param>
+    /// <returns>The canonical structurally validated report.</returns>
+    public static SecurityLockValidatedReport ValidateStructure(SecurityLockReportRequest request)
+    {
         ArgumentNullException.ThrowIfNull(request);
         if (!string.Equals(request.Schema, RequestSchema, StringComparison.Ordinal)) throw Fail("schema_invalid");
         if (request.ExtensionData is { Count: > 0 }) throw Fail("unexpected_field");
         if (!TryCanonicalUuid(request.ReportId, out var reportId)) throw Fail("report_id_invalid");
         if (!TryCanonicalUtc(request.SentAtUtc, out var sentAt)) throw Fail("sent_at_invalid");
-        if (sentAt < now - MaximumClockDistance || sentAt > now + MaximumClockDistance) throw Fail("sent_at_outside_window");
         if (request.HardwareId is null || !HardwareIdRegex().IsMatch(request.HardwareId)) throw Fail("hardware_id_invalid");
         if (request.AppVersion is null || !AppVersionRegex().IsMatch(request.AppVersion)) throw Fail("app_version_invalid");
         if (request.LockId is null || !LockIdRegex().IsMatch(request.LockId)) throw Fail("lock_id_invalid");
@@ -72,11 +86,25 @@ public static partial class SecurityLockReportValidator
         if (irreversible == string.Equals(request.Mode, SecurityLockCauseCatalog.ModeNotApplicable, StringComparison.Ordinal))
             throw Fail("mode_mismatch");
         if (request.EvidenceDigestSha256 is null || !Sha256Regex().IsMatch(request.EvidenceDigestSha256)) throw Fail("evidence_digest_invalid");
-        if (!TryCanonicalUtc(request.FirstSeenUtc, out var firstSeen) || firstSeen > now + MaximumClockDistance)
-            throw Fail("first_seen_invalid");
+        if (!TryCanonicalUtc(request.FirstSeenUtc, out var firstSeen)) throw Fail("first_seen_invalid");
 
         return new SecurityLockValidatedReport(reportId, sentAt, request.HardwareId, request.AppVersion,
             request.LockId, request.Cause!, level, request.Mode!, request.EvidenceDigestSha256, firstSeen);
+    }
+
+    /// <summary>
+    /// Applies the report timestamp window with the authoritative provider instant sampled after the caller's
+    /// decisive lock waits.
+    /// </summary>
+    /// <param name="report">Canonical structurally validated report.</param>
+    /// <param name="now">Authoritative provider time.</param>
+    public static void ValidateTime(SecurityLockValidatedReport report, DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        if (report.SentAtUtc < now - MaximumClockDistance || report.SentAtUtc > now + MaximumClockDistance)
+            throw Fail("sent_at_outside_window");
+        if (report.FirstSeenUtc > now + MaximumClockDistance)
+            throw Fail("first_seen_invalid");
     }
 
     /// <summary>Formats a UTC instant in the canonical seven-digit form used by requests and verdicts.</summary>

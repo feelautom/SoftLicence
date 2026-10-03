@@ -146,7 +146,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         }
     }
 
-    /// <summary>Freezes the first HWID's quota observation while another HWID succeeds after a synthetic quota increase; history must not reread or assert global serialization.</summary>
+    /// <summary>Freezes the first HWID quota observation, proves the concurrent quota writer waits, then admits another HWID after the quota change; history retains the original facts.</summary>
     /// <remarks>The barrier runs after PostgreSQL has executed the exact active-seat statement. Both HTTP calls are awaited, every context is fixture-owned, and the barrier is released in finally. Existing authorization and hardware lock behavior remain unchanged.</remarks>
     [Fact]
     public async Task Tkt976_Legacy_InterHardwareConcurrency_PreservesOriginalPredicateFacts()
@@ -154,8 +154,16 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var connections = await ProvisionAsync();
         var clean = new TestDbFactory(connections.App);
         var fixture = await SeedDistributionAuthorityWithoutBindingAsync(clean);
+        await Tkt976_FillMultiSeatCapacityAsync(clean, fixture.LicenseId);
+        var firstApplication = "history-first-" + Guid.NewGuid().ToString("N");
+        var writerApplication = "history-quota-" + Guid.NewGuid().ToString("N");
+        var firstConnection = new Npgsql.NpgsqlConnectionStringBuilder(connections.App)
+            { ApplicationName = firstApplication, Pooling = false }.ConnectionString;
+        var writerConnection = new Npgsql.NpgsqlConnectionStringBuilder(connections.App)
+            { ApplicationName = writerApplication, Pooling = false }.ConnectionString;
+        var writerFactory = new TestDbFactory(writerConnection);
         var barrier = new Tkt976LegacyQuotaBarrier(fixture.LicenseId);
-        using var firstHost = Tkt976_CreateLegacyHost(new Tkt976LegacyBarrierFactory(connections.App, barrier));
+        using var firstHost = Tkt976_CreateLegacyHost(new Tkt976LegacyBarrierFactory(firstConnection, barrier));
         using var secondHost = Tkt976_CreateLegacyHost(clean);
         ActivationController.ActivationRequest firstRequest;
         ActivationController.ActivationRequest secondRequest;
@@ -180,25 +188,33 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var first = Tkt976_CreateDirectLegacyController(firstScope.ServiceProvider);
         var second = Tkt976_CreateDirectLegacyController(secondScope.ServiceProvider);
         var pending = first.Activate(firstRequest);
+        await using var change = await writerFactory.CreateDbContextAsync();
+        Task? quotaChange = null;
         try
         {
             await barrier.Reached.Task.WaitAsync(TimeSpan.FromSeconds(15));
-            await using (var change = await clean.CreateDbContextAsync())
-            {
-                var license = await change.Licenses.SingleAsync(row => row.Id == fixture.LicenseId);
-                license.MaxSeats = 2;
-                await change.SaveChangesAsync();
-            }
+            var license = await change.Licenses.SingleAsync(row => row.Id == fixture.LicenseId);
+            license.MaxSeats = 3;
+            quotaChange = change.SaveChangesAsync();
+            await WaitForBlockedBackendAsync(connections.Admin, writerApplication, firstApplication);
+            Assert.False(quotaChange.IsCompleted);
+            Assert.False(pending.IsCompleted);
+            barrier.Resume.TrySetResult();
+            Assert.IsType<BadRequestObjectResult>(await pending.WaitAsync(TimeSpan.FromSeconds(15)));
+            await quotaChange.WaitAsync(TimeSpan.FromSeconds(15));
             Assert.IsType<OkObjectResult>(await second.Activate(secondRequest));
         }
         finally
         {
             barrier.Resume.TrySetResult();
             await pending.WaitAsync(TimeSpan.FromSeconds(15));
+            if (quotaChange != null)
+                await quotaChange.WaitAsync(TimeSpan.FromSeconds(15));
         }
+        Assert.Equal(1, barrier.MatchingQueryCount);
         Assert.IsType<BadRequestObjectResult>(await pending);
         await using var observed = await clean.CreateDbContextAsync();
-        Assert.Equal(2, await observed.LicenseSeats.CountAsync(row => row.LicenseId == fixture.LicenseId && row.IsActive));
+        Assert.Equal(3, await observed.LicenseSeats.CountAsync(row => row.LicenseId == fixture.LicenseId && row.IsActive));
         var rows = await observed.LicenseHistories.Where(row => row.LicenseId == fixture.LicenseId
             && row.Action == "ACTIVATION_DECISION_V1").ToListAsync();
         Assert.Equal(2, rows.Count);
@@ -206,8 +222,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))!).ToArray();
         var refusal = Assert.Single(decisions, row => row.Outcome == "refused");
         Assert.Equal(firstRequest.HardwareId, refusal.SubmittedHardwareId);
-        Assert.Equal(1, refusal.Snapshot.ActiveSeats);
-        Assert.Equal(1, refusal.Snapshot.SeatLimit);
+        Assert.Equal(2, refusal.Snapshot.ActiveSeats);
+        Assert.Equal(2, refusal.Snapshot.SeatLimit);
         Assert.Equal("hardware_lock_observation", refusal.Snapshot.ObservationGuarantee);
         Assert.DoesNotContain(refusal.Snapshot.ActiveSeatDetails!, seat => seat.HardwareId == secondRequest.HardwareId);
         Assert.Equal(secondRequest.HardwareId, Assert.Single(decisions, row => row.Outcome == "accepted").SubmittedHardwareId);
@@ -248,6 +264,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         internal TaskCompletionSource Resume { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         /// <summary>Atomic one-shot flag prevents startup or later history queries from blocking again.</summary>
         private int _entered;
+        /// <summary>Counts matching predicate reads so history cannot silently reread the quota.</summary>
+        internal int MatchingQueryCount => Volatile.Read(ref _entered);
         /// <summary>Waits at most fifteen seconds after the target predicate executes, retaining its original result reader unchanged.</summary>
         public override async ValueTask<System.Data.Common.DbDataReader> ReaderExecutedAsync(
             System.Data.Common.DbCommand command, CommandExecutedEventData eventData,
@@ -260,7 +278,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 && !command.CommandText.Contains("AND l.\"HardwareId\" =", StringComparison.Ordinal)
                 && !command.CommandText.Contains("LIMIT", StringComparison.Ordinal)
                 && command.Parameters.Cast<System.Data.Common.DbParameter>().Any(parameter => Equals(parameter.Value, licenseId))
-                && Interlocked.CompareExchange(ref _entered, 1, 0) == 0)
+                && Interlocked.Increment(ref _entered) == 1)
             {
                 Reached.TrySetResult();
                 await Resume.Task.WaitAsync(TimeSpan.FromSeconds(15), cancellationToken);
@@ -293,6 +311,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var connections = await ProvisionAsync();
         var clean = new TestDbFactory(connections.App);
         var fixture = await SeedDistributionAuthorityWithoutBindingAsync(clean);
+        await Tkt976_FillMultiSeatCapacityAsync(clean, fixture.LicenseId);
         using var requestCancellation = new CancellationTokenSource();
         using var shutdown = new CancellationTokenSource();
         var fault = new Tkt976FaultState(mode, requestCancellation, shutdown);
@@ -386,6 +405,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var connections = await ProvisionAsync();
         var database = new TestDbFactory(connections.App);
         var fixture = await SeedDistributionAuthorityWithoutBindingAsync(database);
+        await Tkt976_FillMultiSeatCapacityAsync(database, fixture.LicenseId);
         using var host = Tkt976_CreateLegacyHost(database);
         ActivationController.ActivationRequest request;
         await using (var setup = await database.CreateDbContextAsync())
@@ -429,8 +449,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             Assert.Equal("hardware_lock_observation", decision.Snapshot.ObservationGuarantee);
             Assert.Equal(request.HardwareId, decision.SubmittedHardwareId);
             Assert.Null(decision.CorrelatedHardwareId);
-            Assert.Equal(1, decision.Snapshot.ActiveSeats);
-            Assert.Equal(1, decision.Snapshot.SeatLimit);
+            Assert.Equal(2, decision.Snapshot.ActiveSeats);
+            Assert.Equal(2, decision.Snapshot.SeatLimit);
         }
     }
 

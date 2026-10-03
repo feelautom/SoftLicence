@@ -1,146 +1,69 @@
-using System.Security.Cryptography;
-using System.Text;
 using SoftLicence.SDK;
 using Xunit;
 
 namespace SoftLicence.Tests.Core;
 
+[Collection(MachineIdentityReadersCollection.Name)]
 public class HardwareInfoTests
 {
+    private const string Uuid = "4C4C4544-0051-3610-8052-B7C04F4A4E32";
+
     [Fact]
-    public void GetHardwareId_UsesLegacyDiskSelection_WhenIndexZeroWouldReturnAnotherDisk()
+    public void GetHardwareId_IsDerivedFromSystemUuidOnly()
     {
-        using var _ = HardwareInfo.UseWmiPropertyReaderForTests((className, propertyName, whereClause) =>
-            className switch
-            {
-                "Win32_Processor" => "CPU-1",
-                "Win32_BaseBoard" => "MB-1",
-                "Win32_BIOS" => "BIOS-1",
-                "Win32_DiskDrive" when whereClause == "Index=0" => "SYSTEM-DISK",
-                "Win32_DiskDrive" => "OTHER-DISK-FIRST",
-                _ => "UNKNOWN"
-            });
+        using var _ = MachineIdentity.UseWmiQueryReaderForTests((className, properties) =>
+            className == "Win32_ComputerSystemProduct" ? Row("UUID", " " + Uuid.ToLowerInvariant()) : Row(properties[0], "OTHER-" + className));
 
-        var expected = ComputeHardwareId("CPU-1", "MB-1", "BIOS-1", "OTHER-DISK-FIRST", Environment.MachineName);
-
-        Assert.Equal(expected, HardwareInfo.GetHardwareId());
+        Assert.Equal(MachineIdentity.FromUuid(Uuid).HardwareId, HardwareInfo.GetHardwareId());
     }
 
     [Fact]
-    public void GetStableHardwareId_UsesDiskIndexZero_WhenLegacyDiskOrderWouldReturnAnotherDisk()
+    public void GetHardwareId_DoesNotChange_WhenOtherComponentsChange()
     {
-        using var _ = HardwareInfo.UseWmiPropertyReaderForTests((className, propertyName, whereClause) =>
-            className switch
-            {
-                "Win32_Processor" => "CPU-1",
-                "Win32_BaseBoard" => "MB-1",
-                "Win32_BIOS" => "BIOS-1",
-                "Win32_DiskDrive" when whereClause == "Index=0" => "SYSTEM-DISK",
-                "Win32_DiskDrive" => "OTHER-DISK-FIRST",
-                _ => "UNKNOWN"
-            });
+        string first;
+        using (MachineIdentity.UseWmiQueryReaderForTests((className, properties) =>
+            className == "Win32_ComputerSystemProduct" ? Row("UUID", Uuid) : Row(properties[0], "A")))
+            first = HardwareInfo.GetHardwareId();
 
-        var expected = ComputeHardwareId("CPU-1", "MB-1", "BIOS-1", "SYSTEM-DISK", Environment.MachineName);
+        string second;
+        using (MachineIdentity.UseWmiQueryReaderForTests((className, properties) =>
+            className == "Win32_ComputerSystemProduct" ? Row("UUID", Uuid) : WmiQueryResult.Failed("System.Management.ManagementException")))
+            second = HardwareInfo.GetHardwareId();
 
-        Assert.Equal(expected, HardwareInfo.GetStableHardwareId());
+        Assert.Equal(first, second);
+    }
+
+    [Theory]
+    [InlineData("03000200-0400-0500-0006-000700080009", MachineIdentity.RefusalUuidGenericKnown, "AR-04")]
+    [InlineData("not-a-uuid", MachineIdentity.RefusalUuidInvalidFormat, "AR-03")]
+    [InlineData("", MachineIdentity.RefusalUuidAbsent, "AR-01")]
+    public void GetHardwareId_RefusedUuid_ThrowsWithSupportCode_AndInventsNothing(string uuid, string refusalCode, string supportCode)
+    {
+        using var _ = MachineIdentity.UseWmiQueryReaderForTests((className, properties) =>
+            className == "Win32_ComputerSystemProduct" ? Row("UUID", uuid) : Row(properties[0], "PRESENT"));
+
+        var refused = Assert.Throws<MachineIdentityRefusedException>(() => HardwareInfo.GetHardwareId());
+
+        Assert.Equal(refusalCode, refused.RefusalCode);
+        Assert.Equal(supportCode, refused.SupportCode);
+        Assert.Equal("Device refused (code " + supportCode + ").", refused.Message);
+        Assert.DoesNotContain(refusalCode, refused.Message);
     }
 
     [Fact]
-    public void GetHardwareIdMigrationInfo_ReturnsLegacyStableAndDifferenceFlag_ForMultiDisk()
+    public void GetHardwareId_WmiFailure_ThrowsUnreadable_WithCause()
     {
-        using var _ = HardwareInfo.UseWmiPropertyReaderForTests((className, propertyName, whereClause) =>
-            className switch
-            {
-                "Win32_Processor" => "CPU-1",
-                "Win32_BaseBoard" => "MB-1",
-                "Win32_BIOS" => "BIOS-1",
-                "Win32_DiskDrive" when whereClause == "Index=0" => "SYSTEM-DISK",
-                "Win32_DiskDrive" => "OTHER-DISK-FIRST",
-                _ => "UNKNOWN"
-            });
+        using var _ = MachineIdentity.UseWmiQueryReaderForTests((_, _) => WmiQueryResult.Failed("System.Management.ManagementException"));
 
-        var info = HardwareInfo.GetHardwareIdMigrationInfo();
+        var refused = Assert.Throws<MachineIdentityRefusedException>(() => HardwareInfo.GetHardwareId());
 
-        Assert.Equal(ComputeHardwareId("CPU-1", "MB-1", "BIOS-1", "OTHER-DISK-FIRST", Environment.MachineName), info.LegacyHardwareId);
-        Assert.Equal(ComputeHardwareId("CPU-1", "MB-1", "BIOS-1", "SYSTEM-DISK", Environment.MachineName), info.StableHardwareId);
-        Assert.True(info.HasStableHardwareId);
-        Assert.True(info.HasDistinctHardwareIds);
+        Assert.Equal("AR-02", refused.SupportCode);
+        Assert.Equal("System.Management.ManagementException", refused.ReadFailure);
     }
 
-    [Fact]
-    public void GetHardwareIdMigrationInfo_ReturnsNoDifference_WhenLegacyAndStableDiskMatch()
-    {
-        using var _ = HardwareInfo.UseWmiPropertyReaderForTests((className, propertyName, whereClause) =>
-            className switch
-            {
-                "Win32_Processor" => "CPU-1",
-                "Win32_BaseBoard" => "MB-1",
-                "Win32_BIOS" => "BIOS-1",
-                "Win32_DiskDrive" => "SYSTEM-DISK",
-                _ => "UNKNOWN"
-            });
-
-        var info = HardwareInfo.GetHardwareIdMigrationInfo();
-
-        Assert.Equal(info.LegacyHardwareId, info.StableHardwareId);
-        Assert.True(info.HasStableHardwareId);
-        Assert.False(info.HasDistinctHardwareIds);
-    }
-
-    [Fact]
-    public void GetStableHardwareId_ReturnsNull_WhenIndexZeroIsEmpty()
-    {
-        using var _ = HardwareInfo.UseWmiPropertyReaderForTests((className, propertyName, whereClause) =>
-            className switch
-            {
-                "Win32_Processor" => "CPU-1",
-                "Win32_BaseBoard" => "MB-1",
-                "Win32_BIOS" => "BIOS-1",
-                "Win32_DiskDrive" when whereClause == "Index=0" => "",
-                "Win32_DiskDrive" => "LEGACY-DISK",
-                _ => "UNKNOWN"
-            });
-
-        var info = HardwareInfo.GetHardwareIdMigrationInfo();
-
-        Assert.Equal(ComputeHardwareId("CPU-1", "MB-1", "BIOS-1", "LEGACY-DISK", Environment.MachineName), info.LegacyHardwareId);
-        Assert.Null(info.StableHardwareId);
-        Assert.False(info.HasStableHardwareId);
-        Assert.False(info.HasDistinctHardwareIds);
-    }
-
-    [Fact]
-    public void GetComponentFingerprints_UsesLegacyDiskSelection_ForFpDisk()
-    {
-        using var _ = HardwareInfo.UseWmiPropertyReaderForTests((className, propertyName, whereClause) =>
-            className switch
-            {
-                "Win32_Processor" => "CPU-1",
-                "Win32_BaseBoard" => "MB-1",
-                "Win32_BIOS" => "BIOS-1",
-                "Win32_DiskDrive" when whereClause == "Index=0" => "SYSTEM-DISK",
-                "Win32_DiskDrive" => "OTHER-DISK-FIRST",
-                _ => "UNKNOWN"
-            });
-
-        var fingerprints = HardwareInfo.GetComponentFingerprints();
-
-        Assert.Equal(ComputeComponentHash("OTHER-DISK-FIRST"), fingerprints["FP_DISK"]);
-        Assert.NotEqual(ComputeComponentHash("SYSTEM-DISK"), fingerprints["FP_DISK"]);
-    }
-
-    private static string ComputeHardwareId(string cpuId, string motherboardId, string biosId, string diskId, string machineName)
-    {
-        var rawId = string.Concat(cpuId, motherboardId, biosId, diskId, machineName);
-        using var sha256 = SHA256.Create();
-        var bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(rawId));
-        return BitConverter.ToString(bytes).Replace("-", "").Substring(0, 16).ToUpperInvariant();
-    }
-
-    private static string ComputeComponentHash(string value)
-    {
-        using var sha256 = SHA256.Create();
-        var bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(value));
-        return BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant();
-    }
+    private static WmiQueryResult Row(string property, string? value) =>
+        WmiQueryResult.Success(new IReadOnlyDictionary<string, string?>[]
+        {
+            new Dictionary<string, string?>(StringComparer.Ordinal) { [property] = value }
+        });
 }

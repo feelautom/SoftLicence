@@ -344,6 +344,59 @@ public sealed class RuntimeEnrollmentHttpIntegrationTests
             It.IsAny<CancellationToken>()), Times.Once);
     }
 
+    /// <summary>
+    /// All three critical recovery transports preserve business denial versus unavailable
+    /// infrastructure without exposing the bounded internal assignment diagnostic.
+    /// </summary>
+    [Fact]
+    public async Task CriticalRecoveryRoutes_CommercialDenialAndUnavailable_KeepDistinctStatus()
+    {
+        var enrollment = new Mock<IRuntimeEnrollmentService>();
+        enrollment.SetupSequence(service => service.RecoverCriticalAsync(
+                "security-operator", "runtime-test-key", It.IsAny<string>(),
+                It.IsAny<RuntimeCriticalRecoveryRequest>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new RuntimeEnrollmentException("authority_ineligible", 422, "assignment_missing"))
+            .ThrowsAsync(new RuntimeEnrollmentException("authority_unavailable", 503,
+                "assignment_relation_missing"));
+        enrollment.SetupSequence(service => service.RefetchCriticalRecoveryAsync(
+                "security-operator", "runtime-test-key", It.IsAny<string>(),
+                It.IsAny<RuntimeCriticalRecoveryRefetchRequest>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new RuntimeEnrollmentException("authority_ineligible", 422, "assignment_missing"))
+            .ThrowsAsync(new RuntimeEnrollmentException("authority_unavailable", 503,
+                "assignment_relation_missing"));
+        enrollment.SetupSequence(service => service.RefetchCriticalRecoveryForClientAsync(
+                Guid.Parse(EnrollmentId), It.IsAny<string>(),
+                It.IsAny<RuntimeCriticalRecoveryClientRefetchRequest>(),
+                It.IsAny<RuntimeProofHeaders>(), It.IsAny<IPAddress>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new RuntimeEnrollmentException("authority_ineligible", 422, "assignment_missing"))
+            .ThrowsAsync(new RuntimeEnrollmentException("authority_unavailable", 503,
+                "assignment_relation_missing"));
+        using var factory = CreateFactory(enrollment.Object, allowRuntimeRecovery: true);
+        using var client = factory.CreateClient();
+
+        foreach (var (path, body, isPublic) in new[]
+                 {
+                     (CriticalRecoveryPath, CriticalRecoveryBody, false),
+                     (CriticalRecoveryRefetchPath, CriticalRecoveryRefetchBody, false),
+                     (ClientCriticalRecoveryRefetchPath, ClientCriticalRecoveryRefetchBody, true)
+                 })
+        {
+            using var denied = isPublic
+                ? await PostPublicAsync(client, path, body)
+                : await client.PostAsync(path, new StringContent(body, Encoding.UTF8, "application/json"));
+            using var unavailable = isPublic
+                ? await PostPublicAsync(client, path, body)
+                : await client.PostAsync(path, new StringContent(body, Encoding.UTF8, "application/json"));
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, denied.StatusCode);
+            Assert.Equal("{\"error\":\"authority_ineligible\"}", await denied.Content.ReadAsStringAsync());
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, unavailable.StatusCode);
+            Assert.Equal("{\"error\":\"authority_unavailable\"}",
+                await unavailable.Content.ReadAsStringAsync());
+            AssertNoStore(denied);
+            AssertNoStore(unavailable);
+        }
+    }
+
     [Fact]
     public async Task Prepare_ReturnsFrozenExactBytes_StatusAndNoStoreAcrossReplay()
     {
@@ -500,6 +553,36 @@ public sealed class RuntimeEnrollmentHttpIntegrationTests
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         Assert.Equal(exact, await response.Content.ReadAsByteArrayAsync());
         AssertNoStore(response);
+    }
+
+    /// <summary>
+    /// The authenticated Refresh endpoint preserves business denial and unavailable as
+    /// distinct public statuses while keeping bounded internal diagnostics out of the body.
+    /// </summary>
+    [Fact]
+    public async Task Refresh_DenialAndInfrastructureFailure_KeepDistinctPublicStatus()
+    {
+        var enrollment = new Mock<IRuntimeEnrollmentService>();
+        enrollment.SetupSequence(service => service.RefreshPendingAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<RuntimeEnrollmentRefreshRequest>(),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new RuntimeEnrollmentException("refresh_ineligible", 422, "assignment_missing"))
+            .ThrowsAsync(new RuntimeEnrollmentException("authority_unavailable", 503,
+                "assignment_relation_missing"));
+        using var factory = CreateFactory(enrollment.Object, allowLicenseBootstrap: true);
+        using var client = factory.CreateClient();
+
+        using var denied = await client.PostAsync(
+            RefreshPath, new StringContent(RefreshBody, Encoding.UTF8, "application/json"));
+        using var unavailable = await client.PostAsync(
+            RefreshPath, new StringContent(RefreshBody, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, denied.StatusCode);
+        Assert.Equal("{\"error\":\"refresh_ineligible\"}", await denied.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, unavailable.StatusCode);
+        Assert.Equal("{\"error\":\"authority_unavailable\"}", await unavailable.Content.ReadAsStringAsync());
+        AssertNoStore(denied);
+        AssertNoStore(unavailable);
     }
 
     [Theory]

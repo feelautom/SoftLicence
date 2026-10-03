@@ -25,7 +25,7 @@ public sealed class CleanupServicePostgreSqlTests
             })
             .Build();
         var factory = new TestDbContextFactory(provision.ConnectionString);
-        var now = new DateTimeOffset(2026, 7, 30, 8, 0, 0, TimeSpan.Zero);
+        var now = await ReadDatabaseUtcNowAsync(factory);
         var oldEventId = Guid.Parse("ce9472e9-51f0-47f5-9308-3bd65f14ba78");
         var oldDiagnosticId = Guid.Parse("fab69bea-aa0c-4891-b7d4-ed1d46df79a0");
         var oldErrorId = Guid.Parse("60a7d659-67b9-49c6-85ad-f6889a31c7d9");
@@ -320,7 +320,7 @@ public sealed class CleanupServicePostgreSqlTests
             })
             .Build();
         var factory = new TestDbContextFactory(provision.ConnectionString);
-        var now = new DateTimeOffset(2026, 8, 2, 12, 0, 0, TimeSpan.Zero);
+        var now = await ReadDatabaseUtcNowAsync(factory);
         const string exactRecentHardwareId = " HWID-e\u0301-É ";
 
         await using (var db = factory.CreateDbContext())
@@ -454,6 +454,16 @@ public sealed class CleanupServicePostgreSqlTests
         await using var command = new NpgsqlCommand("SELECT to_regclass(@relation) IS NOT NULL", connection);
         command.Parameters.AddWithValue("relation", "public.\"" + relation + "\"");
         return (bool)(await command.ExecuteScalarAsync())!;
+    }
+
+    /// <summary>Reads the real PostgreSQL UTC clock once to anchor this scenario's relative timestamps.</summary>
+    /// <param name="factory">Factory for the scenario-owned PostgreSQL database.</param>
+    /// <returns>The database timestamp used unchanged by all seeds and the fixed cleanup clock.</returns>
+    private static async Task<DateTimeOffset> ReadDatabaseUtcNowAsync(TestDbContextFactory factory)
+    {
+        await using var db = factory.CreateDbContext();
+        await db.Database.OpenConnectionAsync();
+        return await RuntimeEnrollmentService.DatabaseNowAsync(db, CancellationToken.None);
     }
 
     private static CleanupService CreateService(

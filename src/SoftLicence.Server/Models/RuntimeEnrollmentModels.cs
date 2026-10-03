@@ -87,6 +87,11 @@ public sealed class RuntimeHardwareAuthorityMigrationRequest
     public string? HardwareIdV2Algorithm { get; set; }
     /// <summary>Gets or sets the SDK semantic version that produced both identifiers.</summary>
     public string? SdkVersion { get; set; }
+    /// <summary>
+    /// Gets or sets the raw <c>Win32_ComputerSystemProduct.UUID</c> from which <see cref="HardwareIdV2"/> must be
+    /// derived with the SDK 2.0 rule (TKT-001277 lot 5); a refused or non-derived value is refused with its AR code.
+    /// </summary>
+    public string? SystemUuid { get; set; }
 
     /// <summary>Captures unknown JSON members so strict validation can reject them.</summary>
     [JsonExtensionData]
@@ -192,6 +197,7 @@ public sealed record RuntimeEnrollmentPrepareResponse(
 {
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? SecurityEpoch { get; init; }
+
 }
 
 public sealed record RuntimeEnrollmentConfirmResponse(

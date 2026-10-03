@@ -116,17 +116,20 @@ public sealed class RuntimeAuthorityTransitionResolverTests
         Assert.Equal(expected, coherent);
     }
 
+    /// <summary>
+    /// Proves historical Runtime HWID divergence is not identity authority, while ambiguous enrollment
+    /// cardinality still prevents a released binding from authorizing a successor.
+    /// </summary>
     [Fact]
-    public void IsCoherentSeatRelease_MismatchedAuthorityOrMultipleEnrollments_FailsClosed()
+    public void IsCoherentSeatRelease_IgnoresHistoricalRuntimeHardwareButRejectsMultipleEnrollments()
     {
         var releasedAt = DateTime.UtcNow.AddMinutes(-1);
         var binding = ReleasedBinding(releasedAt);
         var enrollment = MatchingEnrollment(binding, "authority_ineligible", releasedAt.AddSeconds(-1));
 
         enrollment.HardwareIdHash = new string('f', 64);
-        Assert.False(RuntimeAuthorityTransitionResolver.IsCoherentSeatRelease(
+        Assert.True(RuntimeAuthorityTransitionResolver.IsCoherentSeatRelease(
             binding, [enrollment], DateTime.UtcNow));
-        enrollment.HardwareIdHash = binding.HardwareIdHash;
         Assert.False(RuntimeAuthorityTransitionResolver.IsCoherentSeatRelease(
             binding,
             [enrollment, MatchingEnrollment(binding, "authority_ineligible", releasedAt.AddSeconds(-1))],

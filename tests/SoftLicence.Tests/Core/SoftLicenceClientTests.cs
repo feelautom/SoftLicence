@@ -6,9 +6,35 @@ using Xunit;
 
 namespace SoftLicence.Tests.Core;
 
-public class SoftLicenceClientTests
+[Collection(MachineIdentityReadersCollection.Name)]
+public class SoftLicenceClientTests : IDisposable
 {
     private const string ServerUrl = "http://localhost:5200";
+    private const string TestUuid = "4C4C4544-0051-3610-8052-B7C04F4A4E32";
+
+    private readonly IDisposable _wmi = UseUuid(TestUuid);
+    private readonly IDisposable _registry = MachineIdentity.UseRegistryValueReaderForTests((_, _, _) => MachineEvidenceValue.Unsupported());
+
+    /// <summary>Restores the real machine readers after each test.</summary>
+    public void Dispose()
+    {
+        _registry.Dispose();
+        _wmi.Dispose();
+    }
+
+    /// <summary>Simulates a machine whose system UUID is <paramref name="uuid"/> (<c>null</c>: no UUID instance).</summary>
+    private static IDisposable UseUuid(string? uuid) =>
+        MachineIdentity.UseWmiQueryReaderForTests((className, properties) =>
+        {
+            if (className == "Win32_ComputerSystemProduct")
+                return uuid is null
+                    ? WmiQueryResult.Success(Array.Empty<IReadOnlyDictionary<string, string?>>())
+                    : WmiQueryResult.Success(new IReadOnlyDictionary<string, string?>[] { new Dictionary<string, string?> { ["UUID"] = uuid } });
+            return WmiQueryResult.Success(new IReadOnlyDictionary<string, string?>[]
+            {
+                properties.ToDictionary(property => property, property => (string?)(className + "." + property))
+            });
+        });
 
     private static SoftLicenceClient CreateClient(HttpMessageHandler handler, string? publicKeyXml = null)
     {
@@ -56,19 +82,8 @@ public class SoftLicenceClientTests
     }
 
     [Fact]
-    public async Task ActivateAsync_ShouldSendStableHardwareIdAsSecondaryObservationSignal()
+    public async Task ActivateAsync_SendsUuidDerivedIdentifier_SystemUuid_AndEvidence()
     {
-        using var readerOverride = HardwareInfo.UseWmiPropertyReaderForTests((className, propertyName, whereClause) =>
-            className switch
-            {
-                "Win32_Processor" => "CPU-1",
-                "Win32_BaseBoard" => "MB-1",
-                "Win32_BIOS" => "BIOS-1",
-                "Win32_DiskDrive" when whereClause == "Index=0" => "SYSTEM-DISK",
-                "Win32_DiskDrive" => "LEGACY-DISK",
-                _ => "UNKNOWN"
-            });
-
         string? capturedPayload = null;
         var handler = new MockHttpMessageHandler(request =>
         {
@@ -79,26 +94,61 @@ public class SoftLicenceClientTests
             };
         });
 
-        var client = CreateClient(handler);
-        await client.ActivateAsync("KEY-123", "TestApp");
+        await CreateClient(handler).ActivateAsync("KEY-123", "TestApp");
 
-        Assert.NotNull(capturedPayload);
-        using var doc = JsonDocument.Parse(capturedPayload);
+        using var doc = JsonDocument.Parse(capturedPayload!);
         var root = doc.RootElement;
-
-        Assert.Equal(HardwareInfo.GetHardwareId(), root.GetProperty("HardwareId").GetString());
-        Assert.Equal(HardwareInfo.GetStableHardwareId(), root.GetProperty("HardwareIdV2").GetString());
-        Assert.True(root.GetProperty("HardwareIdV2Differs").GetBoolean());
-        Assert.Equal("legacy-wmi-first-disk", root.GetProperty("HardwareIdAlgorithm").GetString());
-        Assert.Equal("v2-wmi-disk-index-0", root.GetProperty("HardwareIdV2Algorithm").GetString());
-        Assert.Equal("1.1.14", root.GetProperty("SdkVersion").GetString());
+        Assert.Equal(MachineIdentity.FromUuid(TestUuid).HardwareId, root.GetProperty("HardwareId").GetString());
+        Assert.Equal(TestUuid, root.GetProperty("SystemUuid").GetString());
+        var evidence = root.GetProperty("MachineEvidence");
+        Assert.Equal("Present", evidence.GetProperty("SystemUuid").GetProperty("Status").GetString());
+        Assert.Equal("Win32_BIOS.SerialNumber", evidence.GetProperty("BiosSerial").GetProperty("Value").GetString());
+        Assert.Equal("2.0.0", root.GetProperty("SdkVersion").GetString());
+        Assert.False(root.TryGetProperty("HardwareIdV2", out _));
+        Assert.False(root.TryGetProperty("HardwareIdAlgorithm", out _));
+        Assert.False(root.TryGetProperty("ComponentFingerprints", out _));
     }
 
     [Fact]
-    public async Task ActivateAsync_WithExplicitAuthority_SendsAuthorityAsPrimaryIdentity()
+    public async Task ActivateAsync_RefusedUuid_FailsLocallyWithSupportCode_WithoutNetwork()
     {
-        using var readerOverride = HardwareInfo.UseWmiPropertyReaderForTests((_, _, _) =>
-            throw new InvalidOperationException("Optional component collection is unavailable."));
+        using var _ = UseUuid("03000200-0400-0500-0006-000700080009");
+        var handler = new MockHttpMessageHandler(_ => throw new InvalidOperationException("No request expected."));
+
+        var result = await CreateClient(handler).ActivateAsync("KEY-123", "TestApp");
+
+        Assert.False(result.Success);
+        Assert.Equal(ActivationErrorCode.DeviceRefused, result.ErrorCode);
+        Assert.Equal("Device refused (code AR-04).", result.ErrorMessage);
+        Assert.Equal("DEVICE_REFUSED", result.ServerErrorCode);
+    }
+
+    [Fact]
+    public async Task ActivateAsync_ServerDeviceRefused_MapsToDeviceRefused()
+    {
+        var handler = new MockHttpMessageHandler(_ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"isSuccess\":false,\"errorCode\":\"DEVICE_REFUSED\",\"message\":\"Appareil refusé (code AR-05).\"}", Encoding.UTF8, "application/json")
+            };
+            response.Headers.Add("X-SoftLicence-Error-Code", "DEVICE_REFUSED");
+            return response;
+        });
+
+        var result = await CreateClient(handler).ActivateAsync("KEY-123", "TestApp");
+
+        Assert.Equal(ActivationErrorCode.DeviceRefused, result.ErrorCode);
+        Assert.Equal("Appareil refusé (code AR-05).", result.ErrorMessage);
+    }
+
+    /// <summary>
+    /// TKT-001277 lot 5: a held identifier that is not derived from this machine's UUID is a pre-UUID seat identifier;
+    /// neither the UUID nor the evidence is sent, so the server does not refuse it as not derived (AR-05).
+    /// </summary>
+    [Fact]
+    public async Task ActivateAsync_WithPreUuidAuthority_SendsNeitherUuidNorEvidence()
+    {
         string? capturedPayload = null;
         var handler = new MockHttpMessageHandler(request =>
         {
@@ -114,29 +164,91 @@ public class SoftLicenceClientTests
 
         using var document = JsonDocument.Parse(capturedPayload!);
         Assert.Equal("A6D3ABCD1234EF90", document.RootElement.GetProperty("HardwareId").GetString());
-        Assert.Equal("1.1.14", document.RootElement.GetProperty("SdkVersion").GetString());
-        Assert.False(document.RootElement.TryGetProperty("HardwareIdV2", out _));
-        Assert.False(document.RootElement.TryGetProperty("HardwareIdAlgorithm", out _));
-        Assert.False(document.RootElement.TryGetProperty("HardwareIdV2Algorithm", out _));
+        Assert.False(document.RootElement.TryGetProperty("SystemUuid", out _));
+        Assert.False(document.RootElement.TryGetProperty("MachineEvidence", out _));
+        Assert.Equal("2.0.0", document.RootElement.GetProperty("SdkVersion").GetString());
         Assert.False(document.RootElement.TryGetProperty("ComponentFingerprints", out _));
     }
 
+    /// <summary>A held identifier equal to the one derived from this machine's UUID is sent with the UUID and evidence.</summary>
     [Fact]
-    public async Task ActivateAsync_WithExplicitAuthority_PreservesOptionalComponentFingerprints()
+    public async Task ActivateAsync_WithUuidDerivedAuthority_SendsUuidAndEvidence()
     {
-        var legacyDiskReadCount = 0;
-        var stableDiskReadCount = 0;
-        using var readerOverride = HardwareInfo.UseWmiPropertyReaderForTests((className, propertyName, whereClause) =>
+        string? capturedPayload = null;
+        var handler = new MockHttpMessageHandler(request =>
         {
-            if (className == "Win32_DiskDrive")
+            capturedPayload = request.Content?.ReadAsStringAsync().Result;
+            return new HttpResponseMessage(HttpStatusCode.OK)
             {
-                if (whereClause == null)
-                    Interlocked.Increment(ref legacyDiskReadCount);
-                else if (whereClause == "Index=0")
-                    Interlocked.Increment(ref stableDiskReadCount);
-            }
-            return $"{className}:{propertyName}";
+                Content = new StringContent("{\"LicenseFile\":\"abc\"}", Encoding.UTF8, "application/json")
+            };
         });
+        var derived = MachineIdentity.FromUuid(TestUuid).HardwareId!;
+
+        await CreateClient(handler).ActivateAsync("KEY-123", "TestApp", null, null, null, null, derived);
+
+        using var document = JsonDocument.Parse(capturedPayload!);
+        Assert.Equal(derived, document.RootElement.GetProperty("HardwareId").GetString());
+        Assert.Equal(TestUuid, document.RootElement.GetProperty("SystemUuid").GetString());
+        Assert.True(document.RootElement.TryGetProperty("MachineEvidence", out _));
+    }
+
+    [Fact]
+    public async Task ActivateReplacingHardwareIdAsync_SendsCurrentIdentity_AndPreviousIdentifier()
+    {
+        string? capturedPayload = null;
+        var handler = new MockHttpMessageHandler(request =>
+        {
+            capturedPayload = request.Content?.ReadAsStringAsync().Result;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"LicenseFile\":\"abc\"}", Encoding.UTF8, "application/json")
+            };
+        });
+
+        var result = await CreateClient(handler).ActivateReplacingHardwareIdAsync("KEY-123", "TestApp", "0123456789ABCDEF");
+
+        Assert.True(result.Success);
+        using var document = JsonDocument.Parse(capturedPayload!);
+        Assert.Equal(MachineIdentity.FromUuid(TestUuid).HardwareId, document.RootElement.GetProperty("HardwareId").GetString());
+        Assert.Equal("0123456789ABCDEF", document.RootElement.GetProperty("PreviousHardwareId").GetString());
+        Assert.Equal(TestUuid, document.RootElement.GetProperty("SystemUuid").GetString());
+    }
+
+    [Theory]
+    [InlineData("0123456789abcdef")]
+    [InlineData("0123456789ABCDE")]
+    [InlineData(" 0123456789ABCDEF")]
+    public async Task ActivateReplacingHardwareIdAsync_NonCanonicalPrevious_RejectsBeforeNetwork(string previous)
+    {
+        var handler = new MockHttpMessageHandler(_ => throw new InvalidOperationException("No request expected."));
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            CreateClient(handler).ActivateReplacingHardwareIdAsync("KEY-123", "TestApp", previous));
+    }
+
+    [Fact]
+    public async Task ActivateAsync_ServerQuotaExhaustedOnSwitch_MapsToMaxActivationsReached()
+    {
+        var handler = new MockHttpMessageHandler(_ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                Content = new StringContent("Limite de déliements quotidiens atteinte (3/jour). Réessayez demain.")
+            };
+            response.Headers.Add("X-SoftLicence-Error-Code", "MAX_DAILY_DEACTIVATIONS_REACHED");
+            return response;
+        });
+
+        var result = await CreateClient(handler).ActivateReplacingHardwareIdAsync("KEY-123", "TestApp", "0123456789ABCDEF");
+
+        Assert.Equal(ActivationErrorCode.MaxActivationsReached, result.ErrorCode);
+    }
+
+    [Fact]
+    public async Task ActivateAsync_WithExplicitAuthority_WithoutUuid_SendsNoUuid()
+    {
+        using var noUuid = UseUuid(null);
         string? capturedPayload = null;
         var handler = new MockHttpMessageHandler(request =>
         {
@@ -151,12 +263,8 @@ public class SoftLicenceClientTests
             "KEY-123", "TestApp", null, null, null, null, "A6D3ABCD1234EF90");
 
         using var document = JsonDocument.Parse(capturedPayload!);
-        Assert.True(document.RootElement.TryGetProperty("ComponentFingerprints", out var fingerprints));
-        Assert.True(fingerprints.EnumerateObject().Any());
-        Assert.Equal(1, legacyDiskReadCount);
-        Assert.Equal(0, stableDiskReadCount);
-        Assert.False(document.RootElement.TryGetProperty("HardwareIdV2", out _));
-        Assert.False(document.RootElement.TryGetProperty("HardwareIdAlgorithm", out _));
+        Assert.False(document.RootElement.TryGetProperty("SystemUuid", out _));
+        Assert.False(document.RootElement.TryGetProperty("MachineEvidence", out _));
     }
 
     [Theory]
@@ -277,6 +385,39 @@ public class SoftLicenceClientTests
         Assert.Equal("opaque", result.CorrelationId);
     }
 
+    /// <summary>SDK 2 classifies the stable HTTP200 header for activation and trial without falling back to text.</summary>
+    [Theory]
+    [InlineData(false, "APP_VERSION_REQUIRED")]
+    [InlineData(false, "APP_VERSION_INVALID")]
+    [InlineData(false, "APP_VERSION_BELOW_MINIMUM")]
+    [InlineData(true, "APP_VERSION_REQUIRED")]
+    [InlineData(true, "APP_VERSION_INVALID")]
+    [InlineData(true, "APP_VERSION_BELOW_MINIMUM")]
+    public async Task Tkt1469_ActivationAndTrial_UpdateRequired_IsVersionNotAllowed(bool trial, string reason)
+    {
+        // The paired PostgreSQL HTTP matrix verifies that the provider actually emits this envelope/header.
+        var handler = new MockHttpMessageHandler(_ =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(JsonSerializer.Serialize(new { isSuccess = false,
+                    status = "UPDATE_REQUIRED", errorCode = "UPDATE_REQUIRED", reasonCode = reason,
+                    message = "Update required by server", contractVersion = 1 }), Encoding.UTF8, "application/json")
+            };
+            response.Headers.Add("X-SoftLicence-Error-Code", "UPDATE_REQUIRED");
+            response.Headers.Add("X-SoftLicence-Correlation-Id", "tkt1469-synthetic");
+            return response;
+        });
+        var client = CreateClient(handler);
+        var result = trial ? await client.RequestTrialAsync("TIAConnect", appVersion: "2.1.357")
+            : await client.ActivateAsync("KEY-SYNTHETIC", "TIAConnect", appVersion: "2.1.357");
+        Assert.False(result.Success);
+        Assert.Equal(ActivationErrorCode.VersionNotAllowed, result.ErrorCode);
+        Assert.Equal("UPDATE_REQUIRED", result.ServerErrorCode);
+        Assert.Equal("tkt1469-synthetic", result.CorrelationId);
+        Assert.False(result.UsedLegacyErrorFallback);
+    }
+
     [Fact]
     public async Task ActivateAsync_ShouldReturnServerError_When500()
     {
@@ -388,19 +529,8 @@ public class SoftLicenceClientTests
     }
 
     [Fact]
-    public async Task CheckStatusAsync_ShouldOmitStableHardwareId_WhenIndexZeroIsUnavailable()
+    public async Task CheckStatusAsync_SendsUuidDerivedIdentifier_AndSystemUuid()
     {
-        using var _ = HardwareInfo.UseWmiPropertyReaderForTests((className, propertyName, whereClause) =>
-            className switch
-            {
-                "Win32_Processor" => "CPU-1",
-                "Win32_BaseBoard" => "MB-1",
-                "Win32_BIOS" => "BIOS-1",
-                "Win32_DiskDrive" when whereClause == "Index=0" => "",
-                "Win32_DiskDrive" => "LEGACY-DISK",
-                _ => "UNKNOWN"
-            });
-
         string? capturedPayload = null;
         var handler = new MockHttpMessageHandler(request =>
         {
@@ -411,29 +541,33 @@ public class SoftLicenceClientTests
             };
         });
 
-        var client = CreateClient(handler);
-        await client.CheckStatusAsync("KEY-123", "TestApp");
+        await CreateClient(handler).CheckStatusAsync("KEY-123", "TestApp");
 
-        Assert.NotNull(capturedPayload);
-        using var doc = JsonDocument.Parse(capturedPayload);
+        using var doc = JsonDocument.Parse(capturedPayload!);
         var root = doc.RootElement;
-
-        Assert.Equal(HardwareInfo.GetHardwareId(), root.GetProperty("HardwareId").GetString());
-        Assert.False(root.TryGetProperty("HardwareIdV2", out var hardwareIdV2Property));
-        Assert.False(root.TryGetProperty("HardwareIdV2Differs", out var hardwareIdV2DiffersProperty));
-        Assert.False(root.TryGetProperty("HardwareIdV2Algorithm", out var hardwareIdV2AlgorithmProperty));
-        Assert.Equal("1.1.14", root.GetProperty("SdkVersion").GetString());
+        Assert.Equal(MachineIdentity.FromUuid(TestUuid).HardwareId, root.GetProperty("HardwareId").GetString());
+        Assert.Equal(TestUuid, root.GetProperty("SystemUuid").GetString());
+        Assert.True(root.TryGetProperty("MachineEvidence", out _));
+        Assert.Equal("2.0.0", root.GetProperty("SdkVersion").GetString());
+        Assert.False(root.TryGetProperty("HardwareIdV2", out _));
     }
 
     [Fact]
-    public async Task CheckStatusAsync_WithExplicitAuthority_SendsAuthorityAsPrimaryIdentity()
+    public async Task CheckStatusAsync_MissingUuid_FailsLocallyWithAr01_WithoutNetwork()
     {
-        var diskReadCount = 0;
-        using var readerOverride = HardwareInfo.UseWmiPropertyReaderForTests((_, _, _) =>
-        {
-            Interlocked.Increment(ref diskReadCount);
-            throw new InvalidOperationException("Optional component collection is unavailable.");
-        });
+        using var _ = UseUuid(null);
+        var handler = new MockHttpMessageHandler(_ => throw new InvalidOperationException("No request expected."));
+
+        var result = await CreateClient(handler).CheckStatusAsync("KEY-123", "TestApp");
+
+        Assert.False(result.Success);
+        Assert.Equal(StatusErrorCode.DeviceRefused, result.ErrorCode);
+        Assert.Equal("Device refused (code AR-01).", result.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task CheckStatusAsync_WithPreUuidAuthority_SendsNeitherUuidNorEvidence()
+    {
         string? capturedPayload = null;
         var handler = new MockHttpMessageHandler(request =>
         {
@@ -449,12 +583,31 @@ public class SoftLicenceClientTests
 
         using var document = JsonDocument.Parse(capturedPayload!);
         Assert.Equal("A6D3ABCD1234EF90", document.RootElement.GetProperty("HardwareId").GetString());
-        Assert.Equal("1.1.14", document.RootElement.GetProperty("SdkVersion").GetString());
-        Assert.Equal(1, diskReadCount);
-        Assert.False(document.RootElement.TryGetProperty("HardwareIdV2", out _));
-        Assert.False(document.RootElement.TryGetProperty("HardwareIdAlgorithm", out _));
-        Assert.False(document.RootElement.TryGetProperty("HardwareIdV2Algorithm", out _));
+        Assert.False(document.RootElement.TryGetProperty("SystemUuid", out _));
+        Assert.False(document.RootElement.TryGetProperty("MachineEvidence", out _));
         Assert.False(document.RootElement.TryGetProperty("ComponentFingerprints", out _));
+    }
+
+    /// <summary>After the switch the held identifier is the UUID-derived one and the check carries the UUID.</summary>
+    [Fact]
+    public async Task CheckStatusAsync_WithUuidDerivedAuthority_SendsUuid()
+    {
+        string? capturedPayload = null;
+        var handler = new MockHttpMessageHandler(request =>
+        {
+            capturedPayload = request.Content?.ReadAsStringAsync().Result;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"Status\":\"VALID\"}", Encoding.UTF8, "application/json")
+            };
+        });
+        var derived = MachineIdentity.FromUuid(TestUuid).HardwareId!;
+
+        await CreateClient(handler).CheckStatusAsync("KEY-123", "TestApp", null, null, derived);
+
+        using var document = JsonDocument.Parse(capturedPayload!);
+        Assert.Equal(TestUuid, document.RootElement.GetProperty("SystemUuid").GetString());
+        Assert.True(document.RootElement.TryGetProperty("MachineEvidence", out _));
     }
 
     [Fact]
@@ -605,6 +758,21 @@ public class SoftLicenceClientTests
         var result = client.ValidateForCurrentMachine(licenseString);
 
         Assert.True(result.IsValid);
+    }
+
+    [Fact]
+    public void ValidateForCurrentMachine_RefusedUuid_ReturnsInvalidWithSupportCode()
+    {
+        var keys = LicenseService.GenerateKeys();
+        var licenseString = LicenseService.GenerateLicense(
+            new LicenseModel { LicenseKey = "CURRENT-TEST", HardwareId = MachineIdentity.FromUuid(TestUuid).HardwareId! },
+            keys.PrivateKey);
+        using var _ = UseUuid("FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF");
+
+        var result = new SoftLicenceClient(ServerUrl, keys.PublicKey).ValidateForCurrentMachine(licenseString);
+
+        Assert.False(result.IsValid);
+        Assert.Equal("Device refused (code AR-04).", result.ErrorMessage);
     }
 
     [Fact]

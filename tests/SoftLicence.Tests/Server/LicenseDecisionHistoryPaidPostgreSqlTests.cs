@@ -21,7 +21,9 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     [InlineData("cancel-after")]
     public async Task Tkt976_Legacy_PaidAutoUnban_RefusalRestoresWholeAuthorityGraph(string mode)
     {
-        var connections = await ProvisionAsync();
+        // Each synthetic encryption key belongs to this scenario, never to the shared registry.
+        await using var isolated = await ProvisionCleanedIsolatedAsync();
+        var connections = (isolated.Admin, isolated.App);
         const string failure = PaidActivationFailure.SeatLimit;
         var productId = Guid.NewGuid();
         var targetLicenseId = Guid.NewGuid();
@@ -29,6 +31,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var conflictingSeatId = Guid.NewGuid();
         var bindingId = Guid.NewGuid();
         var enrollmentId = Guid.NewGuid();
+        var installationId = Guid.NewGuid().ToString("D");
         var eligibleBanId = Guid.NewGuid();
         var hardwareId = Guid.NewGuid().ToString("N")[..16].ToUpperInvariant();
         var appName = "Paid activation " + Guid.NewGuid().ToString("N");
@@ -64,7 +67,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 CustomerEmail = "paid@example.test",
                 CustomerName = "Paid customer",
                 IsActive = true,
-                MaxSeats = failure == PaidActivationFailure.SeatLimit ? 1 : 2,
+                MaxSeats = 2,
                 AllowedVersions = "*",
                 ExpirationDate = now.AddDays(30)
             };
@@ -94,15 +97,19 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             });
             if (failure == PaidActivationFailure.SeatLimit)
             {
-                db.LicenseSeats.Add(new LicenseSeat
+                // Two full seats retain the capacity refusal without invoking mono-seat auto-replacement.
+                for (var index = 0; index < 2; index++)
                 {
-                    Id = Guid.NewGuid(),
-                    LicenseId = targetLicenseId,
-                    HardwareId = Guid.NewGuid().ToString("N")[..16].ToUpperInvariant(),
-                    IsActive = true,
-                    FirstActivatedAt = now.AddDays(-3),
-                    LastCheckInAt = now.AddDays(-1)
-                });
+                    db.LicenseSeats.Add(new LicenseSeat
+                    {
+                        Id = Guid.NewGuid(),
+                        LicenseId = targetLicenseId,
+                        HardwareId = Guid.NewGuid().ToString("N")[..16].ToUpperInvariant(),
+                        IsActive = true,
+                        FirstActivatedAt = now.AddDays(-3),
+                        LastCheckInAt = now.AddDays(-1)
+                    });
+                }
             }
 
             var grantRef = Guid.NewGuid().ToString("D");
@@ -118,7 +125,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 GrantRef = grantRef,
                 GrantRefDigestSha256 = Sha256(grantRef),
                 HandoffDigestSha256 = handoffDigest,
-                InstallationId = Guid.NewGuid().ToString("D"),
+                InstallationId = installationId,
                 HardwareIdHash = Sha256(hardwareId),
                 Version = "2.2.999",
                 InstallerFilename = "TiaConnect-Setup_v2.2.999.msi",
@@ -152,7 +159,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 ProductId = productId,
                 LicenseId = conflictingLicenseId,
                 LicenseSeatId = conflictingSeatId,
-                InstallationId = Guid.NewGuid().ToString("D"),
+                InstallationId = installationId,
                 HardwareIdHash = Sha256(hardwareId),
                 ReleaseVersion = "2.2.999",
                 HandoffDigestSha256 = handoffDigest,
@@ -220,8 +227,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             var decision = System.Text.Json.JsonSerializer.Deserialize<LicenseDecisionHistory>(rows[0].Details!,
                 new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web))!;
             Assert.Equal("SEAT_LIMIT", decision.Code);
-            Assert.Equal(1, decision.Snapshot.ActiveSeats);
-            Assert.Equal(1, decision.Snapshot.SeatLimit);
+            Assert.Equal(2, decision.Snapshot.ActiveSeats);
+            Assert.Equal(2, decision.Snapshot.SeatLimit);
         }
         Assert.True((await observed.BannedHardwareIds.SingleAsync(row => row.Id == eligibleBanId)).IsActive);
         Assert.True((await observed.LicenseSeats.SingleAsync(row => row.Id == conflictingSeatId)).IsActive);

@@ -17,11 +17,11 @@ public sealed partial class RuntimeEnrollmentService
 
     /// <summary>
     /// Processes one authenticated security lock report and returns a signed verdict (TKT-001177). Security
-    /// contract: the same enrollment proof, authority lease, quota and binding checks as a critical canary apply;
-    /// the proof payload uses its own prefix and path so a canary proof can never be replayed here; the verdict
-    /// is computed server-side only (client mode is informational) and ENFORCE bans the hardware in the same
-    /// transaction; hardware that already has a live ban receives a signed BAN without the authority check (which
-    /// would otherwise reject it first); a replayed JTI returns the stored verdict, any other reuse is a conflict.
+    /// contract: enrolled proof, key registry, release identity, authority lease and quota checks apply;
+    /// its distinct prefix and path prevent cross-workflow proof replay. Commercial denial accepts the
+    /// security evidence but keeps the lock; ENFORCE can ban only hardware linked to the assignment or
+    /// authenticated alias. A live ban remains BAN. Exact JTI replay returns frozen bytes only while their
+    /// verdict is at least as restrictive as today's policy.
     /// </summary>
     /// <param name="routeEnrollmentId">Enrollment from the authenticated header.</param>
     /// <param name="exactBodyDigest">Lower-case SHA-256 of the exact request body.</param>
@@ -46,7 +46,7 @@ public sealed partial class RuntimeEnrollmentService
         SecurityLockValidatedReport report;
         try
         {
-            report = SecurityLockReportValidator.Validate(request, DateTimeOffset.UtcNow);
+            report = SecurityLockReportValidator.ValidateStructure(request);
         }
         catch (SecurityLockReportValidationException exception)
         {
@@ -60,44 +60,81 @@ public sealed partial class RuntimeEnrollmentService
         var result = await ExecuteWithRetriesAsync(async () =>
         {
             await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
-            await using var lease = await _authority.AcquireAsync(db, preflight.BindingId, cancellationToken);
+            // A report may atomically create a permanent hardware ban. Own the global mutation side
+            // before enrollment, hardware, assignment and report locks so the later protected-table
+            // trigger is reentrant instead of a shared-to-exclusive upgrade.
+            await using var lease = await _authority.AcquireMutationAsync(
+                db, preflight.BindingId, cancellationToken);
+            await _keyRegistry.ValidateConfiguredKeysAsync(db, cancellationToken);
             var enrollment = await LoadEnrollmentForUpdateAsync(db, routeEnrollmentId, cancellationToken);
             EnsurePreflightUnchanged(enrollment, preflight);
 
+            // Ban writers use the same advisory key. Keep the policy read and any new ban in this transaction.
+            await SecurityService.AcquireHardwareBanMutationAsync(db, report.HardwareId);
+            // Hold the shared half of the assignment writer's commit barrier through
+            // assessment, first-receipt capture and the signed decision.
+            await db.Database.ExecuteSqlRawAsync(
+                "SELECT pg_catalog.pg_advisory_xact_lock_shared(1312, 1)", cancellationToken);
+            // The hardware advisory lock precedes this row lock in both Runtime and admin BAN.
+            // A concurrent admin decision is visible before the signed policy is recomputed.
+            var row = await db.SecurityLockReports.FromSqlInterpolated($"""
+                SELECT * FROM public."SecurityLockReports"
+                WHERE "EnrollmentId" = {enrollment.Id} AND "LockId" = {report.LockId}
+                FOR UPDATE
+                """).SingleOrDefaultAsync(cancellationToken);
+            // Every timestamp and authority decision below uses provider time sampled after global,
+            // enrollment, hardware, assignment-barrier and report-row waits.
             var now = await DatabaseNowAsync(db, cancellationToken);
+            try
+            {
+                SecurityLockReportValidator.ValidateTime(report, now);
+            }
+            catch (SecurityLockReportValidationException exception)
+            {
+                throw new RuntimeEnrollmentException(exception.ErrorCode, StatusCodes.Status400BadRequest);
+            }
+            ValidateProofTime(validatedProof.SentAtUtc, now);
+            var approved = await RuntimeEnrollmentIdentityValidator.ValidateAsync(
+                db, enrollment, "ACTIVE", false, null, cancellationToken);
+            if (!string.Equals(report.AppVersion, enrollment.ReleaseVersion, StringComparison.Ordinal))
+                throw Reject("lock_report_binding_mismatch");
+            // LockId is an immutable report identity. A new proof cannot upgrade a prior UNLINKED observation.
+            if (row != null && (!string.Equals(row.HardwareId, report.HardwareId, StringComparison.Ordinal)
+                                || !string.Equals(row.AppVersion, report.AppVersion, StringComparison.Ordinal)
+                                || !string.Equals(row.Cause, report.Cause, StringComparison.Ordinal)
+                                || row.Level != report.Level
+                                || !string.Equals(row.EvidenceDigestSha256, report.EvidenceDigestSha256, StringComparison.Ordinal)
+                                // Compare at PostgreSQL's exact microsecond storage precision.
+                                || row.FirstSeenUtc != new DateTime(
+                                    report.FirstSeenUtc.UtcDateTime.Ticks / 10 * 10, DateTimeKind.Utc)
+                                || row.ProductId != enrollment.ProductId
+                                || row.BindingId != enrollment.BindingId
+                                || !string.Equals(row.InstallationId, enrollment.InstallationId, StringComparison.Ordinal)))
+                throw Conflict("lock_id_conflict");
+            var commercial = await RuntimeCommercialEligibilityValidator.AssessAsync(
+                db, enrollment, approved.Binaries, now, report.HardwareId, cancellationToken);
+            var hardwareBanned = commercial.ReportHardwareBanned;
+            var configuredMode = await db.SecurityLockEnforcementPolicies.AsNoTracking()
+                .Where(policy => policy.ProductId == enrollment.ProductId && policy.Cause == report.Cause)
+                .Select(policy => policy.Mode)
+                .SingleOrDefaultAsync(cancellationToken);
+            var effectiveMode = SecurityLockVerdictPolicy.ResolveEffectiveMode(report.Level, configuredMode);
+            var openCriticalIncident = await db.RuntimeCriticalIncidents.AsNoTracking().AnyAsync(incident =>
+                incident.BindingId == enrollment.BindingId && incident.State == "OPEN", cancellationToken);
             await ReserveQuotasAsync(db, now,
                 [("lock-report-binding", preflight.BindingId.ToString("D"), 60),
                  ("lock-report-credential", preflight.EnrollmentId.ToString("D"), 30),
                  ("lock-report-ip", PseudonymizeAddress(clientAddress), 30),
                  ("lock-report-global", "all", 600)], cancellationToken);
-            ValidateProofTime(validatedProof.SentAtUtc, now);
-            if (Sha256(report.HardwareId) != enrollment.HardwareIdHash
-                || !string.Equals(report.AppVersion, enrollment.ReleaseVersion, StringComparison.Ordinal))
-                throw Reject("lock_report_binding_mismatch");
-
-            // Historical bans may be stored in any case (same rule as every other ban lookup); the report value is
-            // already the validated canonical upper-case form, so only the column side is folded.
-            var hardwareBanned = await db.BannedHardwareIds.AsNoTracking().AnyAsync(ban =>
-                ban.HardwareId.ToUpper() == report.HardwareId && ban.IsActive
-                && (ban.ProductId == null || ban.ProductId == enrollment.ProductId)
-                && (ban.ExpiresAt == null || ban.ExpiresAt > now.UtcDateTime), cancellationToken);
-            // A banned hardware makes the enrollment authority ineligible, which would reject the report before any
-            // verdict and leave the client without its signed BAN. The proof is already verified and BAN is the most
-            // restrictive verdict, so banned hardware skips the authority check and always receives BAN below.
-            if (!hardwareBanned)
-            {
-                try
-                {
-                    await ValidateEnrollmentAuthorityAsync(db, enrollment, now, cancellationToken);
-                }
-                catch (RuntimeEnrollmentException exception) when (exception.StatusCode == StatusCodes.Status422UnprocessableEntity)
-                {
-                    await CommitInvalidationAsync(db, lease, enrollment, exception, now, cancellationToken);
-                    throw;
-                }
-                if (enrollment.State != "ACTIVE")
-                    throw Reject("enrollment_inactive");
-            }
+            var currentDecision = SecurityLockVerdictPolicy.ApplyAuthorityBoundary(
+                SecurityLockVerdictPolicy.Decide(new SecurityLockDecisionInput(
+                    report.Cause, report.Level, effectiveMode, row?.AdminDecision, hardwareBanned, openCriticalIncident)),
+                commercial.IsEligible, commercial.ReportHardwareLinked, hardwareBanned);
+            if (row is not null && currentDecision.Verdict == SecurityLockVerdicts.Ban && !hardwareBanned
+                && row.LinkStatus is not (SecurityLockReportLinkStatuses.VerifiedSeat
+                    or SecurityLockReportLinkStatuses.VerifiedAlias))
+                currentDecision = new SecurityLockDecision(SecurityLockVerdicts.Maintain,
+                    SecurityLockReportStates.Open);
 
             var jti = validatedProof.Jti.ToString("D");
             var existingNonce = await db.SecurityLockReportNonces.AsNoTracking()
@@ -109,27 +146,12 @@ public sealed partial class RuntimeEnrollmentService
                     throw Conflict("proof_replay");
                 var stored = JsonSerializer.Deserialize<SecurityLockVerdictResponse>(existingNonce.ResponseJson, JsonOptions)
                     ?? throw new RuntimeEnrollmentException("authority_unavailable", StatusCodes.Status503ServiceUnavailable);
+                if (!SecurityLockVerdictPolicy.ReplayRemainsSafe(stored.Verdict, currentDecision.Verdict))
+                    throw Conflict("stale_verdict");
                 await lease.CommitAsync(cancellationToken);
                 return new RuntimeEnrollmentOperationResult<SecurityLockVerdictResponse>(
                     stored, true, Encoding.UTF8.GetBytes(existingNonce.ResponseJson));
             }
-
-            var configuredMode = await db.SecurityLockEnforcementPolicies.AsNoTracking()
-                .Where(policy => policy.ProductId == enrollment.ProductId && policy.Cause == report.Cause)
-                .Select(policy => policy.Mode)
-                .SingleOrDefaultAsync(cancellationToken);
-            var effectiveMode = SecurityLockVerdictPolicy.ResolveEffectiveMode(report.Level, configuredMode);
-            var row = await db.SecurityLockReports
-                .SingleOrDefaultAsync(existing => existing.EnrollmentId == enrollment.Id && existing.LockId == report.LockId,
-                    cancellationToken);
-            if (row != null && (!string.Equals(row.Cause, report.Cause, StringComparison.Ordinal)
-                                || !string.Equals(row.EvidenceDigestSha256, report.EvidenceDigestSha256, StringComparison.Ordinal)))
-                throw Conflict("lock_id_conflict");
-            var openCriticalIncident = await db.RuntimeCriticalIncidents.AsNoTracking().AnyAsync(incident =>
-                incident.BindingId == enrollment.BindingId && incident.State == "OPEN", cancellationToken);
-
-            var decision = SecurityLockVerdictPolicy.Decide(new SecurityLockDecisionInput(
-                report.Cause, report.Level, effectiveMode, row?.AdminDecision, hardwareBanned, openCriticalIncident));
 
             var isNewLock = row == null;
             if (row == null)
@@ -147,10 +169,34 @@ public sealed partial class RuntimeEnrollmentService
                     Level = report.Level,
                     EvidenceDigestSha256 = report.EvidenceDigestSha256,
                     FirstSeenUtc = report.FirstSeenUtc.UtcDateTime,
-                    FirstReportedUtc = now.UtcDateTime
+                    FirstReportedUtc = now.UtcDateTime,
+                    ClientMode = report.ClientMode,
+                    EffectiveMode = effectiveMode,
+                    LastReportedUtc = now.UtcDateTime,
+                    State = SecurityLockReportStates.Open,
+                    LastVerdict = SecurityLockVerdicts.Maintain
                 };
                 db.SecurityLockReports.Add(row);
+                // The BEFORE INSERT trigger captures the immutable server link. This first flush
+                // remains inside the authority transaction; failure rolls back report and proof.
+                await db.SaveChangesAsync(cancellationToken);
+                await db.Entry(row).ReloadAsync(cancellationToken);
             }
+            var linkAtDecision = isNewLock
+                ? row.LinkStatus is SecurityLockReportLinkStatuses.VerifiedSeat
+                    or SecurityLockReportLinkStatuses.VerifiedAlias
+                : commercial.ReportHardwareLinked;
+            var decision = SecurityLockVerdictPolicy.ApplyAuthorityBoundary(
+                SecurityLockVerdictPolicy.Decide(new SecurityLockDecisionInput(
+                    report.Cause, report.Level, effectiveMode, row.AdminDecision,
+                    hardwareBanned, openCriticalIncident)),
+                commercial.IsEligible, linkAtDecision, hardwareBanned);
+            // A legacy or originally unlinked lock cannot gain an irreversible ban merely
+            // because a mutable seat later acquired the reported identifier.
+            if (decision.Verdict == SecurityLockVerdicts.Ban && !hardwareBanned
+                && row.LinkStatus is not (SecurityLockReportLinkStatuses.VerifiedSeat
+                    or SecurityLockReportLinkStatuses.VerifiedAlias))
+                decision = new SecurityLockDecision(SecurityLockVerdicts.Maintain, SecurityLockReportStates.Open);
             row.ClientMode = report.ClientMode;
             row.EffectiveMode = effectiveMode;
             row.LastReportedUtc = now.UtcDateTime;
@@ -182,7 +228,8 @@ public sealed partial class RuntimeEnrollmentService
                 await SecurityLockAlertOutboxProcessor.StageAsync(
                     db, row, newBan, clientAddress?.ToString(), now.UtcDateTime, cancellationToken);
             }
-            enrollment.AuthorityEpoch = lease.AuthorityEpoch;
+            // Security evidence and commercial policy do not create a new enrollment lineage. The mutation
+            // lease still serializes protected authority and ban writes, but its global epoch remains audit data.
             await db.SaveChangesAsync(cancellationToken);
             await lease.CommitAsync(cancellationToken);
             return new RuntimeEnrollmentOperationResult<SecurityLockVerdictResponse>(

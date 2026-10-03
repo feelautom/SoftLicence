@@ -67,6 +67,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var connections = await ProvisionAsync();
         var cleanFactory = new TestDbFactory(connections.App);
         var fixture = await SeedDistributionAuthorityWithoutBindingAsync(cleanFactory);
+        await Tkt976_FillMultiSeatCapacityAsync(cleanFactory, fixture.LicenseId);
         using var requestCancellation = new CancellationTokenSource();
         using var shutdown = new CancellationTokenSource();
         var fault = new Tkt976FaultState(mode, requestCancellation, shutdown);
@@ -366,6 +367,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var connections = await ProvisionAsync();
         var factory = new TestDbFactory(connections.App);
         var fixture = await SeedDistributionAuthorityWithoutBindingAsync(factory);
+        var secondHardware = await Tkt976_FillMultiSeatCapacityAsync(factory, fixture.LicenseId);
         var now = DateTimeOffset.UtcNow;
         var service = new DistributionInstallationBindingService(
             factory, new EphemeralDataProtectionProvider(), new FixedTimeProvider(now),
@@ -383,8 +385,10 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         await using var observed = await factory.CreateDbContextAsync();
         var seats = await observed.LicenseSeats.AsNoTracking()
             .Where(seat => seat.LicenseId == fixture.LicenseId).ToListAsync();
-        Assert.Equal(fixture.HardwareId, Assert.Single(seats).HardwareId);
-        Assert.True(seats[0].IsActive);
+        Assert.Equal(2, seats.Count);
+        Assert.Contains(seats, seat => seat.HardwareId == fixture.HardwareId);
+        Assert.Contains(seats, seat => seat.HardwareId == secondHardware);
+        Assert.All(seats, seat => Assert.True(seat.IsActive));
         Assert.False(await observed.DistributionInstallationBindings.AnyAsync(binding => binding.LicenseId == fixture.LicenseId));
         Assert.False(await observed.DistributionBindingRequests.AnyAsync(receipt => receipt.RequestId == request.RequestId));
         var history = await observed.LicenseHistories.AsNoTracking()
@@ -397,10 +401,12 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.Equal(submitted, frozen.SubmittedHardwareId);
         Assert.Equal(submitted, frozen.ResolvedHardwareId);
         Assert.Null(frozen.CorrelatedHardwareId);
-        Assert.Equal(1, frozen.Snapshot.ActiveSeats);
-        Assert.Equal(1, frozen.Snapshot.SeatLimit);
+        Assert.Equal(2, frozen.Snapshot.ActiveSeats);
+        Assert.Equal(2, frozen.Snapshot.SeatLimit);
         Assert.Equal(fixture.Version, frozen.AppVersion);
-        Assert.Equal(fixture.HardwareId, Assert.Single(frozen.Snapshot.ActiveSeatDetails!).HardwareId);
+        Assert.Equal(2, frozen.Snapshot.ActiveSeatDetails!.Count);
+        Assert.Contains(frozen.Snapshot.ActiveSeatDetails, seat => seat.HardwareId == fixture.HardwareId);
+        Assert.Contains(frozen.Snapshot.ActiveSeatDetails, seat => seat.HardwareId == secondHardware);
         Assert.False(frozen.Snapshot.ResolvedHardwareAlreadyActive);
         Assert.Equal("ordered_authority_locks", frozen.Snapshot.ObservationGuarantee);
         Assert.Equal("refused", frozen.Outcome);
@@ -418,7 +424,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         await using (var setup = await factory.CreateDbContextAsync())
         {
             var license = await setup.Licenses.SingleAsync(row => row.Id == fixture.LicenseId);
-            license.MaxSeats = 2;
+            license.MaxSeats = 3;
             setup.LicenseSeats.Add(new SoftLicence.Server.Data.LicenseSeat
             {
                 LicenseId = fixture.LicenseId, HardwareId = Guid.NewGuid().ToString("N")[..16].ToUpperInvariant()
@@ -435,7 +441,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         await using (var setup = await factory.CreateDbContextAsync())
         {
             var license = await setup.Licenses.SingleAsync(row => row.Id == fixture.LicenseId);
-            license.MaxSeats = 3;
+            license.MaxSeats = 4;
             await setup.SaveChangesAsync();
         }
         var accepted = await service.FinalizeAsync("tkt976-synthetic-client", Sha256("tkt976-finalize"), request);
@@ -444,7 +450,28 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.True(replay.Idempotent);
         Assert.Equal(3, await observed.LicenseHistories.CountAsync(row =>
             row.LicenseId == fixture.LicenseId && row.DecisionOperationId == request.RequestId));
-        Assert.Equal(3, await observed.LicenseSeats.CountAsync(row => row.LicenseId == fixture.LicenseId && row.IsActive));
+        Assert.Equal(4, await observed.LicenseSeats.CountAsync(row => row.LicenseId == fixture.LicenseId && row.IsActive));
+    }
+
+    /// <summary>Creates an exact two-of-two capacity refusal from the one-seat synthetic seed without relying on superseded mono-seat refusal.</summary>
+    /// <remarks>Only call before issuing requests or taking fingerprints. The original seat remains unchanged, and no refusal, rollback or timeout assertion is relaxed.</remarks>
+    private static async Task<string> Tkt976_FillMultiSeatCapacityAsync(IDbContextFactory<LicenseDbContext> factory, Guid licenseId)
+    {
+        await using var db = await factory.CreateDbContextAsync();
+        var license = await db.Licenses.Include(row => row.Seats).SingleAsync(row => row.Id == licenseId);
+        Assert.Equal(1, license.MaxSeats);
+        Assert.True(Assert.Single(license.Seats).IsActive);
+        var hardware = Guid.NewGuid().ToString("N")[..16].ToUpperInvariant();
+        license.MaxSeats = 2;
+        db.LicenseSeats.Add(new LicenseSeat
+        {
+            LicenseId = licenseId, HardwareId = hardware, IsActive = true,
+            FirstActivatedAt = license.Seats.Single().FirstActivatedAt,
+            LastCheckInAt = license.Seats.Single().LastCheckInAt
+        });
+        await db.SaveChangesAsync();
+        Assert.Equal(2, await db.LicenseSeats.CountAsync(row => row.LicenseId == licenseId && row.IsActive));
+        return hardware;
     }
 
     /// <summary>Creates an authenticated v1 entitlement and an independent synthetic finalization request without changing client contracts.</summary>

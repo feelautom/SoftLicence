@@ -1307,12 +1307,32 @@ internal sealed class RuntimeEnrollmentAuthorityEvidence
 /// <param name="BindingId">Exact binding UUID.</param>
 /// <param name="EnrollmentId">Exact enrollment UUID.</param>
 /// <param name="LicenseId">Exact license UUID.</param>
-/// <param name="SeatId">Exact seat UUID.</param>
+/// <param name="LineageRootSeatId">Immutable seat UUID that scopes the lineage root.</param>
+/// <param name="RequestedCurrentSeatId">Exact current seat UUID requested by this generation.</param>
 /// <param name="LineageId">Exact authority-lineage UUID.</param>
 /// <param name="HeadGenerationId">Exact locked head UUID, or empty only for genesis.</param>
 internal sealed record RuntimeEnrollmentAuthorityEvidenceScope(
     string ClientId, Guid ProductId, Guid BindingId, Guid EnrollmentId, Guid LicenseId,
-    Guid SeatId, Guid LineageId, Guid HeadGenerationId);
+    Guid LineageRootSeatId, Guid RequestedCurrentSeatId,
+    Guid LineageId, Guid HeadGenerationId);
+
+/// <summary>Classifies whether a requested generation represents live authority or terminal history.</summary>
+internal enum RuntimeEnrollmentAuthorityResultClass
+{
+    /// <summary>The generation can participate in a later grant and therefore requires current B.</summary>
+    Live,
+    /// <summary>The generation records exact terminal history and cannot require or create a current assignment.</summary>
+    Terminal
+}
+
+/// <summary>Returns transaction-scoped evidence together with the post-barrier provider time.</summary>
+/// <param name="Evidence">Exact transition evidence bound to both lineage and requested seat scopes.</param>
+/// <param name="AuthoritativeNowUtc">Fresh PostgreSQL time sampled after decisive waits.</param>
+/// <param name="ScopeAuthorized">Whether A/P and, for live results, B match the requested scope.</param>
+internal sealed record RuntimeEnrollmentAuthorityEvidenceResolution(
+    RuntimeEnrollmentAuthorityEvidence Evidence,
+    DateTimeOffset AuthoritativeNowUtc,
+    bool ScopeAuthorized);
 
 /// <summary>Associates one exact evidence label with the complete scope read from its authoritative row.</summary>
 /// <param name="Label">Exact closed evidence label.</param>
@@ -1384,6 +1404,14 @@ internal static class RuntimeEnrollmentAuthorityTransitionPolicy
 
     /// <summary>Gets the exact canonical rows for exhaustive contract tests.</summary>
     internal static IReadOnlyList<RuntimeEnrollmentAuthorityTransitionRule> Registry => Rules;
+
+    /// <summary>Returns the closed authorization failure owned by one registered transition.</summary>
+    /// <param name="reasonCode">Exact transition reason.</param>
+    /// <returns>The registered evidence failure, or the unknown-reason diagnostic.</returns>
+    internal static string EvidenceFailure(string reasonCode) =>
+        ByReason.TryGetValue(reasonCode, out var rule)
+            ? rule.EvidenceFailure
+            : "TRANSITION_REASON_UNKNOWN";
 
     /// <summary>
     /// Filters reason-owned decisions by the complete expected scope. Unknown labels, labels belonging to
@@ -1610,7 +1638,8 @@ internal sealed class RuntimeEnrollmentAuthorityV2Prepared
 {
     /// <summary>
     /// Copies retry-stable authenticated and canonical request identity, including the exact seat
-    /// scope that is revalidated against relational authority before persistence.
+    /// scope that is revalidated against relational authority before persistence. A recovery
+    /// finalization also carries the provider-issued expiry for the decisive post-barrier check.
     /// </summary>
     internal RuntimeEnrollmentAuthorityV2Prepared(
         string clientId, string transportKeyId, Guid attemptId, Guid requestId,
@@ -1620,7 +1649,8 @@ internal sealed class RuntimeEnrollmentAuthorityV2Prepared
         string? recoveryKeyId, string? recoverySignature,
         RuntimeEnrollmentAuthorityRequestV2 request,
         RuntimeEnrollmentAuthorityCryptography crypto,
-        Guid? reservedGenerationId = null, string? reservedPayloadDigest = null)
+        Guid? reservedGenerationId = null, string? reservedPayloadDigest = null,
+        DateTime? recoveryPreparationExpiresAtUtc = null)
     {
         ClientId = clientId; TransportKeyId = transportKeyId; AttemptId = attemptId;
         RequestId = requestId; ExpectedLineageId = expectedLineageId; PreviousId = previousId;
@@ -1631,6 +1661,7 @@ internal sealed class RuntimeEnrollmentAuthorityV2Prepared
         Request = request; Crypto = crypto;
         ReservedGenerationId = reservedGenerationId;
         ReservedPayloadDigest = reservedPayloadDigest;
+        RecoveryPreparationExpiresAtUtc = recoveryPreparationExpiresAtUtc;
     }
 
     /// <summary>Gets the exact authenticated S2S client identifier.</summary>
@@ -1671,6 +1702,8 @@ internal sealed class RuntimeEnrollmentAuthorityV2Prepared
     internal Guid? ReservedGenerationId { get; }
     /// <summary>Gets the exact lowercase digest of the prepared canonical payload.</summary>
     internal string? ReservedPayloadDigest { get; }
+    /// <summary>Gets the provider-issued recovery preparation expiry for post-barrier validation.</summary>
+    internal DateTime? RecoveryPreparationExpiresAtUtc { get; }
 }
 
 /// <summary>Returns server-owned canonical recovery bytes and their short signed preparation token.</summary>
@@ -1704,10 +1737,18 @@ internal sealed class RuntimeEnrollmentAuthorityRecoveryPreparationClaims
 }
 
 /// <summary>Contains the locked lineage identity and predecessor resolved before UUID allocation.</summary>
+/// <param name="LineageId">Immutable lineage identifier.</param>
+/// <param name="GenerationId">Reserved candidate generation identifier.</param>
+/// <param name="PreviousGenerationId">Locked predecessor identifier, or null for genesis.</param>
+/// <param name="Sequence">Monotonic generation sequence.</param>
+/// <param name="LineageCreatedAtUtc">Persisted lineage creation time.</param>
+/// <param name="LineageRootSeatId">Immutable root seat retained across a seat reassignment.</param>
+/// <param name="Predecessor">Exact predecessor payload, or null for genesis.</param>
 internal sealed record RuntimeEnrollmentAuthorityResolvedIdentity(
     Guid LineageId, Guid GenerationId, Guid? PreviousGenerationId,
     RuntimeEnrollmentLineageSequence Sequence,
-    DateTime LineageCreatedAtUtc, RuntimeEnrollmentAuthorityGenerationPayloadV2? Predecessor);
+    DateTime LineageCreatedAtUtc, Guid LineageRootSeatId,
+    RuntimeEnrollmentAuthorityGenerationPayloadV2? Predecessor);
 
 /// <summary>Freezes the three lifecycle outcomes consumed by the recovery branch.</summary>
 /// <param name="Predecessor">Classification of the locked predecessor operational key.</param>
@@ -1836,7 +1877,8 @@ public sealed class RuntimeEnrollmentAuthorityV2Coordinator
 
     /// <summary>
     /// Locks and revalidates the current head, allocates the successor UUID, builds exact canonical bytes,
-    /// and signs a short scope-bound token inside the caller-owned transaction.
+    /// rechecks A/P and current B after the commercial barrier, and signs a short scope-bound token whose
+    /// expiry is derived from provider time inside the caller-owned transaction.
     /// </summary>
     internal async Task<RuntimeEnrollmentAuthorityRecoveryPreparation> PrepareRecoveryAmbientAsync(
         LicenseDbContext db, RuntimeEnrollmentAuthorityV2Prepared prepared,
@@ -1854,7 +1896,12 @@ public sealed class RuntimeEnrollmentAuthorityV2Coordinator
         var canonical = prepared.Crypto.CanonicalizeGenerationPayload(serialized);
         if (canonical.Error != RuntimeEnrollmentAuthorityCryptography.Failure.None)
             throw Invalid("INVALID_AUTHORITY_REQUEST");
-        var expires = clock.GetUtcNow().AddSeconds(RecoveryPreparationLifetimeSeconds).UtcDateTime;
+        var authority = await ResolveAuthoritativeEvidenceAsync(
+            db, prepared, identity, payload, cancellationToken);
+        if (!authority.ScopeAuthorized)
+            throw Invalid("RECOVERY_NOT_AUTHORIZED");
+        var expires = authority.AuthoritativeNowUtc.AddSeconds(
+            RecoveryPreparationLifetimeSeconds).UtcDateTime;
         var claims = new RuntimeEnrollmentAuthorityRecoveryPreparationClaims
         {
             ClientId = prepared.ClientId,
@@ -1881,7 +1928,11 @@ public sealed class RuntimeEnrollmentAuthorityV2Coordinator
         return new(canonical.Value.CanonicalUtf8, token, expires);
     }
 
-    /// <summary>Verifies one signed preparation token and freezes its server-allocated successor identity.</summary>
+    /// <summary>
+    /// Verifies one signed preparation token and freezes its server-allocated successor identity. This
+    /// parser does not consult the application clock; execution performs the authoritative expiry and
+    /// maximum-lifetime checks against fresh PostgreSQL time after decisive waits.
+    /// </summary>
     internal RuntimeEnrollmentAuthorityV2Prepared PrepareRecoveryFinalization(
         string clientId, string transportKeyId, Guid attemptId, ReadOnlySpan<byte> exactBody,
         string preparationToken, string recoveryKeyId, string recoverySignature,
@@ -1925,16 +1976,13 @@ public sealed class RuntimeEnrollmentAuthorityV2Coordinator
                     claimsBytes, parts[1], parts[2], registry)
                 != RuntimeEnrollmentAuthorityCryptography.Failure.None)
                 throw Invalid("RECOVERY_PREPARATION_NOT_AUTHORIZED");
-            if (clock.GetUtcNow().UtcDateTime >= expires
-                || expires > clock.GetUtcNow().AddSeconds(RecoveryPreparationLifetimeSeconds).UtcDateTime)
-                throw Invalid("RECOVERY_PREPARATION_EXPIRED");
         }
         return new(prepared.ClientId, prepared.TransportKeyId, prepared.AttemptId, prepared.RequestId,
             prepared.ExpectedLineageId, prepared.PreviousId, prepared.ProductId, prepared.BindingId,
             prepared.LicenseSeatId, prepared.Provider, prepared.GrantRef, prepared.RequestDigest,
             prepared.OccurredAtUtc,
             prepared.RecoveryKeyId, prepared.RecoverySignature, prepared.Request, prepared.Crypto,
-            generationId, claims.PayloadDigest);
+            generationId, claims.PayloadDigest, expires);
     }
 
     /// <summary>
@@ -1960,7 +2008,8 @@ public sealed class RuntimeEnrollmentAuthorityV2Coordinator
     }
 
     /// <summary>
-    /// Executes replay-first issuance inside the active caller transaction. Any post-insert structural
+    /// Executes frozen exact replay before current authority reads; new issuance then rechecks A/P and,
+    /// for live results, B after decisive locks and fresh provider time. Any post-insert structural
     /// conflict throws a rollback-only signal; this method never commits or retries.
     /// </summary>
     internal async Task<RuntimeEnrollmentAuthorityV2OperationResult> ExecuteAmbientAsync(
@@ -1997,8 +2046,21 @@ public sealed class RuntimeEnrollmentAuthorityV2Coordinator
             return await StoreAttemptAsync(db, prepared, "REFUSED", "RECOVERY_PREPARATION_PAYLOAD_MISMATCH",
                 ErrorBody("RECOVERY_PREPARATION_PAYLOAD_MISMATCH"), StatusCodes.Status403Forbidden,
                 cancellationToken);
-        var evidence = await ResolveAuthoritativeEvidenceAsync(
+        var authorityResolution = await ResolveAuthoritativeEvidenceAsync(
             db, prepared, identity, payload, cancellationToken);
+        if (prepared.RecoveryPreparationExpiresAtUtc is { } preparationExpiresAtUtc
+            && (authorityResolution.AuthoritativeNowUtc.UtcDateTime >= preparationExpiresAtUtc
+                || preparationExpiresAtUtc > authorityResolution.AuthoritativeNowUtc
+                    .AddSeconds(RecoveryPreparationLifetimeSeconds).UtcDateTime))
+            throw Invalid("RECOVERY_PREPARATION_EXPIRED");
+        if (!authorityResolution.ScopeAuthorized)
+        {
+            var failure = RuntimeEnrollmentAuthorityTransitionPolicy.EvidenceFailure(
+                payload.Transition.ReasonCode);
+            return await StoreAttemptAsync(db, prepared, "REFUSED", failure,
+                ErrorBody(failure), StatusFor(failure), cancellationToken);
+        }
+        var evidence = authorityResolution.Evidence;
         if (identity.Predecessor is not null
             && payload.Transition.ReasonCode is "INSTALLATION_REINSTALLED" or "RECOVERY_AUTHORIZED")
             evidence = evidence.With("CURRENT_HEAD_PROOF");
@@ -2006,7 +2068,7 @@ public sealed class RuntimeEnrollmentAuthorityV2Coordinator
 
         var registry = AuthenticateRegistry(prepared.Crypto);
         var occurred = new DateTimeOffset(prepared.OccurredAtUtc, TimeSpan.Zero);
-        var now = clock.GetUtcNow();
+        var now = authorityResolution.AuthoritativeNowUtc;
         var requestedKeyId = payload.Key.AuthorityKeyId;
         var signerKeyId = identity.Predecessor?.Key.AuthorityKeyId ?? requestedKeyId;
         RuntimeEnrollmentAuthorityCryptography.KeyLifecycleClassification lifecycle;
@@ -2083,7 +2145,7 @@ public sealed class RuntimeEnrollmentAuthorityV2Coordinator
             RequestDigest = prepared.RequestDigest,
             Provider = prepared.Provider,
             ProductId = prepared.ProductId,
-            LicenseSeatId = prepared.LicenseSeatId,
+            LicenseSeatId = identity.LineageRootSeatId,
             ProviderGrantRef = prepared.GrantRef,
             ProviderGrantRefScalarCount = prepared.GrantRef.EnumerateRunes().Count(),
             LineageCreatedAtUtc = identity.LineageCreatedAtUtc,
@@ -2219,7 +2281,7 @@ public sealed class RuntimeEnrollmentAuthorityV2Coordinator
                     && item.LicenseSeatId == prepared.LicenseSeatId, cancellationToken);
             if (byTuple is not null) return null;
             return new(Guid.NewGuid(), Guid.NewGuid(), null, RuntimeEnrollmentLineageSequence.Genesis,
-                clock.GetUtcNow().UtcDateTime, null);
+                clock.GetUtcNow().UtcDateTime, prepared.LicenseSeatId, null);
         }
 
         var lineageId = prepared.ExpectedLineageId!.Value;
@@ -2234,7 +2296,6 @@ public sealed class RuntimeEnrollmentAuthorityV2Coordinator
             """).SingleOrDefaultAsync(cancellationToken);
         if (lineage is null || lineage.Provider != prepared.Provider
             || lineage.ProductId != prepared.ProductId
-            || lineage.LicenseSeatId != prepared.LicenseSeatId
             || lineage.ProviderGrantRef != prepared.GrantRef
             || lineage.HeadGenerationId != prepared.PreviousId)
             return null;
@@ -2260,7 +2321,7 @@ public sealed class RuntimeEnrollmentAuthorityV2Coordinator
             || !headSequence.TryNext(out var nextSequence))
             return null;
         return new(lineageId, prepared.ReservedGenerationId ?? Guid.NewGuid(), prepared.PreviousId,
-            nextSequence, lineage.CreatedAtUtc, predecessor);
+            nextSequence, lineage.CreatedAtUtc, lineage.LicenseSeatId, predecessor);
     }
 
     /// <summary>Encodes exact token bytes as canonical unpadded Base64Url.</summary>
@@ -2313,10 +2374,17 @@ public sealed class RuntimeEnrollmentAuthorityV2Coordinator
     };
 
     /// <summary>
-    /// Reads SoftLicence-owned binding, enrollment, release, and seat state under the same transaction.
-    /// Returned labels authorize only the exact requested leaves; this resolver never rewrites input.
+    /// Reads A/P and, only for a live result, current B after the enrollment row and item-2 barrier.
+    /// Signed hardware, licence dates, and seat fields remain immutable provenance and never grant B;
+    /// current authorization comes from the Runtime key lineage and locked active assignment.
     /// </summary>
-    private async Task<RuntimeEnrollmentAuthorityEvidence> ResolveAuthoritativeEvidenceAsync(
+    /// <param name="db">Ambient transaction context that owns the enrollment lock and item-2 barrier.</param>
+    /// <param name="prepared">Strict normalized authority request and server-derived relational identifiers.</param>
+    /// <param name="identity">Resolved immutable authority lineage and predecessor generation.</param>
+    /// <param name="current">Exact signed generation payload being classified.</param>
+    /// <param name="cancellationToken">Cancels database reads before the ambient transaction completes.</param>
+    /// <returns>The allowlisted evidence decisions and exact server-derived authority scope.</returns>
+    private async Task<RuntimeEnrollmentAuthorityEvidenceResolution> ResolveAuthoritativeEvidenceAsync(
         LicenseDbContext db, RuntimeEnrollmentAuthorityV2Prepared prepared,
         RuntimeEnrollmentAuthorityResolvedIdentity identity,
         RuntimeEnrollmentAuthorityGenerationPayloadV2 current,
@@ -2324,52 +2392,102 @@ public sealed class RuntimeEnrollmentAuthorityV2Coordinator
     {
         var predecessor = identity.Predecessor;
         var decisions = new List<RuntimeEnrollmentAuthorityScopedDecision>();
-        var binding = await db.DistributionInstallationBindings.AsNoTracking()
-            .SingleOrDefaultAsync(item => item.Id == prepared.BindingId, cancellationToken);
         var enrollmentId = Guid.ParseExact(current.Enrollment.EnrollmentId, "D");
+        _ = await db.RuntimeEnrollments.FromSqlInterpolated($"""
+            SELECT * FROM public."RuntimeEnrollments"
+            WHERE "Id" = {enrollmentId}
+            FOR UPDATE
+            """).AsNoTracking().SingleOrDefaultAsync(cancellationToken);
+        await RuntimeCommercialEligibilityValidator.AcquireReadBarrierAsync(db, cancellationToken);
+        var now = await RuntimeEnrollmentService.DatabaseNowAsync(db, cancellationToken);
         var enrollment = await db.RuntimeEnrollments.AsNoTracking()
             .SingleOrDefaultAsync(item => item.Id == enrollmentId, cancellationToken);
-        var license = enrollment is null ? null : await db.Licenses.AsNoTracking()
-            .SingleOrDefaultAsync(item => item.Id == enrollment.LicenseId, cancellationToken);
-        var seat = binding is null ? null : await db.LicenseSeats.AsNoTracking()
-            .SingleOrDefaultAsync(item => item.Id == binding.LicenseSeatId, cancellationToken);
+        var binding = await db.DistributionInstallationBindings.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == prepared.BindingId, cancellationToken);
         var owned = await db.DistributionBindingRequests.AsNoTracking().AnyAsync(item =>
             item.BindingId == prepared.BindingId && item.ClientId == prepared.ClientId
                 && item.Operation == "finalize_binding",
             cancellationToken);
-        var bindingMatches = binding is not null && owned && license is not null
+
+        var resultClass = ClassifyResult(current);
+        RuntimeCommercialEligibilityValidator.EligibleAssignment? currentAssignment = null;
+        IReadOnlyDictionary<string, string>? approvedBinaries = null;
+        if (resultClass == RuntimeEnrollmentAuthorityResultClass.Live && enrollment is not null)
+        {
+            try
+            {
+                approvedBinaries = (await RuntimeEnrollmentIdentityValidator.ValidateBootstrapAsync(
+                    db, enrollment, cancellationToken)).Binaries;
+            }
+            catch (RuntimeEnrollmentException exception)
+                when (exception.StatusCode == StatusCodes.Status422UnprocessableEntity)
+            {
+                approvedBinaries = null;
+            }
+            if (approvedBinaries is not null)
+            {
+                var assessment = await RuntimeCommercialEligibilityValidator.AssessAsync(
+                    db, enrollment, approvedBinaries, now, null, cancellationToken);
+                currentAssignment = assessment.Assignment;
+            }
+        }
+
+        var historicalAssignment = currentAssignment is null
+            ? await db.EnrollmentLicenseAssignments.AsNoTracking()
+                .Where(item => item.EnrollmentId == enrollmentId
+                    && item.LicenseSeatId == prepared.LicenseSeatId
+                    && (binding == null || item.LicenseId == binding.LicenseId))
+                .OrderByDescending(item => item.Revision)
+                .FirstOrDefaultAsync(cancellationToken)
+            : null;
+        var provenanceLicenseId = currentAssignment?.LicenseId
+            ?? historicalAssignment?.LicenseId
+            ?? binding?.LicenseId
+            ?? Guid.Empty;
+        var license = provenanceLicenseId == Guid.Empty ? null : await db.Licenses.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Id == provenanceLicenseId, cancellationToken);
+
+        var bindingProvenanceMatches = binding is not null && owned
             && binding.ProductId == prepared.ProductId
-            && binding.LicenseId == license.Id
-            && binding.LicenseSeatId == enrollment!.LicenseSeatId
             && binding.GrantRef == prepared.GrantRef
-            && binding.HardwareIdHash == current.Binding.HardwareIdDigest
             && binding.Version == current.Release.Version
             && binding.InstallationId == current.Installation.InstallationId
-            && binding.LicenseSeatId.ToString("D") == current.Installation.SeatId
-            && binding.State == "active";
-        var enrollmentMatches = enrollment is not null
+            && binding.LicenseSeatId == prepared.LicenseSeatId
+            && binding.LicenseSeatId.ToString("D") == current.Installation.SeatId;
+        var enrollmentSecurityEpochMatches = current.Transition.ReasonCode
+                is "SECURITY_EPOCH_ADVANCED" or "RECOVERY_AUTHORIZED"
+            ? predecessor is not null && enrollment?.SecurityEpoch == predecessor.Key.SecurityEpoch
+            : enrollment?.SecurityEpoch == current.Key.SecurityEpoch;
+        var enrollmentProvenanceMatches = enrollment is not null
             && license is not null
             && enrollment.ClientId == prepared.ClientId
             && enrollment.ProductId == prepared.ProductId
             && enrollment.BindingId == prepared.BindingId
-            && enrollment.LicenseSeatId.ToString("D") == current.Installation.SeatId
             && enrollment.InstallationId == current.Installation.InstallationId
-            && enrollment.HardwareIdHash == current.Binding.HardwareIdDigest
             && enrollment.ReleaseVersion == current.Release.Version
+            && enrollmentSecurityEpochMatches
             && ContractTimeEquals(license.ActivationDate ?? license.CreationDate,
                 current.Enrollment.IssuedAtUtc)
             && ContractTimeEquals(license.ExpirationDate, current.Enrollment.ExpiresAtUtc);
-        var seatMatches = MatchesExactActiveSeat(seat, enrollment, license, binding);
+        var liveScopeMatches = resultClass == RuntimeEnrollmentAuthorityResultClass.Live
+            && bindingProvenanceMatches && binding!.State == "active"
+            && enrollmentProvenanceMatches
+            && ContractState(enrollment!.State) == current.Enrollment.State
+            && currentAssignment is not null
+            && currentAssignment.LicenseId == binding.LicenseId
+            && currentAssignment.SeatId == prepared.LicenseSeatId;
+        var terminalScopeMatches = resultClass == RuntimeEnrollmentAuthorityResultClass.Terminal
+            && bindingProvenanceMatches && enrollmentProvenanceMatches
+            && TerminalStateMatches(current.Enrollment.State, enrollment!, license!, now);
         var expectedScope = new RuntimeEnrollmentAuthorityEvidenceScope(
             prepared.ClientId, prepared.ProductId, prepared.BindingId, enrollmentId,
-            license?.Id ?? Guid.Empty, binding?.LicenseSeatId ?? Guid.Empty,
+            license?.Id ?? Guid.Empty, identity.LineageRootSeatId, prepared.LicenseSeatId,
             identity.LineageId, identity.PreviousGenerationId ?? Guid.Empty);
         void Add(string label, bool authorized)
         {
             if (authorized)
                 decisions.Add(new(label, expectedScope));
         }
-        var scopeMatches = bindingMatches && enrollmentMatches && seatMatches;
         var approvedRelease = await db.ApprovedBinaryRegistrations.AsNoTracking().AnyAsync(item =>
                 item.ProductId == prepared.ProductId
                 && item.Version == current.Release.Version
@@ -2378,39 +2496,38 @@ public sealed class RuntimeEnrollmentAuthorityV2Coordinator
         switch (current.Transition.ReasonCode)
         {
             case "INITIAL_ENROLLMENT":
-                Add("INITIAL_ENTITLEMENT", scopeMatches && license!.IsActive
-                    && ContractState(enrollment!.State) == current.Enrollment.State);
+                Add("INITIAL_ENTITLEMENT", liveScopeMatches);
                 break;
             case "APPROVED_RELEASE_ADVANCE":
-                Add("APPROVED_ARTIFACT_SET", scopeMatches && approvedRelease);
+                Add("APPROVED_ARTIFACT_SET", liveScopeMatches && approvedRelease);
                 break;
             case "BINDING_REPLACEMENT":
-                Add("BINDING_REPLACEMENT_AUTHORITY", scopeMatches && predecessor is not null
+                Add("BINDING_REPLACEMENT_AUTHORITY", liveScopeMatches && predecessor is not null
                     && Guid.TryParseExact(predecessor.Binding.BindingId, "D", out var replacedBindingId)
                     && binding!.SupersededBindingId == replacedBindingId);
-                Add("ELIGIBLE_HARDWARE", scopeMatches && binding!.HardwareIdHash == current.Binding.HardwareIdDigest);
+                Add("ELIGIBLE_HARDWARE", liveScopeMatches);
                 break;
             case "ENROLLMENT_ACTIVATED":
-                Add("ACTIVATION_PROOF", scopeMatches && enrollment!.ActivatedAtUtc is not null
+                Add("ACTIVATION_PROOF", liveScopeMatches && enrollment!.ActivatedAtUtc is not null
                     && ContractState(enrollment.State) == "active");
                 break;
             case "ENROLLMENT_EXPIRED":
-                Add("AUTHORITATIVE_EXPIRY", scopeMatches && current.Enrollment.State == "expired"
+                Add("AUTHORITATIVE_EXPIRY", terminalScopeMatches && current.Enrollment.State == "expired"
                     && license!.ExpirationDate is not null
-                    && license.ExpirationDate.Value <= clock.GetUtcNow().UtcDateTime);
+                    && license.ExpirationDate.Value <= now.UtcDateTime);
                 break;
             case "ENROLLMENT_REPLACED":
                 var oldEnrollmentId = predecessor is null ? Guid.Empty
                     : Guid.ParseExact(predecessor.Enrollment.EnrollmentId, "D");
-                Add("REPLACEMENT_ELIGIBILITY", scopeMatches && oldEnrollmentId != enrollmentId
+                Add("REPLACEMENT_ELIGIBILITY", liveScopeMatches && oldEnrollmentId != enrollmentId
                     && await db.RuntimeEnrollments.AsNoTracking().AnyAsync(item =>
                         item.Id == oldEnrollmentId && item.ClientId == prepared.ClientId
-                        && item.ProductId == prepared.ProductId && item.LicenseId == license!.Id
+                        && item.ProductId == prepared.ProductId
                         && item.State == "INVALIDATED" && item.InvalidatedAtUtc != null,
                         cancellationToken));
                 break;
             case "AUTHORITY_REVOKED":
-                Add("SIGNED_REVOCATION_DECISION", scopeMatches && enrollment!.State == "INVALIDATED"
+                Add("SIGNED_REVOCATION_DECISION", terminalScopeMatches && enrollment!.State == "INVALIDATED"
                     && enrollment.InvalidatedAtUtc is not null && enrollment.InvalidationReason is not null
                     && await db.DistributionBindingInvalidations.AsNoTracking().AnyAsync(item =>
                         item.BindingId == prepared.BindingId && item.ProductId == prepared.ProductId
@@ -2419,7 +2536,8 @@ public sealed class RuntimeEnrollmentAuthorityV2Coordinator
                 break;
             case "SECURITY_EPOCH_ADVANCED":
             case "RECOVERY_AUTHORIZED":
-                Add("SECURITY_DECISION", scopeMatches && predecessor is not null
+                Add("SECURITY_DECISION", (resultClass == RuntimeEnrollmentAuthorityResultClass.Live
+                        ? liveScopeMatches : terminalScopeMatches) && predecessor is not null
                     && await db.RuntimeCriticalRecoveries.AsNoTracking().AnyAsync(item =>
                         item.EnrollmentId == enrollmentId && item.BindingId == prepared.BindingId
                         && item.ProductId == prepared.ProductId && item.InstallationId == current.Installation.InstallationId
@@ -2429,54 +2547,58 @@ public sealed class RuntimeEnrollmentAuthorityV2Coordinator
                         cancellationToken));
                 break;
             case "INSTALLATION_REINSTALLED":
-                Add("REINSTALL_PROOF", scopeMatches && predecessor is not null
+                Add("REINSTALL_PROOF", liveScopeMatches && predecessor is not null
                     && predecessor.Installation.InstallationId != current.Installation.InstallationId
                     && binding!.InstallationId == current.Installation.InstallationId);
                 break;
             case "REPAIR_AUTHORIZED":
-                Add("REPAIR_PROOF", scopeMatches && approvedRelease);
+                Add("REPAIR_PROOF", liveScopeMatches && approvedRelease);
                 break;
             case "SEAT_REASSIGNED":
-                Add("SEAT_ACQUISITION_PROOF", scopeMatches
+                Add("SEAT_ACQUISITION_PROOF", liveScopeMatches
                     && await db.LicenseSeats.AsNoTracking().AnyAsync(item =>
-                        item.Id == binding!.LicenseSeatId && item.LicenseId == license!.Id && item.IsActive,
+                        item.Id == prepared.LicenseSeatId && item.LicenseId == license!.Id && item.IsActive,
                         cancellationToken));
-                Add("SEAT_RELEASE_PROOF", scopeMatches && predecessor is not null
+                Add("SEAT_RELEASE_PROOF", liveScopeMatches && predecessor is not null
                     && Guid.TryParseExact(predecessor.Installation.SeatId, "D", out var oldSeatId)
+                    && oldSeatId != prepared.LicenseSeatId
                     && await db.LicenseSeats.AsNoTracking().AnyAsync(item =>
-                        item.Id == oldSeatId && item.LicenseId == license!.Id && !item.IsActive,
+                        item.Id == oldSeatId && !item.IsActive,
                         cancellationToken));
                 break;
         }
         _ = prepared.TransportKeyId;
-        return RuntimeEnrollmentAuthorityTransitionPolicy.ResolveScopedEvidence(
+        var evidence = RuntimeEnrollmentAuthorityTransitionPolicy.ResolveScopedEvidence(
             current.Transition.ReasonCode, expectedScope, decisions);
+        var scopeAuthorized = resultClass == RuntimeEnrollmentAuthorityResultClass.Live
+            ? liveScopeMatches : terminalScopeMatches;
+        if (current.Transition.ReasonCode is "SECURITY_EPOCH_ADVANCED" or "RECOVERY_AUTHORIZED")
+            scopeAuthorized = scopeAuthorized && decisions.Any(item =>
+                item.Label == "SECURITY_DECISION" && item.Scope == expectedScope);
+        return new(evidence, now, scopeAuthorized);
     }
 
-    /// <summary>Requires the exact relational seat behind a positive Runtime authority decision to remain active.</summary>
-    /// <param name="seat">Seat selected by the binding's immutable seat identifier.</param>
-    /// <param name="enrollment">Enrollment selected by the signed generation.</param>
-    /// <param name="license">Licence selected through the enrollment.</param>
-    /// <param name="binding">Provider binding selected by the authenticated request.</param>
-    /// <returns><see langword="true"/> only for one active, same-licence, same-enrollment, exact-hardware seat.</returns>
-    internal static bool MatchesExactActiveSeat(
-        LicenseSeat? seat,
-        RuntimeEnrollment? enrollment,
-        License? license,
-        DistributionInstallationBinding? binding) =>
-        seat is not null
-        && enrollment is not null
-        && license is not null
-        && binding is not null
-        && seat.Id == enrollment.LicenseSeatId
-        && seat.Id == binding.LicenseSeatId
-        && seat.LicenseId == license.Id
-        && binding.LicenseId == license.Id
-        && seat.IsActive
-        && string.Equals(
-            Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(seat.HardwareId))),
-            binding.HardwareIdHash,
-            StringComparison.Ordinal);
+    /// <summary>Classifies recovery by resulting state and every other terminal transition explicitly.</summary>
+    internal static RuntimeEnrollmentAuthorityResultClass ClassifyResult(
+        RuntimeEnrollmentAuthorityGenerationPayloadV2 current) =>
+        current.Enrollment.State is "expired" or "revoked"
+            ? RuntimeEnrollmentAuthorityResultClass.Terminal
+            : RuntimeEnrollmentAuthorityResultClass.Live;
+
+    /// <summary>Matches exact terminal state without consulting or reviving current commercial B.</summary>
+    private static bool TerminalStateMatches(
+        string requestedState,
+        RuntimeEnrollment enrollment,
+        License license,
+        DateTimeOffset now) => requestedState switch
+        {
+            "expired" => enrollment.State is "PENDING" or "ACTIVE"
+                && license.ExpirationDate is not null
+                && license.ExpirationDate.Value <= now.UtcDateTime,
+            "revoked" => enrollment.State == "INVALIDATED"
+                && enrollment.InvalidatedAtUtc is not null,
+            _ => false
+        };
 
     /// <summary>Authenticates the current registry only after replay, locks, and business evidence.</summary>
     private RuntimeEnrollmentAuthorityCryptography.TrustedKeyRegistrySnapshotProof AuthenticateRegistry(

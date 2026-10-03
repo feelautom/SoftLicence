@@ -1607,9 +1607,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     }
 
     [Fact]
-    public async Task DistributionFinalize_CompletesBeforeClassicActivation_ActivationAtomicallyInvalidatesRuntimeIdentity()
+    public async Task DistributionFinalize_CompletesBeforeClassicActivation_ActivationEndsAssignmentAndPreservesRuntimeIdentity()
     {
-        const string invalidationReason = "seat_reassigned_product_scope";
         var connections = await ProvisionAsync();
         var directFactory = new TestDbFactory(connections.App);
         var fixture = await SeedDistributionAuthorityWithoutBindingAsync(directFactory, includeSeat: false);
@@ -1772,6 +1771,11 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             await seedEnrollment.SaveChangesAsync();
         }
 
+        var identityBefore = await SnapshotRetainedRuntimeIdentityAsync(directFactory, enrollmentId);
+        EnrollmentLicenseAssignment assignmentBefore;
+        await using (var original = await directFactory.CreateDbContextAsync())
+            assignmentBefore = await original.EnrollmentLicenseAssignments.AsNoTracking()
+                .SingleAsync(row => row.EnrollmentId == enrollmentId && row.State == "ACTIVE");
         var activationResponse = await client.PostAsJsonAsync("/api/activation", new
         {
             LicenseKey = activationLicenseKey,
@@ -1783,9 +1787,9 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.True(activationResponse.StatusCode == HttpStatusCode.OK,
             $"Expected activation success, got {(int)activationResponse.StatusCode}: {activationBody}");
 
-        DateTime bindingInvalidatedAt;
-        DateTime enrollmentInvalidatedAt;
-        long invalidatedAuthorityEpoch;
+        using var activationJson = System.Text.Json.JsonDocument.Parse(activationBody);
+        Assert.False(string.IsNullOrEmpty(activationJson.RootElement.GetProperty("licenseFile").GetString()));
+        DateTime endedAt;
         await using (var check = await directFactory.CreateDbContextAsync())
         {
             var binding = await check.DistributionInstallationBindings.AsNoTracking()
@@ -1800,22 +1804,19 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             Assert.Single(activeSeats);
             Assert.Equal(activationLicenseId, activeSeats[0].LicenseId);
             Assert.Equal(activationSeatId, activeSeats[0].Id);
-            Assert.Equal("invalidated", binding.State);
-            Assert.Equal(invalidationReason, binding.InvalidationReason);
-            Assert.NotNull(binding.InvalidatedAtUtc);
-            Assert.Equal("INVALIDATED", enrollment.State);
-            Assert.Equal(invalidationReason, enrollment.InvalidationReason);
-            Assert.NotNull(enrollment.InvalidatedAtUtc);
-            Assert.Equal(binding.InvalidatedAtUtc, enrollment.InvalidatedAtUtc);
-            Assert.True(enrollment.AuthorityEpoch > enrollmentAuthorityEpoch);
-            Assert.Equal(await check.RuntimeEnrollmentAuthorityStates.AsNoTracking()
-                .Where(candidate => candidate.Id == 1)
-                .Select(candidate => candidate.Epoch)
-                .SingleAsync(), enrollment.AuthorityEpoch);
-            bindingInvalidatedAt = binding.InvalidatedAtUtc!.Value;
-            enrollmentInvalidatedAt = enrollment.InvalidatedAtUtc!.Value;
-            invalidatedAuthorityEpoch = enrollment.AuthorityEpoch;
+            Assert.Equal("active", binding.State);
+            Assert.Equal("ACTIVE", enrollment.State);
+            Assert.Equal(enrollmentAuthorityEpoch, enrollment.AuthorityEpoch);
+            var assignment = await check.EnrollmentLicenseAssignments.SingleAsync(row => row.Id == assignmentBefore.Id);
+            Assert.Equal("ENDED", assignment.State);
+            Assert.Equal("seat_released", assignment.EndReason);
+            Assert.Equal(assignmentBefore.Revision, assignment.Revision);
+            endedAt = Assert.IsType<DateTime>(assignment.EndedAtUtc);
+            Assert.Empty(await check.EnrollmentLicenseAssignments.Where(row =>
+                row.EnrollmentId == enrollmentId && row.State == "ACTIVE").ToListAsync());
         }
+        Assert.Equal(identityBefore, await SnapshotRetainedRuntimeIdentityAsync(directFactory, enrollmentId));
+        await AssertEndedAssignmentDeniesRuntimeAsync(directFactory, enrollmentId);
 
         await using (var standaloneDb = await directFactory.CreateDbContextAsync())
         {
@@ -1826,15 +1827,15 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         }
 
         await using var replayCheck = await directFactory.CreateDbContextAsync();
-        var replayedBinding = await replayCheck.DistributionInstallationBindings.AsNoTracking()
-            .SingleAsync(candidate => candidate.Id == bindingId);
-        var replayedEnrollment = await replayCheck.RuntimeEnrollments.AsNoTracking()
-            .SingleAsync(candidate => candidate.Id == enrollmentId);
-        Assert.Equal(bindingInvalidatedAt, replayedBinding.InvalidatedAtUtc);
-        Assert.Equal(enrollmentInvalidatedAt, replayedEnrollment.InvalidatedAtUtc);
-        Assert.Equal(invalidatedAuthorityEpoch, replayedEnrollment.AuthorityEpoch);
-        Assert.Equal(invalidationReason, replayedBinding.InvalidationReason);
-        Assert.Equal(invalidationReason, replayedEnrollment.InvalidationReason);
+        var replayedAssignment = await replayCheck.EnrollmentLicenseAssignments.AsNoTracking()
+            .SingleAsync(row => row.Id == assignmentBefore.Id);
+        Assert.Equal(endedAt, replayedAssignment.EndedAtUtc);
+        Assert.Equal("ENDED", replayedAssignment.State);
+        Assert.Equal("seat_released", replayedAssignment.EndReason);
+        Assert.Equal(assignmentBefore.Revision, replayedAssignment.Revision);
+        Assert.Single(await replayCheck.EnrollmentLicenseAssignments.Where(row => row.EnrollmentId == enrollmentId).ToListAsync());
+        Assert.Equal(identityBefore, await SnapshotRetainedRuntimeIdentityAsync(directFactory, enrollmentId));
+        await AssertEndedAssignmentDeniesRuntimeAsync(directFactory, enrollmentId);
     }
 
     [Fact]
@@ -2000,7 +2001,19 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     public async Task ClassicActivation_ConcurrentWithDistributionFinalize_WaitsOnSharedExactHardwareLock()
     {
         var connections = await ProvisionAsync();
-        var directFactory = new TestDbFactory(connections.App);
+        var finalizeApplication = "sync-finalize-" + Guid.NewGuid().ToString("N");
+        var activationApplication = "sync-activation-" + Guid.NewGuid().ToString("N");
+        var finalizeConnection = new NpgsqlConnectionStringBuilder(connections.App)
+            { ApplicationName = finalizeApplication, Pooling = false }.ConnectionString;
+        var activationConnection = new NpgsqlConnectionStringBuilder(connections.App)
+            { ApplicationName = activationApplication, Pooling = false }.ConnectionString;
+        var productId = Guid.NewGuid();
+        using var activeSigning = CreateSigningKey(ActiveSigningPrivateKey);
+        using var nextSigning = CreateSigningKey(NextSigningPrivateKey);
+        var runtimeOptions = RuntimeOptions(productId, activeSigning, nextSigning);
+        await UpsertKeyRegistryAsync(connections.Admin, runtimeOptions);
+        var enrollmentSeed = new ConcurrentFinalizeEnrollmentSeed(runtimeOptions.Encryption.ActiveKeyId);
+        var directFactory = new ConcurrentFinalizeEnrollmentFactory(finalizeConnection, enrollmentSeed);
         using var webFactory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseSetting("IsIntegrationTest", "true");
@@ -2010,13 +2023,12 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 services.RemoveAll<IDbContextOptionsConfiguration<LicenseDbContext>>();
                 services.RemoveAll<IDbContextFactory<LicenseDbContext>>();
                 services.RemoveAll<LicenseDbContext>();
-                services.AddDbContextFactory<LicenseDbContext>(options => options.UseNpgsql(connections.App));
+                services.AddDbContextFactory<LicenseDbContext>(options => options.UseNpgsql(activationConnection));
             });
         });
         var client = webFactory.CreateClient();
         var now = new DateTimeOffset(2026, 7, 27, 16, 0, 0, TimeSpan.Zero);
         var classicActivationExpirationUtc = CreateFutureClassicActivationExpirationUtc();
-        var productId = Guid.NewGuid();
         var typeId = Guid.NewGuid();
         var finalizeLicenseId = Guid.NewGuid();
         var activationLicenseId = Guid.NewGuid();
@@ -2141,8 +2153,13 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             await block.ExecuteNonQueryAsync();
         }
 
+        var lockObservation = System.Diagnostics.Stopwatch.StartNew();
         var finalizeTask = CaptureAsync(() => distribution.FinalizeAsync(
             "website-step1", Sha256("concurrent-lock-finalize"), finalizeRequest));
+        await WaitForProductHardwareLockChainAsync(
+            connections.Admin, productHardwareLockName, blocker.ProcessID,
+            finalizeApplication, string.Empty, lockObservation);
+        Assert.False(finalizeTask.IsCompleted);
         var activationTask = client.PostAsJsonAsync("/api/activation", new
         {
             LicenseKey = activationLicenseKey,
@@ -2151,13 +2168,18 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             AppVersion = version
         });
 
-        await WaitForAdvisoryWaitersAsync(
-            connections.Admin, productHardwareLockName, expectedWaiters: 2);
+        await WaitForProductHardwareLockChainAsync(
+            connections.Admin, productHardwareLockName, blocker.ProcessID,
+            finalizeApplication, activationApplication, lockObservation);
         Assert.False(finalizeTask.IsCompleted);
         Assert.False(activationTask.IsCompleted);
         await blockerTransaction.CommitAsync();
 
         var finalizeOutcome = await finalizeTask;
+        // This ordered scenario must exercise real retained identity, never the rejected-Finalize branch.
+        Assert.Null(finalizeOutcome.Error);
+        Assert.NotEqual(Guid.Empty, enrollmentSeed.EnrollmentId);
+        Assert.NotNull(enrollmentSeed.IdentitySnapshot);
         var activationResponse = await activationTask;
         var activationBody = await activationResponse.Content.ReadAsStringAsync();
         Assert.True(activationResponse.StatusCode == HttpStatusCode.OK,
@@ -2186,25 +2208,53 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         else
         {
             var binding = Assert.Single(bindings);
-            Assert.Equal("invalidated", binding.State);
-            Assert.Equal("seat_reassigned_product_scope", binding.InvalidationReason);
+            Assert.Equal("active", binding.State);
+            Assert.Null(binding.InvalidationReason);
+            Assert.Null(binding.InvalidatedAtUtc);
             Assert.False((await check.LicenseSeats.SingleAsync(candidate =>
                 candidate.Id == binding.LicenseSeatId)).IsActive);
-            Assert.Empty(await check.RuntimeEnrollments.Where(candidate =>
-                candidate.BindingId == binding.Id
-                && (candidate.State == "PENDING" || candidate.State == "ACTIVE")).ToListAsync());
+            Assert.NotEqual(Guid.Empty, enrollmentSeed.EnrollmentId);
+            Assert.NotNull(enrollmentSeed.IdentitySnapshot);
+            Assert.Equal(enrollmentSeed.IdentitySnapshot,
+                await SnapshotRetainedRuntimeIdentityAsync(directFactory, enrollmentSeed.EnrollmentId));
+            var enrollment = await check.RuntimeEnrollments.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == enrollmentSeed.EnrollmentId);
+            Assert.Equal(binding.Id, enrollment.BindingId);
+            Assert.Equal("ACTIVE", enrollment.State);
+            Assert.False(await check.EnrollmentLicenseAssignments.AnyAsync(candidate =>
+                candidate.EnrollmentId == enrollment.Id && candidate.State == "ACTIVE"));
+            var ended = Assert.Single(await check.EnrollmentLicenseAssignments.AsNoTracking()
+                .Where(candidate => candidate.EnrollmentId == enrollment.Id).ToListAsync());
+            Assert.Equal("ENDED", ended.State);
+            Assert.Equal("seat_released", ended.EndReason);
+            Assert.NotNull(ended.EndedAtUtc);
+            await AssertEndedAssignmentDeniesRuntimeAsync(directFactory, enrollment.Id);
         }
 
-        Assert.False(await check.DistributionInstallationBindings.AnyAsync(binding =>
-            binding.State == "active"
-            && check.LicenseSeats.Any(seat => seat.Id == binding.LicenseSeatId && !seat.IsActive)));
+        // The winning seat remains legitimate; only assignments to inactive seats are forbidden.
+        Assert.False(await check.EnrollmentLicenseAssignments.AnyAsync(assignment =>
+            assignment.State == "ACTIVE"
+            && check.LicenseSeats.Any(seat => seat.Id == assignment.LicenseSeatId && !seat.IsActive
+                && seat.License != null && seat.License.ProductId == productId)));
     }
 
     [Fact]
     public async Task AutoTrial_ConcurrentWithDistributionFinalize_WaitsOnSharedExactHardwareLock()
     {
         var connections = await ProvisionAsync();
-        var directFactory = new TestDbFactory(connections.App);
+        var finalizeApplication = "sync-finalize-" + Guid.NewGuid().ToString("N");
+        var activationApplication = "sync-activation-" + Guid.NewGuid().ToString("N");
+        var finalizeConnection = new NpgsqlConnectionStringBuilder(connections.App)
+            { ApplicationName = finalizeApplication, Pooling = false }.ConnectionString;
+        var activationConnection = new NpgsqlConnectionStringBuilder(connections.App)
+            { ApplicationName = activationApplication, Pooling = false }.ConnectionString;
+        var productId = Guid.NewGuid();
+        using var activeSigning = CreateSigningKey(ActiveSigningPrivateKey);
+        using var nextSigning = CreateSigningKey(NextSigningPrivateKey);
+        var runtimeOptions = RuntimeOptions(productId, activeSigning, nextSigning);
+        await UpsertKeyRegistryAsync(connections.Admin, runtimeOptions);
+        var enrollmentSeed = new ConcurrentFinalizeEnrollmentSeed(runtimeOptions.Encryption.ActiveKeyId);
+        var directFactory = new ConcurrentFinalizeEnrollmentFactory(finalizeConnection, enrollmentSeed);
         using var webFactory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseSetting("IsIntegrationTest", "true");
@@ -2214,12 +2264,11 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 services.RemoveAll<IDbContextOptionsConfiguration<LicenseDbContext>>();
                 services.RemoveAll<IDbContextFactory<LicenseDbContext>>();
                 services.RemoveAll<LicenseDbContext>();
-                services.AddDbContextFactory<LicenseDbContext>(options => options.UseNpgsql(connections.App));
+                services.AddDbContextFactory<LicenseDbContext>(options => options.UseNpgsql(activationConnection));
             });
         });
         var client = webFactory.CreateClient();
         var now = new DateTimeOffset(2026, 7, 27, 17, 0, 0, TimeSpan.Zero);
-        var productId = Guid.NewGuid();
         var paidTypeId = Guid.NewGuid();
         var trialTypeId = Guid.NewGuid();
         var finalizeLicenseId = Guid.NewGuid();
@@ -2331,8 +2380,13 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             await block.ExecuteNonQueryAsync();
         }
 
+        var lockObservation = System.Diagnostics.Stopwatch.StartNew();
         var finalizeTask = CaptureAsync(() => distribution.FinalizeAsync(
             "website-step1", Sha256("auto-trial-lock-finalize"), finalizeRequest));
+        await WaitForProductHardwareLockChainAsync(
+            connections.Admin, productHardwareLockName, blocker.ProcessID,
+            finalizeApplication, string.Empty, lockObservation);
+        Assert.False(finalizeTask.IsCompleted);
         var activationTask = client.PostAsJsonAsync("/api/activation", new
         {
             LicenseKey = "FREE-TRIAL",
@@ -2343,13 +2397,18 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             CustomerName = "Trial test"
         });
 
-        await WaitForAdvisoryWaitersAsync(
-            connections.Admin, productHardwareLockName, expectedWaiters: 2);
+        await WaitForProductHardwareLockChainAsync(
+            connections.Admin, productHardwareLockName, blocker.ProcessID,
+            finalizeApplication, activationApplication, lockObservation);
         Assert.False(finalizeTask.IsCompleted);
         Assert.False(activationTask.IsCompleted);
         await blockerTransaction.CommitAsync();
 
         var finalizeOutcome = await finalizeTask;
+        // This ordered scenario must exercise real retained identity, never the rejected-Finalize branch.
+        Assert.Null(finalizeOutcome.Error);
+        Assert.NotEqual(Guid.Empty, enrollmentSeed.EnrollmentId);
+        Assert.NotNull(enrollmentSeed.IdentitySnapshot);
         var activationResponse = await activationTask;
         var activationBody = await activationResponse.Content.ReadAsStringAsync();
         Assert.True(activationResponse.StatusCode == HttpStatusCode.OK,
@@ -2381,18 +2440,34 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         else
         {
             var binding = Assert.Single(bindings);
-            Assert.Equal("invalidated", binding.State);
-            Assert.Equal("seat_reassigned_product_scope", binding.InvalidationReason);
+            Assert.Equal("active", binding.State);
+            Assert.Null(binding.InvalidationReason);
+            Assert.Null(binding.InvalidatedAtUtc);
             Assert.False((await check.LicenseSeats.SingleAsync(candidate =>
                 candidate.Id == binding.LicenseSeatId)).IsActive);
-            Assert.Empty(await check.RuntimeEnrollments.Where(candidate =>
-                candidate.BindingId == binding.Id
-                && (candidate.State == "PENDING" || candidate.State == "ACTIVE")).ToListAsync());
+            Assert.NotEqual(Guid.Empty, enrollmentSeed.EnrollmentId);
+            Assert.NotNull(enrollmentSeed.IdentitySnapshot);
+            Assert.Equal(enrollmentSeed.IdentitySnapshot,
+                await SnapshotRetainedRuntimeIdentityAsync(directFactory, enrollmentSeed.EnrollmentId));
+            var enrollment = await check.RuntimeEnrollments.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == enrollmentSeed.EnrollmentId);
+            Assert.Equal(binding.Id, enrollment.BindingId);
+            Assert.Equal("ACTIVE", enrollment.State);
+            Assert.False(await check.EnrollmentLicenseAssignments.AnyAsync(candidate =>
+                candidate.EnrollmentId == enrollment.Id && candidate.State == "ACTIVE"));
+            var ended = Assert.Single(await check.EnrollmentLicenseAssignments.AsNoTracking()
+                .Where(candidate => candidate.EnrollmentId == enrollment.Id).ToListAsync());
+            Assert.Equal("ENDED", ended.State);
+            Assert.Equal("seat_released", ended.EndReason);
+            Assert.NotNull(ended.EndedAtUtc);
+            await AssertEndedAssignmentDeniesRuntimeAsync(directFactory, enrollment.Id);
         }
 
-        Assert.False(await check.DistributionInstallationBindings.AnyAsync(binding =>
-            binding.State == "active"
-            && check.LicenseSeats.Any(seat => seat.Id == binding.LicenseSeatId && !seat.IsActive)));
+        // The winning seat remains legitimate; only assignments to inactive seats are forbidden.
+        Assert.False(await check.EnrollmentLicenseAssignments.AnyAsync(assignment =>
+            assignment.State == "ACTIVE"
+            && check.LicenseSeats.Any(seat => seat.Id == assignment.LicenseSeatId && !seat.IsActive
+                && seat.License != null && seat.License.ProductId == productId)));
     }
 
     [Fact]
@@ -2647,10 +2722,24 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             candidate.LicenseId == fixture.LicenseId && candidate.IsActive).ToListAsync());
     }
 
-    [Fact]
-    public async Task DistributionFinalize_NewInstallation_V1FailsClosedAndV2AtomicallyRecovers()
+    /// <summary>
+    /// A new installation may recover the same authority only through the explicit V2 path.
+    /// On a unique owned database, item-2 forbidden live-enrollment graph mutations must
+    /// roll back with 23514, while admissible lineage corruptions reach the service's
+    /// binding_conflict guard. The later V1/V2 Refresh sequence retains its exact epoch,
+    /// replay and atomic recovery assertions. A divergent copied historical hardware hash
+    /// remains observation-only; both variants still require current commercial rights.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DistributionFinalize_NewInstallation_V1FailsClosedAndV2AtomicallyRecovers(
+        bool divergentHistoricalHardware)
     {
-        var connections = await ProvisionAsync();
+        // This corruption/recovery matrix must not inherit bindings left by older shared-base
+        // test runs. The harness owns and drops only its generated database on every exit path.
+        await using var isolated = await ProvisionCleanedIsolatedAsync();
+        var connections = (isolated.Admin, isolated.App);
         var factory = new TestDbFactory(connections.App);
         var fixture = await SeedDistributionAuthorityWithoutBindingAsync(factory);
         using var activeSigning = CreateSigningKey(ActiveSigningPrivateKey);
@@ -2658,11 +2747,11 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var runtimeOptions = RuntimeOptions(fixture.ProductId, activeSigning, nextSigning);
         await UpsertKeyRegistryAsync(connections.Admin, runtimeOptions);
 
-        // This scenario exercises refresh authority, whose expiry is compared with the
-        // PostgreSQL clock. Keep the deterministic provider close to that real clock.
+        // Assignment activation is timestamped by PostgreSQL after fixture setup.
+        // Recovery must sample a live clock, never terminalize at the earlier seed instant.
         var now = DateTimeOffset.UtcNow;
         var service = new DistributionInstallationBindingService(
-            factory, new EphemeralDataProtectionProvider(), new FixedTimeProvider(now),
+            factory, new EphemeralDataProtectionProvider(), TimeProvider.System,
             TestHardwareAuthorityAliasResolver.Instance);
         var subjectRef = Convert.ToBase64String(SHA256.HashData("new-installation-same-authority"u8.ToArray()))
             .TrimEnd('=').Replace('+', '-').Replace('/', '_');
@@ -2725,6 +2814,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var sourceBindingId = Guid.Parse(source.Response.BindingId);
         var sourceEnrollmentId = Guid.NewGuid();
         var decoyBindingId = Guid.NewGuid();
+        var historicalHardwareHash = divergentHistoricalHardware ? new string('1', 64) : Sha256(fixture.HardwareId);
         long sourceAuthorityEpoch;
         await using (var seed = await factory.CreateDbContextAsync())
         {
@@ -2772,7 +2862,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 LicenseId = sourceBinding.LicenseId,
                 LicenseSeatId = sourceBinding.LicenseSeatId,
                 InstallationId = sourceBinding.InstallationId,
-                HardwareIdHash = sourceBinding.HardwareIdHash,
+                HardwareIdHash = historicalHardwareHash,
                 ReleaseVersion = sourceBinding.Version,
                 HandoffDigestSha256 = sourceBinding.HandoffDigestSha256,
                 SubjectRefDigestSha256 = sourceBinding.SubjectRefDigestSha256,
@@ -2808,21 +2898,51 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             sourceBindingBaseline = await baseline.DistributionInstallationBindings.AsNoTracking()
                 .SingleAsync(candidate => candidate.Id == sourceBindingId);
         }
-        var corruptions = new (string Field, object CorruptValue, object RestoreValue)[]
+        Assert.Equal(divergentHistoricalHardware,
+            historicalHardwareHash != sourceBindingBaseline.HardwareIdHash);
+        // Neither equality nor divergence of the copied hash grants commercial authority.
+        // Exercise an actual refusal before restoring the licence through its normal trigger.
+        await using (var revoke = await factory.CreateDbContextAsync())
         {
-            ("ClientId", "other-website-client", "website-step1"),
-            ("BindingId", decoyBindingId, sourceBindingId),
-            ("ProductId", Guid.NewGuid(), sourceBindingBaseline.ProductId),
-            ("LicenseId", Guid.NewGuid(), sourceBindingBaseline.LicenseId),
-            ("LicenseSeatId", Guid.NewGuid(), sourceBindingBaseline.LicenseSeatId),
-            ("InstallationId", Guid.NewGuid().ToString("D"), sourceBindingBaseline.InstallationId),
-            ("HardwareIdHash", new string('1', 64), sourceBindingBaseline.HardwareIdHash),
-            ("SubjectRefDigestSha256", new string('2', 64), sourceBindingBaseline.SubjectRefDigestSha256!),
-            ("HandoffDigestSha256", new string('3', 64), sourceBindingBaseline.HandoffDigestSha256),
-            ("ReleaseVersion", "2.2.843", sourceBindingBaseline.Version),
-            ("ProtocolVersion", "runtime-enrollment-v0", RuntimeEnrollmentService.ProtocolVersion)
+            var license = await revoke.Licenses.SingleAsync(row => row.Id == fixture.LicenseId);
+            license.IsActive = false;
+            await revoke.SaveChangesAsync();
+        }
+        var commercialProbe = FinalizeRequest(
+            "new-installation-commercial", targetAuthority, targetRequest.InstallationId!, now.AddMinutes(-5));
+        commercialProbe.Schema = DistributionInstallationBindingService.FinalizeV2Schema;
+        commercialProbe.AllowSameAuthorityRecovery = true;
+        var commercialRefusal = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+            service.FinalizeAsync("website-step1", Sha256("new-installation-commercial-refusal"), commercialProbe));
+        Assert.Equal("entitlement_ineligible", commercialRefusal.ErrorCode);
+        await using (var restoreLicense = await factory.CreateDbContextAsync())
+        {
+            Assert.False(await restoreLicense.DistributionInstallationBindings.AnyAsync(row =>
+                row.InstallationId == targetRequest.InstallationId));
+            var original = await restoreLicense.RuntimeEnrollments.SingleAsync(row => row.Id == sourceEnrollmentId);
+            Assert.Equal("ACTIVE", original.State);
+            Assert.Equal(historicalHardwareHash, original.HardwareIdHash);
+            var license = await restoreLicense.Licenses.SingleAsync(row => row.Id == fixture.LicenseId);
+            license.IsActive = true;
+            await restoreLicense.SaveChangesAsync();
+        }
+        // Item 2 rejects live commercial graph divergence at commit. Only fields outside
+        // that trigger's comparison are allowed to reach the service-level lineage guard.
+        var corruptions = new (string Field, object CorruptValue, object RestoreValue,
+            bool DatabaseRejects)[]
+        {
+            ("ClientId", "other-website-client", "website-step1", false),
+            ("BindingId", decoyBindingId, sourceBindingId, true),
+            ("ProductId", Guid.NewGuid(), sourceBindingBaseline.ProductId, true),
+            ("LicenseId", Guid.NewGuid(), sourceBindingBaseline.LicenseId, true),
+            ("LicenseSeatId", Guid.NewGuid(), sourceBindingBaseline.LicenseSeatId, true),
+            ("InstallationId", Guid.NewGuid().ToString("D"), sourceBindingBaseline.InstallationId, true),
+            ("SubjectRefDigestSha256", new string('2', 64), sourceBindingBaseline.SubjectRefDigestSha256!, false),
+            ("HandoffDigestSha256", new string('3', 64), sourceBindingBaseline.HandoffDigestSha256, true),
+            ("ReleaseVersion", "2.2.843", sourceBindingBaseline.Version, true),
+            ("ProtocolVersion", "runtime-enrollment-v0", RuntimeEnrollmentService.ProtocolVersion, false)
         };
-        foreach (var (field, corruptValue, restoreValue) in corruptions)
+        foreach (var (field, corruptValue, restoreValue, databaseRejects) in corruptions)
         {
             await using (var corrupt = await factory.CreateDbContextAsync())
             {
@@ -2835,16 +2955,48 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                     """;
                 command.Parameters.Add(new NpgsqlParameter("value", corruptValue));
                 command.Parameters.Add(new NpgsqlParameter("id", sourceEnrollmentId));
-                Assert.Equal(1, await command.ExecuteNonQueryAsync());
+                if (databaseRejects)
+                {
+                    var rejected = await Assert.ThrowsAsync<PostgresException>(() =>
+                        command.ExecuteNonQueryAsync());
+                    Assert.Equal("23514", rejected.SqlState);
+                    Assert.Equal("unresolved commercial assignment graph: binding_mismatch",
+                        rejected.MessageText);
+                }
+                else
+                {
+                    Assert.Equal(1, await command.ExecuteNonQueryAsync());
+                }
+            }
+
+            if (databaseRejects)
+            {
+                await using var unchanged = new NpgsqlConnection(connections.Admin);
+                await unchanged.OpenAsync();
+                await using var read = new NpgsqlCommand($"""
+                    SELECT "{field}" FROM public."RuntimeEnrollments" WHERE "Id" = @id;
+                    """, unchanged);
+                read.Parameters.AddWithValue("id", sourceEnrollmentId);
+                Assert.Equal(restoreValue, await read.ExecuteScalarAsync());
+                continue;
             }
 
             var probe = FinalizeRequest(
                 "new-installation-target", targetAuthority, targetRequest.InstallationId!, now.AddMinutes(-5));
             probe.Schema = DistributionInstallationBindingService.FinalizeV2Schema;
             probe.AllowSameAuthorityRecovery = true;
-            var mismatch = await Assert.ThrowsAsync<DistributionOperationException>(() =>
-                service.FinalizeAsync(
-                    "website-step1", Sha256("new-installation-lineage-" + field), probe));
+            DistributionOperationException mismatch;
+            try
+            {
+                mismatch = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+                    service.FinalizeAsync(
+                        "website-step1", Sha256("new-installation-lineage-" + field), probe));
+            }
+            catch (Xunit.Sdk.XunitException assertion)
+            {
+                // Keep the original assertion as the cause while identifying this loop case.
+                throw new InvalidOperationException($"Finalize corruption scenario failed: {field}.", assertion);
+            }
             Assert.Equal("binding_conflict", mismatch.ErrorCode);
 
             await using (var verify = await factory.CreateDbContextAsync())
@@ -2888,6 +3040,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             .SingleAsync(candidate => candidate.Id == sourceEnrollmentId);
         Assert.Equal("active", sourceBindingAfter.State);
         Assert.Equal("ACTIVE", sourceEnrollmentAfter.State);
+        Assert.Equal(historicalHardwareHash, sourceEnrollmentAfter.HardwareIdHash);
         Assert.Equal(4, sourceEnrollmentAfter.SecurityEpoch);
 
         targetRequest.Schema = DistributionInstallationBindingService.FinalizeV2Schema;
@@ -2963,7 +3116,12 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         startRecovery.SetResult();
         var recoveryOutcomes = await Task.WhenAll(firstRecovery, secondRecovery);
         var winnerIndex = Array.FindIndex(recoveryOutcomes, outcome => outcome.Error == null);
-        Assert.True(winnerIndex >= 0);
+        Assert.True(winnerIndex >= 0, string.Join("; ", recoveryOutcomes.Select(outcome =>
+            outcome.Error is DistributionOperationException refusal
+                ? $"{refusal.ErrorCode}/{refusal.ReasonCode}"
+                : outcome.Error?.GetBaseException() is PostgresException databaseFailure
+                    ? $"{databaseFailure.SqlState}/{databaseFailure.MessageText}"
+                : outcome.Error?.GetType().Name ?? "accepted")));
         Assert.Single(recoveryOutcomes, outcome => outcome.Error == null);
         Assert.Equal("binding_conflict", Assert.IsType<DistributionOperationException>(
             Assert.Single(recoveryOutcomes, outcome => outcome.Error != null).Error).ErrorCode);
@@ -2994,6 +3152,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             .SingleAsync(candidate => candidate.Id == sourceEnrollmentId);
         Assert.Equal("INVALIDATED", invalidatedEnrollment.State);
         Assert.Equal("binding_superseded", invalidatedEnrollment.InvalidationReason);
+        Assert.Equal(historicalHardwareHash, invalidatedEnrollment.HardwareIdHash);
         var finalAuthorityEpoch = await recoveredCheck.RuntimeEnrollmentAuthorityStates.AsNoTracking()
             .Where(candidate => candidate.Id == 1)
             .Select(candidate => candidate.Epoch)
@@ -3124,10 +3283,30 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.Equal(refreshed.ExactResponseBody, refreshedReplay.ExactResponseBody);
     }
 
-    [Fact]
-    public async Task DistributionFinalize_NewInstallation_SoleExpiredUnactivatedEnrollment_RecoversWithoutRewritingForensicEvidence()
+    /// <summary>
+    /// Isolates every negative mutation and the healthy recovery in a fresh database. Quarantine
+    /// evidence is never deleted to manufacture a clean authority; all original checks remain.
+    /// </summary>
+    [Theory]
+    [InlineData("healthy")]
+    [InlineData("challenge-consumed")]
+    [InlineData("formerly-activated")]
+    [InlineData("future-expiry")]
+    [InlineData("future-invalidation")]
+    [InlineData("invalidation-before-expiry")]
+    [InlineData("missing-invalidation-time")]
+    [InlineData("security-terminal")]
+    [InlineData("pending-identity")]
+    [InlineData("client-divergence")]
+    [InlineData("protocol-divergence")]
+    [InlineData("multiple-expired-history")]
+    [InlineData("quarantined-history")]
+    [InlineData("open-critical-incident")]
+    public async Task DistributionFinalize_NewInstallation_SoleExpiredUnactivatedEnrollment_RecoversWithoutRewritingForensicEvidence(
+        string scenarioKind)
     {
-        var connections = await ProvisionAsync();
+        await using var isolated = await ProvisionCleanedIsolatedAsync();
+        var connections = (Admin: isolated.Admin, App: isolated.App);
         var factory = new TestDbFactory(connections.App);
         var fixture = await SeedDistributionAuthorityWithoutBindingAsync(factory);
         using var activeSigning = CreateSigningKey(ActiveSigningPrivateKey);
@@ -3211,8 +3390,12 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         long sourceAuthorityEpoch;
         await using (var seed = await factory.CreateDbContextAsync())
         {
-            var sourceBinding = await seed.DistributionInstallationBindings.AsNoTracking()
+            var sourceBinding = await seed.DistributionInstallationBindings
                 .SingleAsync(candidate => candidate.Id == sourceBindingId);
+            // This is historical abandoned authority: its binding predates the enrollment and terminal evidence.
+            sourceBinding.BoundAtUtc = now.AddMinutes(-35).UtcDateTime;
+            (await seed.LicenseSeats.SingleAsync(row => row.Id == sourceBinding.LicenseSeatId))
+                .FirstActivatedAt = now.AddMinutes(-40).UtcDateTime;
             sourceLicenseSeatId = sourceBinding.LicenseSeatId;
             sourceAuthorityEpoch = await seed.RuntimeEnrollmentAuthorityStates.AsNoTracking()
                 .Where(candidate => candidate.Id == 1)
@@ -3242,16 +3425,21 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 ChallengeCiphertext = "test",
                 ChallengeKeyId = runtimeOptions.Encryption.ActiveKeyId,
                 ChallengeDigestSha256 = new string('e', 64),
-                State = "INVALIDATED",
+                // Seed pending directly: SQL correctly forbids resurrecting a terminal enrollment.
+                State = scenarioKind == "pending-identity" ? "PENDING" : "INVALIDATED",
                 Epoch = 1,
                 SecurityEpoch = 4,
                 AuthorityEpoch = sourceAuthorityEpoch,
                 ChallengeExpiresAtUtc = challengeExpiresAtUtc,
                 CreatedAtUtc = now.AddMinutes(-30).UtcDateTime,
-                InvalidatedAtUtc = invalidatedAtUtc,
-                InvalidationReason = "challenge_expired"
+                InvalidatedAtUtc = scenarioKind == "pending-identity" ? null : invalidatedAtUtc,
+                InvalidationReason = scenarioKind == "pending-identity" ? null : "challenge_expired"
             });
             await seed.SaveChangesAsync();
+            Assert.True(sourceBinding.BoundAtUtc < now.AddMinutes(-30).UtcDateTime);
+            Assert.True(invalidatedAtUtc >= sourceBinding.BoundAtUtc);
+            Assert.False(await seed.EnrollmentLicenseAssignmentQuarantines.AnyAsync(row =>
+                row.EnrollmentId == sourceEnrollmentId));
         }
 
         var targetAuthority = await IssueAsync("expired-enrollment-target");
@@ -3324,31 +3512,6 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             await mutate.SaveChangesAsync();
         }
 
-        async Task RestoreEnrollmentAsync()
-        {
-            await MutateEnrollmentAsync(enrollment =>
-            {
-                enrollment.ClientId = "website-step1";
-                enrollment.BindingId = sourceBindingId;
-                enrollment.ProductId = fixture.ProductId;
-                enrollment.LicenseId = fixture.LicenseId;
-                enrollment.LicenseSeatId = sourceLicenseSeatId;
-                enrollment.InstallationId = sourceInstallationId;
-                enrollment.HardwareIdHash = Sha256(fixture.HardwareId);
-                enrollment.ReleaseVersion = fixture.Version;
-                enrollment.HandoffDigestSha256 = sourceRequest.HandoffDigestSha256!;
-                enrollment.SubjectRefDigestSha256 = Sha256(subjectRef);
-                enrollment.ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion;
-                enrollment.State = "INVALIDATED";
-                enrollment.Epoch = 1;
-                enrollment.ChallengeExpiresAtUtc = challengeExpiresAtUtc;
-                enrollment.ChallengeConsumedAtUtc = null;
-                enrollment.ActivatedAtUtc = null;
-                enrollment.InvalidatedAtUtc = invalidatedAtUtc;
-                enrollment.InvalidationReason = "challenge_expired";
-            });
-        }
-
         var rejectedMutations = new (string Label, Action<RuntimeEnrollment> Mutate)[]
         {
             ("challenge-consumed", enrollment => enrollment.ChallengeConsumedAtUtc = now.AddMinutes(-6).UtcDateTime),
@@ -3362,87 +3525,87 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             ("client-divergence", enrollment => enrollment.ClientId = "other-website-client"),
             ("protocol-divergence", enrollment => enrollment.ProtocolVersion = "runtime-enrollment-v0")
         };
-        foreach (var (label, mutation) in rejectedMutations)
+        var rejected = rejectedMutations.SingleOrDefault(candidate => candidate.Label == scenarioKind);
+        if (rejected.Mutate != null)
         {
-            await MutateEnrollmentAsync(mutation);
-            await AssertRecoveryRefusedWithoutMutationAsync(label);
-            await RestoreEnrollmentAsync();
+            await MutateEnrollmentAsync(rejected.Mutate);
+            await AssertRecoveryRefusedWithoutMutationAsync(rejected.Label);
+            return;
+        }
+        if (scenarioKind is "multiple-expired-history" or "quarantined-history")
+        {
+            var secondExpiredEnrollmentId = Guid.NewGuid();
+            await using (var addHistory = await factory.CreateDbContextAsync())
+            {
+                var sourceEnrollment = await addHistory.RuntimeEnrollments.AsNoTracking()
+                    .SingleAsync(candidate => candidate.Id == sourceEnrollmentId);
+                addHistory.RuntimeEnrollments.Add(new RuntimeEnrollment
+                {
+                    Id = secondExpiredEnrollmentId,
+                    ClientId = sourceEnrollment.ClientId,
+                    BindingId = sourceEnrollment.BindingId,
+                    ProductId = sourceEnrollment.ProductId,
+                    LicenseId = sourceEnrollment.LicenseId,
+                    LicenseSeatId = sourceEnrollment.LicenseSeatId,
+                    InstallationId = sourceEnrollment.InstallationId,
+                    HardwareIdHash = sourceEnrollment.HardwareIdHash,
+                    ReleaseVersion = sourceEnrollment.ReleaseVersion,
+                    HandoffDigestSha256 = sourceEnrollment.HandoffDigestSha256,
+                    SubjectRefDigestSha256 = sourceEnrollment.SubjectRefDigestSha256,
+                    ProtocolVersion = sourceEnrollment.ProtocolVersion,
+                    Algorithm = sourceEnrollment.Algorithm,
+                    KeyBackend = sourceEnrollment.KeyBackend,
+                    AttestationLevel = sourceEnrollment.AttestationLevel,
+                    PublicKeySpkiCiphertext = "test-history",
+                    PublicKeySpkiKeyId = sourceEnrollment.PublicKeySpkiKeyId,
+                    PublicKeySpkiSha256 = new string('f', 64),
+                    KeyThumbprint = "eh-" + Guid.NewGuid().ToString("N"),
+                    ChallengeCiphertext = "test-history",
+                    ChallengeKeyId = sourceEnrollment.ChallengeKeyId,
+                    ChallengeDigestSha256 = new string('a', 64),
+                    State = "INVALIDATED",
+                    Epoch = 1,
+                    SecurityEpoch = 3,
+                    AuthorityEpoch = sourceEnrollment.AuthorityEpoch,
+                    ChallengeExpiresAtUtc = now.AddMinutes(-8).UtcDateTime,
+                    CreatedAtUtc = now.AddMinutes(-40).UtcDateTime,
+                    InvalidatedAtUtc = now.AddMinutes(scenarioKind == "quarantined-history" ? -36 : -7).UtcDateTime,
+                    InvalidationReason = "challenge_expired"
+                });
+                await addHistory.SaveChangesAsync();
+            }
+            await AssertRecoveryRefusedWithoutMutationAsync("multiple-expired-history");
+            await using var preserved = await factory.CreateDbContextAsync();
+            Assert.True(await preserved.RuntimeEnrollments.AnyAsync(row => row.Id == secondExpiredEnrollmentId));
+            Assert.Equal(scenarioKind == "quarantined-history", await preserved.EnrollmentLicenseAssignmentQuarantines.AnyAsync(row =>
+                row.EnrollmentId == secondExpiredEnrollmentId));
+            return;
         }
 
-        var secondExpiredEnrollmentId = Guid.NewGuid();
-        await using (var addHistory = await factory.CreateDbContextAsync())
+        if (scenarioKind == "open-critical-incident")
         {
-            var sourceEnrollment = await addHistory.RuntimeEnrollments.AsNoTracking()
-                .SingleAsync(candidate => candidate.Id == sourceEnrollmentId);
-            addHistory.RuntimeEnrollments.Add(new RuntimeEnrollment
+            var criticalIncidentId = Guid.NewGuid();
+            var adminFactory = new TestDbFactory(connections.Admin);
+            await using (var addIncident = await adminFactory.CreateDbContextAsync())
             {
-                Id = secondExpiredEnrollmentId,
-                ClientId = sourceEnrollment.ClientId,
-                BindingId = sourceEnrollment.BindingId,
-                ProductId = sourceEnrollment.ProductId,
-                LicenseId = sourceEnrollment.LicenseId,
-                LicenseSeatId = sourceEnrollment.LicenseSeatId,
-                InstallationId = sourceEnrollment.InstallationId,
-                HardwareIdHash = sourceEnrollment.HardwareIdHash,
-                ReleaseVersion = sourceEnrollment.ReleaseVersion,
-                HandoffDigestSha256 = sourceEnrollment.HandoffDigestSha256,
-                SubjectRefDigestSha256 = sourceEnrollment.SubjectRefDigestSha256,
-                ProtocolVersion = sourceEnrollment.ProtocolVersion,
-                Algorithm = sourceEnrollment.Algorithm,
-                KeyBackend = sourceEnrollment.KeyBackend,
-                AttestationLevel = sourceEnrollment.AttestationLevel,
-                PublicKeySpkiCiphertext = "test-history",
-                PublicKeySpkiKeyId = sourceEnrollment.PublicKeySpkiKeyId,
-                PublicKeySpkiSha256 = new string('f', 64),
-                KeyThumbprint = "eh-" + Guid.NewGuid().ToString("N"),
-                ChallengeCiphertext = "test-history",
-                ChallengeKeyId = sourceEnrollment.ChallengeKeyId,
-                ChallengeDigestSha256 = new string('a', 64),
-                State = "INVALIDATED",
-                Epoch = 1,
-                SecurityEpoch = 3,
-                AuthorityEpoch = sourceEnrollment.AuthorityEpoch,
-                ChallengeExpiresAtUtc = now.AddMinutes(-8).UtcDateTime,
-                CreatedAtUtc = now.AddMinutes(-40).UtcDateTime,
-                InvalidatedAtUtc = now.AddMinutes(-7).UtcDateTime,
-                InvalidationReason = "challenge_expired"
-            });
-            await addHistory.SaveChangesAsync();
-        }
-        await AssertRecoveryRefusedWithoutMutationAsync("multiple-expired-history");
-        await using (var removeHistory = await factory.CreateDbContextAsync())
-        {
-            removeHistory.RuntimeEnrollments.Remove(await removeHistory.RuntimeEnrollments
-                .SingleAsync(candidate => candidate.Id == secondExpiredEnrollmentId));
-            await removeHistory.SaveChangesAsync();
-        }
-
-        var criticalIncidentId = Guid.NewGuid();
-        var adminFactory = new TestDbFactory(connections.Admin);
-        await using (var addIncident = await adminFactory.CreateDbContextAsync())
-        {
-            addIncident.RuntimeCriticalIncidents.Add(new RuntimeCriticalIncident
-            {
-                Id = criticalIncidentId,
-                EnrollmentId = sourceEnrollmentId,
-                BindingId = sourceBindingId,
-                ProductId = fixture.ProductId,
-                InstallationId = sourceInstallationId,
-                EventId = "expired-recovery-critical-incident",
-                Trigger = "test_open_critical_incident",
-                State = "OPEN",
-                OpenedSecurityEpoch = 4,
-                OpenedAuthorityEpoch = sourceAuthorityEpoch,
-                OpenedAtUtc = now.AddMinutes(-3).UtcDateTime
-            });
-            await addIncident.SaveChangesAsync();
-        }
-        await AssertRecoveryRefusedWithoutMutationAsync("open-critical-incident");
-        await using (var removeIncident = await adminFactory.CreateDbContextAsync())
-        {
-            removeIncident.RuntimeCriticalIncidents.Remove(await removeIncident.RuntimeCriticalIncidents
-                .SingleAsync(candidate => candidate.Id == criticalIncidentId));
-            await removeIncident.SaveChangesAsync();
+                addIncident.RuntimeCriticalIncidents.Add(new RuntimeCriticalIncident
+                {
+                    Id = criticalIncidentId,
+                    EnrollmentId = sourceEnrollmentId,
+                    BindingId = sourceBindingId,
+                    ProductId = fixture.ProductId,
+                    InstallationId = sourceInstallationId,
+                    EventId = "expired-recovery-critical-incident",
+                    Trigger = "test_open_critical_incident",
+                    State = "OPEN",
+                    OpenedSecurityEpoch = 4,
+                    OpenedAuthorityEpoch = sourceAuthorityEpoch,
+                    OpenedAtUtc = now.AddMinutes(-3).UtcDateTime
+                });
+                await addIncident.SaveChangesAsync();
+            }
+            await AssertRecoveryRefusedWithoutMutationAsync("open-critical-incident");
+            return;
         }
 
         var competingAuthority = await IssueAsync("expired-enrollment-competing-target");
@@ -3606,6 +3769,616 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             && candidate.State == "active").ToListAsync());
     }
 
+    /// <summary>Proves cleanup ends only the losing commercial assignment and preserves Runtime identity.</summary>
+    [Fact]
+    public async Task ProductScopeCleanup_EndsAssignmentAndPreservesRuntimeAuthority()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        var winner = await SeedProductScopeCleanupWinnerAsync(scenario, LegacyHardwareId);
+
+        RuntimeEnrollment enrollmentBefore;
+        DistributionInstallationBinding bindingBefore;
+        EnrollmentLicenseAssignment assignmentBefore;
+        await using (var before = await scenario.Factory.CreateDbContextAsync())
+        {
+            enrollmentBefore = await before.RuntimeEnrollments.AsNoTracking().SingleAsync();
+            bindingBefore = await before.DistributionInstallationBindings.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == enrollmentBefore.BindingId);
+            assignmentBefore = await before.EnrollmentLicenseAssignments.AsNoTracking()
+                .SingleAsync(candidate => candidate.EnrollmentId == enrollmentBefore.Id
+                    && candidate.State == "ACTIVE");
+        }
+
+        await using (var cleanupDb = await scenario.Factory.CreateDbContextAsync())
+        {
+            var cleanup = new SeatCleanupService(cleanupDb, NullLogger<SeatCleanupService>.Instance);
+            await using var transaction = await cleanup.BeginProductScopeCleanupAsync(
+                scenario.Fixture.ProductId, LegacyHardwareId);
+            var released = await cleanup.UnlinkHwidFromOtherProductLicensesAsync(
+                LegacyHardwareId, winner.LicenseId, scenario.Fixture.ProductId);
+            Assert.Single(released);
+            if (transaction != null)
+                await transaction.CommitAsync();
+        }
+
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        var enrollmentAfter = await check.RuntimeEnrollments.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == enrollmentBefore.Id);
+        var bindingAfter = await check.DistributionInstallationBindings.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == bindingBefore.Id);
+        var assignmentAfter = await check.EnrollmentLicenseAssignments.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == assignmentBefore.Id);
+        var losingSeat = await check.LicenseSeats.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == assignmentBefore.LicenseSeatId);
+        var winningSeat = await check.LicenseSeats.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == winner.SeatId);
+
+        Assert.False(losingSeat.IsActive);
+        Assert.NotNull(losingSeat.UnlinkedAt);
+        Assert.True(winningSeat.IsActive);
+        Assert.Equal("ENDED", assignmentAfter.State);
+        Assert.Equal("seat_released", assignmentAfter.EndReason);
+        Assert.Equal(assignmentBefore.Revision, assignmentAfter.Revision);
+        Assert.Equal(assignmentBefore.EnrollmentId, assignmentAfter.EnrollmentId);
+        Assert.Equal(assignmentBefore.LicenseId, assignmentAfter.LicenseId);
+        Assert.Equal(assignmentBefore.LicenseSeatId, assignmentAfter.LicenseSeatId);
+        Assert.False(await check.EnrollmentLicenseAssignments.AsNoTracking().AnyAsync(candidate =>
+            candidate.State == "ACTIVE"
+            && (candidate.EnrollmentId == assignmentBefore.EnrollmentId
+                || candidate.LicenseSeatId == assignmentBefore.LicenseSeatId)));
+        Assert.Equal(bindingBefore.State, bindingAfter.State);
+        Assert.Equal(bindingBefore.InvalidatedAtUtc, bindingAfter.InvalidatedAtUtc);
+        Assert.Equal(bindingBefore.InvalidationReason, bindingAfter.InvalidationReason);
+        Assert.Equal(enrollmentBefore.State, enrollmentAfter.State);
+        Assert.Equal(enrollmentBefore.InvalidatedAtUtc, enrollmentAfter.InvalidatedAtUtc);
+        Assert.Equal(enrollmentBefore.InvalidationReason, enrollmentAfter.InvalidationReason);
+        Assert.Equal(enrollmentBefore.SecurityEpoch, enrollmentAfter.SecurityEpoch);
+        Assert.Equal(enrollmentBefore.AuthorityEpoch, enrollmentAfter.AuthorityEpoch);
+        Assert.Single(await check.LicenseHistories.AsNoTracking().Where(candidate =>
+            candidate.LicenseId == assignmentBefore.LicenseId
+            && candidate.Action == HistoryActions.AutoUnlinkedProductScope).ToListAsync());
+    }
+
+    /// <summary>Proves a missing item2 assignment returns bounded unavailability and rolls back all cleanup writes.</summary>
+    [Fact]
+    public async Task ProductScopeCleanup_MissingAssignmentReturns503AndRollsBack()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        var winner = await SeedProductScopeCleanupWinnerAsync(scenario, LegacyHardwareId);
+        Guid losingSeatId;
+        await using (var corrupt = new TestDbFactory(scenario.AdminConnectionString).CreateDbContext())
+        {
+            var enrollmentId = await corrupt.RuntimeEnrollments.AsNoTracking()
+                .Select(candidate => candidate.Id).SingleAsync();
+            losingSeatId = await corrupt.RuntimeEnrollments.AsNoTracking()
+                .Select(candidate => candidate.LicenseSeatId).SingleAsync();
+            await corrupt.Database.ExecuteSqlInterpolatedAsync(
+                $"DELETE FROM public.\"EnrollmentLicenseAssignments\" WHERE \"EnrollmentId\" = {enrollmentId}");
+        }
+
+        await using (var cleanupDb = await scenario.Factory.CreateDbContextAsync())
+        {
+            var cleanup = new SeatCleanupService(cleanupDb, NullLogger<SeatCleanupService>.Instance);
+            await using var transaction = await cleanup.BeginProductScopeCleanupAsync(
+                scenario.Fixture.ProductId, LegacyHardwareId);
+            var refusal = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+                cleanup.UnlinkHwidFromOtherProductLicensesAsync(
+                    LegacyHardwareId, winner.LicenseId, scenario.Fixture.ProductId));
+            Assert.Equal(StatusCodes.Status503ServiceUnavailable, refusal.StatusCode);
+            Assert.Equal("authority_unavailable", refusal.ErrorCode);
+        }
+
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        Assert.True((await check.LicenseSeats.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == losingSeatId)).IsActive);
+        Assert.True((await check.LicenseSeats.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == winner.SeatId)).IsActive);
+        Assert.Empty(await check.LicenseHistories.AsNoTracking().Where(candidate =>
+            candidate.Action == HistoryActions.AutoUnlinkedProductScope).ToListAsync());
+    }
+
+    /// <summary>Proves a caller-owned transaction can roll back seats, history, and forced trigger effects together.</summary>
+    [Fact]
+    public async Task ProductScopeCleanup_CallerRollbackRestoresSeatsHistoryAndAssignment()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        var winner = await SeedProductScopeCleanupWinnerAsync(scenario, LegacyHardwareId);
+        Guid losingSeatId;
+        Guid assignmentId;
+        await using (var snapshot = await scenario.Factory.CreateDbContextAsync())
+        {
+            var assignment = await snapshot.EnrollmentLicenseAssignments.AsNoTracking()
+                .SingleAsync(candidate => candidate.State == "ACTIVE");
+            assignmentId = assignment.Id;
+            losingSeatId = assignment.LicenseSeatId;
+        }
+
+        await using (var cleanupDb = await scenario.Factory.CreateDbContextAsync())
+        {
+            var cleanup = new SeatCleanupService(cleanupDb, NullLogger<SeatCleanupService>.Instance);
+            await using var transaction = await cleanup.BeginProductScopeCleanupAsync(
+                scenario.Fixture.ProductId, LegacyHardwareId);
+            await cleanup.UnlinkHwidFromOtherProductLicensesAsync(
+                LegacyHardwareId, winner.LicenseId, scenario.Fixture.ProductId,
+                redactSensitiveDetails: true);
+            Assert.NotNull(transaction);
+            await transaction!.RollbackAsync();
+        }
+
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        Assert.True((await check.LicenseSeats.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == losingSeatId)).IsActive);
+        Assert.Equal("ACTIVE", (await check.EnrollmentLicenseAssignments.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == assignmentId)).State);
+        Assert.Empty(await check.LicenseHistories.AsNoTracking().Where(candidate =>
+            candidate.Action == HistoryActions.AutoUnlinkedProductScope).ToListAsync());
+    }
+
+    /// <summary>
+    /// Proves a scoped cleanup service cannot reuse authority from a committed transaction, while a
+    /// newly acquired production lease on the same service remains valid.
+    /// </summary>
+    [Fact]
+    public async Task ProductScopeCleanup_ReusedServiceRejectsUnleasedTransactionThenAcceptsNewLease()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        var winner = await SeedProductScopeCleanupWinnerAsync(scenario, LegacyHardwareId);
+
+        RuntimeEnrollment enrollmentBefore;
+        DistributionInstallationBinding bindingBefore;
+        EnrollmentLicenseAssignment assignmentBefore;
+        await using (var before = await scenario.Factory.CreateDbContextAsync())
+        {
+            enrollmentBefore = await before.RuntimeEnrollments.AsNoTracking().SingleAsync();
+            bindingBefore = await before.DistributionInstallationBindings.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == enrollmentBefore.BindingId);
+            assignmentBefore = await before.EnrollmentLicenseAssignments.AsNoTracking()
+                .SingleAsync(candidate => candidate.EnrollmentId == enrollmentBefore.Id
+                    && candidate.State == "ACTIVE");
+        }
+
+        await using var cleanupDb = await scenario.Factory.CreateDbContextAsync();
+        var cleanup = new SeatCleanupService(cleanupDb, NullLogger<SeatCleanupService>.Instance);
+        await using (var completedLease = await cleanup.BeginProductScopeCleanupAsync(
+            scenario.Fixture.ProductId, LegacyHardwareId))
+        {
+            Assert.NotNull(completedLease);
+            await completedLease!.CommitAsync();
+        }
+
+        await using (var unrelatedTransaction = await cleanupDb.Database.BeginTransactionAsync())
+        {
+            var refusal = await Assert.ThrowsAsync<DistributionOperationException>(() =>
+                cleanup.UnlinkHwidFromOtherProductLicensesAsync(
+                    LegacyHardwareId, winner.LicenseId, scenario.Fixture.ProductId));
+            Assert.Equal(StatusCodes.Status503ServiceUnavailable, refusal.StatusCode);
+            Assert.Equal("authority_unavailable", refusal.ErrorCode);
+            Assert.Equal("product_scope_authority_order_missing", refusal.ReasonCode);
+            await unrelatedTransaction.RollbackAsync();
+        }
+
+        await using (var afterRefusal = await scenario.Factory.CreateDbContextAsync())
+        {
+            var enrollment = await afterRefusal.RuntimeEnrollments.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == enrollmentBefore.Id);
+            var binding = await afterRefusal.DistributionInstallationBindings.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == bindingBefore.Id);
+            var assignment = await afterRefusal.EnrollmentLicenseAssignments.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == assignmentBefore.Id);
+            Assert.True((await afterRefusal.LicenseSeats.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == assignmentBefore.LicenseSeatId)).IsActive);
+            Assert.True((await afterRefusal.LicenseSeats.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == winner.SeatId)).IsActive);
+            Assert.Equal("ACTIVE", assignment.State);
+            Assert.Equal(assignmentBefore.Revision, assignment.Revision);
+            Assert.Equal(bindingBefore.State, binding.State);
+            Assert.Equal(bindingBefore.InvalidatedAtUtc, binding.InvalidatedAtUtc);
+            Assert.Equal(enrollmentBefore.State, enrollment.State);
+            Assert.Equal(enrollmentBefore.SecurityEpoch, enrollment.SecurityEpoch);
+            Assert.Equal(enrollmentBefore.AuthorityEpoch, enrollment.AuthorityEpoch);
+            Assert.Empty(await afterRefusal.LicenseHistories.AsNoTracking().Where(candidate =>
+                candidate.Action == HistoryActions.AutoUnlinkedProductScope).ToListAsync());
+        }
+
+        await using (var newLease = await cleanup.BeginProductScopeCleanupAsync(
+            scenario.Fixture.ProductId, LegacyHardwareId))
+        {
+            Assert.NotNull(newLease);
+            var released = await cleanup.UnlinkHwidFromOtherProductLicensesAsync(
+                LegacyHardwareId, winner.LicenseId, scenario.Fixture.ProductId);
+            Assert.Single(released);
+            await newLease!.CommitAsync();
+        }
+
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        var assignmentAfter = await check.EnrollmentLicenseAssignments.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == assignmentBefore.Id);
+        Assert.Equal("ENDED", assignmentAfter.State);
+        Assert.Equal("seat_released", assignmentAfter.EndReason);
+        Assert.False(await check.EnrollmentLicenseAssignments.AsNoTracking().AnyAsync(candidate =>
+            candidate.State == "ACTIVE"
+            && (candidate.EnrollmentId == assignmentBefore.EnrollmentId
+                || candidate.LicenseSeatId == assignmentBefore.LicenseSeatId)));
+    }
+
+    /// <summary>
+    /// Proves cleanup rechecks the winning licence against PostgreSQL time after waiting for the
+    /// global authority lease and rolls back every commercial and Runtime side effect on expiry.
+    /// </summary>
+    [Fact]
+    public async Task ProductScopeCleanup_WinnerExpiresWhileWaitingReturns503WithoutMutation()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        var winner = await SeedProductScopeCleanupWinnerAsync(scenario, LegacyHardwareId);
+
+        RuntimeEnrollment enrollmentBefore;
+        DistributionInstallationBinding bindingBefore;
+        EnrollmentLicenseAssignment assignmentBefore;
+        LicenseSeat losingSeatBefore;
+        LicenseSeat winningSeatBefore;
+        int historyCountBefore;
+        await using (var before = await scenario.Factory.CreateDbContextAsync())
+        {
+            enrollmentBefore = await before.RuntimeEnrollments.AsNoTracking().SingleAsync();
+            bindingBefore = await before.DistributionInstallationBindings.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == enrollmentBefore.BindingId);
+            assignmentBefore = await before.EnrollmentLicenseAssignments.AsNoTracking()
+                .SingleAsync(candidate => candidate.EnrollmentId == enrollmentBefore.Id
+                    && candidate.State == "ACTIVE");
+            losingSeatBefore = await before.LicenseSeats.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == assignmentBefore.LicenseSeatId);
+            winningSeatBefore = await before.LicenseSeats.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == winner.SeatId);
+            historyCountBefore = await before.LicenseHistories.AsNoTracking().CountAsync(candidate =>
+                candidate.Action == HistoryActions.AutoUnlinkedProductScope);
+        }
+
+        var writerApplicationName = "item3b2-expiry-writer-" + Guid.NewGuid().ToString("N");
+        var cleanupApplicationName = "item3b2-expiry-cleanup-" + Guid.NewGuid().ToString("N");
+        var writerConnection = new NpgsqlConnectionStringBuilder(scenario.AppConnectionString)
+        {
+            ApplicationName = writerApplicationName,
+            Pooling = false
+        }.ConnectionString;
+        var cleanupConnection = new NpgsqlConnectionStringBuilder(scenario.AppConnectionString)
+        {
+            ApplicationName = cleanupApplicationName,
+            Pooling = false
+        }.ConnectionString;
+
+        await using var writerDb = new TestDbFactory(writerConnection).CreateDbContext();
+        var writerAuthority = new SeatCleanupService(
+            writerDb, NullLogger<SeatCleanupService>.Instance);
+        await using var writerTransaction = await writerAuthority.BeginProductScopeCleanupAsync(
+            scenario.Fixture.ProductId, LegacyHardwareId);
+        Assert.NotNull(writerTransaction);
+        await writerDb.Database.ExecuteSqlInterpolatedAsync($"""
+            UPDATE public."Licenses"
+            SET "ExpirationDate" = pg_catalog.clock_timestamp() + interval '750 milliseconds'
+            WHERE "Id" = {winner.LicenseId}
+            """);
+
+        var cleanupTask = Task.Run(async () =>
+        {
+            await using var cleanupDb = new TestDbFactory(cleanupConnection).CreateDbContext();
+            var cleanup = new SeatCleanupService(
+                cleanupDb, NullLogger<SeatCleanupService>.Instance);
+            await using var cleanupTransaction = await cleanup.BeginProductScopeCleanupAsync(
+                scenario.Fixture.ProductId, LegacyHardwareId);
+            return await Assert.ThrowsAsync<DistributionOperationException>(() =>
+                cleanup.UnlinkHwidFromOtherProductLicensesAsync(
+                    LegacyHardwareId, winner.LicenseId, scenario.Fixture.ProductId));
+        });
+
+        Exception? observationFailure = null;
+        try
+        {
+            await WaitForBlockedBackendAsync(
+                scenario.AdminConnectionString, cleanupApplicationName, writerApplicationName);
+            Assert.False(cleanupTask.IsCompleted);
+
+            var expired = false;
+            for (var attempt = 0; attempt < 100 && !expired; attempt++)
+            {
+                writerDb.ChangeTracker.Clear();
+                var expiration = await writerDb.Licenses.AsNoTracking()
+                    .Where(candidate => candidate.Id == winner.LicenseId)
+                    .Select(candidate => candidate.ExpirationDate)
+                    .SingleAsync();
+                var databaseNow = (await RuntimeEnrollmentService.DatabaseNowAsync(
+                    writerDb, CancellationToken.None)).UtcDateTime;
+                expired = expiration.HasValue && expiration.Value <= databaseNow;
+                if (!expired)
+                    await Task.Delay(25);
+            }
+
+            Assert.True(expired, "The winning licence must expire according to PostgreSQL while cleanup waits.");
+            Assert.False(cleanupTask.IsCompleted);
+        }
+        catch (Exception exception)
+        {
+            observationFailure = exception;
+        }
+        finally
+        {
+            await writerTransaction!.CommitAsync();
+        }
+
+        if (observationFailure != null)
+        {
+            try
+            {
+                await cleanupTask.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            catch
+            {
+                // Drain the task before surfacing the original lock/clock observation failure.
+            }
+            throw observationFailure;
+        }
+
+        var refusal = await cleanupTask.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, refusal.StatusCode);
+        Assert.Equal("authority_unavailable", refusal.ErrorCode);
+        Assert.Equal("product_scope_winner_expired", refusal.ReasonCode);
+
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        var enrollmentAfter = await check.RuntimeEnrollments.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == enrollmentBefore.Id);
+        var bindingAfter = await check.DistributionInstallationBindings.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == bindingBefore.Id);
+        var assignmentAfter = await check.EnrollmentLicenseAssignments.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == assignmentBefore.Id);
+        var losingSeatAfter = await check.LicenseSeats.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == losingSeatBefore.Id);
+        var winningSeatAfter = await check.LicenseSeats.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == winningSeatBefore.Id);
+
+        Assert.True(losingSeatAfter.IsActive);
+        Assert.Equal(losingSeatBefore.UnlinkedAt, losingSeatAfter.UnlinkedAt);
+        Assert.True(winningSeatAfter.IsActive);
+        Assert.Equal(winningSeatBefore.UnlinkedAt, winningSeatAfter.UnlinkedAt);
+        Assert.Equal("ACTIVE", assignmentAfter.State);
+        Assert.Equal(assignmentBefore.Revision, assignmentAfter.Revision);
+        Assert.Equal(assignmentBefore.EndedAtUtc, assignmentAfter.EndedAtUtc);
+        Assert.Equal(assignmentBefore.EndReason, assignmentAfter.EndReason);
+        Assert.Equal(bindingBefore.State, bindingAfter.State);
+        Assert.Equal(bindingBefore.InvalidatedAtUtc, bindingAfter.InvalidatedAtUtc);
+        Assert.Equal(bindingBefore.InvalidationReason, bindingAfter.InvalidationReason);
+        Assert.Equal(enrollmentBefore.State, enrollmentAfter.State);
+        Assert.Equal(enrollmentBefore.InvalidatedAtUtc, enrollmentAfter.InvalidatedAtUtc);
+        Assert.Equal(enrollmentBefore.InvalidationReason, enrollmentAfter.InvalidationReason);
+        Assert.Equal(enrollmentBefore.SecurityEpoch, enrollmentAfter.SecurityEpoch);
+        Assert.Equal(enrollmentBefore.AuthorityEpoch, enrollmentAfter.AuthorityEpoch);
+        Assert.Equal(historyCountBefore, await check.LicenseHistories.AsNoTracking().CountAsync(candidate =>
+            candidate.Action == HistoryActions.AutoUnlinkedProductScope));
+    }
+
+    /// <summary>
+    /// Proves that two complete product-scope ownership changes serialize at the global lease in
+    /// either order, and that the later grant determines the commercial assignment without changing
+    /// Runtime cryptographic identity.
+    /// </summary>
+    /// <param name="newWinnerRunsFirst">Whether cleanup for the newly seeded licence owns the first transaction.</param>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ProductScopeCleanup_TwoConnectionCompetingGrantSerializesWithoutPartialRuntime(
+        bool newWinnerRunsFirst)
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        var newWinner = await SeedProductScopeCleanupWinnerAsync(scenario, LegacyHardwareId);
+        Guid originalLicenseId;
+        Guid originalSeatId;
+        RuntimeEnrollment enrollmentBefore;
+        DistributionInstallationBinding bindingBefore;
+        EnrollmentLicenseAssignment assignmentBefore;
+        await using (var before = await scenario.Factory.CreateDbContextAsync())
+        {
+            enrollmentBefore = await before.RuntimeEnrollments.AsNoTracking().SingleAsync();
+            bindingBefore = await before.DistributionInstallationBindings.AsNoTracking()
+                .SingleAsync(candidate => candidate.Id == enrollmentBefore.BindingId);
+            assignmentBefore = await before.EnrollmentLicenseAssignments.AsNoTracking()
+                .SingleAsync(candidate => candidate.EnrollmentId == enrollmentBefore.Id
+                    && candidate.State == "ACTIVE");
+            originalLicenseId = assignmentBefore.LicenseId;
+            originalSeatId = assignmentBefore.LicenseSeatId;
+        }
+
+        var firstApplicationName = "item3b2-first-" + Guid.NewGuid().ToString("N");
+        var secondApplicationName = "item3b2-second-" + Guid.NewGuid().ToString("N");
+        var firstConnection = new NpgsqlConnectionStringBuilder(scenario.AppConnectionString)
+        {
+            ApplicationName = firstApplicationName,
+            Pooling = false
+        }.ConnectionString;
+        var secondConnection = new NpgsqlConnectionStringBuilder(scenario.AppConnectionString)
+        {
+            ApplicationName = secondApplicationName,
+            Pooling = false
+        }.ConnectionString;
+        var firstHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        (Guid LicenseId, Guid SeatId) firstAuthority = newWinnerRunsFirst
+            ? (newWinner.LicenseId, newWinner.SeatId)
+            : (originalLicenseId, originalSeatId);
+        (Guid LicenseId, Guid SeatId) secondAuthority = newWinnerRunsFirst
+            ? (originalLicenseId, originalSeatId)
+            : (newWinner.LicenseId, newWinner.SeatId);
+
+        // Runs one complete commercial ownership change under the production lock order;
+        // the optional pause exposes the first lease for deterministic blocking evidence.
+        async Task ChangeOwnerAsync(
+            string connectionString,
+            (Guid LicenseId, Guid SeatId) authority,
+            TaskCompletionSource? acquired,
+            Task? pause)
+        {
+            await using var db = new TestDbFactory(connectionString).CreateDbContext();
+            var cleanup = new SeatCleanupService(db, NullLogger<SeatCleanupService>.Instance);
+            await using var transaction = await cleanup.BeginProductScopeCleanupAsync(
+                scenario.Fixture.ProductId, LegacyHardwareId);
+            acquired?.SetResult();
+            if (pause != null)
+                await pause;
+            var seat = await db.LicenseSeats.SingleAsync(candidate => candidate.Id == authority.SeatId);
+            seat.IsActive = true;
+            seat.UnlinkedAt = null;
+            await db.SaveChangesAsync();
+            await cleanup.UnlinkHwidFromOtherProductLicensesAsync(
+                LegacyHardwareId, authority.LicenseId, scenario.Fixture.ProductId);
+            if (transaction != null)
+                await transaction.CommitAsync();
+        }
+
+        var first = Task.Run(() => ChangeOwnerAsync(
+            firstConnection, firstAuthority, firstHeld, releaseFirst.Task));
+        await firstHeld.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var second = Task.Run(() => ChangeOwnerAsync(
+            secondConnection, secondAuthority, null, null));
+        try
+        {
+            await WaitForBlockedBackendAsync(
+                scenario.AdminConnectionString, secondApplicationName, firstApplicationName);
+            Assert.False(second.IsCompleted);
+        }
+        finally
+        {
+            releaseFirst.TrySetResult();
+        }
+        await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(20));
+
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        var enrollmentAfter = await check.RuntimeEnrollments.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == enrollmentBefore.Id);
+        var bindingAfter = await check.DistributionInstallationBindings.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == bindingBefore.Id);
+        var originalAssignmentAfter = await check.EnrollmentLicenseAssignments.AsNoTracking()
+            .SingleAsync(candidate => candidate.Id == assignmentBefore.Id);
+        var activeSuccessors = await check.EnrollmentLicenseAssignments.AsNoTracking()
+            .Where(candidate => candidate.EnrollmentId == assignmentBefore.EnrollmentId
+                && candidate.State == "ACTIVE")
+            .OrderBy(candidate => candidate.Revision)
+            .ThenBy(candidate => candidate.Id)
+            .ToListAsync();
+        var activeSeats = await check.LicenseSeats.AsNoTracking().Where(candidate =>
+            candidate.IsActive
+            && candidate.HardwareId == LegacyHardwareId
+            && candidate.License != null
+            && candidate.License.ProductId == scenario.Fixture.ProductId).ToListAsync();
+        var cleanupHistory = await check.LicenseHistories.AsNoTracking().Where(candidate =>
+                candidate.Action == HistoryActions.AutoUnlinkedProductScope)
+            .OrderBy(candidate => candidate.Timestamp)
+            .ThenBy(candidate => candidate.Id)
+            .ToListAsync();
+        Assert.Single(activeSeats);
+        Assert.Equal(2, cleanupHistory.Count);
+        Assert.True(cleanupHistory[1].Timestamp >= cleanupHistory[0].Timestamp);
+        Assert.Equal(secondAuthority.SeatId, activeSeats[0].Id);
+        if (secondAuthority.SeatId == originalSeatId)
+        {
+            Assert.Equal("ENDED", originalAssignmentAfter.State);
+            Assert.Equal("seat_released", originalAssignmentAfter.EndReason);
+            var activeSuccessor = Assert.Single(activeSuccessors);
+            Assert.Equal(originalLicenseId, activeSuccessor.LicenseId);
+            Assert.Equal(originalSeatId, activeSuccessor.LicenseSeatId);
+            Assert.True(activeSuccessor.Revision > assignmentBefore.Revision);
+        }
+        else
+        {
+            Assert.Equal("ENDED", originalAssignmentAfter.State);
+            Assert.Equal("seat_released", originalAssignmentAfter.EndReason);
+            Assert.Empty(activeSuccessors);
+            Assert.False(await check.EnrollmentLicenseAssignments.AsNoTracking().AnyAsync(candidate =>
+                candidate.State == "ACTIVE"
+                && candidate.LicenseSeatId == originalSeatId));
+        }
+        Assert.Equal(bindingBefore.State, bindingAfter.State);
+        Assert.Equal(bindingBefore.InvalidatedAtUtc, bindingAfter.InvalidatedAtUtc);
+        Assert.Equal(bindingBefore.InvalidationReason, bindingAfter.InvalidationReason);
+        Assert.Equal(enrollmentBefore.State, enrollmentAfter.State);
+        Assert.Equal(enrollmentBefore.InvalidatedAtUtc, enrollmentAfter.InvalidatedAtUtc);
+        Assert.Equal(enrollmentBefore.InvalidationReason, enrollmentAfter.InvalidationReason);
+        Assert.Equal(enrollmentBefore.SecurityEpoch, enrollmentAfter.SecurityEpoch);
+        Assert.Equal(enrollmentBefore.AuthorityEpoch, enrollmentAfter.AuthorityEpoch);
+    }
+
+    /// <summary>Creates the unique winning commercial seat used by product-scope cleanup tests.</summary>
+    /// <param name="scenario">The isolated Runtime authority fixture that owns the losing seat.</param>
+    /// <param name="hardwareId">The exact canonical hardware shared by the winner and loser.</param>
+    /// <returns>The winning licence and seat identifiers.</returns>
+    private static async Task<(Guid LicenseId, Guid SeatId)> SeedProductScopeCleanupWinnerAsync(
+        PreparedBootstrapScenario scenario,
+        string hardwareId)
+    {
+        await using var db = await scenario.Factory.CreateDbContextAsync();
+        var sourceLicense = await db.Licenses.AsNoTracking().SingleAsync();
+        var licenseId = Guid.NewGuid();
+        var seatId = Guid.NewGuid();
+        db.Licenses.Add(new License
+        {
+            Id = licenseId,
+            ProductId = sourceLicense.ProductId,
+            LicenseTypeId = sourceLicense.LicenseTypeId,
+            LicenseKey = "PRODUCT-SCOPE-WINNER-" + Guid.NewGuid().ToString("N"),
+            IsActive = true,
+            MaxSeats = 1,
+            AllowedVersions = sourceLicense.AllowedVersions,
+            ExpirationDate = DateTime.UtcNow.AddDays(30)
+        });
+        db.LicenseSeats.Add(new LicenseSeat
+        {
+            Id = seatId,
+            LicenseId = licenseId,
+            HardwareId = hardwareId,
+            IsActive = true,
+            FirstActivatedAt = DateTime.UtcNow,
+            LastCheckInAt = DateTime.UtcNow
+        });
+        await db.SaveChangesAsync();
+        return (licenseId, seatId);
+    }
+
+    /// <summary>Waits until one tagged PostgreSQL backend is blocked by the other tagged backend.</summary>
+    /// <param name="adminConnectionString">Administrator connection used for bounded lock observation.</param>
+    /// <param name="blockedApplicationName">Exact application name of the waiting backend.</param>
+    /// <param name="blockerApplicationName">Exact application name of the lock owner.</param>
+    private static async Task WaitForBlockedBackendAsync(
+        string adminConnectionString,
+        string blockedApplicationName,
+        string blockerApplicationName)
+    {
+        await using var observer = new NpgsqlConnection(adminConnectionString);
+        await observer.OpenAsync();
+        for (var attempt = 0; attempt < 100; attempt++)
+        {
+            await using var command = observer.CreateCommand();
+            command.CommandText = """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_stat_activity AS blocked
+                    JOIN pg_catalog.pg_stat_activity AS blocker
+                      ON blocker.pid = ANY(pg_catalog.pg_blocking_pids(blocked.pid))
+                    WHERE blocked.application_name = @blocked_application
+                      AND blocker.application_name = @blocker_application);
+                """;
+            command.Parameters.AddWithValue("blocked_application", blockedApplicationName);
+            command.Parameters.AddWithValue("blocker_application", blockerApplicationName);
+            if (Convert.ToBoolean(await command.ExecuteScalarAsync()))
+                return;
+            await Task.Delay(25);
+        }
+
+        throw new TimeoutException("Expected the tagged product-scope authority backend to be blocked.");
+    }
+
     private static DateTime CreateFutureClassicActivationExpirationUtc()
     {
         var expirationUtc = DateTime.UtcNow.AddDays(30);
@@ -3613,6 +4386,130 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             expirationUtc > DateTime.UtcNow.AddDays(7),
             "ClassicActivation fixtures must remain valid for more than seven days from the wall clock.");
         return expirationUtc;
+    }
+
+    /// <summary>Creates contexts that seed a synthetic enrollment inside the successful Finalize transaction.</summary>
+    private sealed class ConcurrentFinalizeEnrollmentFactory(
+        string connection, ConcurrentFinalizeEnrollmentSeed seed) : IDbContextFactory<LicenseDbContext>
+    {
+        /// <summary>Allocates a caller-owned context; only the Finalize commit with a new binding is seeded.</summary>
+        public LicenseDbContext CreateDbContext() => new(new DbContextOptionsBuilder<LicenseDbContext>()
+            .UseNpgsql(connection).AddInterceptors(seed).Options);
+        /// <summary>Honors cancellation before allocating the context.</summary>
+        public Task<LicenseDbContext> CreateDbContextAsync(CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(CreateDbContext());
+        }
+    }
+
+    /// <summary>Seeds real persisted Runtime identity before Finalize releases its locks, without altering product SQL.</summary>
+    /// <remarks>The cryptographic fields are synthetic placeholders: assertions exercise the real commercial
+    /// validator, not signature verification. The database's real deferred triggers create the assignment.</remarks>
+    private sealed class ConcurrentFinalizeEnrollmentSeed(string encryptionKeyId)
+        : Microsoft.EntityFrameworkCore.Diagnostics.DbTransactionInterceptor
+    {
+        /// <summary>Exact synthetic enrollment created by the successful Finalize transaction.</summary>
+        internal Guid EnrollmentId { get; private set; }
+        /// <summary>Hash of all persisted enrollment and binding fields before the competing activation.</summary>
+        internal string? IdentitySnapshot { get; private set; }
+
+        /// <summary>Adds identity only when Finalize has saved its first binding; preserves the real transaction commit.</summary>
+        public override async ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult> TransactionCommittingAsync(
+            System.Data.Common.DbTransaction transaction,
+            Microsoft.EntityFrameworkCore.Diagnostics.TransactionEventData eventData,
+            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult result,
+            CancellationToken cancellationToken = default)
+        {
+            if (EnrollmentId != Guid.Empty || eventData.Context is not LicenseDbContext db)
+                return result;
+            var tracked = db.ChangeTracker.Entries<DistributionInstallationBinding>()
+                .Select(entry => entry.Entity).ToArray();
+            if (tracked.Length == 0)
+                return result;
+            var binding = Assert.Single(tracked);
+            Assert.Equal("active", binding.State);
+            EnrollmentId = Guid.NewGuid();
+            var epoch = await db.RuntimeEnrollmentAuthorityStates.AsNoTracking()
+                .Where(row => row.Id == 1).Select(row => row.Epoch).SingleAsync(cancellationToken);
+            db.RuntimeEnrollments.Add(new RuntimeEnrollment
+            {
+                Id = EnrollmentId, ClientId = "website-step1", BindingId = binding.Id,
+                ProductId = binding.ProductId, LicenseId = binding.LicenseId, LicenseSeatId = binding.LicenseSeatId,
+                InstallationId = binding.InstallationId, HardwareIdHash = binding.HardwareIdHash,
+                ReleaseVersion = binding.Version, HandoffDigestSha256 = binding.HandoffDigestSha256,
+                SubjectRefDigestSha256 = binding.SubjectRefDigestSha256,
+                ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion, Algorithm = "PS256",
+                KeyBackend = "software-cng-unattested", AttestationLevel = "none",
+                PublicKeySpkiCiphertext = "test", PublicKeySpkiKeyId = encryptionKeyId,
+                PublicKeySpkiSha256 = new string('d', 64), KeyThumbprint = "sync-" + Guid.NewGuid().ToString("N"),
+                ChallengeCiphertext = "test", ChallengeKeyId = encryptionKeyId,
+                ChallengeDigestSha256 = new string('e', 64), State = "ACTIVE", Epoch = 1,
+                SecurityEpoch = 1, AuthorityEpoch = epoch, ChallengeExpiresAtUtc = DateTime.UtcNow.AddHours(1),
+                CreatedAtUtc = DateTime.UtcNow, ActivatedAtUtc = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync(cancellationToken);
+            var enrollment = await db.RuntimeEnrollments.AsNoTracking()
+                .SingleAsync(row => row.Id == EnrollmentId, cancellationToken);
+            var storedBinding = await db.DistributionInstallationBindings.AsNoTracking()
+                .SingleAsync(row => row.Id == binding.Id, cancellationToken);
+            IdentitySnapshot = Sha256(System.Text.Json.JsonSerializer.Serialize(new { enrollment, binding = storedBinding }));
+            return result;
+        }
+    }
+
+    /// <summary>Proves both tagged operations are pending in the exact global-authority/HWID lock chain.</summary>
+    /// <remarks>Finalize must first own the global barrier and wait on the fixture HWID lock. After activation
+    /// starts it must wait on Finalize. Both observations share the original five-second budget.</remarks>
+    private static async Task WaitForProductHardwareLockChainAsync(
+        string connectionString, string exactLockName, int fixturePid,
+        string firstApplication, string secondApplication, System.Diagnostics.Stopwatch observation)
+    {
+        await using var observer = new NpgsqlConnection(connectionString);
+        await observer.OpenAsync();
+        while (observation.Elapsed < TimeSpan.FromSeconds(5))
+        {
+            await using var command = observer.CreateCommand();
+            command.CommandText = """
+                WITH target AS (SELECT pg_catalog.hashtextextended(@lock_name, 0)::bigint AS key)
+                SELECT owner.pid, follower.pid
+                FROM pg_catalog.pg_stat_activity owner
+                LEFT JOIN pg_catalog.pg_stat_activity follower
+                  ON owner.pid = ANY(pg_catalog.pg_blocking_pids(follower.pid))
+                 AND follower.application_name = @second
+                CROSS JOIN target
+                WHERE owner.application_name = @first
+                  AND @fixture = ANY(pg_catalog.pg_blocking_pids(owner.pid))
+                  AND owner.datid = (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database())
+                  AND (@second = '' OR follower.datid = owner.datid)
+                  AND EXISTS (SELECT 1 FROM pg_catalog.pg_locks h
+                    WHERE h.pid = owner.pid AND h.locktype = 'advisory' AND NOT h.granted
+                      AND h.classid = (((target.key >> 32) & 4294967295)::bigint)::oid
+                      AND h.objid = ((target.key & 4294967295)::bigint)::oid AND h.objsubid = 1)
+                  AND EXISTS (SELECT 1 FROM pg_catalog.pg_locks g
+                    WHERE g.pid = owner.pid AND g.locktype = 'advisory' AND g.granted
+                      AND g.classid = 999831 AND g.objid = 1 AND g.objsubid = 2
+                      AND g.mode = 'ExclusiveLock')
+                  AND (@second = '' OR EXISTS (SELECT 1 FROM pg_catalog.pg_locks g
+                    WHERE g.pid = follower.pid AND g.locktype = 'advisory' AND NOT g.granted
+                      AND g.classid = 999831 AND g.objid = 1 AND g.objsubid = 2));
+                """;
+            command.Parameters.AddWithValue("lock_name", exactLockName);
+            command.Parameters.AddWithValue("fixture", fixturePid);
+            command.Parameters.AddWithValue("first", firstApplication);
+            command.Parameters.AddWithValue("second", secondApplication);
+            await using var reader = await command.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                Assert.NotEqual(fixturePid, reader.GetInt32(0));
+                if (secondApplication.Length != 0)
+                    Assert.NotEqual(reader.GetInt32(0), reader.GetInt32(1));
+                Assert.False(await reader.ReadAsync());
+                return;
+            }
+            await Task.Delay(50);
+        }
+        throw new TimeoutException("Expected the exact tagged global-authority then HWID PostgreSQL lock chain.");
     }
 
     private static async Task WaitForAdvisoryWaitersAsync(

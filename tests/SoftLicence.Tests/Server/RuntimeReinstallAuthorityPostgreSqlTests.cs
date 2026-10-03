@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using SoftLicence.Server.Data;
 using SoftLicence.Server.Models;
 using SoftLicence.Server.Services;
@@ -38,11 +39,11 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     }
 
     /// <summary>
-    /// Proves a legacy reinstall whose source version is below the product minimum retains the
-    /// bounded reinstall refusal contract after live Runtime validation adopts version_ineligible.
+    /// Proves reconciled legacy authorization remains historical identity evidence after a
+    /// product version-policy change, while legacy discovery still requires current commerce.
     /// </summary>
     [Fact]
-    public async Task ReinstallAuthority_LegacyV2_VersionIneligibleRetainsBoundedPublicRefusal()
+    public async Task ReinstallAuthority_LegacyV2_VersionIneligibleKeepsIdentityButDeniesDiscovery()
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
         await ActivatePreparedEnrollmentAsync(scenario);
@@ -58,14 +59,14 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             await db.SaveChangesAsync();
         }
 
-        var error = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() =>
-            scenario.Runtime.AuthorizeReinstallAsync(
-                "website-step1",
-                request));
+        var before = await SnapshotReinstallAuthorityAsync(scenario);
+        var identity = await scenario.Runtime.AuthorizeReinstallAsync("website-step1", request);
+        var discovery = await scenario.Runtime.ResolveReinstallSourceAuthorityAsync(
+            "website-step1", BuildReinstallSourceResolutionRequest(scenario));
 
-        Assert.Equal(StatusCodes.Status403Forbidden, error.StatusCode);
-        Assert.Equal("reinstall_authority_ineligible", error.ErrorCode);
-        Assert.Equal("v2_binding_rows_ineligible", error.DiagnosticCode);
+        Assert.Equal("identity_confirmed", identity.Decision);
+        Assert.Equal("none", discovery.Outcome);
+        Assert.Equal(before, await SnapshotReinstallAuthorityAsync(scenario));
     }
 
     [Fact]
@@ -101,6 +102,180 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             "website-step1", BuildReinstallAuthorityRequest(scenario, grantRef, subjectRef));
 
         Assert.Equal(Sha256(subjectRef), response.SubjectRefDigestSha256);
+        Assert.Equal(before, await SnapshotReinstallAuthorityAsync(scenario));
+    }
+
+    /// <summary>
+    /// Historical modern source identity remains available after the old licence and its
+    /// assignment lose current eligibility. Neither signed Runtime endpoint waits on the
+    /// commercial barrier or treats the changed same-seat hardware as crypto identity.
+    /// </summary>
+    [Fact]
+    public async Task ReinstallModernIdentity_CommercialBarrierAndInactiveSource_DoNotBlockOrGrant()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivatePreparedEnrollmentAsync(scenario);
+        var (grantRef, subjectRef) = await ConfigureModernV2AuthorityAsync(scenario);
+        await using (var revoke = await scenario.Factory.CreateDbContextAsync())
+        {
+            var license = await revoke.Licenses.SingleAsync();
+            license.IsActive = false;
+            var seat = await revoke.LicenseSeats.SingleAsync();
+            seat.HardwareId = "reinstall-current-seat-" + Guid.NewGuid().ToString("N");
+            await revoke.SaveChangesAsync();
+        }
+        var before = await SnapshotReinstallAuthorityAsync(scenario);
+        await using var writer = new NpgsqlConnection(scenario.AdminConnectionString);
+        await writer.OpenAsync();
+        await using var transaction = await writer.BeginTransactionAsync();
+        await using (var hold = new NpgsqlCommand(
+                         "SELECT pg_catalog.pg_advisory_xact_lock(1312, 1);", writer, transaction))
+            await hold.ExecuteNonQueryAsync();
+        try
+        {
+            var authorized = await scenario.Runtime.AuthorizeReinstallAsync(
+                "website-step1", BuildReinstallAuthorityRequest(scenario, grantRef, subjectRef))
+                .WaitAsync(TimeSpan.FromSeconds(8));
+            var discovered = await scenario.Runtime.ResolveReinstallSourceAuthorityAsync(
+                "website-step1", BuildReinstallSourceResolutionRequest(scenario))
+                .WaitAsync(TimeSpan.FromSeconds(8));
+            Assert.Equal("identity_confirmed", authorized.Decision);
+            Assert.Equal("source", discovered.Outcome);
+            Assert.Equal("modern", discovered.SourceKind);
+            Assert.Equal(authorized.SoftLicenceLicenseId, discovered.SourceLicenseId);
+            Assert.Equal(before, await SnapshotReinstallAuthorityAsync(scenario));
+            await using var verify = await scenario.Factory.CreateDbContextAsync();
+            Assert.Empty(await verify.EnrollmentLicenseAssignments.Where(row =>
+                row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE").ToListAsync());
+        }
+        finally
+        {
+            await transaction.RollbackAsync();
+        }
+    }
+
+    /// <summary>
+    /// Reconciled legacy source discovery waits for the commercial writer, whereas its
+    /// identity-only authorization remains read-only after the source later loses B.
+    /// The fallback never revives the terminated assignment.
+    /// </summary>
+    [Fact]
+    public async Task ReinstallLegacyDiscovery_CommercialBarrierSerializesAndDenialReturnsNone()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivatePreparedEnrollmentAsync(scenario);
+        var subjectRef = Base64Url(RandomNumberGenerator.GetBytes(32));
+        var grantRef = await ConvertToLegacyV2AuthorityAsync(scenario);
+        var incompleteBefore = await SnapshotReinstallAuthorityAsync(scenario);
+        var incomplete = await scenario.Runtime.ResolveReinstallSourceAuthorityAsync(
+            "website-step1", BuildReinstallSourceResolutionRequest(scenario));
+        Assert.Equal("source", incomplete.Outcome);
+        Assert.Equal("legacy", incomplete.SourceKind);
+        Assert.Equal(incompleteBefore, await SnapshotReinstallAuthorityAsync(scenario));
+        await scenario.Runtime.AuthorizeReinstallAsync(
+            "website-step1", BuildReinstallAuthorityRequest(scenario, grantRef, subjectRef));
+        await using var writer = new NpgsqlConnection(scenario.AdminConnectionString);
+        await writer.OpenAsync();
+        await using var transaction = await writer.BeginTransactionAsync();
+        await using (var hold = new NpgsqlCommand(
+                         "SELECT pg_catalog.pg_advisory_xact_lock(1312, 1);", writer, transaction))
+            await hold.ExecuteNonQueryAsync();
+        var pending = scenario.Runtime.ResolveReinstallSourceAuthorityAsync(
+            "website-step1", BuildReinstallSourceResolutionRequest(scenario));
+        await using var observer = new NpgsqlConnection(scenario.AdminConnectionString);
+        await observer.OpenAsync();
+        var observedWait = false;
+        for (var poll = 0; poll < 200 && !observedWait; poll++)
+        {
+            await using var activity = new NpgsqlCommand("""
+                SELECT count(*) FROM pg_catalog.pg_stat_activity
+                WHERE datname = pg_catalog.current_database()
+                  AND pid <> pg_catalog.pg_backend_pid()
+                  AND query LIKE '%pg_advisory_xact_lock_shared(1312, 1)%'
+                  AND wait_event_type = 'Lock'
+                  AND pg_catalog.cardinality(pg_catalog.pg_blocking_pids(pid)) > 0;
+                """, observer);
+            observedWait = Convert.ToInt64(await activity.ExecuteScalarAsync()) > 0;
+            if (!observedWait)
+                await Task.Delay(10);
+        }
+        Assert.True(observedWait);
+        Assert.False(pending.IsCompleted);
+        await transaction.CommitAsync();
+        var source = await pending.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal("source", source.Outcome);
+        Assert.Equal("legacy", source.SourceKind);
+        Assert.Null(source.Authority);
+
+        await using (var revoke = await scenario.Factory.CreateDbContextAsync())
+        {
+            var license = await revoke.Licenses.SingleAsync();
+            license.IsActive = false;
+            await revoke.SaveChangesAsync();
+        }
+        var before = await SnapshotReinstallAuthorityAsync(scenario);
+        var denied = await scenario.Runtime.ResolveReinstallSourceAuthorityAsync(
+            "website-step1", BuildReinstallSourceResolutionRequest(scenario));
+        var identity = await scenario.Runtime.AuthorizeReinstallAsync(
+            "website-step1", BuildReinstallAuthorityRequest(scenario, grantRef, subjectRef));
+        Assert.Equal("none", denied.Outcome);
+        Assert.Equal("identity_confirmed", identity.Decision);
+        Assert.Equal(before, await SnapshotReinstallAuthorityAsync(scenario));
+        await using var verify = await scenario.Factory.CreateDbContextAsync();
+        Assert.Empty(await verify.EnrollmentLicenseAssignments.Where(row =>
+            row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE").ToListAsync());
+    }
+
+    /// <summary>
+    /// A corrupt active assignment relation is unavailable infrastructure, not a bounded
+    /// discovery miss. The historical source credential still proves identity separately.
+    /// </summary>
+    [Fact]
+    public async Task ReinstallLegacyDiscovery_MissingAssignmentSeat_PropagatesUnavailable()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivatePreparedEnrollmentAsync(scenario);
+        var subjectRef = Base64Url(RandomNumberGenerator.GetBytes(32));
+        var grantRef = await ConvertToLegacyV2AuthorityAsync(scenario);
+        await scenario.Runtime.AuthorizeReinstallAsync(
+            "website-step1", BuildReinstallAuthorityRequest(scenario, grantRef, subjectRef));
+        await using (var admin = new NpgsqlConnection(scenario.AdminConnectionString))
+        {
+            await admin.OpenAsync();
+            await using var dropConstraint = new NpgsqlCommand("""
+                DO $broken_relation$
+                DECLARE constraint_name name;
+                BEGIN
+                    SELECT conname INTO constraint_name FROM pg_catalog.pg_constraint
+                    WHERE conrelid = 'public."EnrollmentLicenseAssignments"'::pg_catalog.regclass
+                      AND conname LIKE 'FK_EnrollmentLicenseAssignments_LicenseSeats%';
+                    EXECUTE pg_catalog.format(
+                        'ALTER TABLE public."EnrollmentLicenseAssignments" DROP CONSTRAINT %I',
+                        constraint_name);
+                END;
+                $broken_relation$;
+                """, admin);
+            await dropConstraint.ExecuteNonQueryAsync();
+            await using var breakRelation = new NpgsqlCommand("""
+                UPDATE public."EnrollmentLicenseAssignments"
+                SET "LicenseSeatId" = @missing
+                WHERE "EnrollmentId" = @enrollment AND "State" = 'ACTIVE';
+                """, admin);
+            breakRelation.Parameters.AddWithValue("missing", Guid.NewGuid());
+            breakRelation.Parameters.AddWithValue("enrollment", scenario.EnrollmentId);
+            await breakRelation.ExecuteNonQueryAsync();
+        }
+
+        var before = await SnapshotReinstallAuthorityAsync(scenario);
+        var unavailable = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() =>
+            scenario.Runtime.ResolveReinstallSourceAuthorityAsync(
+                "website-step1", BuildReinstallSourceResolutionRequest(scenario)));
+        var identity = await scenario.Runtime.AuthorizeReinstallAsync(
+            "website-step1", BuildReinstallAuthorityRequest(scenario, grantRef, subjectRef));
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, unavailable.StatusCode);
+        Assert.Equal("authority_unavailable", unavailable.ErrorCode);
+        Assert.Equal("assignment_relation_missing", unavailable.DiagnosticCode);
+        Assert.Equal("identity_confirmed", identity.Decision);
         Assert.Equal(before, await SnapshotReinstallAuthorityAsync(scenario));
     }
 

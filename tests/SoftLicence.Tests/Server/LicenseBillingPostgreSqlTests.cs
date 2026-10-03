@@ -20,6 +20,79 @@ namespace SoftLicence.Tests.Server;
 /// <summary>Real HTTP/PostgreSQL billing authority tests with synthetic identities and an injected UTC clock.</summary>
 public sealed class LicenseBillingPostgreSqlTests
 {
+    /// <summary>A prepared extension is absolute and idempotent; paid renewal supersedes it permanently.</summary>
+    [Fact]
+    public async Task Continuity_ReplayAndPaidRenewalDoNotAccumulate()
+    {
+        await using var f = await Fixture.CreateAsync(); f.Clock.Now = f.Start.AddMinutes(-2);
+        var grant = await f.ContinuityAsync();
+        using (var response = await f.Client.PostAsJsonAsync(f.ContinuityUrl, grant))
+            Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+        Assert.Equal(f.Start.AddMinutes(15), (await f.ReadAsync()).ExpirationDate);
+        f.Clock.Now = f.Start.AddMinutes(7);
+        using (var response = await f.Client.PostAsJsonAsync(f.ContinuityUrl, grant)) Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using (var response = await f.Client.PostAsJsonAsync(f.ContinuityUrl, grant with { OperationId = Guid.NewGuid() }))
+            Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        await f.OkAsync(await f.RequestAsync("PAID"));
+        using (var response = await f.Client.PostAsJsonAsync(f.ContinuityUrl, grant))
+        {
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.False(JsonNode.Parse(await response.Content.ReadAsStringAsync())!["matchesCurrent"]!.GetValue<bool>());
+        }
+        Assert.Equal(f.Start.AddDays(30), (await f.ReadAsync()).ExpirationDate);
+    }
+
+    /// <summary>Both cancellation orderings are safe, including a body frozen before a concurrent grant.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Continuity_CancellationFencesDelayedGrant(bool grantFirst)
+    {
+        await using var f = await Fixture.CreateAsync(); f.Clock.Now = f.Start.AddMinutes(-2);
+        var grant = await f.ContinuityAsync();
+        var cancel = grant with { OperationId = Guid.NewGuid(), Command = "CANCEL", PreviousOperationId = grant.OperationId };
+        if (grantFirst)
+        {
+            using var response = await f.Client.PostAsJsonAsync(f.ContinuityUrl, grant);
+            Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+        }
+        for (var i = 0; i < 2; i++)
+        {
+            using var response = await f.Client.PostAsJsonAsync(f.ContinuityUrl, cancel);
+            Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+        }
+        using (var response = await f.Client.PostAsJsonAsync(f.ContinuityUrl, grant))
+            Assert.Equal(grantFirst ? HttpStatusCode.OK : HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal(f.Start, (await f.ReadAsync()).ExpirationDate);
+    }
+
+    /// <summary>A genuine continuity receipt admits the existing H24 grace without adding fifteen minutes.</summary>
+    [Fact]
+    public async Task Continuity_GraceReplacesExactReceipt()
+    {
+        await using var f = await Fixture.CreateAsync(); f.Clock.Now = f.Start.AddMinutes(-2);
+        var grant = await f.ContinuityAsync();
+        using (var response = await f.Client.PostAsJsonAsync(f.ContinuityUrl, grant))
+            Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+        f.Clock.Now = f.Start.AddMinutes(5);
+        await f.OkAsync(await f.RequestAsync("GRACE"));
+        Assert.Equal(f.Start.AddHours(24), (await f.ReadAsync()).ExpirationDate);
+    }
+
+    /// <summary>Expired preparations, changed ownership, invalid casing and security revocations never acquire grace.</summary>
+    [Fact]
+    public async Task Continuity_RejectsStaleAndForeignEvidence()
+    {
+        await using var f = await Fixture.CreateAsync(); var request = await f.ContinuityAsync();
+        using (var response = await f.Client.PostAsJsonAsync(f.ContinuityUrl, request)) Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        f.Clock.Now = f.Start.AddMinutes(-2);
+        using (var response = await f.Client.PostAsJsonAsync(f.ContinuityUrl, request with { Command = "grant" })) Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        using (var response = await f.Client.PostAsJsonAsync(f.ContinuityUrl, request with { CommercialSubjectId = Guid.NewGuid() })) Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        await f.SecurityRevokeAsync();
+        using (var response = await f.Client.PostAsJsonAsync(f.ContinuityUrl, request)) Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.False((await f.ReadAsync()).IsActive);
+        await using var db = f.Db(); Assert.Equal(0, await db.LicenseHistories.CountAsync());
+    }
     /// <summary>First-delivery null expiry is explicit current evidence; repeated reads create no authority, history or ownership mutation.</summary>
     [Fact]
     public async Task AuthorityObservation_FirstDeliveryIsReadOnly()
@@ -720,6 +793,16 @@ public sealed class LicenseBillingPostgreSqlTests
         public string Url => $"/api/admin/licenses/{Key}/billing-conditional";
         /// <summary>Read-only exact-owner authority route, independent of any billing operation receipt.</summary>
         public string AuthorityUrl => $"/api/admin/licenses/{Key}/billing-authority";
+        /// <summary>Local authenticated continuity endpoint, never a production URL.</summary>
+        public string ContinuityUrl => $"/api/admin/licenses/{Key}/renewal-continuity";
+        /// <summary>Freezes current fixture identity, config and original paid boundary for continuity.</summary>
+        public async Task<AdminController.RenewalContinuityRequest> ContinuityAsync()
+        {
+            var l = await ReadAsync();
+            return new(Guid.NewGuid(), "GRANT", l.Id, l.ProductId, l.AuthorityVersion, OwnershipId, SubjectId,
+                l.ExpirationDate!.Value, await TypeAsync(l.LicenseTypeId), l.MaxSeats,
+                "local-license", "local-user", "cus-fixture", "sub-fixture", Start, null);
+        }
         /// <summary>Installs a one-shot test-only checkpoint before the next license UPDATE.</summary>
         public Func<Task>? BeforeUpdate { set => interceptor.Callback = value; }
 

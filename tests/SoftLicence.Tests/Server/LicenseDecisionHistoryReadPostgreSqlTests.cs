@@ -20,11 +20,13 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var connections = await ProvisionAsync();
         var database = new TestDbFactory(connections.App);
         var fixture = await SeedDistributionAuthorityWithoutBindingAsync(database);
+        if (!allowSeat)
+            await Tkt976_FillMultiSeatCapacityAsync(database, fixture.LicenseId);
         SoftLicence.Server.Controllers.ActivationController.ActivationRequest request;
         await using (var setup = await database.CreateDbContextAsync())
         {
             var license = await setup.Licenses.Include(row => row.Product).SingleAsync(row => row.Id == fixture.LicenseId);
-            license.MaxSeats = allowSeat ? 2 : 1;
+            license.MaxSeats = 2;
             request = new() { LicenseKey = license.LicenseKey, AppName = license.Product!.Name,
                 HardwareId = "1234567890ABCDEF", AppVersion = fixture.Version, CustomerEmail = license.CustomerEmail };
             await setup.SaveChangesAsync();

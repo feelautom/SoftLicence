@@ -1,3 +1,4 @@
+using System.Text.Json;
 using SoftLicence.Server.Models;
 using SoftLicence.Server.Services;
 using Xunit;
@@ -95,12 +96,28 @@ public sealed class RuntimeEnrollmentUpgradeContractTests
 
         var payload = RuntimeEnrollmentCryptoService.BuildUpgradeSignaturePayload(response);
 
-        Assert.StartsWith(string.Join('\n',
+        Assert.Equal(string.Join('\n',
             "runtime-enrollment-upgrade-response-v1",
             "runtime-enrollment-v1",
             "PS256",
             "runtime-signing-1",
             DesktopUpgradeAudience,
-            "runtime-enrollment-upgrade") + "\n", payload, StringComparison.Ordinal);
+            "runtime-enrollment-upgrade",
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+            "33333333-3333-4333-8333-333333333333",
+            "44444444-4444-4444-8444-444444444444",
+            "55555555-5555-4555-8555-555555555555",
+            "2.2.916",
+            "2.2.924",
+            "1",
+            "2",
+            "66666666-6666-4666-8666-666666666666",
+            new string('a', 64),
+            "upgraded",
+            "2026-07-24T14:18:35.0000000Z",
+            "2026-07-24T14:28:35.0000000Z"), payload);
+        Assert.DoesNotContain("assignmentId", JsonSerializer.Serialize(response), StringComparison.Ordinal);
     }
+
 }

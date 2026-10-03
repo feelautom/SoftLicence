@@ -53,8 +53,9 @@ public sealed record SecurityLockDecision(string Verdict, string State);
 
 /// <summary>
 /// Pure verdict policy (TKT-001177, DevBrain #1329/#1330). Security contract: only the server releases a lock;
-/// levels 1 and 2 are released because an authenticated report proves the server is reachable and the
-/// enrollment authority (licence) was validated before this policy runs; level 3 needs an admin release except
+/// levels 1 and 2 are released when authenticated identity and commercial authority are eligible; the
+/// caller constrains this decision when commercial authority or reported hardware linkage is absent;
+/// level 3 needs an admin release except
 /// a legacy marker on a clean record; levels 4 and 5 follow the server mode and are banned only in ENFORCE.
 /// </summary>
 public static class SecurityLockVerdictPolicy
@@ -96,6 +97,37 @@ public static class SecurityLockVerdictPolicy
     }
 
     /// <summary>
+    /// Commercial denial keeps a lock in place. A new permanent ban requires the reported hardware
+    /// to be linked to the active assignment or its authenticated alias; an existing ban remains BAN.
+    /// </summary>
+    public static SecurityLockDecision ApplyAuthorityBoundary(
+        SecurityLockDecision decision,
+        bool commerciallyEligible,
+        bool reportHardwareLinked,
+        bool reportHardwareBanned)
+    {
+        ArgumentNullException.ThrowIfNull(decision);
+        if (reportHardwareBanned)
+            return new SecurityLockDecision(SecurityLockVerdicts.Ban, SecurityLockReportStates.Banned);
+        if (!reportHardwareLinked || !commerciallyEligible)
+            return new SecurityLockDecision(SecurityLockVerdicts.Maintain, SecurityLockReportStates.Open);
+        return decision;
+    }
+
+    /// <summary>Whether an immutable replay verdict is at least as restrictive as today's decision.</summary>
+    public static bool ReplayRemainsSafe(string storedVerdict, string currentVerdict) =>
+        Severity(storedVerdict) >= Severity(currentVerdict);
+
+    /// <summary>Orders signed verdicts from least to most restrictive for safe replay checks.</summary>
+    private static int Severity(string verdict) => verdict switch
+    {
+        SecurityLockVerdicts.Release => 0,
+        SecurityLockVerdicts.Maintain => 1,
+        SecurityLockVerdicts.Ban => 2,
+        _ => throw new ArgumentOutOfRangeException(nameof(verdict), "Unknown signed security verdict.")
+    };
+
+    /// <summary>
     /// Resolves the server-side mode: reversible causes are NOT_APPLICABLE; irreversible ones use the configured
     /// policy or REVIEW when none exists. The client-claimed mode is informational only.
     /// </summary>
@@ -111,7 +143,10 @@ public static class SecurityLockVerdictPolicy
     /// <param name="level">Catalogued level.</param>
     public static string BanCategoryFor(int level) => level == 5 ? "debugger" : "piracy";
 
+    /// <summary>Builds the non-granting release verdict after all independent gates pass.</summary>
     private static SecurityLockDecision Released() => new(SecurityLockVerdicts.Release, SecurityLockReportStates.Released);
+    /// <summary>Builds the non-granting keep-lock verdict.</summary>
     private static SecurityLockDecision Open() => new(SecurityLockVerdicts.Maintain, SecurityLockReportStates.Open);
+    /// <summary>Builds the irreversible ban verdict when an authoritative link or prior ban permits it.</summary>
     private static SecurityLockDecision Banned() => new(SecurityLockVerdicts.Ban, SecurityLockReportStates.Banned);
 }
