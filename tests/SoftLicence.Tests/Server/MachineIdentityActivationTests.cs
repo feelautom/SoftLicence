@@ -201,8 +201,8 @@ public sealed class MachineIdentityActivationTests : IClassFixture<WebApplicatio
         Assert.Equal(licencesBefore, await after.ServiceProvider.GetRequiredService<LicenseDbContext>().Licenses.CountAsync());
     }
 
-    private static async Task<string?> ErrorCodeAsync(HttpResponseMessage response) =>
-        response.Headers.TryGetValues("X-SoftLicence-Error-Code", out var values) ? values.Single() : null;
+    private static Task<string?> ErrorCodeAsync(HttpResponseMessage response) =>
+        Task.FromResult(response.Headers.TryGetValues("X-SoftLicence-Error-Code", out var values) ? values.Single() : null);
 
     private async Task<List<MachineEvidenceObservation>> ObservationsAsync()
     {
