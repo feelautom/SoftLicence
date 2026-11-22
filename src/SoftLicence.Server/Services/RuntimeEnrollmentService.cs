@@ -1104,6 +1104,10 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
     /// <param name="approvedBinaries">A-validated release hashes for current ban checks.</param>
     /// <param name="now">Database time sampled after the barrier wait.</param>
     /// <param name="cancellationToken">Cancels read-only current-policy checks.</param>
+    /// <exception cref="RuntimeEnrollmentException">
+    /// 403 <c>reinstall_authority_ineligible</c>; its diagnostic is the publishable commercial or assignment-state reason
+    /// when there is one (TKT-004158), otherwise <c>v2_binding_rows_ineligible</c>.
+    /// </exception>
     private static async Task ValidateReinstallSourceCommercialAsync(
         LicenseDbContext db, RuntimeEnrollment enrollment,
         IReadOnlyDictionary<string, string> approvedBinaries,
@@ -1119,7 +1123,12 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
         catch (RuntimeEnrollmentException exception) when (
             exception.StatusCode == StatusCodes.Status422UnprocessableEntity)
         {
-            throw ReinstallAuthorityIneligible("v2_binding_rows_ineligible");
+            // TKT-004158: a commercial or assignment-state reason the client may see (licence revoked, expired...) is
+            // kept so that the public 403 reinstall_authority_ineligible can carry it as reasonCode; any other denial
+            // (ban, binary, identity) keeps the opaque v2_binding_rows_ineligible.
+            throw ReinstallAuthorityIneligible(
+                AssignmentRefusals.PublicReasonCode("reinstall_authority_ineligible", exception.DiagnosticCode)
+                ?? "v2_binding_rows_ineligible");
         }
     }
 

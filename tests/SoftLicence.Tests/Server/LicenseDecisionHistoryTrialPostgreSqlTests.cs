@@ -120,13 +120,16 @@ public sealed partial class LicenseDecisionHistoryTrialPostgreSqlTests(RuntimeEn
             controller.Response.Headers["X-Content-Type-Options"] = "nosniff";
             fault.Armed = true;
             IActionResult response = automatic ? await controller.Activate(new ActivationController.ActivationRequest { LicenseKey = "FREE-TRIAL", HardwareId = hardwareId, AppName = productName, AppVersion = fixture.Version, SystemUuid = systemUuid, MachineEvidence = evidence }) : await controller.GetTrial(new ActivationController.TrialRequest { TypeSlug = "TRIAL", HardwareId = hardwareId, AppName = productName, AppVersion = fixture.Version, SystemUuid = systemUuid, MachineEvidence = evidence });
-            Assert.Equal(mode == "cancel-after" ? 403 : 500, Assert.IsAssignableFrom<ObjectResult>(response).StatusCode);
+            // TKT-004158: a refusal (403) is returned whatever the history outcome. A grant ("new", "existing") whose
+            // history cannot be confirmed still fails with 500: an unconfirmed success is never handed to the client.
+            var refused = outcome == "refused";
+            Assert.Equal(refused || mode == "cancel-after" ? 403 : 500, Assert.IsAssignableFrom<ObjectResult>(response).StatusCode);
             Assert.Equal("trial-request", controller.Response.Headers["X-Request-Id"].ToString());
             Assert.Equal("nosniff", controller.Response.Headers["X-Content-Type-Options"].ToString());
             if (mode == "cancel-after")
                 Assert.True(requestCancellation.IsCancellationRequested);
             else
-                Assert.False(controller.Response.Headers.ContainsKey("X-SoftLicence-Error-Code"));
+                Assert.Equal(refused, controller.Response.Headers.ContainsKey("X-SoftLicence-Error-Code"));
         }
 
         if (outcome == "refused" || mode != "commit-ack")

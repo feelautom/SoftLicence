@@ -33,8 +33,13 @@ public sealed partial class DistributionInstallationBindingService
     /// context; there is no RuntimeAuthorityLease and only context/transaction disposal follows.
     /// Five seconds linked to application stopping cover all checks, history persistence and commit;
     /// client cancellation cannot erase an already captured decision. Commit errors remain indeterminate.
+    /// <para>
+    /// TKT-004158: when the pre-write safety checks or the persistence cannot be confirmed, the failure is logged
+    /// (phase, commit outcome, exception type; no SQL, request evidence or hardware value) and the method returns
+    /// normally, so the caller rethrows the business refusal instead of a 500 <c>internal_error</c>. Nothing else is
+    /// committed: a failed check throws before any commit, and the transaction is rolled back on disposal.
+    /// </para>
     /// </remarks>
-    /// <exception cref="InvalidOperationException">Pre-write safety or persistence could not be confirmed; existing redacted internal_error mapping applies.</exception>
     private async Task PersistEarlyFinalizeRefusalAsync(
         LicenseDbContext db, IDbContextTransaction? transaction, LicenseDecisionSnapshot snapshot,
         string clientId, string payloadDigest, FinalizeValidated request, DateTimeOffset now,
@@ -69,13 +74,12 @@ public sealed partial class DistributionInstallationBindingService
             committing = true;
             if (transaction != null) await transaction.CommitAsync(finalization.Token);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            _logger.LogError("LicenseDecisionPersistenceFailed Phase=distribution_finalize_early CommitOutcome={CommitOutcome}",
-                committing ? "indeterminate" : "not_confirmed");
-            throw new InvalidOperationException(committing
-                ? "Licence decision commit outcome is indeterminate."
-                : "Licence decision persistence was not confirmed.");
+            // TKT-004158: the caller rethrows the business refusal; only the audit trail is missing or uncertain.
+            _logger.LogError(
+                "LicenseDecisionPersistenceFailed Phase=distribution_finalize_early CommitOutcome={CommitOutcome} ExceptionType={ExceptionType}",
+                committing ? "indeterminate" : "not_confirmed", exception.GetType().FullName);
         }
     }
 
@@ -111,8 +115,12 @@ public sealed partial class DistributionInstallationBindingService
     /// A five-second token covers rollback, lookup, save and commit, independent of client cancellation
     /// but linked to host shutdown. No background work or fallback transaction exists. Commit exceptions
     /// leave persistence indeterminate; they never prove absence or produce a durable-refusal claim.
+    /// <para>
+    /// TKT-004158: when the history cannot be confirmed, the failure is logged and the method returns normally, so the
+    /// caller rethrows <paramref name="refusal"/> instead of a 500 <c>internal_error</c>. The refusal undid every
+    /// business effect before the history write, so returning it stays true whatever the commit outcome.
+    /// </para>
     /// </remarks>
-    /// <exception cref="InvalidOperationException">History persistence could not be confirmed; the controller's existing internal_error mapping applies.</exception>
     private async Task PersistFinalizeRefusalAsync(
         LicenseDbContext db, IDbContextTransaction? transaction, LicenseDecisionSnapshot snapshot,
         string clientId, string payloadDigest, FinalizeValidated request, string submittedHardwareId,
@@ -135,15 +143,14 @@ public sealed partial class DistributionInstallationBindingService
             if (transaction != null)
                 await transaction.CommitAsync(finalization.Token);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
             // Do not log SQL, request evidence, HWIDs or exception messages. A lost commit
             // acknowledgement is explicitly indeterminate and must be resolved by exact replay.
-            _logger.LogError("LicenseDecisionPersistenceFailed Phase=distribution_finalize CommitOutcome={CommitOutcome}",
-                committing ? "indeterminate" : "not_confirmed");
-            throw new InvalidOperationException(committing
-                ? "Licence decision commit outcome is indeterminate."
-                : "Licence decision persistence was not confirmed.");
+            // TKT-004158: the caller rethrows the business refusal instead of a 500.
+            _logger.LogError(
+                "LicenseDecisionPersistenceFailed Phase=distribution_finalize CommitOutcome={CommitOutcome} ExceptionType={ExceptionType}",
+                committing ? "indeterminate" : "not_confirmed", exception.GetType().FullName);
         }
     }
 

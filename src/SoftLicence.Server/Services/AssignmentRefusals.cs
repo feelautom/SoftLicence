@@ -133,15 +133,31 @@ internal static class AssignmentRefusals
         .ToFrozenSet(StringComparer.Ordinal);
 
     /// <summary>
+    /// Closed set of commercial reasons published under any public code (TKT-004158, product decision of
+    /// 21/11/2026: commercial causes are named, security stays opaque). They describe the customer's own
+    /// licence (revoked, deactivated, key period over, release not covered, no free seat) and help the customer act.
+    /// Deliberately excluded: <c>license_unusable</c> (another product or no seat: a probe could learn licence
+    /// structure), <c>seat_unavailable</c>, the identity refusal kept under <c>commercial_authority_ineligible</c>, and
+    /// every ban, binary, release-approval or proof reason. An absent reason never carries any detail.
+    /// </summary>
+    private static readonly FrozenSet<string> PublishableCommercialReasons = new[]
+    {
+        "license_revoked", "license_expired", "license_inactive", "version_ineligible", "seat_capacity_exceeded",
+    }.ToFrozenSet(StringComparer.Ordinal);
+
+    /// <summary>
     /// Returns the reason a response may publish for <paramref name="errorCode"/>: the bounded reason of a named
-    /// assignment code; since TKT-004106 also an assignment-state reason of <see cref="PublishableAssignmentReasons"/>
-    /// under any code (for example <c>authority_unavailable</c> with <c>assignment_relation_missing</c>); otherwise
-    /// <see langword="null"/>, so ban, binary, identity and commercial diagnostics stay server-side.
+    /// assignment code; since TKT-004106 also an assignment-state reason of <see cref="PublishableAssignmentReasons"/>,
+    /// and since TKT-004158 a commercial reason of <see cref="PublishableCommercialReasons"/>, under any code (for
+    /// example <c>authority_ineligible</c> with <c>license_expired</c>); otherwise <see langword="null"/>, so ban,
+    /// binary, identity and proof diagnostics stay server-side.
     /// </summary>
     /// <param name="errorCode">Public error code, compared ordinally.</param>
     /// <param name="reasonCode">Internal bounded reason carried by the exception, compared ordinally; null publishes nothing.</param>
     internal static string? PublicReasonCode(string? errorCode, string? reasonCode) =>
-        reasonCode is not null && (IsNamed(errorCode) || PublishableAssignmentReasons.Contains(reasonCode))
+        reasonCode is not null && (IsNamed(errorCode)
+            || PublishableAssignmentReasons.Contains(reasonCode)
+            || PublishableCommercialReasons.Contains(reasonCode))
             ? reasonCode
             : null;
 

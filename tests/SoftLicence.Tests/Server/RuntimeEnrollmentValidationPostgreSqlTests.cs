@@ -414,7 +414,8 @@ public sealed partial class RuntimeEnrollmentValidationPostgreSqlTests(RuntimeEn
         var denied = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => pending);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, denied.StatusCode);
         Assert.Equal("authority_ineligible", denied.ErrorCode);
-        Assert.Equal("commercial_authority_ineligible", denied.DiagnosticCode);
+        // TKT-004158: the refusal names the commercial cause; the public code is unchanged.
+        Assert.Equal("license_expired", denied.DiagnosticCode);
         await using var check = await scenario.Factory.CreateDbContextAsync();
         var current = await check.RuntimeEnrollments.AsNoTracking().SingleAsync(row => row.Id == scenario.EnrollmentId);
         Assert.Equal(before.Epoch, current.Epoch);

@@ -588,6 +588,32 @@ public sealed class RuntimeEnrollmentHttpIntegrationTests
     }
 
     /// <summary>
+    /// TKT-004158: a revoked licence keeps the public <c>refresh_ineligible</c> code and publishes <c>license_revoked</c>;
+    /// the identity refusal kept under <c>commercial_authority_ineligible</c> stays without reason.
+    /// </summary>
+    [Fact]
+    public async Task Refresh_CommercialReasonIsNamed_IdentityStaysOpaque()
+    {
+        var enrollment = new Mock<IRuntimeEnrollmentService>();
+        enrollment.SetupSequence(service => service.RefreshPendingAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<RuntimeEnrollmentRefreshRequest>(),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new RuntimeEnrollmentException("refresh_ineligible", 422, "license_revoked"))
+            .ThrowsAsync(new RuntimeEnrollmentException("refresh_ineligible", 422, "commercial_authority_ineligible"));
+        using var factory = CreateFactory(enrollment.Object, allowLicenseBootstrap: true);
+        using var client = factory.CreateClient();
+
+        using var revoked = await client.PostAsync(
+            RefreshPath, new StringContent(RefreshBody, Encoding.UTF8, "application/json"));
+        using var identity = await client.PostAsync(
+            RefreshPath, new StringContent(RefreshBody, Encoding.UTF8, "application/json"));
+
+        Assert.Equal("{\"error\":\"refresh_ineligible\",\"reasonCode\":\"license_revoked\"}",
+            await revoked.Content.ReadAsStringAsync());
+        Assert.Equal("{\"error\":\"refresh_ineligible\"}", await identity.Content.ReadAsStringAsync());
+    }
+
+    /// <summary>
     /// TKT-004106: a quarantined assignment keeps the public <c>refresh_ineligible</c> code and publishes its bounded
     /// reason, while a hardware ban under the same code stays without reason (anti-piracy refusals stay opaque).
     /// </summary>

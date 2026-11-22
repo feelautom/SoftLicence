@@ -58,9 +58,18 @@ internal static class AutomaticSeatSwitch
 
         var scope = await SeatRuntimeReleaseAuthority.PrepareAsync(
             db, license.ProductId, license, active, fallbackNowUtc, cancellationToken);
-        if (!license.IsActive || license.RevokedAt != null
-            || license.ExpirationDate is { } expiry && expiry <= scope.ObservedAtUtc
-            || license.MaxSeats != 1 || !active[0].IsActive)
+        // TKT-004158: a revoked, deactivated or expired licence names its reason; the single-seat and live-seat
+        // preconditions of the automatic switch keep the historical reason-less refusal.
+        if (license.RevokedAt != null)
+            throw new DistributionOperationException("entitlement_ineligible", 422,
+                RuntimeCommercialEligibilityValidator.LicenseRevokedReason);
+        if (!license.IsActive)
+            throw new DistributionOperationException("entitlement_ineligible", 422,
+                RuntimeCommercialEligibilityValidator.LicenseInactiveReason);
+        if (license.ExpirationDate is { } expiry && expiry <= scope.ObservedAtUtc)
+            throw new DistributionOperationException("entitlement_ineligible", 422,
+                RuntimeCommercialEligibilityValidator.LicenseExpiredReason);
+        if (license.MaxSeats != 1 || !active[0].IsActive)
             throw new DistributionOperationException("entitlement_ineligible", 422);
         if (license.Type != null)
             await db.Entry(license.Type).ReloadAsync(cancellationToken);

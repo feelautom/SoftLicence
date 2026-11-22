@@ -306,17 +306,16 @@ public sealed partial class LicenseDecisionHistoryLegacyPostgreSqlTests(RuntimeE
             fault.Armed = true;
             var response = await controller.Activate(request);
             var result = Assert.IsAssignableFrom<ObjectResult>(response);
-            Assert.Equal(confirmed ? 400 : 500, result.StatusCode);
+            // TKT-004158: the business refusal is returned whatever the history outcome.
+            Assert.Equal(400, result.StatusCode);
             Assert.Equal("tkt976-correlation", controller.Response.Headers["X-SoftLicence-Correlation-Id"].ToString());
             Assert.Equal("tkt976-request", controller.Response.Headers["X-Request-Id"].ToString());
             Assert.Equal("nosniff", controller.Response.Headers["X-Content-Type-Options"].ToString());
             if (!confirmed)
             {
-                Assert.False(controller.Response.Headers.ContainsKey("X-SoftLicence-Error-Code"));
-                Assert.False(controller.Response.Headers.ContainsKey("X-SoftLicence-Error-Contract"));
-                Assert.False(controller.HttpContext.Items.ContainsKey(LogKeys.ResultStatusOverride));
+                // TKT-004158: the refusal keeps its error headers and never leaks the key or SQL text.
+                Assert.Equal("SEAT_LIMIT", controller.Response.Headers["X-SoftLicence-Error-Code"].ToString());
                 var body = System.Text.Json.JsonSerializer.Serialize(result.Value);
-                Assert.DoesNotContain("SEAT_LIMIT", body);
                 Assert.DoesNotContain(request.LicenseKey, body);
                 Assert.DoesNotContain("INSERT", body);
             }

@@ -1232,6 +1232,8 @@ public sealed partial class DistributionInstallationBindingServiceTests : IDispo
         var forgedException = await Assert.ThrowsAsync<DistributionOperationException>(() =>
             _service.FinalizeAsync(ClientId, Hash("forged"), forged));
         Assert.Equal("entitlement_ineligible", forgedException.ErrorCode);
+        // TKT-004158: a forged token never carries a reason.
+        Assert.Null(forgedException.ReasonCode);
 
         var entitlement = (await _service.IssueEntitlementAsync(
             ClientId, Hash("issue"), IssueRequest())).Response.EntitlementRef;
@@ -1249,6 +1251,8 @@ public sealed partial class DistributionInstallationBindingServiceTests : IDispo
         var revokedException = await Assert.ThrowsAsync<DistributionOperationException>(() =>
             _service.FinalizeAsync(ClientId, Hash("revoked"), FinalizeRequest(entitlement)));
         Assert.Equal("entitlement_ineligible", revokedException.ErrorCode);
+        // TKT-004158: a revoked licence names its commercial reason; the public code is unchanged.
+        Assert.Equal("license_revoked", revokedException.ReasonCode);
     }
 
     /// <summary>

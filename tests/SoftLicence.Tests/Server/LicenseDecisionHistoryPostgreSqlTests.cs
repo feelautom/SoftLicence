@@ -317,10 +317,10 @@ public sealed partial class LicenseDecisionHistoryPostgreSqlTests(RuntimeEnrollm
         }
         else
         {
-            var technical = await Assert.ThrowsAsync<InvalidOperationException>(() => service.FinalizeAsync("tkt976-synthetic-client", Sha256("tkt976-finalize"), request, requestCancellation.Token));
-            Assert.StartsWith("Licence decision ", technical.Message);
-            if (mode == "commit-ack")
-                Assert.Contains("indeterminate", technical.Message);
+            // TKT-004158: a failed or uncertain history write returns the business refusal, not an internal error.
+            var refusal = await Assert.ThrowsAsync<DistributionOperationException>(() => service.FinalizeAsync("tkt976-synthetic-client", Sha256("tkt976-finalize"), request, requestCancellation.Token));
+            Assert.Equal(422, refusal.StatusCode);
+            Assert.Equal("seat_limit_reached", refusal.ErrorCode);
         }
 
         elapsed.Stop();

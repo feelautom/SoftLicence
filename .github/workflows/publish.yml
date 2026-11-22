@@ -172,29 +172,16 @@ jobs:
               throw "Package name mismatch. Expected '$expectedName', got '$($packages[0].Name)'."
           }
 
+          # The allowlist lives in the shared signing contract (TKT-004207): a .signature.p7s entry
+          # passes only when it is a valid, timestamped author signature of the registered certificate.
+          . ./scripts/SdkSigning.ps1
+          Assert-SdkPackageEntries -PackagePath $packages[0].FullName
+
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $zip = [IO.Compression.ZipFile]::OpenRead($packages[0].FullName)
           try {
               $entries = $zip.Entries | Sort-Object FullName
               $entries | ForEach-Object { Write-Host "PACKAGE_ENTRY $($_.FullName) $($_.Length)" }
-
-              $allowed = @(
-                  "_rels/.rels",
-                  "[Content_Types].xml",
-                  "LICENSE",
-                  "PACKAGE_README.md",
-                  "SoftLicence.SDK.nuspec",
-                  "icon.png",
-                  "lib/netstandard2.0/SoftLicence.SDK.dll"
-              )
-
-              foreach ($entry in $entries) {
-                  $isAllowed = $allowed -ccontains $entry.FullName `
-                      -or $entry.FullName -clike "package/services/metadata/core-properties/*.psmdcp"
-                  if (-not $isAllowed) {
-                      throw "Unexpected file in NuGet package: $($entry.FullName)"
-                  }
-              }
 
               $secretPattern = '(?i)(api[_-]?key\s*[=:]\s*[^\s"'']+|secret\s*[=:]\s*[^\s"'']+|password\s*[=:]\s*[^\s"'']+|bearer\s+[a-z0-9._-]+|BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY|ConnectionStrings__|Host=.*;.*Password=|NUGET_API_KEY)'
               foreach ($entry in $entries) {
@@ -237,6 +224,10 @@ jobs:
               # An SDK whose assembly is not signed with the release certificate is never published.
               $thumbprint = Assert-SdkPackageSignature -PackagePath $pkg.FullName
               Write-Host "SoftLicence.SDK $($env:SDK_VERSION) identity and assembly signature verified (certificate $thumbprint)."
+              # nuget.org refuses a package of this account without an author signature of the
+              # registered certificate (TKT-004207); fail here with the reason instead of a bare 400.
+              $fingerprint = Assert-SdkPackageAuthorSignature -PackagePath $pkg.FullName
+              Write-Host "SoftLicence.SDK $($env:SDK_VERSION) NuGet author signature verified (certificate SHA-256 $fingerprint)."
 
               # Duplicates are not skipped: the version was checked as unpublished above, so a duplicate
               # here means the wrong package and must fail instead of reporting a silent success.

@@ -105,13 +105,28 @@ internal static class RuntimeCommercialEligibilityValidator
     /// <param name="ReportHardwareLinked">Current link of reported hardware, never historical proof.</param>
     /// <param name="ReportHardwareBanned">Whether a current active ban covers the reported hardware.</param>
     /// <param name="ActiveBanReason">Bounded recognized live-ban reason, independent of denial precedence.</param>
+    /// <param name="CommercialReason">
+    /// TKT-004158: finer licence or seat reason (<see cref="LicenseRevokedReason"/>, <see cref="LicenseInactiveReason"/>,
+    /// <see cref="LicenseExpiredReason"/>, <see cref="LicenseUnusableReason"/>, <see cref="SeatUnavailableReason"/>) when
+    /// <paramref name="DenialReason"/> is the historical <c>commercial_authority_ineligible</c>; otherwise null.
+    /// <paramref name="DenialReason"/> keeps its historical value because it is stored (preflight hardware decisions,
+    /// canary alerts) and replayed; only the refusal thrown to the client carries this finer reason.
+    /// </param>
     internal sealed record Assessment(
         EligibleAssignment? Assignment,
         string? DenialReason,
         bool ReportHardwareLinked,
         bool ReportHardwareBanned,
-        string? ActiveBanReason)
+        string? ActiveBanReason,
+        string? CommercialReason = null)
     {
+        /// <summary>
+        /// Reason carried by the client refusal: the finer <see cref="CommercialReason"/> when known, otherwise
+        /// <see cref="DenialReason"/>, otherwise the historical <c>commercial_authority_ineligible</c>. Publication of the
+        /// reason is decided later by <see cref="AssignmentRefusals.PublicReasonCode"/>, never here.
+        /// </summary>
+        internal string RefusalReason => CommercialReason ?? DenialReason ?? "commercial_authority_ineligible";
+
         /// <summary>Closed business outcome; infrastructure failures remain exceptions.</summary>
         internal AssessmentOutcome Outcome => Assignment is not null && DenialReason is null
             ? AssessmentOutcome.Eligible : AssessmentOutcome.Denied;
@@ -135,7 +150,7 @@ internal static class RuntimeCommercialEligibilityValidator
         CancellationToken cancellationToken)
     {
         var assessment = await AssessAsync(db, enrollment, approvedBinaries, now, null, cancellationToken);
-        return assessment.Assignment ?? throw Denied(assessment.DenialReason ?? "commercial_authority_ineligible");
+        return assessment.Assignment ?? throw Denied(assessment.RefusalReason);
     }
 
     /// <summary>
@@ -149,7 +164,10 @@ internal static class RuntimeCommercialEligibilityValidator
     /// <param name="sourceReleasePolicy">Whether the enrollment release is judged; see <see cref="SourceReleaseVersionPolicy"/>.</param>
     /// <param name="cancellationToken">Cancellation.</param>
     /// <returns>The eligible assignment with its exact seat hardware value.</returns>
-    /// <exception cref="RuntimeEnrollmentException">422 <c>authority_ineligible</c> with the denial reason; 503 for a broken graph.</exception>
+    /// <exception cref="RuntimeEnrollmentException">
+    /// 422 <c>authority_ineligible</c> with <see cref="Assessment.RefusalReason"/> as diagnostic (finer licence reason since
+    /// TKT-004158); 503 for a broken graph.
+    /// </exception>
     internal static async Task<EligibleAssignment> ValidateAsync(
         LicenseDbContext db,
         RuntimeEnrollment enrollment,
@@ -160,7 +178,7 @@ internal static class RuntimeCommercialEligibilityValidator
     {
         var assessment = await AssessAsync(db, enrollment, approvedBinaries, now, null,
             HardwareBanAssessmentMode.Enforce, sourceReleasePolicy, cancellationToken);
-        return assessment.Assignment ?? throw Denied(assessment.DenialReason ?? "commercial_authority_ineligible");
+        return assessment.Assignment ?? throw Denied(assessment.RefusalReason);
     }
 
     /// <summary>
@@ -283,10 +301,11 @@ internal static class RuntimeCommercialEligibilityValidator
 
         // Keep the established denial reason precedence while carrying live-ban priority separately for SHADOW.
         // TKT-003647: the licence and seat rules live in ClassifyLicenseAndSeat, shared with the current-assignment
-        // read; every finer reason it returns still maps to the single historical code here.
-        if (ClassifyLicenseAndSeat(license, seat, enrollment.ProductId, now.UtcDateTime) is not null)
+        // read; every finer reason it returns still maps to the single historical DenialReason here, because that value
+        // is stored and replayed. TKT-004158: the finer reason travels separately as CommercialReason.
+        if (ClassifyLicenseAndSeat(license, seat, enrollment.ProductId, now.UtcDateTime) is { } licenseOrSeatReason)
             return new Assessment(null, "commercial_authority_ineligible", reportHardwareLinked,
-                reportHardwareBanned, activeBanReason);
+                reportHardwareBanned, activeBanReason, licenseOrSeatReason);
 
         var activeSeats = await db.LicenseSeats.AsNoTracking()
             .CountAsync(row => row.LicenseId == license.Id && row.IsActive, cancellationToken);
@@ -370,7 +389,11 @@ internal static class RuntimeCommercialEligibilityValidator
     /// <param name="activeSeatCount">Number of active seats of that licence, counted by the caller in its transaction.</param>
     internal static bool ExceedsSeatCapacity(License license, int activeSeatCount) => activeSeatCount > license.MaxSeats;
 
-    /// <summary>Converts a bounded business reason to the stable public 422 response.</summary>
+    /// <summary>
+    /// Converts a bounded business reason to the stable public 422 <c>authority_ineligible</c>. The reason stays a
+    /// diagnostic; only the commercial and assignment-state reasons allowed by
+    /// <see cref="AssignmentRefusals.PublicReasonCode"/> ever reach a response body.
+    /// </summary>
     private static RuntimeEnrollmentException Denied(string diagnosticCode) =>
         new("authority_ineligible", StatusCodes.Status422UnprocessableEntity, diagnosticCode);
 

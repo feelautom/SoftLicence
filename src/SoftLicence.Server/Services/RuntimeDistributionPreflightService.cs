@@ -590,7 +590,7 @@ public sealed partial class RuntimeDistributionPreflightService : IRuntimeDistri
                 return await RefuseAsync(db, transaction, replay, clientId, requestId,
                     payloadDigestSha256, productId, licenseId, request.GrantRefDigestSha256!, request,
                     installationIdHash, authorityMode,
-                    exception.DiagnosticCode ?? "commercial_authority_ineligible", [], licenseActive,
+                    StoredResolverReason(exception.DiagnosticCode), [], licenseActive,
                     licenseRevoked, licenseExpired, paidAutoUnbanEligible, cancellationToken,
                     hardwareIdHash, classification);
             }
@@ -879,11 +879,6 @@ public sealed partial class RuntimeDistributionPreflightService : IRuntimeDistri
             decision.AutoUnbannedCount, decision.AttemptCount, replay);
 
     /// <summary>
-    /// Admits only the closed UUID evidence shape. A missing or malformed UUID is not a contract error: it is a
-    /// machine refusal decided by <see cref="MachineIdentity.FromUuid"/>. Only an unknown member, a missing evidence
-    /// object, or a UUID longer than the stored bound is rejected as an invalid request.
-    /// </summary>
-    /// <summary>
     /// Returns whether the WebSetup observations state that the UUID read itself failed
     /// (<c>"systemUuidRead": "error"</c>, exact ordinal value). Used only to pick AR-02 over AR-01 for an already
     /// refused machine; it can never turn a refusal into an acceptance.
@@ -896,6 +891,11 @@ public sealed partial class RuntimeDistributionPreflightService : IRuntimeDistri
         && status.ValueKind == JsonValueKind.String
         && string.Equals(status.GetString(), "error", StringComparison.Ordinal);
 
+    /// <summary>
+    /// Admits only the closed UUID evidence shape. A missing or malformed UUID is not a contract error: it is a
+    /// machine refusal decided by <see cref="MachineIdentity.FromUuid"/>. Only an unknown member, a missing evidence
+    /// object, or a UUID longer than the stored bound is rejected as an invalid request.
+    /// </summary>
     private static RuntimeDistributionHardwareEvidence ValidateEvidence(
         RuntimeDistributionHardwareEvidence? evidence)
     {
@@ -986,6 +986,26 @@ public sealed partial class RuntimeDistributionPreflightService : IRuntimeDistri
             ? new DistributionOperationException(DeviceRefusedErrorCode, StatusCodes.Status403Forbidden, supportCode)
             : NotEligible(reasonCode);
     }
+
+    /// <summary>
+    /// Maps the resolver's finer commercial reasons (TKT-004158: <c>license_revoked</c>, <c>license_inactive</c>,
+    /// <c>license_expired</c>, <c>version_ineligible</c>) back to the historical <c>commercial_authority_ineligible</c>
+    /// before it is stored in <c>RuntimeDistributionHardwareDecisions.ReasonCode</c>. Those rows are replayed through
+    /// <see cref="Denial"/> and read by analytics, so their vocabulary must not change; the public answer of this
+    /// anti-piracy endpoint (403 <c>not_eligible</c>, support code AR-00) is the same either way. Any other reason is
+    /// stored unchanged; a null reason becomes the historical value.
+    /// </summary>
+    /// <param name="diagnosticCode">Diagnostic of the resolver refusal.</param>
+    /// <returns>The reason to store: the historical value for the four commercial reasons and null, otherwise the input.</returns>
+    internal static string StoredResolverReason(string? diagnosticCode) => diagnosticCode switch
+    {
+        null => "commercial_authority_ineligible",
+        RuntimeCommercialEligibilityValidator.LicenseRevokedReason
+            or RuntimeCommercialEligibilityValidator.LicenseInactiveReason
+            or RuntimeCommercialEligibilityValidator.LicenseExpiredReason
+            or "version_ineligible" => "commercial_authority_ineligible",
+        _ => diagnosticCode
+    };
 
     /// <summary>Creates a fail-closed response for malformed provider-owned enrollment state.</summary>
     private static DistributionOperationException ServiceUnavailable() =>

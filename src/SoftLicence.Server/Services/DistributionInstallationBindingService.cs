@@ -241,7 +241,7 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
             candidate.Id == validated.TargetLicenseId && candidate.ProductId == validated.ProductId,
             cancellationToken);
         if (!IsEligibleLicense(targetLicense, now))
-            throw Reject("entitlement_ineligible");
+            throw EntitlementIneligible(targetLicense, now);
 
         if (requiresAliasSeatReconciliation)
         {
@@ -383,7 +383,7 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
                 candidate.Id == validated.LicenseId && candidate.ProductId == validated.ProductId,
                 cancellationToken);
         if (!IsEligibleLicense(license, now))
-            throw Reject("entitlement_ineligible");
+            throw EntitlementIneligible(license, now);
 
         var issuedAt = validated.ContractVersion is 3 or 4
             ? ToPostgreSqlTimestampPrecision(now)
@@ -702,7 +702,7 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
                 db, validated.EntitlementRef, clientId, validated.ProductId, now, cancellationToken);
         }
         if (!IsEligibleLicense(license, now))
-            throw Reject("entitlement_ineligible");
+            throw EntitlementIneligible(license, now);
         if (VirtualMachinePolicy.IsRestricted(license!.CommercialNature))
         {
             var machineProof = await RuntimeMachineEvidenceAuthority.ForFinalizeAsync(db, clientId,
@@ -712,7 +712,7 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
             now = db.Database.IsNpgsql() ? await RuntimeEnrollmentService.DatabaseNowAsync(db, cancellationToken) : _timeProvider.GetUtcNow();
             ValidateHandoffWindow(validated, now);
             entitlement = await ReadEntitlementAsync(db, validated.EntitlementRef, clientId, validated.ProductId, now, cancellationToken);
-            if (!IsEligibleLicense(license, now)) throw Reject("entitlement_ineligible");
+            if (!IsEligibleLicense(license, now)) throw EntitlementIneligible(license, now);
             var machineRefusal = VirtualMachinePolicy.Refusal(license.CommercialNature, machineProof);
             if (machineRefusal is not null) throw VirtualMachinePolicy.DistributionRefusal(machineRefusal);
         }
@@ -2158,13 +2158,51 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
         }
     }
 
+    /// <summary>
+    /// Returns whether <paramref name="license"/> may receive or keep a distribution entitlement at
+    /// <paramref name="now"/>; same rule as before TKT-004158, now expressed through <see cref="LicenseIneligibilityReason"/>.
+    /// </summary>
+    /// <param name="license">Licence with its seats loaded, or null when not found.</param>
+    /// <param name="now">Provider time; an expiry equal to it already counts as expired.</param>
     private static bool IsEligibleLicense(License? license, DateTimeOffset now) =>
-        license != null
-        && license.IsActive
-        && license.RevokedAt == null
-        && (!license.ExpirationDate.HasValue || license.ExpirationDate.Value > now.UtcDateTime)
-        && license.MaxSeats > 0
-        && license.Seats.Count(seat => seat.IsActive) <= license.MaxSeats;
+        LicenseIneligibilityReason(license, now) is null;
+
+    /// <summary>
+    /// Returns why <paramref name="license"/> cannot hold a distribution entitlement, or null when it can (TKT-004158).
+    /// Precedence: <c>license_missing</c>, <c>license_revoked</c>, <c>license_inactive</c>, <c>license_expired</c>,
+    /// <c>license_unusable</c> (no seat allowed), <c>seat_capacity_exceeded</c> (more active seats than allowed).
+    /// Pure function over the loaded seats; it never reads the database.
+    /// </summary>
+    /// <param name="license">Licence with its seats loaded, or null when not found.</param>
+    /// <param name="now">Provider time; an expiry equal to it already counts as expired.</param>
+    private static string? LicenseIneligibilityReason(License? license, DateTimeOffset now)
+    {
+        if (license == null)
+            return "license_missing";
+        if (license.RevokedAt != null)
+            return RuntimeCommercialEligibilityValidator.LicenseRevokedReason;
+        if (!license.IsActive)
+            return RuntimeCommercialEligibilityValidator.LicenseInactiveReason;
+        if (license.ExpirationDate.HasValue && license.ExpirationDate.Value <= now.UtcDateTime)
+            return RuntimeCommercialEligibilityValidator.LicenseExpiredReason;
+        if (license.MaxSeats <= 0)
+            return RuntimeCommercialEligibilityValidator.LicenseUnusableReason;
+        if (license.Seats.Count(seat => seat.IsActive) > license.MaxSeats)
+            return RuntimeCommercialEligibilityValidator.SeatCapacityExceededReason;
+        return null;
+    }
+
+    /// <summary>
+    /// Builds the 422 <c>entitlement_ineligible</c> refusal for an ineligible licence. Its reason is set only when it is
+    /// a commercial reason the client may see (<see cref="AssignmentRefusals.PublicReasonCode"/>), because Finalize and
+    /// source resolution publish <see cref="DistributionOperationException.ReasonCode"/> as is and Finalize stores it in
+    /// its decision history. A missing or unusable licence keeps the historical reason-less refusal.
+    /// </summary>
+    /// <param name="license">The ineligible licence, or null when not found.</param>
+    /// <param name="now">Provider time used by the eligibility rule.</param>
+    private static DistributionOperationException EntitlementIneligible(License? license, DateTimeOffset now) =>
+        new("entitlement_ineligible", StatusCodes.Status422UnprocessableEntity,
+            AssignmentRefusals.PublicReasonCode("entitlement_ineligible", LicenseIneligibilityReason(license, now)));
 
     /// <summary>
     /// Resolves and retires the sole active grantless source seat before target-seat establishment.

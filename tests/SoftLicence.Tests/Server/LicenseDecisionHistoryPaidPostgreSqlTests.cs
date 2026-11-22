@@ -124,7 +124,8 @@ public sealed partial class LicenseDecisionHistoryPaidPostgreSqlTests(RuntimeEnr
             controller.HttpContext.RequestAborted = requestCancellation.Token;
             fault.Armed = true;
             var response = Assert.IsAssignableFrom<ObjectResult>(await controller.Activate(new ActivationController.ActivationRequest { LicenseKey = licenseKey, HardwareId = hardwareId, AppName = appName, AppVersion = "2.2.999", CustomerEmail = "paid@example.test" }));
-            Assert.Equal(mode == "insert" ? 500 : 400, response.StatusCode);
+            // TKT-004158: the SEAT_LIMIT refusal (400) is returned even when its history insert fails.
+            Assert.Equal(400, response.StatusCode);
             if (mode == "cancel-after")
                 Assert.True(requestCancellation.IsCancellationRequested);
         }

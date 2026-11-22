@@ -211,7 +211,8 @@ public sealed partial class LicenseDecisionHistoryRuntimePostgreSqlTests(Runtime
 
             var sourceClock = System.Diagnostics.Stopwatch.StartNew();
             var sourceResult = await Tkt976_RuntimeIssueControllerAsync(sourceService, options, issue, client, sourceRequestCancellation.Token);
-            Assert.Equal(sourceFaulted ? 503 : mode == "source-token" ? 500 : 422, sourceResult.StatusCode);
+            // TKT-004158: a failed or uncertain history write no longer turns the business refusal into a 503.
+            Assert.Equal(mode == "source-token" ? 500 : 422, sourceResult.StatusCode);
             if (sourceMode == "cancel-after")
                 Assert.True(sourceRequestCancellation.IsCancellationRequested);
             if (sourceMode == "timeout")
@@ -296,11 +297,10 @@ public sealed partial class LicenseDecisionHistoryRuntimePostgreSqlTests(Runtime
         {
             var clock = System.Diagnostics.Stopwatch.StartNew();
             var refusal = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => faultService.IssueWebSetupTransitionAsync("website-step1", issueDigest, issue, requestCancellation.Token));
-            var businessRefusal = mode is "quota" or "runtime-business-after-save" or "cancel-after";
-            Assert.Equal(businessRefusal ? 422 : 503, refusal.StatusCode);
-            Assert.Equal(businessRefusal ? mode == "runtime-business-after-save" ? "synthetic_transfer_refusal" : "seat_limit_reached" : "authority_unavailable", refusal.ErrorCode);
-            if (mode == "commit-ack")
-                Assert.Equal("decision_history_commit_indeterminate", refusal.DiagnosticCode);
+            // TKT-004158: every mode returns the business refusal, even when the history write failed or its commit
+            // acknowledgement was lost; the failure is only logged.
+            Assert.Equal(422, refusal.StatusCode);
+            Assert.Equal(mode == "runtime-business-after-save" ? "synthetic_transfer_refusal" : "seat_limit_reached", refusal.ErrorCode);
             if (mode == "runtime-business-after-save")
                 Assert.True(fault.Triggered);
             if (mode == "cancel-after")

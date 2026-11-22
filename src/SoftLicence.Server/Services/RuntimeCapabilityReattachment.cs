@@ -141,7 +141,9 @@ internal static class RuntimeCapabilityReattachment
             db, enrollment, approvedBinaries, now, null, cancellationToken);
         if (assessment.IsEligible)
             return new Decision(assessment.Assignment, null, null);
-        var historical = Denied(assessment.DenialReason ?? "commercial_authority_ineligible");
+        // TKT-004158: the refusal carries the finer licence reason; the assignment_missing test below still reads the
+        // stored DenialReason, whose values are unchanged.
+        var historical = Denied(assessment.RefusalReason);
         if (!string.Equals(assessment.DenialReason, "assignment_missing", StringComparison.Ordinal))
             return new Decision(null, null, historical);
         var released = await FindHealthyReleasedSeatAsync(

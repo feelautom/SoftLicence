@@ -12,7 +12,12 @@ public sealed partial class RuntimeEnrollmentService
     /// <summary>Checkpoint after existing source row locks and authenticated source identity, before any later transfer mutation.</summary>
     private const string RuntimeSourceHistorySavepoint = "runtime_source_decision_identity";
 
-    /// <summary>Persists one pre-effect refusal for the established source, or for a fully validated target that replaced it.</summary>
+    /// <summary>
+    /// Persists one pre-effect refusal for the established source, or for a fully validated target that replaced it.
+    /// Since TKT-004158 a failed or uncertain history write is logged (phase, business code, commit outcome, no request
+    /// body) and the method returns normally, so that the caller rethrows the original business refusal instead of a
+    /// 503 <c>authority_unavailable</c>: the history is an audit trail, not the authority that decided the refusal.
+    /// </summary>
     /// <remarks>Source facts are identity-only and omit all claimed target identifiers and HWIDs. Only after source authority and target entitlement validation may the caller supply the server source-seat identity. SQL inspection proves the checkpoint follows the original locks and precedes business DML. Rollback plus terminal Clear affects only this private delegate context; the lease owns no tracked entities. Target business history uses its original later savepoint and cannot enter this handler. Five seconds linked to host shutdown cover rollback/save/commit; no fallback or internal retry follows failure or uncertain commit. Public500 from invalid target entitlement is retained, with its internal canonical refusal in ReasonCode.</remarks>
     private async Task PersistRuntimeIdentityRefusalAsync(LicenseDbContext db, RuntimeAuthorityLease lease,
         LicenseDecisionSnapshot snapshot, string phase, RuntimeWebSetupTransitionIssueRequest request,
@@ -34,12 +39,14 @@ public sealed partial class RuntimeEnrollmentService
             committing = true;
             await lease.CommitAsync(finalization.Token);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            _historyLogger?.LogError("LicenseDecisionPersistenceFailed Phase={Phase} ObservedBusinessCode={Code} CommitOutcome={CommitOutcome}",
-                phase, code, committing ? "indeterminate" : "not_confirmed");
-            throw new RuntimeEnrollmentException("authority_unavailable", StatusCodes.Status503ServiceUnavailable,
-                committing ? "decision_history_commit_indeterminate" : "decision_history_not_confirmed");
+            // TKT-004158: log the failure with its exception type only (no request body, no hardware value) and let the
+            // caller rethrow the business refusal. "indeterminate" means the history row may already be committed; the
+            // refusal itself changed nothing, so returning it stays true either way.
+            _historyLogger?.LogError(
+                "LicenseDecisionPersistenceFailed Phase={Phase} ObservedBusinessCode={Code} CommitOutcome={CommitOutcome} ExceptionType={ExceptionType}",
+                phase, code, committing ? "indeterminate" : "not_confirmed", exception.GetType().FullName);
         }
     }
 
@@ -67,7 +74,11 @@ public sealed partial class RuntimeEnrollmentService
         return LicenseDecisionHistoryWriter.AddAsync(db, decision, clientId, payloadDigest, occurredAt, cancellationToken);
     }
 
-    /// <summary>Commits only the captured refusal after undoing every transfer effect; failure never falls back to another transaction.</summary>
+    /// <summary>
+    /// Commits only the captured refusal after undoing every transfer effect; failure never falls back to another
+    /// transaction. Since TKT-004158 a failed or uncertain history write is logged and the method returns normally, so
+    /// the caller rethrows <paramref name="refusal"/> itself instead of a 503 <c>authority_unavailable</c>.
+    /// </summary>
     /// <remarks>
     /// The savepoint precedes sourceSeat, binding/enrollment/entitlement changes, target ownership/seat,
     /// encryption nonce SQL, transition/receipt inserts and epoch updates. SQL rollback plus Clear removes
@@ -75,8 +86,9 @@ public sealed partial class RuntimeEnrollmentService
     /// terminal refusal; no later branch consumes detached objects. RuntimeAuthorityLease owns only its
     /// transaction and epoch; its finally disposal does not require tracked entities. Existing lock order is
     /// unchanged. Five seconds independent of client abort but linked to host shutdown cover rollback/save/
-    /// commit. Persistence faults become the existing technical503 without a retryable inner SQL exception;
-    /// an uncertain commit is explicitly diagnosed, never asserted absent or retried here.
+    /// commit. Persistence faults are logged and the business refusal is returned (TKT-004158); the refusal is a
+    /// 4xx RuntimeEnrollmentException without SQL inner exception, so the retry loop never replays the operation, and
+    /// an uncertain commit is explicitly diagnosed in the log, never asserted absent or retried here.
     /// </remarks>
     private async Task PersistRuntimeTransferRefusalAsync(
         LicenseDbContext db, RuntimeAuthorityLease lease, RuntimeTransferHistoryObservation observation,
@@ -96,17 +108,14 @@ public sealed partial class RuntimeEnrollmentService
             committing = true;
             await lease.CommitAsync(finalization.Token);
         }
-        catch (Exception)
+        catch (Exception exception)
         {
             var outcome = committing ? "indeterminate" : "not_confirmed";
+            // TKT-004158: the customer receives the business refusal (caller rethrows it), not a 503. The log keeps the
+            // diagnosis without request body or hardware value.
             _historyLogger?.LogError(
-                "LicenseDecisionPersistenceFailed Phase=runtime_license_transfer ObservedBusinessCode={ObservedBusinessCode} CommitOutcome={CommitOutcome}",
-                refusal.ErrorCode, outcome);
-            // Preserve the established technical response and keep diagnostic state internal.
-            // Omitting a SQL inner exception prevents the business retry loop from replaying
-            // an operation whose history commit acknowledgement may have been lost.
-            throw new RuntimeEnrollmentException("authority_unavailable", StatusCodes.Status503ServiceUnavailable,
-                committing ? "decision_history_commit_indeterminate" : "decision_history_not_confirmed");
+                "LicenseDecisionPersistenceFailed Phase=runtime_license_transfer ObservedBusinessCode={ObservedBusinessCode} CommitOutcome={CommitOutcome} ExceptionType={ExceptionType}",
+                refusal.ErrorCode, outcome, exception.GetType().FullName);
         }
     }
 }

@@ -370,7 +370,8 @@ public sealed partial class RuntimeCriticalRecoveryPostgreSqlTests(RuntimeEnroll
             var denial = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => pending);
             Assert.Equal(StatusCodes.Status422UnprocessableEntity, denial.StatusCode);
             Assert.Equal("authority_ineligible", denial.ErrorCode);
-            Assert.Equal("commercial_authority_ineligible", denial.DiagnosticCode);
+            // TKT-004158: the refusal names the commercial cause; the public code is unchanged.
+            Assert.Equal("license_expired", denial.DiagnosticCode);
         }
         finally
         {

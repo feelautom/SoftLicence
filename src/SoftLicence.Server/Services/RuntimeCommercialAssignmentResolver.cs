@@ -82,16 +82,13 @@ internal static class RuntimeCommercialAssignmentResolver
         if (activeAssignments.Count == 1)
             return new Resolution(activeAssignments[0], false);
 
-        if (license.ProductId != enrollment.ProductId
-            || !license.IsActive
-            || license.RevokedAt is not null
-            || license.ExpirationDate is { } expiry && expiry <= now.UtcDateTime
-            || license.MaxSeats < 1
-            // TKT-004062: a reinstallation source relink skips only its own replaced release (NotJudged).
-            || sourceReleasePolicy == RuntimeCommercialEligibilityValidator.SourceReleaseVersionPolicy.Judged
-                && (!RuntimeEnrollmentService.IsVersionAllowed(releaseVersion, license.AllowedVersions)
-                    || RuntimeEnrollmentService.IsVersionBelow(releaseVersion, license.Product?.MinimumAllowedVersion)))
-            throw Denied("commercial_authority_ineligible");
+        // TKT-004158: the refusal names the commercial cause (revoked, inactive, expired, version) so that clients can
+        // explain it; a licence of another product or without seats keeps the unpublished commercial_authority_ineligible.
+        // The precedence mirrors RuntimeCommercialEligibilityValidator.ClassifyLicenseAndSeat. The public code stays
+        // 422 authority_ineligible; callers that store this diagnostic (preflight) map it back to the historical value.
+        if (LicenseRefusalReason(license, enrollment.ProductId, releaseVersion, sourceReleasePolicy, now.UtcDateTime)
+            is { } licenseRefusal)
+            throw Denied(licenseRefusal);
 
         var activeSeatCount = license.Seats.Count(row => row.IsActive);
         if (activeSeatCount > license.MaxSeats)
@@ -436,6 +433,39 @@ internal static class RuntimeCommercialAssignmentResolver
         /// </param>
         internal static AuthorityProof AccountRelink(string relinkClientId, Guid? ownerSubjectId) =>
             new(relinkClientId, null, null, ownerSubjectId);
+    }
+
+    /// <summary>
+    /// Returns why the target licence cannot receive a new assignment, or null when it can (TKT-004158). Precedence:
+    /// <c>license_revoked</c>, <c>license_inactive</c>, <c>license_expired</c>, then the unpublished
+    /// <c>commercial_authority_ineligible</c> for a licence of another product or without seats, then
+    /// <c>version_ineligible</c> when the release is judged. Pure function, no database access.
+    /// </summary>
+    /// <param name="license">Target licence with its product loaded.</param>
+    /// <param name="enrollmentProductId">Product of the enrollment, which the licence must share.</param>
+    /// <param name="releaseVersion">Release version of the enrollment.</param>
+    /// <param name="sourceReleasePolicy">Whether the release version is judged (TKT-004062).</param>
+    /// <param name="nowUtc">Provider UTC time; an expiry equal to it already counts as expired.</param>
+    private static string? LicenseRefusalReason(
+        License license,
+        Guid enrollmentProductId,
+        string releaseVersion,
+        RuntimeCommercialEligibilityValidator.SourceReleaseVersionPolicy sourceReleasePolicy,
+        DateTime nowUtc)
+    {
+        if (license.RevokedAt is not null)
+            return RuntimeCommercialEligibilityValidator.LicenseRevokedReason;
+        if (!license.IsActive)
+            return RuntimeCommercialEligibilityValidator.LicenseInactiveReason;
+        if (license.ExpirationDate is { } expiry && expiry <= nowUtc)
+            return RuntimeCommercialEligibilityValidator.LicenseExpiredReason;
+        if (license.ProductId != enrollmentProductId || license.MaxSeats < 1)
+            return "commercial_authority_ineligible";
+        if (sourceReleasePolicy == RuntimeCommercialEligibilityValidator.SourceReleaseVersionPolicy.Judged
+            && (!RuntimeEnrollmentService.IsVersionAllowed(releaseVersion, license.AllowedVersions)
+                || RuntimeEnrollmentService.IsVersionBelow(releaseVersion, license.Product?.MinimumAllowedVersion)))
+            return "version_ineligible";
+        return null;
     }
 
     /// <summary>Creates the existing bounded commercial denial without exposing authority data.</summary>

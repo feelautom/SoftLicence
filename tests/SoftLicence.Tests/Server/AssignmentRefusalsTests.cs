@@ -173,6 +173,44 @@ public sealed class AssignmentRefusalsTests
         Assert.True(AssignmentRefusals.TryTranslate(new DbUpdateException("save failed", cause), out _));
     }
 
+    /// <summary>
+    /// TKT-004158: the five commercial reasons are published under any code, while the unpublished licence-structure
+    /// reasons, the identity refusal and every ban stay server-side.
+    /// </summary>
+    [Theory]
+    [InlineData("authority_ineligible", "license_revoked", "license_revoked")]
+    [InlineData("authority_ineligible", "license_expired", "license_expired")]
+    [InlineData("refresh_ineligible", "license_inactive", "license_inactive")]
+    [InlineData("bootstrap_ineligible", "version_ineligible", "version_ineligible")]
+    [InlineData("entitlement_ineligible", "seat_capacity_exceeded", "seat_capacity_exceeded")]
+    [InlineData("reinstall_authority_ineligible", "license_revoked", "license_revoked")]
+    [InlineData("authority_ineligible", "license_unusable", null)]
+    [InlineData("authority_ineligible", "seat_unavailable", null)]
+    [InlineData("entitlement_ineligible", "license_missing", null)]
+    [InlineData("authority_ineligible", "commercial_authority_ineligible", null)]
+    [InlineData("entitlement_ineligible", "hardware_banned", null)]
+    public void PublicReasonCode_PublishesOnlyCommercialReasons(string code, string reason, string? expected)
+    {
+        Assert.Equal(expected, AssignmentRefusals.PublicReasonCode(code, reason));
+    }
+
+    /// <summary>
+    /// TKT-004158: the preflight stores the historical <c>commercial_authority_ineligible</c> for the resolver's finer
+    /// commercial reasons, so stored and replayed hardware decisions keep their vocabulary; other reasons are unchanged.
+    /// </summary>
+    [Theory]
+    [InlineData("license_revoked", "commercial_authority_ineligible")]
+    [InlineData("license_inactive", "commercial_authority_ineligible")]
+    [InlineData("license_expired", "commercial_authority_ineligible")]
+    [InlineData("version_ineligible", "commercial_authority_ineligible")]
+    [InlineData(null, "commercial_authority_ineligible")]
+    [InlineData("seat_capacity_exceeded", "seat_capacity_exceeded")]
+    [InlineData("assignment_scope_mismatch", "assignment_scope_mismatch")]
+    public void PreflightStoredResolverReason_KeepsTheHistoricalVocabulary(string? diagnostic, string stored)
+    {
+        Assert.Equal(stored, RuntimeDistributionPreflightService.StoredResolverReason(diagnostic));
+    }
+
     /// <summary>Only the busy code carries <c>Retry-After</c>; other codes leave the headers untouched.</summary>
     [Fact]
     public void ApplyRetryAfter_OnlyForBusy()

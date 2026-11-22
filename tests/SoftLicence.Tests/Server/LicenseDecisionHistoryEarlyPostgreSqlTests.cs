@@ -157,11 +157,9 @@ public sealed partial class LicenseDecisionHistoryEarlyPostgreSqlTests(RuntimeEn
         }
         else
         {
-            var error = await Assert.ThrowsAsync<InvalidOperationException>(() => service.FinalizeAsync("tkt976-synthetic-client", Sha256("976-early-fault"), request, requestCancellation.Token));
-            Assert.StartsWith("Licence decision ", error.Message);
-            Assert.DoesNotContain("SELECT", error.Message);
-            if (mode is "commit-before" or "commit-ack")
-                Assert.Contains("indeterminate", error.Message);
+            // TKT-004158: the early refusal is returned even when its history could not be confirmed.
+            var refused = await Assert.ThrowsAsync<DistributionOperationException>(() => service.FinalizeAsync("tkt976-synthetic-client", Sha256("976-early-fault"), request, requestCancellation.Token));
+            Assert.Equal("hardware_authority_refused", refused.ErrorCode);
         }
 
         timer.Stop();

@@ -482,6 +482,219 @@ if (Test-Path -LiteralPath $syncScriptPath -PathType Leaf) {
     }
 }
 
+# --- NuGet author signature (TKT-004207) -------------------------------------------------------
+# nuget.org refuses any package of the FeelAutom account without an author signature made with its
+# registered certificate (HTTP 400 on the SDK 3.0.0 push). The preparation signs the package, and
+# the workflow accepts the .signature.p7s entry only when that signature is the expected one.
+
+Add-Type -AssemblyName System.Security.Cryptography.Pkcs
+
+# DER of the CommitmentTypeIndication attribute value naming proof-of-origin (author) or
+# proof-of-receipt (repository), exactly as dotnet nuget sign writes it.
+$authorCommitment = [byte[]](0x30, 0x0D, 0x06, 0x0B, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x10, 0x06, 0x01)
+$repositoryCommitment = [byte[]](0x30, 0x0D, 0x06, 0x0B, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x10, 0x06, 0x02)
+
+# Creates a throwaway self-signed RSA certificate with its private key, never stored anywhere.
+function New-TestSigningCertificate {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $rsa = [Security.Cryptography.RSA]::Create(2048)
+    $request = [Security.Cryptography.X509Certificates.CertificateRequest]::new(
+        "CN=$Name", $rsa, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+    return $request.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOffset]::UtcNow.AddDays(30))
+}
+
+# Returns the uppercase SHA-256 fingerprint of a certificate, the form NuGet uses.
+function Get-TestCertificateFingerprint {
+    param([Parameter(Mandatory = $true)]$Certificate)
+
+    return [BitConverter]::ToString([Security.Cryptography.SHA256]::HashData($Certificate.RawData)).Replace('-', '')
+}
+
+# Builds the bytes of a .signature.p7s shaped like a NuGet author signature. The switches remove or
+# replace one element at a time so each structural refusal of the guard can be proven.
+function New-TestAuthorSignatureBytes {
+    param(
+        [Parameter(Mandatory = $true)]$Certificate,
+        [byte[]]$Commitment = $authorCommitment,
+        [switch]$WithoutCommitment,
+        [switch]$WithoutTimestamp,
+        [switch]$TimestampNotTstInfo,
+        [switch]$TwoSigners
+    )
+
+    $cms = [Security.Cryptography.Pkcs.SignedCms]::new([Security.Cryptography.Pkcs.ContentInfo]::new([byte[]](1, 2, 3)), $false)
+    $signer = [Security.Cryptography.Pkcs.CmsSigner]::new($Certificate)
+    $signer.DigestAlgorithm = [Security.Cryptography.Oid]::new('2.16.840.1.101.3.4.2.1')
+    if (-not $WithoutCommitment) {
+        $signer.SignedAttributes.Add([Security.Cryptography.AsnEncodedData]::new('1.2.840.113549.1.9.16.2.16', $Commitment)) | Out-Null
+    }
+    $cms.ComputeSignature($signer)
+    if ($TwoSigners) {
+        $cms.ComputeSignature($signer)
+    }
+    if (-not $WithoutTimestamp) {
+        $tokenType = if ($TimestampNotTstInfo) { '1.2.840.113549.1.7.1' } else { '1.2.840.113549.1.9.16.1.4' }
+        $token = [Security.Cryptography.Pkcs.SignedCms]::new(
+            [Security.Cryptography.Pkcs.ContentInfo]::new([Security.Cryptography.Oid]::new($tokenType), [byte[]](4, 5, 6)), $false)
+        $token.ComputeSignature([Security.Cryptography.Pkcs.CmsSigner]::new($Certificate))
+        $cms.SignerInfos[0].AddUnsignedAttribute([Security.Cryptography.AsnEncodedData]::new('1.2.840.113549.1.9.16.2.14', $token.Encode()))
+    }
+    return $cms.Encode()
+}
+
+$authorCertificate = New-TestSigningCertificate -Name "SoftLicence author test"
+$otherCertificate = New-TestSigningCertificate -Name "Other publisher test"
+$authorFingerprint = Get-TestCertificateFingerprint -Certificate $authorCertificate
+
+Assert-True `
+    -Condition ((Get-SdkNuGetSigningCertificateFingerprint) -ceq 'A1515DCDB473469BC226F0DDF94DAD06E6EDF7B21C0732444BF3B34DE3B0CD33') `
+    -Name "Registered NuGet certificate fingerprint is the SHA-256 of the release certificate"
+Assert-True `
+    -Condition ($null -eq (Get-SdkAuthorSignatureFailure -SignatureBytes (New-TestAuthorSignatureBytes -Certificate $authorCertificate) -ExpectedFingerprint $authorFingerprint)) `
+    -Name "Timestamped author signature of the expected certificate is acceptable"
+Assert-True `
+    -Condition ($null -eq (Get-SdkAuthorSignatureFailure -SignatureBytes (New-TestAuthorSignatureBytes -Certificate $authorCertificate) -ExpectedFingerprint $authorFingerprint.ToLowerInvariant())) `
+    -Name "Fingerprint comparison ignores hexadecimal case"
+foreach ($case in @(
+    @{ Name = "Author signature of another certificate is refused"; Bytes = (New-TestAuthorSignatureBytes -Certificate $otherCertificate); Pattern = 'unexpected certificate' },
+    @{ Name = "Signature without commitment type is refused"; Bytes = (New-TestAuthorSignatureBytes -Certificate $authorCertificate -WithoutCommitment); Pattern = 'not an author signature' },
+    @{ Name = "Repository signature is refused"; Bytes = (New-TestAuthorSignatureBytes -Certificate $authorCertificate -Commitment $repositoryCommitment); Pattern = 'not an author signature' },
+    @{ Name = "Author signature without timestamp is refused"; Bytes = (New-TestAuthorSignatureBytes -Certificate $authorCertificate -WithoutTimestamp); Pattern = 'no timestamp' },
+    @{ Name = "Timestamp attribute that is not an RFC 3161 token is refused"; Bytes = (New-TestAuthorSignatureBytes -Certificate $authorCertificate -TimestampNotTstInfo); Pattern = 'not an RFC 3161' },
+    @{ Name = "Signature with two signers is refused"; Bytes = (New-TestAuthorSignatureBytes -Certificate $authorCertificate -TwoSigners); Pattern = 'exactly one signer' },
+    @{ Name = "Undecodable signature is refused"; Bytes = [Text.Encoding]::ASCII.GetBytes("not a signature"); Pattern = 'cannot be decoded' }
+)) {
+    Assert-True `
+        -Condition ((Get-SdkAuthorSignatureFailure -SignatureBytes $case.Bytes -ExpectedFingerprint $authorFingerprint) -match $case.Pattern) `
+        -Name $case.Name
+}
+
+# Package level. nuget verify needs the registered certificate and a trusted chain, which a test
+# fixture cannot have, so these cases inject the verifier; the real verifier runs on the real
+# package in Prepare-SdkRelease.ps1, in the workflow, and below when a signed package is supplied.
+$passingVerifier = { param($PackagePath, $Fingerprint) return $null }
+$failingVerifier = { param($PackagePath, $Fingerprint) return "NU3018: simulated verification failure" }
+$baseEntries = @(
+    @("_rels/.rels", [Text.Encoding]::ASCII.GetBytes("rels")),
+    @("[Content_Types].xml", [Text.Encoding]::ASCII.GetBytes("<Types/>")),
+    @("LICENSE", [Text.Encoding]::ASCII.GetBytes("license")),
+    @("PACKAGE_README.md", [Text.Encoding]::ASCII.GetBytes("readme")),
+    @("SoftLicence.SDK.nuspec", (New-NuspecBytes -Id "SoftLicence.SDK" -Version "3.0.0")),
+    @("icon.png", [byte[]](0x89, 0x50)),
+    @($assemblyEntry, $signedBytes),
+    @("package/services/metadata/core-properties/abc.psmdcp", [Text.Encoding]::ASCII.GetBytes("<coreProperties/>"))
+)
+$goodSignature = New-TestAuthorSignatureBytes -Certificate $authorCertificate
+$authorFixtures = @()
+try {
+    $unsignedSdk = New-SdkPackageFixtureFromList -EntryList $baseEntries
+    $authorSignedSdk = New-SdkPackageFixtureFromList -EntryList ($baseEntries + , @(".signature.p7s", $goodSignature))
+    $junkSignedSdk = New-SdkPackageFixtureFromList -EntryList ($baseEntries + , @(".signature.p7s", [Text.Encoding]::ASCII.GetBytes("junk")))
+    $otherSignedSdk = New-SdkPackageFixtureFromList -EntryList ($baseEntries + , @(".signature.p7s", (New-TestAuthorSignatureBytes -Certificate $otherCertificate)))
+    $caseTwinSignatureSdk = New-SdkPackageFixtureFromList -EntryList ($baseEntries + @(@(".signature.p7s", $goodSignature), @(".Signature.p7s", $goodSignature)))
+    $nestedSignatureSdk = New-SdkPackageFixtureFromList -EntryList ($baseEntries + , @("lib/.signature.p7s", $goodSignature))
+    $extraFileSdk = New-SdkPackageFixtureFromList -EntryList ($baseEntries + , @("tools/install.ps1", [Text.Encoding]::ASCII.GetBytes("evil")))
+    $authorFixtures = @($unsignedSdk, $authorSignedSdk, $junkSignedSdk, $otherSignedSdk, $caseTwinSignatureSdk, $nestedSignatureSdk, $extraFileSdk)
+
+    Assert-True `
+        -Condition ($null -eq (Get-GuardFailure { Assert-SdkPackageEntries -PackagePath $unsignedSdk -NuGetVerifier $failingVerifier })) `
+        -Name "Unsigned package with only allowed entries passes the content check"
+    Assert-True `
+        -Condition ($null -eq (Get-GuardFailure { Assert-SdkPackageEntries -PackagePath $authorSignedSdk -ExpectedFingerprint $authorFingerprint -NuGetVerifier $passingVerifier })) `
+        -Name "Author signature entry is accepted when the signature is the expected one"
+    Assert-True `
+        -Condition ((Get-GuardFailure { Assert-SdkPackageEntries -PackagePath $authorSignedSdk -ExpectedFingerprint $authorFingerprint -NuGetVerifier $failingVerifier }) -match 'nuget verify refused.*NU3018') `
+        -Name "Author signature entry is refused when nuget verify fails"
+    Assert-True `
+        -Condition ((Get-GuardFailure { Assert-SdkPackageEntries -PackagePath $junkSignedSdk -ExpectedFingerprint $authorFingerprint -NuGetVerifier $passingVerifier }) -match 'cannot be decoded') `
+        -Name "Undecodable signature entry is refused even if nuget verify would pass"
+    Assert-True `
+        -Condition ((Get-GuardFailure { Assert-SdkPackageEntries -PackagePath $otherSignedSdk -ExpectedFingerprint $authorFingerprint -NuGetVerifier $passingVerifier }) -match 'unexpected certificate') `
+        -Name "Signature entry of another certificate is refused"
+    Assert-True `
+        -Condition ((Get-GuardFailure { Assert-SdkPackageEntries -PackagePath $caseTwinSignatureSdk -ExpectedFingerprint $authorFingerprint -NuGetVerifier $passingVerifier }) -match 'exactly one \.signature\.p7s') `
+        -Name "Signature entry twin differing by case is refused"
+    Assert-True `
+        -Condition ((Get-GuardFailure { Assert-SdkPackageEntries -PackagePath $nestedSignatureSdk -ExpectedFingerprint $authorFingerprint -NuGetVerifier $passingVerifier }) -match 'Unexpected file in NuGet package: lib/\.signature\.p7s') `
+        -Name "Signature entry outside the package root is refused"
+    Assert-True `
+        -Condition ((Get-GuardFailure { Assert-SdkPackageEntries -PackagePath $extraFileSdk -NuGetVerifier $passingVerifier }) -match 'Unexpected file in NuGet package: tools/install\.ps1') `
+        -Name "Unexpected entry is still refused"
+    Assert-True `
+        -Condition ((Get-GuardFailure { Assert-SdkPackageAuthorSignature -PackagePath $unsignedSdk -NuGetVerifier $passingVerifier }) -match 'no NuGet author signature') `
+        -Name "A package without author signature cannot be published"
+    Assert-True `
+        -Condition ($null -eq (Get-GuardFailure { Assert-SdkPackageAuthorSignature -PackagePath $authorSignedSdk -ExpectedFingerprint $authorFingerprint -NuGetVerifier $passingVerifier })) `
+        -Name "A package with the expected author signature can be published"
+
+    # The workflow content step itself, run as written in publish.yml against the fixtures.
+    $verifyBlock = @($runBlocks | Where-Object { $_ -match 'Expected exactly one nupkg in out' })
+    Assert-True -Condition ($verifyBlock.Count -eq 1) -Name "Package content step discovered"
+    Assert-True -Condition ($verifyBlock.Count -eq 1 -and $verifyBlock[0] -notmatch '\$allowed\s*=\s*@\(') -Name "Package content step has no private copy of the allowlist"
+    if ($verifyBlock.Count -eq 1) {
+        $stepRoot = Join-Path ([IO.Path]::GetTempPath()) ("softlicence-publish-step-" + [Guid]::NewGuid().ToString("N"))
+        $previousSdkVersion = $env:SDK_VERSION
+        try {
+            New-Item -ItemType Directory -Path (Join-Path $stepRoot "scripts"), (Join-Path $stepRoot "out") | Out-Null
+            Copy-Item -LiteralPath (Join-Path $PSScriptRoot "..\..\scripts\SdkSigning.ps1") -Destination (Join-Path $stepRoot "scripts")
+            $env:SDK_VERSION = "3.0.0"
+            foreach ($stepCase in @(
+                @{ Name = "Workflow content step accepts an unsigned package"; Package = $unsignedSdk; Pattern = $null },
+                @{ Name = "Workflow content step refuses an invalid author signature"; Package = $junkSignedSdk; Pattern = 'cannot be decoded' }
+            )) {
+                Get-ChildItem -LiteralPath (Join-Path $stepRoot "out") | Remove-Item -Force
+                Copy-Item -LiteralPath $stepCase.Package -Destination (Join-Path $stepRoot "out\SoftLicence.SDK.3.0.0.nupkg")
+                Push-Location $stepRoot
+                try {
+                    $stepFailure = Get-GuardFailure ([scriptblock]::Create($verifyBlock[0]))
+                }
+                finally {
+                    Pop-Location
+                }
+                $stepOk = if ($null -eq $stepCase.Pattern) { $null -eq $stepFailure } else { $stepFailure -match $stepCase.Pattern }
+                Assert-True -Condition $stepOk -Name $stepCase.Name
+            }
+        }
+        finally {
+            $env:SDK_VERSION = $previousSdkVersion
+            Remove-Item -LiteralPath $stepRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+finally {
+    foreach ($fixture in $authorFixtures) {
+        Remove-Item -LiteralPath $fixture -Force -ErrorAction SilentlyContinue
+    }
+    $authorCertificate.Dispose()
+    $otherCertificate.Dispose()
+}
+
+if ($pushBlock.Count -eq 1) {
+    $authorGuardIndex = $pushBlock[0].IndexOf('Assert-SdkPackageAuthorSignature', [System.StringComparison]::Ordinal)
+    $pushCommandIndex = $pushBlock[0].IndexOf('dotnet nuget push', [System.StringComparison]::Ordinal)
+    Assert-True -Condition ($authorGuardIndex -ge 0 -and $authorGuardIndex -lt $pushCommandIndex) -Name "Author signature guard runs before the NuGet push"
+}
+if ($null -ne $prepareScript) {
+    $authorSignIndex = $prepareScript.IndexOf('Invoke-SdkPackageAuthorSigning -PackagePath', [System.StringComparison]::Ordinal)
+    $authorCheckIndex = $prepareScript.IndexOf('Assert-SdkPackageAuthorSignature -PackagePath', [System.StringComparison]::Ordinal)
+    $contentCheckIndex = $prepareScript.IndexOf('Assert-SdkPackageEntries -PackagePath', [System.StringComparison]::Ordinal)
+    Assert-True -Condition ($authorSignIndex -gt $signStepIndex) -Name "Local preparation author-signs the package after signing the assembly"
+    Assert-True -Condition ($authorCheckIndex -gt $authorSignIndex) -Name "Local preparation verifies the author signature after signing"
+    Assert-True -Condition ($contentCheckIndex -gt $authorSignIndex) -Name "Local preparation checks the content of the signed package"
+}
+
+# Real package proof, local only: the registered certificate is never available to the test run.
+$realSignedPackage = $env:SOFTLICENCE_SIGNED_SDK_PACKAGE
+if (-not [string]::IsNullOrWhiteSpace($realSignedPackage)) {
+    Assert-True `
+        -Condition ($null -eq (Get-GuardFailure { Assert-SdkPackageAuthorSignature -PackagePath $realSignedPackage })) `
+        -Name "Real author-signed SDK package passes the guard with the real nuget verify"
+    Assert-True `
+        -Condition ($null -eq (Get-GuardFailure { Assert-SdkPackageEntries -PackagePath $realSignedPackage })) `
+        -Name "Real author-signed SDK package passes the content check"
+}
+
 if ($failures -gt 0) {
     throw "$failures publish workflow security test(s) failed."
 }

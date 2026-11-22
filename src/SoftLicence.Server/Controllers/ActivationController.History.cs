@@ -112,9 +112,13 @@ public partial class ActivationController
     /// seat, auto-unban, cleanup and history changes; no later business path uses detached objects. The
     /// outer caller disposes the transaction, and unrelated factory-owned telemetry contexts are untouched.
     /// Five seconds linked to application shutdown cover rollback, history save and commit. Client
-    /// cancellation does not interrupt an already-decided refusal. Failure keeps the existing localized
-    /// HTTP500 mapping without provisional business-error headers; commit acknowledgement loss remains
-    /// indeterminate. An explicit commercialRevokeLicenseId must equal the observed locked license and requires
+    /// cancellation does not interrupt an already-decided refusal. Since TKT-004158 a failure is logged (business code,
+    /// commit outcome, exception type) and the original refusal is returned with its headers, instead of the former
+    /// localized HTTP 500 "Signature key unreadable": the history is an audit trail, and the refusal undid every business
+    /// effect before it was written. The one exception is the first-order revocation refusal
+    /// (<paramref name="commercialRevokeLicenseId"/>): its revocation commits with the history, so a failed or uncertain
+    /// write keeps the former HTTP 500 without business-error headers rather than announce a revocation that did not
+    /// happen. Commit acknowledgement loss remains indeterminate in the log. An explicit commercialRevokeLicenseId must equal the observed locked license and requires
     /// a transaction; only that new license is revoked after rollback, atomically with its refusal. Every other
     /// caller retains history-only finalization. No retry, external notification or fallback transaction is used.
     /// </remarks>
@@ -150,14 +154,25 @@ public partial class ActivationController
                 await observation.Transaction.CommitAsync(finalization.Token);
             return response;
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            _logger.LogError("LicenseDecisionPersistenceFailed Phase=legacy_activation ObservedBusinessCode={ObservedBusinessCode} CommitOutcome={CommitOutcome}",
-                code, committing ? "indeterminate" : "not_confirmed");
-            HttpContext.Items.Remove(LogKeys.ResultStatusOverride);
-            Response.Headers.Remove(ActivationErrorCodeHeader);
-            Response.Headers.Remove(ActivationErrorContractVersionHeader);
-            return StatusCode(StatusCodes.Status500InternalServerError, _localizer["Api_InternalErrorSignature"].Value);
+            // The log keeps the diagnosis without request body, key or hardware value.
+            _logger.LogError(
+                "LicenseDecisionPersistenceFailed Phase=legacy_activation ObservedBusinessCode={ObservedBusinessCode} CommitOutcome={CommitOutcome} ExceptionType={ExceptionType}",
+                code, committing ? "indeterminate" : "not_confirmed", exception.GetType().FullName);
+            // The first-order revocation is written in the same transaction as this history: when the write failed
+            // the revocation was rolled back (or its commit is unknown), so announcing "revoked" would be false. That
+            // refusal keeps the former failure, without its provisional business-error headers (TKT-001424).
+            if (commercialRevokeLicenseId.HasValue)
+            {
+                HttpContext.Items.Remove(LogKeys.ResultStatusOverride);
+                Response.Headers.Remove(ActivationErrorCodeHeader);
+                Response.Headers.Remove(ActivationErrorContractVersionHeader);
+                return StatusCode(StatusCodes.Status500InternalServerError, _localizer["Api_InternalErrorSignature"].Value);
+            }
+            // TKT-004158: every other refusal undid its business effects before this write, so the customer receives
+            // the business refusal with its error headers, never a fake signature failure.
+            return response;
         }
     }
 }
