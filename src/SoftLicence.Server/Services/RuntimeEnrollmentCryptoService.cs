@@ -501,7 +501,7 @@ public sealed class RuntimeEnrollmentCryptoService : IRuntimeEnrollmentCryptoSer
             or "rollback-response" or "bootstrap-issue-response"
             or "bootstrap-redeem-response" or "websetup-transition-response"
             or "hardware-migration-response" or "hardware-migration-receipt"
-            or "websetup-upgrade-response";
+            or "websetup-upgrade-response" or "account-relink-response";
 
     private static byte[] SerializeJson(Action<Utf8JsonWriter> write)
     {

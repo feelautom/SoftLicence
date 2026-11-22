@@ -173,25 +173,33 @@
                     {
                         <div class="input-group mb-3 mt-3">
                             <input class="form-control" placeholder="@L["Common_Name"] (ex: Professionnelle)" @bind="newTypeName" />
-                            <input class="form-control" placeholder="SLUG (ex: PRO)" @bind="newTypeSlug" />
+                            <input class="form-control" placeholder="@L["Products_TypeSlugPlaceholder"]" @bind="newTypeSlug" />
                             <input class="form-control" type="number" style="max-width: 100px;" title="@L["Products_Duration"] (@L["Common_Days"])" @bind="newTypeDuration" />
                             <input class="form-control" type="number" style="max-width: 80px;" title="@L["Licenses_Seats"]" @bind="newMaxSeats" />
-                            <input class="form-control" type="number" style="max-width: 80px;" title="Max activations/jour (0 = illimité)" @bind="newMaxActivationsPerDay" placeholder="Act/j" />
+                            <input class="form-control" type="number" style="max-width: 80px;" title="@L["Products_MaxActivationsPerDayHint"]" @bind="newMaxActivationsPerDay" placeholder="@L["Products_ActivationsPerDayShort"]" />
                             <div class="input-group-text bg-dark border-secondary">
-                                <input class="form-check-input mt-0" type="checkbox" @bind="isRecurring" title="Abonnement récurrent" />
+                                <input class="form-check-input mt-0" type="checkbox" @bind="isRecurring" title="@L["Products_RecurringHint"]" />
                                 <span class="ms-2 small text-muted">@L["Products_Abo_Short"]</span>
                             </div>
                             <div class="input-group-text bg-dark border-secondary">
-                                <input class="form-check-input mt-0" type="checkbox" @bind="isAnonymous" title="Clé anonyme (sans email/nom)" />
-                                <span class="ms-2 small text-muted">Anon</span>
+                                <input class="form-check-input mt-0" type="checkbox" @bind="isAnonymous" title="@L["Products_AnonymousHint"]" />
+                                <span class="ms-2 small text-muted">@L["Products_AnonymousShort"]</span>
                             </div>
                             <div class="input-group-text bg-dark border-secondary">
-                                <input class="form-check-input mt-0" type="checkbox" @bind="newEnforceSingleUsePerHardwareId" title="Un HWID ne peut consommer ce type qu'une seule fois" />
-                                <span class="ms-2 small text-muted">HWID unique</span>
+                                <input class="form-check-input mt-0" type="checkbox" @bind="newEnforceSingleUsePerHardwareId" title="@L["Products_SingleUseHint"]" />
+                                <span class="ms-2 small text-muted">@L["Products_SingleUseShort"]</span>
                             </div>
                             <div class="input-group-text bg-dark border-secondary">
-                                <input class="form-check-input mt-0" type="checkbox" @bind="newDisableNewActivations" title="Bloque uniquement les nouvelles activations" />
-                                <span class="ms-2 small text-muted">Act. off</span>
+                                <input class="form-check-input mt-0" type="checkbox" @bind="newDisableNewActivations" title="@L["Products_DisableNewActivationsHint"]" />
+                                <span class="ms-2 small text-muted">@L["Products_DisableNewActivationsShort"]</span>
+                            </div>
+                            <div class="input-group-text bg-dark border-secondary">
+                                <input class="form-check-input mt-0" type="checkbox" @bind="newAllowPublicTrial" title="@L["Products_TypePublicTrialHint"]" />
+                                <span class="ms-2 small text-muted">@L["Products_TypePublicTrial"]</span>
+                            </div>
+                            <div class="input-group-text bg-dark border-secondary">
+                                <input class="form-check-input mt-0" type="checkbox" @bind="newTeamEligible" title="@L["Products_TypeTeamHint"]" />
+                                <span class="ms-2 small text-muted">@L["Products_TypeTeam"]</span>
                             </div>
                             <button class="btn btn-success" @onclick="CreateLicenseType">@L["Common_Add"]</button>
                         </div>
@@ -203,11 +211,13 @@
                                     <th>Slug</th>
                                     <th class="text-center">@L["Products_Duration"]</th>
                                     <th class="text-center">@L["Licenses_Seats"]</th>
-                                    <th class="text-center">Act/j</th>
+                                    <th class="text-center">@L["Products_ActivationsPerDayShort"]</th>
                                     <th class="text-center">@L["Products_Mode"]</th>
-                                    <th class="text-center">Anon</th>
-                                    <th class="text-center">HWID unique</th>
-                                    <th class="text-center">Act. off</th>
+                                    <th class="text-center">@L["Products_AnonymousShort"]</th>
+                                    <th class="text-center">@L["Products_SingleUseShort"]</th>
+                                    <th class="text-center">@L["Products_DisableNewActivationsShort"]</th>
+                                    <th class="text-center">@L["Products_TypePublicTrial"]</th>
+                                    <th class="text-center">@L["Products_TypeTeam"]</th>
                                     <th class="text-end">@L["Common_Actions"]</th>
                                 </tr>
                             </thead>
@@ -238,18 +248,28 @@
                                         </td>
                                         <td class="text-center">
                                             @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.AllowAnonymous" /> }
-                                            else if (type.AllowAnonymous) { <span class="badge bg-warning text-dark">Anon</span> }
-                                            else { <span class="text-secondary">—</span> }
+                                            else if (type.AllowAnonymous) { <span class="badge bg-warning text-dark">@L["Products_AnonymousShort"]</span> }
+                                            else { <span class="text-secondary">-</span> }
                                         </td>
                                         <td class="text-center">
                                             @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.EnforceSingleUsePerHardwareId" /> }
-                                            else if (type.EnforceSingleUsePerHardwareId) { <span class="badge bg-danger">HWID unique</span> }
-                                            else { <span class="text-secondary">—</span> }
+                                            else if (type.EnforceSingleUsePerHardwareId) { <span class="badge bg-danger">@L["Products_SingleUseShort"]</span> }
+                                            else { <span class="text-secondary">-</span> }
                                         </td>
                                         <td class="text-center">
                                             @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.DisableNewActivations" /> }
-                                            else if (type.DisableNewActivations) { <span class="badge bg-warning text-dark">Act. off</span> }
-                                            else { <span class="text-secondary">—</span> }
+                                            else if (type.DisableNewActivations) { <span class="badge bg-warning text-dark">@L["Products_DisableNewActivationsShort"]</span> }
+                                            else { <span class="text-secondary">-</span> }
+                                        </td>
+                                        <td class="text-center">
+                                            @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.AllowPublicTrial" /> }
+                                            else if (type.AllowPublicTrial) { <span class="badge bg-info text-dark">@L["Products_TypePublicTrial"]</span> }
+                                            else { <span class="text-secondary">@L["Products_TypePublicTrialOff"]</span> }
+                                        </td>
+                                        <td class="text-center">
+                                            @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.TeamEligible" /> }
+                                            else if (type.TeamEligible) { <span class="badge bg-primary">@L["Products_TypeTeam"]</span> }
+                                            else { <span class="text-secondary">@L["Products_TypePublicTrialOff"]</span> }
                                         </td>
                                         <td class="text-end">
                                             @if (editingTypeId == type.Id)
@@ -842,25 +862,33 @@
                             <div class="animate-fade">
                                 <div class="input-group mb-3">
                                     <input class="form-control" placeholder="@L["Common_Name"] (ex: Professionnelle)" @bind="newTypeName" />
-                                    <input class="form-control" placeholder="SLUG (ex: PRO)" @bind="newTypeSlug" />
+                                    <input class="form-control" placeholder="@L["Products_TypeSlugPlaceholder"]" @bind="newTypeSlug" />
                                     <input class="form-control" type="number" style="max-width: 100px;" title="@L["Products_Duration"] (0 = Lifetime)" @bind="newTypeDuration" />
                                     <input class="form-control" type="number" style="max-width: 80px;" title="@L["Licenses_Seats"]" @bind="newMaxSeats" />
-                                    <input class="form-control" type="number" style="max-width: 80px;" title="Max activations/jour (0 = illimité)" @bind="newMaxActivationsPerDay" placeholder="Act/j" />
+                                    <input class="form-control" type="number" style="max-width: 80px;" title="@L["Products_MaxActivationsPerDayHint"]" @bind="newMaxActivationsPerDay" placeholder="@L["Products_ActivationsPerDayShort"]" />
                                     <div class="input-group-text bg-dark border-secondary">
-                                        <input class="form-check-input mt-0" type="checkbox" @bind="isRecurring" title="Abonnement récurrent" />
+                                        <input class="form-check-input mt-0" type="checkbox" @bind="isRecurring" title="@L["Products_RecurringHint"]" />
                                         <span class="ms-2 small text-muted">@L["Products_Abo_Short"]</span>
                                     </div>
                                     <div class="input-group-text bg-dark border-secondary">
-                                        <input class="form-check-input mt-0" type="checkbox" @bind="isAnonymous" title="Clé anonyme (sans email/nom)" />
-                                        <span class="ms-2 small text-muted">Anon</span>
+                                        <input class="form-check-input mt-0" type="checkbox" @bind="isAnonymous" title="@L["Products_AnonymousHint"]" />
+                                        <span class="ms-2 small text-muted">@L["Products_AnonymousShort"]</span>
                                     </div>
                                     <div class="input-group-text bg-dark border-secondary">
-                                        <input class="form-check-input mt-0" type="checkbox" @bind="newEnforceSingleUsePerHardwareId" title="Un HWID ne peut consommer ce type qu'une seule fois" />
-                                        <span class="ms-2 small text-muted">HWID unique</span>
+                                        <input class="form-check-input mt-0" type="checkbox" @bind="newEnforceSingleUsePerHardwareId" title="@L["Products_SingleUseHint"]" />
+                                        <span class="ms-2 small text-muted">@L["Products_SingleUseShort"]</span>
                                     </div>
                                     <div class="input-group-text bg-dark border-secondary">
-                                        <input class="form-check-input mt-0" type="checkbox" @bind="newDisableNewActivations" title="Bloque uniquement les nouvelles activations" />
-                                        <span class="ms-2 small text-muted">Act. off</span>
+                                        <input class="form-check-input mt-0" type="checkbox" @bind="newDisableNewActivations" title="@L["Products_DisableNewActivationsHint"]" />
+                                        <span class="ms-2 small text-muted">@L["Products_DisableNewActivationsShort"]</span>
+                                    </div>
+                                    <div class="input-group-text bg-dark border-secondary">
+                                        <input class="form-check-input mt-0" type="checkbox" @bind="newAllowPublicTrial" title="@L["Products_TypePublicTrialHint"]" />
+                                        <span class="ms-2 small text-muted">@L["Products_TypePublicTrial"]</span>
+                                    </div>
+                                    <div class="input-group-text bg-dark border-secondary">
+                                        <input class="form-check-input mt-0" type="checkbox" @bind="newTeamEligible" title="@L["Products_TypeTeamHint"]" />
+                                        <span class="ms-2 small text-muted">@L["Products_TypeTeam"]</span>
                                     </div>
                                     <button class="btn btn-success" @onclick="CreateLicenseType">@L["Common_Add"]</button>
                                 </div>
@@ -872,11 +900,13 @@
                                             <th>Slug</th>
                                             <th class="text-center">@L["Products_Duration"]</th>
                                             <th class="text-center">@L["Licenses_Seats"]</th>
-                                            <th class="text-center">Act/j</th>
+                                            <th class="text-center">@L["Products_ActivationsPerDayShort"]</th>
                                             <th class="text-center">@L["Products_Mode"]</th>
-                                            <th class="text-center">Anon</th>
-                                            <th class="text-center">HWID unique</th>
-                                            <th class="text-center">Act. off</th>
+                                            <th class="text-center">@L["Products_AnonymousShort"]</th>
+                                            <th class="text-center">@L["Products_SingleUseShort"]</th>
+                                            <th class="text-center">@L["Products_DisableNewActivationsShort"]</th>
+                                            <th class="text-center">@L["Products_TypePublicTrial"]</th>
+                                            <th class="text-center">@L["Products_TypeTeam"]</th>
                                             <th class="text-end">@L["Common_Actions"]</th>
                                         </tr>
                                     </thead>
@@ -891,8 +921,8 @@
                                                 <td><code class="text-info">@type.Slug</code></td>
                                                 <td class="text-center">
                                                     @if (editingTypeId == type.Id) { <input class="form-control form-control-sm mx-auto" type="number" style="width: 70px" @bind="type.DefaultDurationDays" /> }
-                                                    else if (type.DefaultDurationDays == 0) { <span class="badge bg-info">∞ Lifetime</span> }
-                                                    else { @($"{type.DefaultDurationDays} j") }
+                                                    else if (type.DefaultDurationDays == 0) { <span class="badge bg-info">@L["Products_Lifetime"]</span> }
+                                                    else { @($"{type.DefaultDurationDays} {L["Common_Days_Short"]}") }
                                                 </td>
                                                 <td class="text-center">
                                                     @if (editingTypeId == type.Id) { <input class="form-control form-control-sm mx-auto" type="number" style="width: 60px" @bind="type.DefaultMaxSeats" /> }
@@ -908,18 +938,28 @@
                                                 </td>
                                                 <td class="text-center">
                                                     @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.AllowAnonymous" /> }
-                                                    else if (type.AllowAnonymous) { <span class="badge bg-warning text-dark">Anon</span> }
-                                                    else { <span class="text-secondary">—</span> }
+                                                    else if (type.AllowAnonymous) { <span class="badge bg-warning text-dark">@L["Products_AnonymousShort"]</span> }
+                                                    else { <span class="text-secondary">-</span> }
                                                 </td>
                                                 <td class="text-center">
                                                     @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.EnforceSingleUsePerHardwareId" /> }
-                                                    else if (type.EnforceSingleUsePerHardwareId) { <span class="badge bg-danger">HWID unique</span> }
-                                                    else { <span class="text-secondary">—</span> }
+                                                    else if (type.EnforceSingleUsePerHardwareId) { <span class="badge bg-danger">@L["Products_SingleUseShort"]</span> }
+                                                    else { <span class="text-secondary">-</span> }
                                                 </td>
                                                 <td class="text-center">
                                                     @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.DisableNewActivations" /> }
-                                                    else if (type.DisableNewActivations) { <span class="badge bg-warning text-dark">Act. off</span> }
-                                                    else { <span class="text-secondary">—</span> }
+                                                    else if (type.DisableNewActivations) { <span class="badge bg-warning text-dark">@L["Products_DisableNewActivationsShort"]</span> }
+                                                    else { <span class="text-secondary">-</span> }
+                                                </td>
+                                                <td class="text-center">
+                                                    @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.AllowPublicTrial" /> }
+                                                    else if (type.AllowPublicTrial) { <span class="badge bg-info text-dark">@L["Products_TypePublicTrial"]</span> }
+                                                    else { <span class="text-secondary">@L["Products_TypePublicTrialOff"]</span> }
+                                                </td>
+                                                <td class="text-center">
+                                                    @if (editingTypeId == type.Id) { <input type="checkbox" @bind="type.TeamEligible" /> }
+                                                    else if (type.TeamEligible) { <span class="badge bg-primary">@L["Products_TypeTeam"]</span> }
+                                                    else { <span class="text-secondary">@L["Products_TypePublicTrialOff"]</span> }
                                                 </td>
                                                 <td class="text-end">
                                                     @if (editingTypeId == type.Id)
@@ -929,7 +969,7 @@
                                                     }
                                                     else
                                                     {
-                                                        <button class="btn btn-sm btn-outline-warning" @onclick="() => ToggleTypeParams(type)" title="Paramètres personnalisés">⚙</button>
+                                                        <button class="btn btn-sm btn-outline-warning" @onclick="() => ToggleTypeParams(type)" title="@L["Products_CustomParameters"]">⚙</button>
                                                         <button class="btn btn-sm btn-outline-info" @onclick="() => editingTypeId = type.Id">@L["Common_Edit"]</button>
                                                         <button class="btn btn-sm btn-outline-danger" @onclick="() => RequestDeleteType(type)">@L["Common_Delete"]</button>
                                                     }
@@ -938,15 +978,15 @@
                                             @if (expandedTypeParamsId == type.Id)
                                             {
                                                 <tr class="bg-dark bg-opacity-50 animate-fade">
-                                                    <td colspan="10" class="p-3 border-start border-3 border-warning">
+                                                    <td colspan="12" class="p-3 border-start border-3 border-warning">
                                                         <div class="d-flex justify-content-between align-items-center mb-2">
-                                                            <span class="small fw-bold text-warning">⚙ Paramètres — <code>@type.Slug</code></span>
+                                                            <span class="small fw-bold text-warning">⚙ @L["Products_ParametersOf"] <code>@type.Slug</code></span>
                                                             <button class="btn btn-sm btn-link text-muted p-0" @onclick="() => ToggleTypeParams(type)">✕</button>
                                                         </div>
                                                         @if (typeParams.Any())
                                                         {
                                                             <table class="table table-sm table-dark mb-2" style="font-size:0.8rem;">
-                                                                <thead><tr><th>Clé</th><th>Nom</th><th>Valeur</th><th></th></tr></thead>
+                                                                <thead><tr><th>@L["Products_ParamKey"]</th><th>@L["Common_Name"]</th><th>@L["Products_ParamValue"]</th><th></th></tr></thead>
                                                                 <tbody>
                                                                     @foreach (var p in typeParams)
                                                                     {
@@ -958,8 +998,8 @@
                                                                                 <td><input class="form-control form-control-sm" style="min-width:120px;" @bind="editingParamName" /></td>
                                                                                 <td><input class="form-control form-control-sm font-monospace" style="min-width:80px;" @bind="editingParamValue" /></td>
                                                                                 <td class="text-end" style="white-space:nowrap;">
-                                                                                    <button class="btn btn-sm btn-success p-0 px-1 me-1" @onclick="SaveEditParam" title="Enregistrer">✓</button>
-                                                                                    <button class="btn btn-sm btn-link text-muted p-0" @onclick="CancelEditParam" title="Annuler">✕</button>
+                                                                                    <button class="btn btn-sm btn-success p-0 px-1 me-1" @onclick="SaveEditParam" title="@L["Common_Save"]">✓</button>
+                                                                                    <button class="btn btn-sm btn-link text-muted p-0" @onclick="CancelEditParam" title="@L["Common_Cancel"]">✕</button>
                                                                                 </td>
                                                                             }
                                                                             else
@@ -967,8 +1007,8 @@
                                                                                 <td class="text-muted">@p.Name</td>
                                                                                 <td>@p.Value</td>
                                                                                 <td class="text-end" style="white-space:nowrap;">
-                                                                                    <button class="btn btn-sm btn-link text-warning p-0 me-1" @onclick="() => StartEditParam(param)" title="Modifier">✎</button>
-                                                                                    <button class="btn btn-sm btn-link text-danger p-0" @onclick="() => DeleteTypeParam(param)" title="Supprimer">✕</button>
+                                                                                    <button class="btn btn-sm btn-link text-warning p-0 me-1" @onclick="() => StartEditParam(param)" title="@L["Common_Edit"]">✎</button>
+                                                                                    <button class="btn btn-sm btn-link text-danger p-0" @onclick="() => DeleteTypeParam(param)" title="@L["Common_Delete"]">✕</button>
                                                                                 </td>
                                                                             }
                                                                         </tr>
@@ -978,17 +1018,17 @@
                                                         }
                                                         else
                                                         {
-                                                            <p class="text-muted small mb-2">Aucun paramètre défini.</p>
+                                                            <p class="text-muted small mb-2">@L["Products_NoParameters"]</p>
                                                         }
                                                         <div class="d-flex gap-2 align-items-center flex-wrap">
-                                                            <input class="form-control form-control-sm font-monospace" style="max-width:140px;" placeholder="clé (ex: maxAccounts)" @bind="newParamKey" />
-                                                            <input class="form-control form-control-sm" style="max-width:160px;" placeholder="Nom (ex: Comptes max)" @bind="newParamName" />
-                                                            <input class="form-control form-control-sm" style="max-width:120px;" placeholder="Valeur (ex: 50)" @bind="newParamValue" />
-                                                            <div class="form-check form-check-inline mb-0" title="Ajoute ce paramètre à tous les types de ce produit (skip si déjà existant)">
+                                                            <input class="form-control form-control-sm font-monospace" style="max-width:140px;" placeholder="@L["Products_ParamKeyPlaceholder"]" @bind="newParamKey" />
+                                                            <input class="form-control form-control-sm" style="max-width:160px;" placeholder="@L["Products_ParamNamePlaceholder"]" @bind="newParamName" />
+                                                            <input class="form-control form-control-sm" style="max-width:120px;" placeholder="@L["Products_ParamValuePlaceholder"]" @bind="newParamValue" />
+                                                            <div class="form-check form-check-inline mb-0" title="@L["Products_ApplyToAllTypesHint"]">
                                                                 <input class="form-check-input" type="checkbox" id="applyToAll_@type.Id" @bind="newParamApplyToAll" />
-                                                                <label class="form-check-label small text-warning" for="applyToAll_@type.Id">Tous les types</label>
+                                                                <label class="form-check-label small text-warning" for="applyToAll_@type.Id">@L["Products_AllTypes"]</label>
                                                             </div>
-                                                            <button class="btn btn-sm btn-success" @onclick="() => AddTypeParam(type)">+ Ajouter</button>
+                                                            <button class="btn btn-sm btn-success" @onclick="() => AddTypeParam(type)">+ @L["Common_Add"]</button>
                                                         </div>
                                                     </td>
                                                 </tr>
@@ -996,7 +1036,7 @@
                                         }
                                         @if (!LicenseTypes.Any())
                                         {
-                                            <tr><td colspan="10" class="text-center py-4 text-muted">@L["Products_NoTypes"]</td></tr>
+                                            <tr><td colspan="12" class="text-center py-4 text-muted">@L["Products_NoTypes"]</td></tr>
                                         }
                                     </tbody>
                                 </table>
@@ -1182,7 +1222,8 @@
                     
                     <h6 class="mt-4 mb-2">@L["Products_EventData"] (@SelectedRecord.Type)</h6>
                     <div class="p-3 bg-black text-info rounded border border-secondary" style="font-size: 0.85rem; max-height: 400px; overflow-y: auto;">
-                        @if (SelectedRecord.Type == TelemetryType.Event && SelectedRecord.EventData != null)
+                        @if (SelectedRecord.EventData != null &&
+                            (SelectedRecord.Type == TelemetryType.Event || SelectedRecord.Type == TelemetryType.Error))
                         {
                             <pre>@FormatJson(SelectedRecord.EventData.PropertiesJson)</pre>
                         }
@@ -1359,6 +1400,10 @@
     private bool isFree = false;
     private bool newEnforceSingleUsePerHardwareId = false;
     private bool newDisableNewActivations = false;
+    /// <summary>Public trial opt-in for a new type; closed by default (TKT-002466).</summary>
+    private bool newAllowPublicTrial = false;
+    /// <summary>Team eligibility flag for a new type; stored and exposed only, false by default (TKT-002717).</summary>
+    private bool newTeamEligible = false;
     private bool showTypes = false;
     private Guid? editingTypeId;
     private LicenseType? typeToDelete;
@@ -1843,17 +1888,17 @@
 
     private async Task CreateLicenseType()
     {
-        if (selectedProduct == null) { Toast.ShowError("Aucun produit sélectionné."); return; }
+        if (selectedProduct == null) { Toast.ShowError(L["Products_NoProductSelected"]); return; }
         if (string.IsNullOrWhiteSpace(newTypeName) || string.IsNullOrWhiteSpace(newTypeSlug))
         {
-            Toast.ShowError("Nom et Slug requis."); return;
+            Toast.ShowError(L["Products_NameAndSlugRequired"]); return;
         }
 
         using var db = await DbFactory.CreateDbContextAsync();
         var slug = newTypeSlug.Trim().ToUpper().Replace(" ", "_");
         if (await db.LicenseTypes.AnyAsync(t => t.ProductId == selectedProduct.Id && t.Slug == slug))
         {
-            Toast.ShowError("Ce Slug existe déjà pour ce produit."); return;
+            Toast.ShowError(L["Products_SlugExists"]); return;
         }
 
         var lt = new LicenseType
@@ -1867,7 +1912,9 @@
             AllowAnonymous = isAnonymous,
             IsFree = isFree,
             EnforceSingleUsePerHardwareId = newEnforceSingleUsePerHardwareId,
-            DisableNewActivations = newDisableNewActivations
+            DisableNewActivations = newDisableNewActivations,
+            AllowPublicTrial = newAllowPublicTrial,
+            TeamEligible = newTeamEligible
         };
         // Auto-copy custom params from existing license types of the same product
         var existingParams = await db.LicenseTypeCustomParams
@@ -1881,8 +1928,8 @@
 
         db.LicenseTypes.Add(lt);
         await db.SaveChangesAsync();
-        Toast.ShowSuccess($"Type '{slug}' ajouté ({lt.CustomParams.Count} paramètres copiés).");
-        newTypeName = ""; newTypeSlug = ""; newTypeDuration = 30; newMaxSeats = 1; newMaxActivationsPerDay = 0; isRecurring = false; isAnonymous = false; isFree = false; newEnforceSingleUsePerHardwareId = false; newDisableNewActivations = false;
+        Toast.ShowSuccess(L["Products_TypeAddedWithParams", slug, lt.CustomParams.Count]);
+        newTypeName = ""; newTypeSlug = ""; newTypeDuration = 30; newMaxSeats = 1; newMaxActivationsPerDay = 0; isRecurring = false; isAnonymous = false; isFree = false; newEnforceSingleUsePerHardwareId = false; newDisableNewActivations = false; newAllowPublicTrial = false; newTeamEligible = false;
         await LoadProductData();
     }
 
@@ -1906,6 +1953,8 @@
             dbType.IsFree = lt.IsFree;
             dbType.EnforceSingleUsePerHardwareId = lt.EnforceSingleUsePerHardwareId;
             dbType.DisableNewActivations = lt.DisableNewActivations;
+            dbType.AllowPublicTrial = lt.AllowPublicTrial;
+            dbType.TeamEligible = lt.TeamEligible;
 
             await db.SaveChangesAsync();
 
@@ -1932,11 +1981,11 @@
                     }
                 }
                 await db.SaveChangesAsync();
-                Toast.ShowSuccess($"Durée modifiée : {licenses.Count} licences mises à jour.");
+                Toast.ShowSuccess(L["Products_DurationChanged", licenses.Count]);
             }
             else
             {
-                Toast.ShowSuccess("Modifications enregistrées.");
+                Toast.ShowSuccess(L["Products_ChangesSaved"]);
             }
 
             editingTypeId = null;
@@ -1956,7 +2005,7 @@
 
         if (licenseCount > 0)
         {
-            Toast.ShowError("Impossible de supprimer ce type : des licences l'utilisent encore.");
+            Toast.ShowError(L["Products_TypeInUse"]);
             return;
         }
 
@@ -1978,7 +2027,7 @@
 
             db.LicenseTypes.Remove(dbType);
             await db.SaveChangesAsync();
-            Toast.ShowSuccess("Type supprimé.");
+            Toast.ShowSuccess(L["Products_TypeDeleted"]);
             await LoadData();
         }
         typeToDelete = null;
@@ -2008,16 +2057,16 @@
         var key = newParamKey.Trim();
         if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(newParamName))
         {
-            Toast.ShowError("Clé et Nom requis."); return;
+            Toast.ShowError(L["Products_ParamKeyAndNameRequired"]); return;
         }
         if (!System.Text.RegularExpressions.Regex.IsMatch(key, @"^[a-zA-Z0-9_]+$"))
         {
-            Toast.ShowError("La clé ne doit contenir que des caractères alphanumériques ou des underscores."); return;
+            Toast.ShowError(L["Products_ParamKeyInvalid"]); return;
         }
         using var db = await DbFactory.CreateDbContextAsync();
         if (await db.LicenseTypeCustomParams.AnyAsync(p => p.LicenseTypeId == type.Id && p.Key == key))
         {
-            Toast.ShowError($"La clé '{key}' existe déjà pour ce type."); return;
+            Toast.ShowError(L["Products_ParamKeyExists", key]); return;
         }
         if (newParamApplyToAll)
         {
@@ -2037,13 +2086,13 @@
                 }
             }
             await db.SaveChangesAsync();
-            Toast.ShowSuccess($"Paramètre '{key}' ajouté à {added}/{allTypes.Count} types (déjà présent sur {allTypes.Count - added}).");
+            Toast.ShowSuccess(L["Products_ParamAddedToTypes", key, added, allTypes.Count, allTypes.Count - added]);
         }
         else
         {
             db.LicenseTypeCustomParams.Add(new LicenseTypeCustomParam { LicenseTypeId = type.Id, Key = key, Name = newParamName.Trim(), Value = newParamValue.Trim() });
             await db.SaveChangesAsync();
-            Toast.ShowSuccess($"Paramètre '{key}' ajouté.");
+            Toast.ShowSuccess(L["Products_ParamAdded", key]);
         }
         newParamKey = ""; newParamName = ""; newParamValue = ""; newParamApplyToAll = false; editingParamId = null;
         typeParams = await db.LicenseTypeCustomParams.Where(p => p.LicenseTypeId == type.Id).OrderBy(p => p.Key).ToListAsync();
@@ -2057,7 +2106,7 @@
         db.LicenseTypeCustomParams.Remove(param);
         await db.SaveChangesAsync();
         typeParams.Remove(param);
-        Toast.ShowSuccess("Paramètre supprimé.");
+        Toast.ShowSuccess(L["Products_ParamDeleted"]);
     }
 
     private void StartEditParam(LicenseTypeCustomParam param)
@@ -2084,7 +2133,7 @@
         using var db = await DbFactory.CreateDbContextAsync();
         db.LicenseTypeCustomParams.Update(param);
         await db.SaveChangesAsync();
-        Toast.ShowSuccess($"Paramètre '{param.Key}' modifié.");
+        Toast.ShowSuccess(L["Products_ParamUpdated", param.Key]);
         CancelEditParam();
     }
 

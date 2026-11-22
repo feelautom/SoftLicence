@@ -35,7 +35,7 @@ public sealed partial class DistributionInstallationBindingServiceTests
     /// <remarks>The existing harness requires explicit synthetic PostgreSQL configuration and its exact container finally owns all clone cleanup. Missing infrastructure fails visibly, never skips. Seven clones remain under the monitored768MiB bound.</remarks>
     private static async Task<DistributionInstallationBindingServiceTests> CreateTkt976DecisionPostgresFixtureAsync()
     {
-        var connection = await RuntimeEnrollmentPostgreSqlTests.Tkt976_CloneCompatibilityDatabaseAsync();
+        var connection = await RuntimeEnrollmentPostgreSqlTestBase.Tkt976_CloneCompatibilityDatabaseAsync();
         return new(new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(connection).Options);
     }
 
@@ -75,13 +75,13 @@ public sealed partial class DistributionInstallationBindingServiceTests
 
 /// <summary>Exposes only the existing migrated, synthetic clone operation to the exact seven compatibility scenarios.</summary>
 [Collection(Tkt976DecisionRelationalCollection.Name)]
-public sealed partial class RuntimeEnrollmentPostgreSqlTests
+public abstract partial class RuntimeEnrollmentPostgreSqlTestBase
 {
     /// <summary>Serializes creation of the empty compatibility template; existing Runtime fixture rows are never copied into historical empty-database assertions.</summary>
-    private static readonly SemaphoreSlim Tkt976CompatibilityTemplateLock = new(1, 1);
+    protected static readonly SemaphoreSlim Tkt976CompatibilityTemplateLock = new(1, 1);
 
     /// <summary>Owns only the dedicated migrated template connection pair for this synthetic test process; the harness container finally removes template and clones.</summary>
-    private static (string Admin, string App)? _tkt976CompatibilityTemplate;
+    protected static (string Admin, string App)? _tkt976CompatibilityTemplate;
 
     /// <summary>Creates a separate empty migrated template once, then clones it without business rows from other Runtime/981 scenarios.</summary>
     /// <remarks>Existing synthetic roles are provisioned by the shared harness. A generated identifier creates a new database only; no database or row is cleaned during execution. Full migrations and app-role grants are retained. Eight template/clone databases are bounded by the monitored768MiB container.</remarks>
@@ -92,7 +92,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         {
             if (_tkt976CompatibilityTemplate == null)
             {
-                var shared = await ProvisionAsync();
+                var shared = await ProvisionSharedAsync();
                 var name = "tkt976_compat_template_" + Guid.NewGuid().ToString("N");
                 var control = new NpgsqlConnectionStringBuilder(shared.Admin) { Database = "postgres", Pooling = false };
                 await using (var admin = new NpgsqlConnection(control.ConnectionString))

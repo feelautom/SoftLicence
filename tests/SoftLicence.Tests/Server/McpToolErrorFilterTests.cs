@@ -29,6 +29,21 @@ public sealed class McpToolErrorFilterTests
         Assert.Same(original, ex.InnerException);
     }
 
+    /// <summary>A typed provider refusal reaches the client as a tool error carrying its code and message.</summary>
+    [Fact]
+    public async Task Wrap_ConvertsProviderRefusalToMcpException()
+    {
+        var refusal = new SoftLicenceProviderRefusalException(
+            "ANALYTICS_AUTH_FAILED", 401,
+            "SoftLicence analytics API rejected SOFTLICENCE_API_KEY (HTTP 401 on /api/analytics/security/bans).");
+        var wrapped = McpToolErrorFilter.Wrap(Throwing(refusal));
+
+        var ex = await Assert.ThrowsAsync<McpException>(async () => await wrapped(null!, CancellationToken.None));
+
+        Assert.Equal(refusal.Message, ex.Message);
+        Assert.Same(refusal, ex.InnerException);
+    }
+
     [Fact]
     public async Task Wrap_KeepsMcpExceptionUnchanged()
     {

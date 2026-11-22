@@ -14,155 +14,21 @@ using Xunit;
 
 namespace SoftLicence.Tests.Server;
 
-public sealed partial class RuntimeEnrollmentPostgreSqlTests
+public abstract partial class RuntimeEnrollmentPostgreSqlTestBase
 {
-    /// <summary>Preserves the direct equal-digest Confirm path without requiring newly introduced historical receipts.</summary>
-    [Fact]
-    public async Task MigrationLineage_DirectDigestEqualityRetainsExistingAdmission()
-    {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        using var successor = await PrepareAliasSuccessorConfirmScenarioAsync(scenario, "receipt-direct-equality");
-        await using (var db = await scenario.Factory.CreateDbContextAsync())
-        {
-            var source = await db.DistributionInstallationBindings.SingleAsync(row => row.Id == successor.SourceBindingId);
-            var target = await db.DistributionInstallationBindings.SingleAsync(row => row.Id == successor.BindingId);
-            source.HardwareIdHash = target.HardwareIdHash;
-            var alias = await db.HardwareAuthorityAliases.SingleAsync();
-            alias.MigrationReceiptId = null;
-            alias.MigrationRequestId = null;
-            await db.SaveChangesAsync();
-        }
-        await scenario.Runtime.ConfirmAsync(successor.EnrollmentId, successor.ConfirmDigest,
-            successor.ConfirmRequest, successor.ConfirmProof, IPAddress.Loopback);
-        await using var check = await scenario.Factory.CreateDbContextAsync();
-        Assert.Equal(successor.EnrollmentId, (await check.HardwareAuthorityAliases.SingleAsync()).RuntimeEnrollmentId);
-    }
-
-    /// <summary>Rejects a foreign signing key or a changed signed body before any durable acceptance is created.</summary>
-    /// <param name="wrongKey">Selects foreign-key forgery rather than a body-digest substitution.</param>
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task MigrationLineage_UnacceptedSignatureNeverCreatesReceipt(bool wrongKey)
-    {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
-        using var attacker = RSA.Create(3072);
-        var request = MigrationRequest(scenario, LegacyHardwareId, StableHardwareId);
-        var digest = Sha256("accepted-body-" + Guid.NewGuid().ToString("D"));
-        var proof = Proof(wrongKey ? attacker : scenario.EnrollmentKey, "hardware-authority-migration",
-            scenario.EnrollmentId, scenario.Options.ConfirmAudience, "-", digest);
-        var error = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => scenario.Runtime.MigrateHardwareAuthorityAsync(
-            scenario.EnrollmentId, wrongKey ? digest : Sha256("substituted-body"), request, proof, IPAddress.Loopback));
-        Assert.Equal("authentication_failed", error.ErrorCode);
-        await AssertLegacyAuthorityUnchangedAsync(scenario);
-        await using var db = await scenario.Factory.CreateDbContextAsync();
-        Assert.Empty(await db.HardwareAuthorityMigrationReceipts.ToListAsync());
-        Assert.Empty(await db.HardwareAuthorityAliases.ToListAsync());
-    }
-
-    /// <summary>Exact accepted migration replay returns the original bytes without duplicating its durable receipt.</summary>
-    [Fact]
-    public async Task MigrationLineage_ExactMigrationReplayCreatesOneReceipt()
-    {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
-        var request = MigrationRequest(scenario, LegacyHardwareId, StableHardwareId);
-        var digest = Sha256("receipt-replay-" + Guid.NewGuid().ToString("D"));
-        var proof = Proof(scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId,
-            scenario.Options.ConfirmAudience, "-", digest);
-        var first = await scenario.Runtime.MigrateHardwareAuthorityAsync(scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback);
-        var second = await scenario.Runtime.MigrateHardwareAuthorityAsync(scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback);
-        Assert.False(first.Idempotent);
-        Assert.True(second.Idempotent);
-        Assert.Equal(first.ExactResponseBody, second.ExactResponseBody);
-        await using var db = await scenario.Factory.CreateDbContextAsync();
-        var receipt = Assert.Single(await db.HardwareAuthorityMigrationReceipts.ToListAsync());
-        Assert.Equal(Guid.Parse(request.RequestId!), receipt.RequestId);
-        Assert.Equal(receipt.Id, (await db.HardwareAuthorityAliases.SingleAsync()).MigrationReceiptId);
-    }
-
-    /// <summary>
-    /// Changes only whitespace inside the retirement-state SQL literal: startup must reject the altered function
-    /// even though a whitespace-stripping comparison would incorrectly consider the two bodies equivalent.
-    /// </summary>
-    [Fact]
-    public async Task MigrationLineage_WhitespaceInsideGuardLiteralFailsStartup()
-    {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        var registry = new RuntimeEnrollmentKeyRegistryService(scenario.Factory, Options.Create(scenario.Options));
-        await registry.ValidateAsync();
-        await using var connection = new NpgsqlConnection(scenario.AdminConnectionString);
-        await connection.OpenAsync();
-        const string original = SoftLicence.Server.Migrations.MigrationReceiptGuards.KeyRetentionSource;
-        var altered = original.Replace("'retired'", "'ret ired'", StringComparison.Ordinal);
-        Assert.NotEqual(original, altered);
-        await ReplaceMigrationReceiptKeyGuardAsync(connection, altered);
-        try { await Assert.ThrowsAsync<InvalidOperationException>(() => registry.ValidateAsync()); }
-        finally { await ReplaceMigrationReceiptKeyGuardAsync(connection, original); }
-        await registry.ValidateAsync();
-    }
 
     /// <summary>Replaces only the owned fixture's guard body, preserving its owner, security mode and fixed search path.</summary>
     /// <param name="connection">Administrator connection to the isolated synthetic database.</param>
     /// <param name="body">Closed test constant or its single intentional literal mutation; never user-controlled SQL.</param>
-    private static Task ReplaceMigrationReceiptKeyGuardAsync(NpgsqlConnection connection, string body) =>
+    protected static Task ReplaceMigrationReceiptKeyGuardAsync(NpgsqlConnection connection, string body) =>
         ExecuteAsync(connection, "CREATE OR REPLACE FUNCTION public.runtime_migration_receipt_key_retirement() "
             + "RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $guard$"
             + body + "$guard$;");
 
-    /// <summary>
-    /// Confirms that additive schema rollback is allowed only before proof exists; populated rollback preserves
-    /// receipts and reports the explicit restore-backup requirement rather than silently discarding authority.
-    /// </summary>
-    /// <param name="acceptedProof">Whether a signed migration has committed durable evidence.</param>
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task MigrationLineage_SchemaRollbackRequiresEmptyEvidence(bool acceptedProof)
-    {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        if (acceptedProof)
-        {
-            await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
-            await MigrateScenarioAsync(scenario);
-        }
-        var options = new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(scenario.AdminConnectionString).Options;
-        await using var admin = new LicenseDbContext(options);
-        var migrator = admin.GetService<IMigrator>();
-        const string previous = "20260929190522_AddAssignmentEnforcementSwitch";
-        if (acceptedProof)
-        {
-            var dataBefore = await Tkt976_BusinessFingerprintAsync(scenario.AdminConnectionString);
-            var schemaBefore = await ReadMigrationReceiptSchemaAsync(scenario.AdminConnectionString);
-            var migrationsBefore = (await admin.Database.GetAppliedMigrationsAsync()).ToArray();
-            var envelope = await Assert.ThrowsAsync<InvalidOperationException>(() => migrator.MigrateAsync(previous));
-            var error = Assert.IsType<PostgresException>(envelope.InnerException);
-            Assert.Equal("55000", error.SqlState);
-            Assert.Equal("durable migration receipts exist; restore a verified backup instead of dropping proof", error.MessageText);
-            Assert.Single(await admin.HardwareAuthorityMigrationReceipts.ToListAsync());
-            Assert.Equal(dataBefore, await Tkt976_BusinessFingerprintAsync(scenario.AdminConnectionString));
-            Assert.Equal(schemaBefore, await ReadMigrationReceiptSchemaAsync(scenario.AdminConnectionString));
-            Assert.Equal(migrationsBefore, (await admin.Database.GetAppliedMigrationsAsync()).ToArray());
-            await new RuntimeEnrollmentKeyRegistryService(scenario.Factory, Options.Create(scenario.Options)).ValidateAsync();
-        }
-        else
-        {
-            await migrator.MigrateAsync(previous);
-            await using var connection = new NpgsqlConnection(scenario.AdminConnectionString);
-            await connection.OpenAsync();
-            await using var command = connection.CreateCommand();
-            command.CommandText = "SELECT to_regclass('public.\"HardwareAuthorityMigrationReceipts\"') IS NULL";
-            Assert.True((bool)(await command.ExecuteScalarAsync())!);
-            await migrator.MigrateAsync();
-            Assert.Empty(await admin.HardwareAuthorityMigrationReceipts.ToListAsync());
-        }
-    }
-
     /// <summary>Snapshots receipt-related columns, constraints, indexes, triggers, guard functions and history without returning row data.</summary>
     /// <param name="connectionString">Administrator connection to the caller-owned synthetic database only.</param>
     /// <returns>Ordered catalogue definitions and a history digest for exact before/after rollback comparison.</returns>
-    private static async Task<string[]> ReadMigrationReceiptSchemaAsync(string connectionString)
+    protected static async Task<string[]> ReadMigrationReceiptSchemaAsync(string connectionString)
     {
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync();
@@ -197,72 +63,11 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         return definitions.ToArray();
     }
 
-    /// <summary>Accepts the historical server shape S without an L-to-S receipt after a real signed S-to-U migration.</summary>
-    /// <remarks>The old alias is not backfilled. Only the new accepted edge is a receipt root;
-    /// Finalize, Prepare and signed successor Confirm all use the real services.</remarks>
-    [Fact]
-    public async Task MigrationLineage_HistoricalStableBindingWithoutReceipt_SignedUuidMigrationConfirmsSuccessor()
-        => await ExerciseHistoricalStableConfirmAsync("none");
-
-    /// <summary>Accepts the legitimate historical backfill shape with a null request id, without rewriting it.</summary>
-    [Fact]
-    public async Task MigrationLineage_HistoricalBackfillWithoutRequestOrReceipt_SignedUuidMigrationConfirmsSuccessor()
-        => await ExerciseHistoricalStableConfirmAsync("backfill");
-
-    /// <summary>Replays the exact signed Confirm after selection without changing the retained historical alias.</summary>
-    [Fact]
-    public async Task MigrationLineage_HistoricalSelection_ExactConfirmReplayIsIdempotent()
-        => await ExerciseHistoricalStableConfirmAsync("exact-replay");
-
-    /// <summary>Observes both exact Confirms blocked before allowing one selection and one replay.</summary>
-    [Fact]
-    public async Task MigrationLineage_HistoricalSelection_ConcurrentExactConfirmsRepointOnce()
-        => await ExerciseHistoricalStableConfirmAsync("concurrent");
-
-    /// <summary>Exercises historical selection after real key rotation and migration nonce retention cleanup.</summary>
-    [Fact]
-    public async Task MigrationLineage_HistoricalSelection_RotationAndNonceRetentionPreserveReceipt()
-        => await ExerciseHistoricalStableConfirmAsync("rotation-retention");
-
-    /// <summary>Rejects a real server-accepted foreign receipt on the new historical selection path.</summary>
-    [Fact]
-    public async Task MigrationLineage_HistoricalSelection_RealForeignReceiptCannotAuthorizeCurrentAlias()
-        => await ExerciseHistoricalStableConfirmAsync("real-foreign-receipt");
-
-    /// <summary>Proves PostgreSQL rejects a second same-license S root before Confirm, preserving the genuine accepted root.</summary>
-    /// <remarks>This is an exact database uniqueness proof, not a claim that two authenticated candidates reached Confirm.</remarks>
-    [Fact]
-    public async Task MigrationLineage_HistoricalSelection_DuplicateCurrentRootFailsDatabaseUniqueness()
-        => await ExerciseHistoricalStableConfirmAsync("duplicate-current-root");
-
-    /// <summary>Rejects a foreign or ambiguous historical companion without mutating either alias or consuming Confirm.</summary>
-    [Theory]
-    [InlineData("historical-product")]
-    [InlineData("historical-license")]
-    [InlineData("historical-seat")]
-    [InlineData("historical-binding")]
-    [InlineData("historical-enrollment")]
-    [InlineData("historical-destination")]
-    [InlineData("historical-source-is-target")]
-    [InlineData("historical-security")]
-    [InlineData("historical-authority")]
-    [InlineData("historical-time")]
-    [InlineData("historical-request-empty")]
-    [InlineData("historical-receipt-borrowed")]
-    [InlineData("current-receipt-missing")]
-    [InlineData("current-request-forged")]
-    [InlineData("current-source-foreign")]
-    [InlineData("current-destination-foreign")]
-    [InlineData("current-disabled")]
-    [InlineData("second-current-alias")]
-    public async Task MigrationLineage_HistoricalCompanionMutationFailsClosed(string mutation)
-        => await ExerciseHistoricalStableConfirmAsync(mutation);
-
     /// <summary>Runs the exact old-server S shape, genuine signed migration, and real successor protocol.</summary>
     /// <param name="mutation">A named positive lifecycle variant or one bounded adversarial mutation.
     /// Every positive preserves the entire historical row from before migration through Confirm;
     /// concurrent Confirm observes both waiters, while rotation retains the receipt key and removes only replay nonces.</param>
-    private static async Task ExerciseHistoricalStableConfirmAsync(string mutation)
+    protected static async Task ExerciseHistoricalStableConfirmAsync(string mutation)
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
         var subjectRef = Base64Url(SHA256.HashData("historical-stable-receipt-subject"u8.ToArray()));
@@ -537,29 +342,9 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             row.EnrollmentId == enrollmentId && row.Operation == "confirm").ToListAsync());
     }
 
-    /// <summary>Does not fabricate an old acceptance edge when a later signed migration extends an unproved alias.</summary>
-    [Fact]
-    public async Task MigrationLineage_UnprovedHistoricalParentIsNotBackfilled()
-    {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        using var successor = await PrepareAliasSuccessorConfirmScenarioAsync(scenario, "unproved-parent",
-            () => RemoveParentProofThenExtendAsync(scenario));
-        await using (var db = await scenario.Factory.CreateDbContextAsync())
-        {
-            Assert.Null((await db.HardwareAuthorityAliases.SingleAsync()).MigrationReceiptId);
-            Assert.Single(await db.HardwareAuthorityMigrationReceipts.ToListAsync());
-        }
-        var error = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => scenario.Runtime.ConfirmAsync(
-            successor.EnrollmentId, successor.ConfirmDigest, successor.ConfirmRequest, successor.ConfirmProof,
-            IPAddress.Loopback));
-        Assert.Equal("enrollment_conflict", error.ErrorCode);
-        Assert.Equal("confirm_alias_boundary_mismatch", error.DiagnosticCode);
-        await AssertPendingSuccessorAndStaleAliasAsync(scenario, successor);
-    }
-
     /// <summary>Removes only the synthetic alias's proof reference, then performs a genuine second signed migration.</summary>
     /// <param name="scenario">Owned active migration fixture.</param>
-    private static async Task RemoveParentProofThenExtendAsync(PreparedBootstrapScenario scenario)
+    protected static async Task RemoveParentProofThenExtendAsync(PreparedBootstrapScenario scenario)
     {
         await using (var db = await scenario.Factory.CreateDbContextAsync())
         {
@@ -569,8 +354,234 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         await ExtendSignedMigrationChainAsync(scenario);
     }
 
+    /// <summary>Extends an accepted synthetic migration through a second actual signed request with a distinct UUID.</summary>
+    /// <param name="scenario">Active source credential and isolated database after the first accepted migration.</param>
+    protected static async Task ExtendSignedMigrationChainAsync(PreparedBootstrapScenario scenario)
+    {
+        const string secondUuid = "4C4C4544-0051-3610-8052-B7C04F4A4E33";
+        var target = MachineIdentity.FromUuid(secondUuid).HardwareId
+            ?? throw new InvalidOperationException("Synthetic chain UUID was refused.");
+        var request = MigrationRequest(scenario, StableHardwareId, target);
+        request.SystemUuid = secondUuid;
+        var digest = Sha256("receipt-chain-second-" + Guid.NewGuid().ToString("D"));
+        var proof = Proof(scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId,
+            scenario.Options.ConfirmAudience, "-", digest);
+        var result = await scenario.Runtime.MigrateHardwareAuthorityAsync(
+            scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback);
+        Assert.Equal("migrated", result.Response.Decision);
+    }
+}
+
+/// <summary>Runs the tests from RuntimeMigrationLineagePostgreSqlTests as an independently schedulable PostgreSQL class.</summary>
+/// <param name="classDatabase">The xUnit-owned PostgreSQL clone fixture for this exact test class.</param>
+public sealed partial class RuntimeMigrationLineagePostgreSqlTests(RuntimeEnrollmentPostgreSqlClassDatabase classDatabase)
+    : RuntimeEnrollmentPostgreSqlTestBase(classDatabase)
+{
+    /// <summary>Preserves the direct equal-digest Confirm path without requiring newly introduced historical receipts.</summary>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_DirectDigestEqualityRetainsExistingAdmission")]
+    public async Task MigrationLineage_DirectDigestEqualityRetainsExistingAdmission()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        using var successor = await PrepareAliasSuccessorConfirmScenarioAsync(scenario, "receipt-direct-equality");
+        await using (var db = await scenario.Factory.CreateDbContextAsync())
+        {
+            var source = await db.DistributionInstallationBindings.SingleAsync(row => row.Id == successor.SourceBindingId);
+            var target = await db.DistributionInstallationBindings.SingleAsync(row => row.Id == successor.BindingId);
+            source.HardwareIdHash = target.HardwareIdHash;
+            var alias = await db.HardwareAuthorityAliases.SingleAsync();
+            alias.MigrationReceiptId = null;
+            alias.MigrationRequestId = null;
+            await db.SaveChangesAsync();
+        }
+
+        await scenario.Runtime.ConfirmAsync(successor.EnrollmentId, successor.ConfirmDigest, successor.ConfirmRequest, successor.ConfirmProof, IPAddress.Loopback);
+        await using var check = await scenario.Factory.CreateDbContextAsync();
+        Assert.Equal(successor.EnrollmentId, (await check.HardwareAuthorityAliases.SingleAsync()).RuntimeEnrollmentId);
+    }
+
+    /// <summary>Rejects a foreign signing key or a changed signed body before any durable acceptance is created.</summary>
+    /// <param name = "wrongKey">Selects foreign-key forgery rather than a body-digest substitution.</param>
+    [Theory(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_UnacceptedSignatureNeverCreatesReceipt")]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MigrationLineage_UnacceptedSignatureNeverCreatesReceipt(bool wrongKey)
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        using var attacker = RSA.Create(3072);
+        var request = MigrationRequest(scenario, LegacyHardwareId, StableHardwareId);
+        var digest = Sha256("accepted-body-" + Guid.NewGuid().ToString("D"));
+        var proof = Proof(wrongKey ? attacker : scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId, scenario.Options.ConfirmAudience, "-", digest);
+        var error = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => scenario.Runtime.MigrateHardwareAuthorityAsync(scenario.EnrollmentId, wrongKey ? digest : Sha256("substituted-body"), request, proof, IPAddress.Loopback));
+        Assert.Equal("authentication_failed", error.ErrorCode);
+        await AssertLegacyAuthorityUnchangedAsync(scenario);
+        await using var db = await scenario.Factory.CreateDbContextAsync();
+        Assert.Empty(await db.HardwareAuthorityMigrationReceipts.ToListAsync());
+        Assert.Empty(await db.HardwareAuthorityAliases.ToListAsync());
+    }
+
+    /// <summary>Exact accepted migration replay returns the original bytes without duplicating its durable receipt.</summary>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_ExactMigrationReplayCreatesOneReceipt")]
+    public async Task MigrationLineage_ExactMigrationReplayCreatesOneReceipt()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        var request = MigrationRequest(scenario, LegacyHardwareId, StableHardwareId);
+        var digest = Sha256("receipt-replay-" + Guid.NewGuid().ToString("D"));
+        var proof = Proof(scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId, scenario.Options.ConfirmAudience, "-", digest);
+        var first = await scenario.Runtime.MigrateHardwareAuthorityAsync(scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback);
+        var second = await scenario.Runtime.MigrateHardwareAuthorityAsync(scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback);
+        Assert.False(first.Idempotent);
+        Assert.True(second.Idempotent);
+        Assert.Equal(first.ExactResponseBody, second.ExactResponseBody);
+        await using var db = await scenario.Factory.CreateDbContextAsync();
+        var receipt = Assert.Single(await db.HardwareAuthorityMigrationReceipts.ToListAsync());
+        Assert.Equal(Guid.Parse(request.RequestId!), receipt.RequestId);
+        Assert.Equal(receipt.Id, (await db.HardwareAuthorityAliases.SingleAsync()).MigrationReceiptId);
+    }
+
+    /// <summary>
+    /// Changes only whitespace inside the retirement-state SQL literal: startup must reject the altered function
+    /// even though a whitespace-stripping comparison would incorrectly consider the two bodies equivalent.
+    /// </summary>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_WhitespaceInsideGuardLiteralFailsStartup")]
+    public async Task MigrationLineage_WhitespaceInsideGuardLiteralFailsStartup()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        var registry = new RuntimeEnrollmentKeyRegistryService(scenario.Factory, Options.Create(scenario.Options));
+        await registry.ValidateAsync();
+        await using var connection = new NpgsqlConnection(scenario.AdminConnectionString);
+        await connection.OpenAsync();
+        const string original = SoftLicence.Server.Migrations.MigrationReceiptGuards.KeyRetentionSource;
+        var altered = original.Replace("'retired'", "'ret ired'", StringComparison.Ordinal);
+        Assert.NotEqual(original, altered);
+        await ReplaceMigrationReceiptKeyGuardAsync(connection, altered);
+        try
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => registry.ValidateAsync());
+        }
+        finally
+        {
+            await ReplaceMigrationReceiptKeyGuardAsync(connection, original);
+        }
+
+        await registry.ValidateAsync();
+    }
+
+    /// <summary>
+    /// Confirms that additive schema rollback is allowed only before proof exists; populated rollback preserves
+    /// receipts and reports the explicit restore-backup requirement rather than silently discarding authority.
+    /// </summary>
+    /// <param name = "acceptedProof">Whether a signed migration has committed durable evidence.</param>
+    [Theory(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_SchemaRollbackRequiresEmptyEvidence")]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MigrationLineage_SchemaRollbackRequiresEmptyEvidence(bool acceptedProof)
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        if (acceptedProof)
+        {
+            await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+            await MigrateScenarioAsync(scenario);
+        }
+
+        var options = new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(scenario.AdminConnectionString).Options;
+        await using var admin = new LicenseDbContext(options);
+        var migrator = admin.GetService<IMigrator>();
+        const string previous = "20260929190522_AddAssignmentEnforcementSwitch";
+        if (acceptedProof)
+        {
+            var dataBefore = await Tkt976_BusinessFingerprintAsync(scenario.AdminConnectionString);
+            var schemaBefore = await ReadMigrationReceiptSchemaAsync(scenario.AdminConnectionString);
+            var migrationsBefore = (await admin.Database.GetAppliedMigrationsAsync()).ToArray();
+            var envelope = await Assert.ThrowsAsync<InvalidOperationException>(() => migrator.MigrateAsync(previous));
+            var error = Assert.IsType<PostgresException>(envelope.InnerException);
+            Assert.Equal("55000", error.SqlState);
+            Assert.Equal("durable migration receipts exist; restore a verified backup instead of dropping proof", error.MessageText);
+            Assert.Single(await admin.HardwareAuthorityMigrationReceipts.ToListAsync());
+            Assert.Equal(dataBefore, await Tkt976_BusinessFingerprintAsync(scenario.AdminConnectionString));
+            Assert.Equal(schemaBefore, await ReadMigrationReceiptSchemaAsync(scenario.AdminConnectionString));
+            Assert.Equal(migrationsBefore, (await admin.Database.GetAppliedMigrationsAsync()).ToArray());
+            await new RuntimeEnrollmentKeyRegistryService(scenario.Factory, Options.Create(scenario.Options)).ValidateAsync();
+        }
+        else
+        {
+            await migrator.MigrateAsync(previous);
+            await using var connection = new NpgsqlConnection(scenario.AdminConnectionString);
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT to_regclass('public.\"HardwareAuthorityMigrationReceipts\"') IS NULL";
+            Assert.True((bool)(await command.ExecuteScalarAsync())!);
+            await migrator.MigrateAsync();
+            Assert.Empty(await admin.HardwareAuthorityMigrationReceipts.ToListAsync());
+        }
+    }
+
+    /// <summary>Accepts the historical server shape S without an L-to-S receipt after a real signed S-to-U migration.</summary>
+    /// <remarks>The old alias is not backfilled. Only the new accepted edge is a receipt root;
+    /// Finalize, Prepare and signed successor Confirm all use the real services.</remarks>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_HistoricalStableBindingWithoutReceipt_SignedUuidMigrationConfirmsSuccessor")]
+    public async Task MigrationLineage_HistoricalStableBindingWithoutReceipt_SignedUuidMigrationConfirmsSuccessor() => await ExerciseHistoricalStableConfirmAsync("none");
+    /// <summary>Accepts the legitimate historical backfill shape with a null request id, without rewriting it.</summary>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_HistoricalBackfillWithoutRequestOrReceipt_SignedUuidMigrationConfirmsSuccessor")]
+    public async Task MigrationLineage_HistoricalBackfillWithoutRequestOrReceipt_SignedUuidMigrationConfirmsSuccessor() => await ExerciseHistoricalStableConfirmAsync("backfill");
+    /// <summary>Replays the exact signed Confirm after selection without changing the retained historical alias.</summary>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_HistoricalSelection_ExactConfirmReplayIsIdempotent")]
+    public async Task MigrationLineage_HistoricalSelection_ExactConfirmReplayIsIdempotent() => await ExerciseHistoricalStableConfirmAsync("exact-replay");
+    /// <summary>Observes both exact Confirms blocked before allowing one selection and one replay.</summary>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_HistoricalSelection_ConcurrentExactConfirmsRepointOnce")]
+    public async Task MigrationLineage_HistoricalSelection_ConcurrentExactConfirmsRepointOnce() => await ExerciseHistoricalStableConfirmAsync("concurrent");
+    /// <summary>Exercises historical selection after real key rotation and migration nonce retention cleanup.</summary>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_HistoricalSelection_RotationAndNonceRetentionPreserveReceipt")]
+    public async Task MigrationLineage_HistoricalSelection_RotationAndNonceRetentionPreserveReceipt() => await ExerciseHistoricalStableConfirmAsync("rotation-retention");
+    /// <summary>Rejects a real server-accepted foreign receipt on the new historical selection path.</summary>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_HistoricalSelection_RealForeignReceiptCannotAuthorizeCurrentAlias")]
+    public async Task MigrationLineage_HistoricalSelection_RealForeignReceiptCannotAuthorizeCurrentAlias() => await ExerciseHistoricalStableConfirmAsync("real-foreign-receipt");
+    /// <summary>Proves PostgreSQL rejects a second same-license S root before Confirm, preserving the genuine accepted root.</summary>
+    /// <remarks>This is an exact database uniqueness proof, not a claim that two authenticated candidates reached Confirm.</remarks>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_HistoricalSelection_DuplicateCurrentRootFailsDatabaseUniqueness")]
+    public async Task MigrationLineage_HistoricalSelection_DuplicateCurrentRootFailsDatabaseUniqueness() => await ExerciseHistoricalStableConfirmAsync("duplicate-current-root");
+    /// <summary>Rejects a foreign or ambiguous historical companion without mutating either alias or consuming Confirm.</summary>
+    [Theory(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_HistoricalCompanionMutationFailsClosed")]
+    [InlineData("historical-product")]
+    [InlineData("historical-license")]
+    [InlineData("historical-seat")]
+    [InlineData("historical-binding")]
+    [InlineData("historical-enrollment")]
+    [InlineData("historical-destination")]
+    [InlineData("historical-source-is-target")]
+    [InlineData("historical-security")]
+    [InlineData("historical-authority")]
+    [InlineData("historical-time")]
+    [InlineData("historical-request-empty")]
+    [InlineData("historical-receipt-borrowed")]
+    [InlineData("current-receipt-missing")]
+    [InlineData("current-request-forged")]
+    [InlineData("current-source-foreign")]
+    [InlineData("current-destination-foreign")]
+    [InlineData("current-disabled")]
+    [InlineData("second-current-alias")]
+    public async Task MigrationLineage_HistoricalCompanionMutationFailsClosed(string mutation) => await ExerciseHistoricalStableConfirmAsync(mutation);
+    /// <summary>Does not fabricate an old acceptance edge when a later signed migration extends an unproved alias.</summary>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_UnprovedHistoricalParentIsNotBackfilled")]
+    public async Task MigrationLineage_UnprovedHistoricalParentIsNotBackfilled()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        using var successor = await PrepareAliasSuccessorConfirmScenarioAsync(scenario, "unproved-parent", () => RemoveParentProofThenExtendAsync(scenario));
+        await using (var db = await scenario.Factory.CreateDbContextAsync())
+        {
+            Assert.Null((await db.HardwareAuthorityAliases.SingleAsync()).MigrationReceiptId);
+            Assert.Single(await db.HardwareAuthorityMigrationReceipts.ToListAsync());
+        }
+
+        var error = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => scenario.Runtime.ConfirmAsync(successor.EnrollmentId, successor.ConfirmDigest, successor.ConfirmRequest, successor.ConfirmProof, IPAddress.Loopback));
+        Assert.Equal("enrollment_conflict", error.ErrorCode);
+        Assert.Equal("confirm_alias_boundary_mismatch", error.DiagnosticCode);
+        await AssertPendingSuccessorAndStaleAliasAsync(scenario, successor);
+    }
+
     /// <summary>Rejects a genuine accepted receipt borrowed from another product, license, seat and signing enrollment.</summary>
-    [Fact]
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_RealForeignReceiptCannotAuthorizeLocalSuccessor")]
     public async Task MigrationLineage_RealForeignReceiptCannotAuthorizeLocalSuccessor()
     {
         using var foreign = await CreatePreparedBootstrapScenarioAsync();
@@ -578,7 +589,6 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         await MigrateScenarioAsync(foreign);
         await using var foreignDb = await foreign.Factory.CreateDbContextAsync();
         var borrowed = await foreignDb.HardwareAuthorityMigrationReceipts.AsNoTracking().SingleAsync();
-
         using var local = await CreatePreparedBootstrapScenarioAsync();
         using var successor = await PrepareAliasSuccessorConfirmScenarioAsync(local, "foreign-accepted-receipt");
         await using (var db = await local.Factory.CreateDbContextAsync())
@@ -593,31 +603,36 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             (await db.HardwareAuthorityAliases.SingleAsync()).MigrationReceiptId = borrowed.Id;
             await db.SaveChangesAsync();
         }
-        var error = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => local.Runtime.ConfirmAsync(
-            successor.EnrollmentId, successor.ConfirmDigest, successor.ConfirmRequest, successor.ConfirmProof,
-            IPAddress.Loopback));
+
+        var error = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => local.Runtime.ConfirmAsync(successor.EnrollmentId, successor.ConfirmDigest, successor.ConfirmRequest, successor.ConfirmProof, IPAddress.Loopback));
         Assert.Equal("authority_unavailable", error.ErrorCode);
         await AssertPendingSuccessorAndStaleAliasAsync(local, successor);
     }
 
     /// <summary>Proves a disabled storage/key guard prevents startup; restores only the exact test-disabled trigger.</summary>
-    /// <param name="trigger">Allowlisted trigger under test.</param>
-    [Theory]
+    /// <param name = "trigger">Allowlisted trigger under test.</param>
+    [Theory(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_DisabledGuardFailsStartup")]
     [InlineData("TR_MigrationReceipt_Immutable")]
     [InlineData("TR_MigrationReceipt_NoTruncate")]
     [InlineData("TR_MigrationReceipt_KeyRetention")]
     public async Task MigrationLineage_DisabledGuardFailsStartup(string trigger)
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        var table = trigger == "TR_MigrationReceipt_KeyRetention"
-            ? "RuntimeEnrollmentKeyRegistries" : "HardwareAuthorityMigrationReceipts";
+        var table = trigger == "TR_MigrationReceipt_KeyRetention" ? "RuntimeEnrollmentKeyRegistries" : "HardwareAuthorityMigrationReceipts";
         var registry = new RuntimeEnrollmentKeyRegistryService(scenario.Factory, Options.Create(scenario.Options));
         await registry.ValidateAsync();
         await using var connection = new NpgsqlConnection(scenario.AdminConnectionString);
         await connection.OpenAsync();
         await ExecuteAsync(connection, $"ALTER TABLE public.\"{table}\" DISABLE TRIGGER \"{trigger}\";");
-        try { await Assert.ThrowsAsync<InvalidOperationException>(() => registry.ValidateAsync()); }
-        finally { await ExecuteAsync(connection, $"ALTER TABLE public.\"{table}\" ENABLE TRIGGER \"{trigger}\";"); }
+        try
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => registry.ValidateAsync());
+        }
+        finally
+        {
+            await ExecuteAsync(connection, $"ALTER TABLE public.\"{table}\" ENABLE TRIGGER \"{trigger}\";");
+        }
+
         await registry.ValidateAsync();
     }
 
@@ -625,7 +640,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Rotates the encryption key using the real registry procedure, retains the old receipt decrypt key,
     /// removes migration replay nonces, and confirms through a newly constructed runtime service.
     /// </summary>
-    [Fact]
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_KeyRotationPreservesOldReceiptAndRefusesKeyRemoval")]
     public async Task MigrationLineage_KeyRotationPreservesOldReceiptAndRefusesKeyRemoval()
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
@@ -634,29 +649,22 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var oldKeyId = before.Encryption.ActiveKeyId;
         scenario.Options.KeyRegistryVersion++;
         scenario.Options.Encryption.ActiveKeyId = "receipt-rotated-key";
-        scenario.Options.Encryption.Keys.Add(new RuntimeEncryptionKeyOptions
-        {
-            KeyId = scenario.Options.Encryption.ActiveKeyId,
-            KeyBase64 = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))
-        });
+        scenario.Options.Encryption.Keys.Add(new RuntimeEncryptionKeyOptions { KeyId = scenario.Options.Encryption.ActiveKeyId, KeyBase64 = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)) });
         await RotateKeyRegistryAsync(scenario.AdminConnectionString, before, scenario.Options);
         await using (var db = await scenario.Factory.CreateDbContextAsync())
         {
             Assert.Equal(oldKeyId, (await db.HardwareAuthorityMigrationReceipts.SingleAsync()).KeyId);
-            await db.RuntimeEnrollmentProofNonces.Where(row => row.Operation == "hardware-authority-migration")
-                .ExecuteDeleteAsync();
+            await db.RuntimeEnrollmentProofNonces.Where(row => row.Operation == "hardware-authority-migration").ExecuteDeleteAsync();
         }
+
         var registry = new RuntimeEnrollmentKeyRegistryService(scenario.Factory, Options.Create(scenario.Options));
         await registry.ValidateAsync();
         var restarted = scenario.CreateRestartedRuntime();
         using var crypto = restarted.Crypto;
-        await restarted.Runtime.ConfirmAsync(successor.EnrollmentId, successor.ConfirmDigest,
-            successor.ConfirmRequest, successor.ConfirmProof, IPAddress.Loopback);
-
+        await restarted.Runtime.ConfirmAsync(successor.EnrollmentId, successor.ConfirmDigest, successor.ConfirmRequest, successor.ConfirmProof, IPAddress.Loopback);
         var withoutOldKey = JsonSerializer.Deserialize<RuntimeEnrollmentOptions>(JsonSerializer.Serialize(scenario.Options))!;
         withoutOldKey.Encryption.Keys.RemoveAll(key => key.KeyId == oldKeyId);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => new RuntimeEnrollmentKeyRegistryService(
-            scenario.Factory, Options.Create(withoutOldKey)).ValidateAsync());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => new RuntimeEnrollmentKeyRegistryService(scenario.Factory, Options.Create(withoutOldKey)).ValidateAsync());
         await using var check = await scenario.Factory.CreateDbContextAsync();
         Assert.Equal(successor.EnrollmentId, (await check.HardwareAuthorityAliases.SingleAsync()).RuntimeEnrollmentId);
     }
@@ -665,7 +673,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Injects an AFTER INSERT failure to prove receipt, alias, nonce, history and seat mutations share one transaction.
     /// The injection exists only in this owned synthetic database and is always removed before disposal.
     /// </summary>
-    [Fact]
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_FailureAfterReceiptInsertionRollsBackWholeMigration")]
     public async Task MigrationLineage_FailureAfterReceiptInsertionRollsBackWholeMigration()
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
@@ -690,6 +698,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                 DROP FUNCTION public.test_migration_receipt_insert_failure();
                 """);
         }
+
         await using var check = await scenario.Factory.CreateDbContextAsync();
         Assert.Empty(await check.HardwareAuthorityMigrationReceipts.ToListAsync());
         Assert.Empty(await check.HardwareAuthorityAliases.ToListAsync());
@@ -703,15 +712,14 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Proves two real signed migrations form a durable L-to-S-to-U chain; substituting the old head
     /// cannot authorize the final target. Both migration replay nonces are removed before Confirm.
     /// </summary>
-    /// <param name="substituteOldHead">Whether to attack the final edge by restoring the first receipt reference.</param>
-    [Theory]
+    /// <param name = "substituteOldHead">Whether to attack the final edge by restoring the first receipt reference.</param>
+    [Theory(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_SignedChainRequiresItsExactFinalEdge")]
     [InlineData(false)]
     [InlineData(true)]
     public async Task MigrationLineage_SignedChainRequiresItsExactFinalEdge(bool substituteOldHead)
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        using var successor = await PrepareAliasSuccessorConfirmScenarioAsync(scenario, "receipt-chain",
-            () => ExtendSignedMigrationChainAsync(scenario));
+        using var successor = await PrepareAliasSuccessorConfirmScenarioAsync(scenario, "receipt-chain", () => ExtendSignedMigrationChainAsync(scenario));
         await using (var db = await scenario.Factory.CreateDbContextAsync())
         {
             var receipts = await db.HardwareAuthorityMigrationReceipts.ToListAsync();
@@ -720,50 +728,30 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             var second = Assert.Single(receipts, row => row.ParentReceiptId == first.Id);
             var alias = await db.HardwareAuthorityAliases.SingleAsync(row => row.Id == successor.AliasId);
             Assert.Equal(second.Id, alias.MigrationReceiptId);
-            if (substituteOldHead) alias.MigrationReceiptId = first.Id;
+            if (substituteOldHead)
+                alias.MigrationReceiptId = first.Id;
             await db.SaveChangesAsync();
-            Assert.Equal(2, await db.RuntimeEnrollmentProofNonces.Where(row =>
-                row.EnrollmentId == successor.SourceEnrollmentId && row.Operation == "hardware-authority-migration")
-                .ExecuteDeleteAsync());
+            Assert.Equal(2, await db.RuntimeEnrollmentProofNonces.Where(row => row.EnrollmentId == successor.SourceEnrollmentId && row.Operation == "hardware-authority-migration").ExecuteDeleteAsync());
         }
+
         if (substituteOldHead)
         {
-            var error = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => scenario.Runtime.ConfirmAsync(
-                successor.EnrollmentId, successor.ConfirmDigest, successor.ConfirmRequest,
-                successor.ConfirmProof, IPAddress.Loopback));
+            var error = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => scenario.Runtime.ConfirmAsync(successor.EnrollmentId, successor.ConfirmDigest, successor.ConfirmRequest, successor.ConfirmProof, IPAddress.Loopback));
             Assert.Equal("enrollment_conflict", error.ErrorCode);
             Assert.Equal("confirm_alias_boundary_mismatch", error.DiagnosticCode);
             await AssertPendingSuccessorAndStaleAliasAsync(scenario, successor);
         }
         else
         {
-            await scenario.Runtime.ConfirmAsync(successor.EnrollmentId, successor.ConfirmDigest,
-                successor.ConfirmRequest, successor.ConfirmProof, IPAddress.Loopback);
+            await scenario.Runtime.ConfirmAsync(successor.EnrollmentId, successor.ConfirmDigest, successor.ConfirmRequest, successor.ConfirmProof, IPAddress.Loopback);
             await using var check = await scenario.Factory.CreateDbContextAsync();
             Assert.Equal(successor.EnrollmentId, (await check.HardwareAuthorityAliases.SingleAsync()).RuntimeEnrollmentId);
             Assert.Equal(2, await check.HardwareAuthorityMigrationReceipts.CountAsync());
         }
     }
 
-    /// <summary>Extends an accepted synthetic migration through a second actual signed request with a distinct UUID.</summary>
-    /// <param name="scenario">Active source credential and isolated database after the first accepted migration.</param>
-    private static async Task ExtendSignedMigrationChainAsync(PreparedBootstrapScenario scenario)
-    {
-        const string secondUuid = "4C4C4544-0051-3610-8052-B7C04F4A4E33";
-        var target = MachineIdentity.FromUuid(secondUuid).HardwareId
-            ?? throw new InvalidOperationException("Synthetic chain UUID was refused.");
-        var request = MigrationRequest(scenario, StableHardwareId, target);
-        request.SystemUuid = secondUuid;
-        var digest = Sha256("receipt-chain-second-" + Guid.NewGuid().ToString("D"));
-        var proof = Proof(scenario.EnrollmentKey, "hardware-authority-migration", scenario.EnrollmentId,
-            scenario.Options.ConfirmAudience, "-", digest);
-        var result = await scenario.Runtime.MigrateHardwareAuthorityAsync(
-            scenario.EnrollmentId, digest, request, proof, IPAddress.Loopback);
-        Assert.Equal("migrated", result.Response.Decision);
-    }
-
     /// <summary>Proves an accepted migration remains usable after actual deletion of its expiring replay nonce.</summary>
-    [Fact]
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_ConfirmAfterNoncePurgeRetainsDurableAcceptance")]
     public async Task MigrationLineage_ConfirmAfterNoncePurgeRetainsDurableAcceptance()
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
@@ -771,13 +759,11 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         await using (var db = await scenario.Factory.CreateDbContextAsync())
         {
             Assert.Single(await db.HardwareAuthorityMigrationReceipts.ToListAsync());
-            var removed = await db.RuntimeEnrollmentProofNonces.Where(row =>
-                row.EnrollmentId == successor.SourceEnrollmentId && row.Operation == "hardware-authority-migration")
-                .ExecuteDeleteAsync();
+            var removed = await db.RuntimeEnrollmentProofNonces.Where(row => row.EnrollmentId == successor.SourceEnrollmentId && row.Operation == "hardware-authority-migration").ExecuteDeleteAsync();
             Assert.Equal(1, removed);
         }
-        await scenario.Runtime.ConfirmAsync(successor.EnrollmentId, successor.ConfirmDigest,
-            successor.ConfirmRequest, successor.ConfirmProof, IPAddress.Loopback);
+
+        await scenario.Runtime.ConfirmAsync(successor.EnrollmentId, successor.ConfirmDigest, successor.ConfirmRequest, successor.ConfirmProof, IPAddress.Loopback);
         await using var check = await scenario.Factory.CreateDbContextAsync();
         var alias = await check.HardwareAuthorityAliases.SingleAsync(row => row.Id == successor.AliasId);
         Assert.Equal(successor.EnrollmentId, alias.RuntimeEnrollmentId);
@@ -789,9 +775,9 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Rejects missing or substituted durable lineage without advancing the successor or repointing its alias.
     /// Corrupt ciphertext keeps the distinct authority-unavailable error instead of becoming a business success.
     /// </summary>
-    /// <param name="mutation">Exact receipt or linkage dimension corrupted in this isolated synthetic database.</param>
-    /// <param name="expectedError">Public refusal preserving crypto versus authority-graph semantics.</param>
-    [Theory]
+    /// <param name = "mutation">Exact receipt or linkage dimension corrupted in this isolated synthetic database.</param>
+    /// <param name = "expectedError">Public refusal preserving crypto versus authority-graph semantics.</param>
+    [Theory(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_UnprovedOrSubstitutedReceiptFailsClosed")]
     [InlineData("missing", "enrollment_conflict")]
     [InlineData("request", "enrollment_conflict")]
     [InlineData("alias-source", "enrollment_conflict")]
@@ -807,35 +793,44 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             var alias = await db.HardwareAuthorityAliases.SingleAsync(row => row.Id == successor.AliasId);
             switch (mutation)
             {
-                case "missing": alias.MigrationReceiptId = null; break;
-                case "request": alias.MigrationRequestId = Guid.NewGuid(); break;
-                case "alias-source": alias.LegacyHardwareIdSha256 = Sha256("foreign-machine"); break;
+                case "missing":
+                    alias.MigrationReceiptId = null;
+                    break;
+                case "request":
+                    alias.MigrationRequestId = Guid.NewGuid();
+                    break;
+                case "alias-source":
+                    alias.LegacyHardwareIdSha256 = Sha256("foreign-machine");
+                    break;
                 case "binding-source":
-                    (await db.DistributionInstallationBindings.SingleAsync(row => row.Id == successor.SourceBindingId))
-                        .HardwareIdHash = Sha256("foreign-machine");
+                    (await db.DistributionInstallationBindings.SingleAsync(row => row.Id == successor.SourceBindingId)).HardwareIdHash = Sha256("foreign-machine");
                     break;
                 case "signing-key":
-                    (await db.RuntimeEnrollments.SingleAsync(row => row.Id == successor.SourceEnrollmentId))
-                        .PublicKeySpkiSha256 = Sha256("foreign-signing-key");
+                    (await db.RuntimeEnrollments.SingleAsync(row => row.Id == successor.SourceEnrollmentId)).PublicKeySpkiSha256 = Sha256("foreign-signing-key");
                     break;
                 case "borrowed-envelope":
                     var original = await db.HardwareAuthorityMigrationReceipts.AsNoTracking().SingleAsync();
                     var counterfeit = new HardwareAuthorityMigrationReceipt
                     {
-                        Id = Guid.NewGuid(), EnrollmentId = original.EnrollmentId,
-                        EnrollmentEpoch = original.EnrollmentEpoch, RequestId = Guid.NewGuid(), Jti = Guid.NewGuid(),
-                        KeyId = original.KeyId, Ciphertext = original.Ciphertext
+                        Id = Guid.NewGuid(),
+                        EnrollmentId = original.EnrollmentId,
+                        EnrollmentEpoch = original.EnrollmentEpoch,
+                        RequestId = Guid.NewGuid(),
+                        Jti = Guid.NewGuid(),
+                        KeyId = original.KeyId,
+                        Ciphertext = original.Ciphertext
                     };
                     db.HardwareAuthorityMigrationReceipts.Add(counterfeit);
                     alias.MigrationReceiptId = counterfeit.Id;
                     break;
-                default: throw new InvalidOperationException("Unknown receipt mutation.");
+                default:
+                    throw new InvalidOperationException("Unknown receipt mutation.");
             }
+
             await db.SaveChangesAsync();
         }
-        var refused = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => scenario.Runtime.ConfirmAsync(
-            successor.EnrollmentId, successor.ConfirmDigest, successor.ConfirmRequest, successor.ConfirmProof,
-            IPAddress.Loopback));
+
+        var refused = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => scenario.Runtime.ConfirmAsync(successor.EnrollmentId, successor.ConfirmDigest, successor.ConfirmRequest, successor.ConfirmProof, IPAddress.Loopback));
         Assert.Equal(expectedError, refused.ErrorCode);
         if (expectedError == "enrollment_conflict")
             Assert.Equal("confirm_alias_boundary_mismatch", refused.DiagnosticCode);
@@ -847,7 +842,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// The SQL constraint rejects this attack before Confirm, preserving the entire graph and stale alias.
     /// No constraint is disabled to manufacture an otherwise unreachable application state.
     /// </summary>
-    [Fact]
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_SigningGenerationMutationFailsDatabaseConstraintWithoutGraphChange")]
     public async Task MigrationLineage_SigningGenerationMutationFailsDatabaseConstraintWithoutGraphChange()
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
@@ -864,13 +859,14 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             Assert.Equal("CK_RuntimeEnrollments_Epoch", error.ConstraintName);
             Assert.Equal("RuntimeEnrollments", error.TableName);
         }
+
         Assert.Equal(before, await Tkt976_BusinessFingerprintAsync(scenario.AdminConnectionString));
         await AssertPendingSuccessorAndStaleAliasAsync(scenario, successor);
     }
 
     /// <summary>Proves persisted acceptance cannot be rewritten or deleted, even using the fixture's owner connection.</summary>
-    /// <param name="operation">Closed destructive operation attempted against the owned synthetic receipt.</param>
-    [Theory]
+    /// <param name = "operation">Closed destructive operation attempted against the owned synthetic receipt.</param>
+    [Theory(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.MigrationLineage_ReceiptIsImmutable")]
     [InlineData("update")]
     [InlineData("delete")]
     [InlineData("truncate")]
@@ -887,8 +883,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             "delete" => "DELETE FROM public.\"HardwareAuthorityMigrationReceipts\"",
             "truncate" => "TRUNCATE public.\"HardwareAuthorityMigrationReceipts\" CASCADE",
             "update" => "UPDATE public.\"HardwareAuthorityMigrationReceipts\" SET \"Ciphertext\" = 'tampered'",
-            _ => throw new InvalidOperationException("Unknown receipt write operation.")
-        };
+            _ => throw new InvalidOperationException("Unknown receipt write operation.")};
         var error = await Assert.ThrowsAsync<PostgresException>(() => command.ExecuteNonQueryAsync());
         Assert.Equal("55000", error.SqlState);
         await using var check = await scenario.Factory.CreateDbContextAsync();

@@ -29,6 +29,21 @@ public sealed class DistributionS2SClientOptions
     public bool AllowLicenseBootstrap { get; set; }
     /// <summary>Allows the dedicated client to invoke provider-owned portal deactivation.</summary>
     public bool AllowPortalDeactivation { get; set; }
+    /// <summary>Allows the dedicated client to invoke provider-owned key-activation settings.</summary>
+    public bool AllowLicenseKeyActivationSettings { get; set; }
+    /// <summary>Allows the dedicated client to manage licence hardware exclusions.</summary>
+    public bool AllowLicenseHardwareExclusions { get; set; }
+    /// <summary>
+    /// TKT-002919: allows the dedicated client to relink a Runtime installation after the account signed in inside
+    /// the application. Strictly dedicated: the identity carries no other capability on any key rotation.
+    /// </summary>
+    public bool AllowRuntimeAccountRelink { get; set; }
+    /// <summary>
+    /// TKT-002919: distribution clients whose enrollments the dedicated relink identity may act on. Required
+    /// (non-empty, canonical identifiers, without the identity itself, identical on every key rotation) exactly
+    /// when <see cref="AllowRuntimeAccountRelink"/> is set, and forbidden otherwise.
+    /// </summary>
+    public List<string> AccountRelinkForClientIds { get; set; } = [];
     public DateTimeOffset? NotBeforeUtc { get; set; }
     public DateTimeOffset? NotAfterUtc { get; set; }
     public DateTimeOffset? RevokedAtUtc { get; set; }
@@ -79,8 +94,13 @@ public sealed class DistributionS2SOptionsValidator : IValidateOptions<Distribut
                 failures.Add("Distribution S2S public keys must be RSA public keys of at least 2048 bits.");
         }
 
+        // TKT-002919 review: a relink identity may only name distribution clients that exist in this configuration,
+        // so a typo at deployment fails startup instead of answering 404 to every relink.
+        var configuredClientIds = new HashSet<string>(
+            (options.Clients ?? []).Select(client => client.ClientId), StringComparer.Ordinal);
         foreach (var identity in (options.Clients ?? []).GroupBy(client => client.ClientId, StringComparer.Ordinal))
         {
+            // Historical rule kept as is: portal deactivation may share its identity with hardware exclusions.
             if (identity.Any(client => client.AllowPortalDeactivation)
                 && identity.Any(client =>
                     !client.AllowPortalDeactivation
@@ -90,10 +110,88 @@ public sealed class DistributionS2SOptionsValidator : IValidateOptions<Distribut
             {
                 failures.Add("Portal deactivation requires one dedicated client identity across all key rotations.");
             }
+            // TKT-002475: the new capability alone is strict, its identity carries no other capability.
+            if (RequiresDedicatedIdentity(identity, client => client.AllowLicenseKeyActivationSettings))
+            {
+                failures.Add("License key activation settings require one dedicated client identity across all key rotations.");
+            }
+            // TKT-002919: decision of 31/10/2026, the account relink has its own identity and key pair, linked
+            // explicitly to the distribution clients that created the enrollments it may relink.
+            if (RequiresDedicatedIdentity(identity, client => client.AllowRuntimeAccountRelink))
+            {
+                failures.Add("Runtime account relink requires one dedicated client identity across all key rotations.");
+            }
+            failures.AddRange(ValidateAccountRelinkLinks(identity.Key, identity.ToList(), configuredClientIds));
+            if (identity.Any(client => client.AllowLicenseHardwareExclusions)
+                && identity.Any(client =>
+                    !client.AllowLicenseHardwareExclusions
+                    || client.AllowRuntimeRecovery
+                    || client.AllowRuntimeUpgrade
+                    || client.AllowLicenseBootstrap))
+            {
+                failures.Add("Licence hardware exclusions require one dedicated client identity across all key rotations.");
+            }
         }
 
         return failures.Count == 0 ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(failures);
     }
+
+    /// <summary>
+    /// Returns whether an identity holding <paramref name="capability"/> violates the strict dedicated rule:
+    /// every key rotation of that identity must carry exactly this one capability.
+    /// </summary>
+    private static bool RequiresDedicatedIdentity(
+        IEnumerable<DistributionS2SClientOptions> identity,
+        Func<DistributionS2SClientOptions, bool> capability)
+    {
+        if (!identity.Any(capability))
+            return false;
+        return identity.Any(client => CapabilityCount(client) != 1 || !capability(client));
+    }
+
+    /// <summary>
+    /// Validates the TKT-002919 link between a relink identity and the distribution clients it acts for: the list is
+    /// required exactly when the relink capability is set, holds unique canonical identifiers other than the identity
+    /// itself, each naming a S2S client present in the configuration, and is identical (same order) on every key
+    /// rotation, so a rotation cannot widen the scope silently.
+    /// </summary>
+    /// <param name="clientId">Identity whose key rotations are checked.</param>
+    /// <param name="identity">Every configured key entry of that identity.</param>
+    /// <param name="configuredClientIds">Every configured S2S client identifier, compared ordinally.</param>
+    /// <returns>Configuration failures; empty when the identity is coherent.</returns>
+    private static IEnumerable<string> ValidateAccountRelinkLinks(
+        string clientId,
+        IReadOnlyList<DistributionS2SClientOptions> identity,
+        IReadOnlySet<string> configuredClientIds)
+    {
+        foreach (var client in identity)
+        {
+            var links = client.AccountRelinkForClientIds ?? [];
+            if (client.AllowRuntimeAccountRelink && links.Count == 0)
+                yield return "Runtime account relink requires a non-empty AccountRelinkForClientIds list.";
+            if (!client.AllowRuntimeAccountRelink && links.Count > 0)
+                yield return "AccountRelinkForClientIds is allowed only with AllowRuntimeAccountRelink.";
+            if (links.Any(link => !IsIdentifier(link))
+                || links.Distinct(StringComparer.Ordinal).Count() != links.Count
+                || links.Contains(clientId, StringComparer.Ordinal))
+                yield return "AccountRelinkForClientIds must hold unique canonical client identifiers other than the relink identity.";
+            if (links.Any(link => !configuredClientIds.Contains(link)))
+                yield return "AccountRelinkForClientIds must name configured Distribution S2S clients.";
+        }
+        var first = identity[0].AccountRelinkForClientIds ?? [];
+        if (identity.Any(client => !(client.AccountRelinkForClientIds ?? []).SequenceEqual(first, StringComparer.Ordinal)))
+            yield return "AccountRelinkForClientIds must be identical on every key rotation of the relink identity.";
+    }
+
+    /// <summary>Counts the S2S capabilities enabled on one client key entry.</summary>
+    private static int CapabilityCount(DistributionS2SClientOptions client) =>
+        (client.AllowRuntimeRecovery ? 1 : 0)
+        + (client.AllowRuntimeUpgrade ? 1 : 0)
+        + (client.AllowLicenseBootstrap ? 1 : 0)
+        + (client.AllowPortalDeactivation ? 1 : 0)
+        + (client.AllowLicenseKeyActivationSettings ? 1 : 0)
+        + (client.AllowLicenseHardwareExclusions ? 1 : 0)
+        + (client.AllowRuntimeAccountRelink ? 1 : 0);
 
     private static bool IsIdentifier(string? value) =>
         value is { Length: >= 3 and <= 64 }
@@ -139,13 +237,56 @@ public sealed class DistributionS2SOptionsValidator : IValidateOptions<Distribut
     }
 }
 
+/// <summary>
+/// Authenticated S2S caller returned by <see cref="IDistributionS2SAuthenticationService"/>: the exact configured
+/// client and key, with the capabilities of that key entry. Every <c>Allow*</c> flag defaults to false, so a route
+/// must check the flag it needs; since TKT-003162 no S2S route is reachable on authentication alone.
+/// </summary>
+/// <param name="ClientId">Configured client identifier; services scope their data by it, never by the body.</param>
+/// <param name="KeyId">Configured key identifier that verified the request signature.</param>
+/// <param name="AllowRuntimeRecovery">Runtime recovery routes (critical recovery, rollbacks, seat recovery).</param>
+/// <param name="AllowRuntimeUpgrade">Runtime upgrade, WebSetup and authority v2 routes.</param>
+/// <param name="AllowLicenseBootstrap">Licence bootstrap and refresh routes, and the installation flow
+/// (<see cref="MayDriveInstallation"/>).</param>
+/// <param name="AllowPortalDeactivation">Dedicated portal deactivation route.</param>
+/// <param name="AllowLicenseHardwareExclusions">Dedicated licence hardware exclusion routes.</param>
+/// <param name="AllowLicenseKeyActivationSettings">Dedicated key-activation setting routes.</param>
+/// <param name="AllowRuntimeAccountRelink">Dedicated account relink route.</param>
+/// <param name="AccountRelinkForClientIds">Distribution clients whose enrollments the relink identity may touch;
+/// null or empty for every other identity.</param>
 public sealed record DistributionS2SPrincipal(
     string ClientId,
     string KeyId,
     bool AllowRuntimeRecovery = false,
     bool AllowRuntimeUpgrade = false,
     bool AllowLicenseBootstrap = false,
-    bool AllowPortalDeactivation = false);
+    bool AllowPortalDeactivation = false,
+    bool AllowLicenseHardwareExclusions = false,
+    bool AllowLicenseKeyActivationSettings = false,
+    bool AllowRuntimeAccountRelink = false,
+    IReadOnlyList<string>? AccountRelinkForClientIds = null)
+{
+    /// <summary>
+    /// TKT-003162: stable 403 error code returned by every installation route (binding, entitlement, hardware
+    /// authority, source authority, enrollment prepare and reinstall) to an authenticated principal that is not a
+    /// distribution client. The nonce is already consumed when it is returned; no business write has happened.
+    /// </summary>
+    public const string InstallationNotAuthorizedErrorCode = "installation_not_authorized";
+
+    /// <summary>
+    /// TKT-003162: whether this principal may drive the installation flow (hardware authority, entitlement issue,
+    /// installation binding finalize, invalidate and source resolution, enrollment prepare and reinstall).
+    /// </summary>
+    /// <remarks>
+    /// The flow ends with a licence bootstrap, so it reuses <see cref="AllowLicenseBootstrap"/> instead of a new
+    /// capability: client 0 (the main distribution client) already holds it in production and cannot be changed by
+    /// <c>deploy.ps1 -ConfigurationChange</c>, which only edits clients 1 and above. Every dedicated identity
+    /// (portal deactivation, hardware exclusions, key-activation settings, account relink) is refused this right
+    /// by <see cref="DistributionS2SOptionsValidator"/>, so none of them can reach these routes. Do not widen this to
+    /// recovery or upgrade without re-checking that rule.
+    /// </remarks>
+    public bool MayDriveInstallation => AllowLicenseBootstrap;
+}
 
 public interface IDistributionS2SAuthenticationService
 {
@@ -285,7 +426,11 @@ public sealed class DistributionS2SAuthenticationService : IDistributionS2SAuthe
             client.AllowRuntimeRecovery,
             client.AllowRuntimeUpgrade,
             client.AllowLicenseBootstrap,
-            client.AllowPortalDeactivation);
+            client.AllowPortalDeactivation,
+            client.AllowLicenseHardwareExclusions,
+            client.AllowLicenseKeyActivationSettings,
+            client.AllowRuntimeAccountRelink,
+            client.AllowRuntimeAccountRelink ? (client.AccountRelinkForClientIds ?? []).ToArray() : []);
     }
 
     public static string BuildSignaturePayload(

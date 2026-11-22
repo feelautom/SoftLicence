@@ -91,8 +91,12 @@ public sealed class BackupProcessRunnerTests
         await AssertProcessExitedAsync(await ReadPidAsync(consumerPidFile));
     }
 
+    /// <summary>
+    /// Proves that cleanup preserves consumer attribution after a closed pipe. The consumer may
+    /// still be running when cleanup starts or may already expose its intentional exit code.
+    /// </summary>
     [Fact]
-    public async Task PipeAsync_ConsumerClosesPipeBeforeDelayedExit_PreservesConsumerIdentityWithoutKillCode()
+    public async Task PipeAsync_ConsumerClosesPipeBeforeDelayedExit_PreservesConsumerIdentityAcrossTimings()
     {
         var producerPidFile = NewPidFile();
         var consumerPidFile = NewPidFile();
@@ -103,8 +107,8 @@ public sealed class BackupProcessRunnerTests
             default);
 
         Assert.Equal(BackupPipelineFailureStage.Consumer, result.FailureStage);
-        Assert.Null(result.ConsumerExitCode);
-        Assert.Equal(-1, result.ExitCode);
+        Assert.True(result.ConsumerExitCode is null or 29);
+        Assert.Equal(result.ConsumerExitCode ?? -1, result.ExitCode);
         Assert.Empty(result.StandardOutput);
         Assert.Empty(result.StandardError);
         Assert.True(result.DiagnosticDrainsObserved);

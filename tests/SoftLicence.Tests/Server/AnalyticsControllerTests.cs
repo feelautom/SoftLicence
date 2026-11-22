@@ -264,6 +264,103 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
         Assert.DoesNotContain(topEvents, e => GetString(e, "name") == "Startup_AppStarted");
     }
 
+    /// <summary>Proves scoped list/detail projections, exact authority selectors, and email display matching.</summary>
+    [Fact]
+    public async Task SecurityLocks_ReadRoutesEnforceScopeExactFiltersAndProjectIncidentCount()
+    {
+        await SeedTelemetryAsync();
+        var ids = await SeedSecurityLockAnalyticsAsync();
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
+
+        var listResponse = await client.GetAsync(
+            "/api/analytics/security/locks?state=OPEN&hardwareId=HW-LOCK-EXACT&email=alice%40example.test&take=10");
+
+        Assert.Equal(HttpStatusCode.OK, listResponse.StatusCode);
+        var list = await ReadJsonAsync(listResponse);
+        var row = Assert.Single(GetArray(list, "locks"));
+        Assert.Equal(ids.LockId.ToString("D"), GetString(row, "id"));
+        Assert.Equal("HW-LOCK-EXACT", GetString(row, "hardwareId"));
+        Assert.Equal("Alice@Example.Test", GetString(row, "customerEmail"));
+        Assert.Equal(1, GetInt(row, "openIncidentCount"));
+
+        var exactMismatch = await client.GetAsync(
+            "/api/analytics/security/locks?hardwareId=hw-lock-exact&take=10");
+        Assert.Empty(GetArray(await ReadJsonAsync(exactMismatch), "locks"));
+
+        var detailResponse = await client.GetAsync($"/api/analytics/security/locks/{ids.LockId:D}");
+        Assert.Equal(HttpStatusCode.OK, detailResponse.StatusCode);
+        Assert.Equal("LOCK-EVIDENCE", GetString(await ReadJsonAsync(detailResponse), "lockId"));
+
+        var decisionsResponse = await client.GetAsync(
+            $"/api/analytics/security/lock-release-decisions?decisionId={ids.DecisionId:D}&includeInactive=true");
+        Assert.Equal(HttpStatusCode.OK, decisionsResponse.StatusCode);
+        Assert.Equal(ids.DecisionId.ToString("D"),
+            GetString(Assert.Single(GetArray(await ReadJsonAsync(decisionsResponse), "decisions")), "id"));
+    }
+
+    /// <summary>Proves that state values are not normalized before server-side validation.</summary>
+    [Fact]
+    public async Task SecurityLocks_RejectInvalidExactState()
+    {
+        await SeedTelemetryAsync();
+        var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", ValidAnalyticsKey);
+
+        var response = await client.GetAsync("/api/analytics/security/locks?state=open");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("SECURITY_LOCK_STATE_INVALID", GetString(await ReadJsonAsync(response), "errorCode"));
+    }
+
+    /// <summary>Seeds one linked lock, one open incident and one remembered decision for analytics contract tests.</summary>
+    private async Task<(Guid LockId, Guid DecisionId)> SeedSecurityLockAnalyticsAsync()
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+        var product = await db.Products.SingleAsync(value => value.Name == "T-IA Connect");
+        var license = new License
+        {
+            Id = Guid.NewGuid(), ProductId = product.Id, LicenseKey = "LOCK-TEST-LICENSE",
+            CustomerName = "Alice", CustomerEmail = "Alice@Example.Test", IsActive = true
+        };
+        var enrollment = new RuntimeEnrollment
+        {
+            Id = Guid.NewGuid(), ProductId = product.Id, LicenseId = license.Id,
+            LicenseSeatId = Guid.NewGuid(), BindingId = Guid.NewGuid(), ClientId = "lock-test-client",
+            InstallationId = "installation-lock-test", HardwareIdHash = new string('a', 64),
+            ReleaseVersion = "2.1.999", State = "ACTIVE"
+        };
+        var report = new SecurityLockReport
+        {
+            Id = Guid.NewGuid(), ProductId = product.Id, EnrollmentId = enrollment.Id,
+            BindingId = enrollment.BindingId, InstallationId = enrollment.InstallationId,
+            HardwareId = "HW-LOCK-EXACT", AppVersion = "2.1.999", LockId = "LOCK-EVIDENCE",
+            Cause = "DEBUGGER", Level = 4, ClientMode = "REVIEW", EffectiveMode = "REVIEW",
+            EvidenceDigestSha256 = new string('b', 64), FirstSeenUtc = DateTime.UtcNow.AddMinutes(-3),
+            FirstReportedUtc = DateTime.UtcNow.AddMinutes(-2), LastReportedUtc = DateTime.UtcNow.AddMinutes(-1),
+            ReportCount = 1, State = "OPEN", LastVerdict = "MAINTAIN",
+            LinkStatus = SecurityLockReportLinkStatuses.VerifiedSeat
+        };
+        var decision = new SecurityLockReleaseDecision
+        {
+            Id = Guid.NewGuid(), ProductId = product.Id, LicenseId = license.Id,
+            HardwareId = report.HardwareId, Cause = report.Cause, IsActive = true,
+            CreatedAtUtc = DateTime.UtcNow, CreatedBy = "Alice",
+            SourceSecurityLockReportId = report.Id, ActivatedAtUtc = DateTime.UtcNow,
+            ActivatedBy = "Alice", ActivationCount = 1
+        };
+        db.AddRange(license, enrollment, report, decision, new RuntimeCriticalIncident
+        {
+            Id = Guid.NewGuid(), EnrollmentId = enrollment.Id, BindingId = enrollment.BindingId,
+            ProductId = product.Id, InstallationId = enrollment.InstallationId, EventId = Guid.NewGuid().ToString("D"),
+            Trigger = "security_lock", State = "OPEN", OpenedSecurityEpoch = 1,
+            OpenedAuthorityEpoch = 1, OpenedAtUtc = DateTime.UtcNow
+        });
+        await db.SaveChangesAsync();
+        return (report.Id, decision.Id);
+    }
+
     /// <summary>
     /// Keeps all four expected records inside a fixed UTC calendar day and proves that records
     /// immediately outside either boundary are excluded, independently of the execution clock.
@@ -380,7 +477,7 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
                         ModuleName = "PLC reachability",
                         Success = false,
                         Severity = "Warning",
-                        Message = "at 12:34:56 token=secret-value user@example.test https://private.example/x 10.20.30.40 2001:db8::1 C:\\Users\\Franck\\secret.txt"
+                        Message = "at 12:34:56 token=secret-value user@example.test https://private.example/x 10.20.30.40 2001:db8::1 C:\\Users\\Alice\\secret.txt"
                     }
                 },
                 new[]
@@ -401,7 +498,7 @@ public sealed class AnalyticsControllerTests : IClassFixture<WebApplicationFacto
         Assert.DoesNotContain("private.example", body, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("10.20.30.40", body, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("2001:db8::1", body, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("Franck", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Alice", body, StringComparison.OrdinalIgnoreCase);
 
         using var document = JsonDocument.Parse(body);
         var record = Assert.Single(GetArray(document.RootElement, "records"));

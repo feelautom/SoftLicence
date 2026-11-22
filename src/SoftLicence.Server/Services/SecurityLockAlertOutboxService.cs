@@ -136,6 +136,19 @@ public sealed class SecurityLockAlertOutboxProcessor(
         return null;
     }
 
+    /// <summary>
+    /// Prepares and sends one claimed delivery: the dossier is built once and stored, then the email channel goes
+    /// through SMTP (SKIPPED when SMTP is not configured, UNKNOWN on any transport error) and a webhook channel through
+    /// <see cref="SendWebhookAsync"/> with the lock level read from its report (0 when the report row is missing).
+    /// </summary>
+    /// <remarks>
+    /// A preparation failure (for a dossier not yet built, including a missing report row) is logged with its
+    /// exception and retried with backoff; cancellation requested by the host is propagated. A lost lease (another
+    /// worker took over) ends silently.
+    /// </remarks>
+    /// <param name="id">Delivery identifier.</param>
+    /// <param name="leaseToken">Lease obtained by the claim.</param>
+    /// <param name="cancellationToken">Host shutdown token.</param>
     private async Task ProcessClaimedAsync(Guid id, Guid leaseToken, CancellationToken cancellationToken)
     {
         try
@@ -171,7 +184,12 @@ public sealed class SecurityLockAlertOutboxProcessor(
                 return;
             }
 
-            await SendWebhookAsync(delivery, leaseToken, cancellationToken);
+            // The dossier is already frozen in the delivery, so a missing report row must not block the alert: the
+            // priority then falls back to the ban flag alone (level 0 never reaches the level-5 maximum).
+            var level = await readDb.SecurityLockReports.AsNoTracking()
+                .Where(report => report.Id == delivery.SecurityLockReportId)
+                .Select(report => (int?)report.Level).SingleOrDefaultAsync(cancellationToken);
+            await SendWebhookAsync(delivery, level ?? 0, leaseToken, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -239,8 +257,22 @@ public sealed class SecurityLockAlertOutboxProcessor(
         await db.SaveChangesAsync(cancellationToken);
     }
 
+    /// <summary>
+    /// Posts one claimed webhook delivery and records its exact outcome. An ntfy target receives the plain dossier
+    /// with title, tag and the level-based priority of <see cref="SecurityLockAlertPolicy.NtfyPriority"/>; any other
+    /// target receives JSON. Every request carries the stable <c>Idempotency-Key</c> of the delivery.
+    /// </summary>
+    /// <remarks>
+    /// 2xx marks the delivery SENT; 408, 425, 429 and 5xx are retried with backoff; other statuses are FAILED. A
+    /// transport error or timeout is UNKNOWN because the endpoint may already have accepted the body; it is never
+    /// replayed automatically.
+    /// </remarks>
+    /// <param name="delivery">Claimed delivery with its prepared title and message.</param>
+    /// <param name="level">Catalogued level of the reported lock, used for the ntfy priority; 0 when unknown.</param>
+    /// <param name="leaseToken">Lease proving this worker still owns the delivery.</param>
+    /// <param name="cancellationToken">Host shutdown token.</param>
     private async Task SendWebhookAsync(
-        SecurityLockAlertDelivery delivery, Guid leaseToken, CancellationToken cancellationToken)
+        SecurityLockAlertDelivery delivery, int level, Guid leaseToken, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, delivery.Target);
         request.Headers.TryAddWithoutValidation("Idempotency-Key", "security-lock-alert/" + delivery.Id.ToString("D"));
@@ -250,7 +282,7 @@ public sealed class SecurityLockAlertOutboxProcessor(
             var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
             query["title"] = delivery.Title;
             query["tags"] = delivery.NewBan ? "no_entry" : "lock";
-            query["priority"] = "4";
+            query["priority"] = SecurityLockAlertPolicy.NtfyPriority(level, delivery.NewBan);
             uri.Query = query.ToString();
             request.RequestUri = uri.Uri;
             request.Content = new StringContent(delivery.Message!);

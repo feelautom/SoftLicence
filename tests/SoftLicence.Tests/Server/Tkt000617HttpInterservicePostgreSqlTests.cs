@@ -22,71 +22,40 @@ using Xunit;
 
 namespace SoftLicence.Tests.Server;
 
-public sealed partial class RuntimeEnrollmentPostgreSqlTests
+public abstract partial class RuntimeEnrollmentPostgreSqlTestBase
 {
+
     /// <summary>
-    /// Proves the production Website PS256 client reaches the real SoftLicence controller,
-    /// authentication service, authority resolver, and PostgreSQL graph without a mocked response.
-    /// The same process then changes the graph to the authenticated alias-seat topology and proves
-    /// that both same-target paths return none while a different eligible target remains fail-closed.
+    /// Creates an ephemeral Website signing key on Windows. On Unix, loads the runner-provisioned,
+    /// root-owned test key so the real Website ownership and permission checks remain exercised.
     /// </summary>
-    [Fact]
-    public async Task Tkt000617_WebsiteToSoftLicenceHttp_ResolvesSameTargetAndAliasWithoutMock()
+    protected static async Task<WebsiteSigningKey> CreateWebsiteSigningKeyAsync(string temporaryDirectory)
     {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
-        using var websiteSigningKey = RSA.Create(3072);
-        using var loopbackCertificate = CreateLoopbackCertificate();
-        var temporary = Directory.CreateTempSubdirectory("softlicence-tkt000617-http-");
-        try
+        if (OperatingSystem.IsWindows())
         {
-            var privateKeyPath = Path.Combine(temporary.FullName, "website-s2s.pkcs8.pem");
-            var certificatePath = Path.Combine(temporary.FullName, "loopback-ca.pem");
-            await File.WriteAllTextAsync(privateKeyPath, websiteSigningKey.ExportPkcs8PrivateKeyPem());
-            await File.WriteAllTextAsync(certificatePath, loopbackCertificate.Certificate.ExportCertificatePem());
-
-            var authority = await ReadHttpAuthorityAsync(scenario);
-            var conflictLicenseId = await AddEligibleConflictTargetAsync(scenario, authority.LicenseId);
-            using var factory = CreateTkt000617ProviderFactory(
-                scenario, websiteSigningKey.ExportSubjectPublicKeyInfoPem());
-            using var providerClient = factory.CreateClient(new WebApplicationFactoryClientOptions
-            {
-                BaseAddress = new Uri("https://localhost")
-            });
-            await using var proxy = await StartHttpsProxyAsync(providerClient, loopbackCertificate.Certificate);
-
-            await RunWebsiteProbeAsync(new WebsiteProbeInput(
-                "direct",
-                proxy.BaseAddress,
-                privateKeyPath,
-                certificatePath,
-                authority.ProductId,
-                authority.LicenseId,
-                conflictLicenseId,
-                authority.HardwareId));
-
-            await ConvertScenarioToAliasSeatTransitionAsync(scenario);
-            await RunWebsiteProbeAsync(new WebsiteProbeInput(
-                "alias",
-                proxy.BaseAddress,
-                privateKeyPath,
-                certificatePath,
-                authority.ProductId,
-                authority.LicenseId,
-                null,
-                LegacyHardwareId));
+            var signingKey = RSA.Create(3072);
+            var privateKeyPath = Path.Combine(temporaryDirectory, "website-s2s.pkcs8.pem");
+            await File.WriteAllTextAsync(privateKeyPath, signingKey.ExportPkcs8PrivateKeyPem());
+            return new WebsiteSigningKey(signingKey, privateKeyPath);
         }
-        finally
-        {
-            temporary.Delete(recursive: true);
-        }
+
+        var configuredPath = Environment.GetEnvironmentVariable("SOFTLICENCE_TEST_WEBSITE_S2S_PRIVATE_KEY_PATH");
+        Assert.False(string.IsNullOrEmpty(configuredPath),
+            "SOFTLICENCE_TEST_WEBSITE_S2S_PRIVATE_KEY_PATH must identify the root-owned Unix test key.");
+        Assert.True(File.Exists(configuredPath), $"Website S2S test key is unavailable: {configuredPath}");
+        Assert.False(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISTRIBUTION_S2S_PRIVATE_KEY_EXPECTED_GID")),
+            "DISTRIBUTION_S2S_PRIVATE_KEY_EXPECTED_GID must identify the provisioned runner group.");
+
+        var unixSigningKey = RSA.Create();
+        unixSigningKey.ImportFromPem(await File.ReadAllTextAsync(configuredPath));
+        return new WebsiteSigningKey(unixSigningKey, configuredPath);
     }
 
     /// <summary>
     /// Reads the exact product, licence, and hardware authority selected by the prepared relational
     /// fixture. Values remain canonical or opaque and are never recased or trimmed for the probe.
     /// </summary>
-    private static async Task<HttpAuthority> ReadHttpAuthorityAsync(PreparedBootstrapScenario scenario)
+    protected static async Task<HttpAuthority> ReadHttpAuthorityAsync(PreparedBootstrapScenario scenario)
     {
         await using var db = await scenario.Factory.CreateDbContextAsync();
         var binding = await db.DistributionInstallationBindings.AsNoTracking()
@@ -103,7 +72,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Adds one eligible target licence for the same product without creating hardware authority.
     /// Resolving the existing active binding against this target must remain a bounded conflict.
     /// </summary>
-    private static async Task<string> AddEligibleConflictTargetAsync(
+    protected static async Task<string> AddEligibleConflictTargetAsync(
         PreparedBootstrapScenario scenario,
         string sourceLicenseId)
     {
@@ -132,7 +101,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Converts the direct authority into the confirmed V2-unlinked plus legacy-seat-reactivated
     /// topology. The authenticated alias remains the only recoverable binding and seat identity.
     /// </summary>
-    private static async Task ConvertScenarioToAliasSeatTransitionAsync(PreparedBootstrapScenario scenario)
+    protected static async Task ConvertScenarioToAliasSeatTransitionAsync(PreparedBootstrapScenario scenario)
     {
         var subjectRef = Base64Url(SHA256.HashData("tkt000617-http-alias-subject"u8.ToArray()));
         await SetScenarioSubjectAuthorityAsync(scenario, subjectRef);
@@ -169,7 +138,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// services, replacing only infrastructure with the isolated PostgreSQL fixture and ephemeral
     /// data protection. No resolver, controller, or provider decision is mocked.
     /// </summary>
-    private static WebApplicationFactory<Program> CreateTkt000617ProviderFactory(
+    protected static WebApplicationFactory<Program> CreateTkt000617ProviderFactory(
         PreparedBootstrapScenario scenario,
         string websitePublicKeyPem)
     {
@@ -183,6 +152,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             builder.UseSetting("DistributionS2S:Clients:0:KeyId", "website-runtime-test-1");
             builder.UseSetting("DistributionS2S:Clients:0:PublicKeyPem", websitePublicKeyPem);
             builder.UseSetting("DistributionS2S:Clients:0:Enabled", "true");
+            // TKT-003162: the installation and enrollment routes require the main distribution client right.
+            builder.UseSetting("DistributionS2S:Clients:0:AllowLicenseBootstrap", "true");
             builder.UseSetting("DistributionS2S:Clients:0:ProductIds:0", scenario.Fixture.ProductId.ToString("D"));
             builder.UseSetting("DistributionS2S:Clients:0:AllowedCidrs:0", "127.0.0.1/32");
             builder.ConfigureServices(services =>
@@ -205,7 +176,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Selects the valid local ASP.NET development certificate on Windows or creates a short-lived
     /// fallback certificate elsewhere. Only its public certificate is shared with the Node probe.
     /// </summary>
-    private static LoopbackCertificate CreateLoopbackCertificate()
+    protected static LoopbackCertificate CreateLoopbackCertificate()
     {
         if (OperatingSystem.IsWindows())
         {
@@ -255,7 +226,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Starts a loopback-only HTTPS transport adapter that forwards exact requests to the real
     /// SoftLicence TestServer. The adapter changes no payload, status, or provider decision.
     /// </summary>
-    private static async Task<HttpsProxy> StartHttpsProxyAsync(
+    protected static async Task<HttpsProxy> StartHttpsProxyAsync(
         HttpClient providerClient,
         X509Certificate2 certificate)
     {
@@ -292,7 +263,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Reserves an available IPv4 loopback port for the immediately following Kestrel bind.
     /// The listener is closed before return, so Kestrel remains the sole long-lived owner.
     /// </summary>
-    private static int ReserveLoopbackPort()
+    protected static int ReserveLoopbackPort()
     {
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -303,7 +274,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Forwards one exact HTTP body and reviewed headers to the provider TestServer, then preserves
     /// the provider status, headers, and bounded JSON response at the external HTTPS boundary.
     /// </summary>
-    private static async Task ForwardExactAsync(HttpContext context, HttpClient providerClient)
+    protected static async Task ForwardExactAsync(HttpContext context, HttpClient providerClient)
     {
         await using var body = new MemoryStream();
         await context.Request.Body.CopyToAsync(body, context.RequestAborted);
@@ -340,12 +311,16 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// <summary>
     /// Runs the production Website TypeScript S2S client in a separate Node process with only the
     /// ephemeral key, certificate, provider URL, and exact fixture identities in its environment.
-    /// A timeout terminates the process tree and fails the integration test.
+    /// A timeout terminates the process tree and fails the integration test. The Website checkout comes only from
+    /// <c>TIA_CONNECT_WEBSITE_REPOSITORY_PATH</c>, which the canonical launcher <c>scripts/Test-FullSuite.ps1</c> sets;
+    /// there is no machine-specific default (TKT-004191: no local path in the public mirror), so a missing variable
+    /// fails with a message naming it.
     /// </summary>
-    private static async Task RunWebsiteProbeAsync(WebsiteProbeInput input)
+    protected static async Task RunWebsiteProbeAsync(WebsiteProbeInput input)
     {
-        var repository = Environment.GetEnvironmentVariable("TIA_CONNECT_WEBSITE_REPOSITORY_PATH")
-            ?? @"D:\Works\T-IA-Connect_website";
+        var repository = Environment.GetEnvironmentVariable("TIA_CONNECT_WEBSITE_REPOSITORY_PATH");
+        Assert.False(string.IsNullOrWhiteSpace(repository),
+            "TIA_CONNECT_WEBSITE_REPOSITORY_PATH is not set; run this test through scripts/Test-FullSuite.ps1.");
         var workingDirectory = Path.Combine(repository, "t-ia-connect-marketing-landing");
         Assert.True(Directory.Exists(workingDirectory), $"Website repository is unavailable: {workingDirectory}");
         var start = new ProcessStartInfo("node")
@@ -395,10 +370,10 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     }
 
     /// <summary>Exact provider authority values transferred to the Website probe without normalization.</summary>
-    private sealed record HttpAuthority(string ProductId, string LicenseId, string HardwareId);
+    protected sealed record HttpAuthority(string ProductId, string LicenseId, string HardwareId);
 
     /// <summary>Bounded non-secret process inputs used by one Website HTTP probe execution.</summary>
-    private sealed record WebsiteProbeInput(
+    protected sealed record WebsiteProbeInput(
         string Mode,
         string BaseAddress,
         string PrivateKeyPath,
@@ -408,11 +383,14 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         string? ConflictTargetLicenseId,
         string HardwareId);
 
+    /// <summary>Owns one test signing key and its exact private-key path.</summary>
+    protected sealed record WebsiteSigningKey(RSA SigningKey, string PrivateKeyPath);
+
     /// <summary>
     /// Owns either the Windows development certificate or the fallback self-signed certificate and
     /// keeps any originating RSA key alive for the complete Kestrel lifetime.
     /// </summary>
-    private sealed class LoopbackCertificate(RSA? key, X509Certificate2 certificate) : IDisposable
+    protected sealed class LoopbackCertificate(RSA? key, X509Certificate2 certificate) : IDisposable
     {
         public X509Certificate2 Certificate { get; } = certificate;
 
@@ -425,7 +403,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     }
 
     /// <summary>Owns the loopback Kestrel adapter and guarantees bounded asynchronous shutdown.</summary>
-    private sealed class HttpsProxy(WebApplication application, string baseAddress) : IAsyncDisposable
+    protected sealed class HttpsProxy(WebApplication application, string baseAddress) : IAsyncDisposable
     {
         public string BaseAddress { get; } = baseAddress;
 
@@ -441,7 +419,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Assigns the TestServer request a loopback remote address so the production S2S CIDR guard
     /// evaluates the same private-network authority as the external Kestrel adapter.
     /// </summary>
-    private sealed class LoopbackRemoteAddressStartupFilter : IStartupFilter
+    protected sealed class LoopbackRemoteAddressStartupFilter : IStartupFilter
     {
         /// <summary>Prepends the loopback connection authority before controller authentication.</summary>
         public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => application =>
@@ -453,5 +431,46 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             });
             next(application);
         };
+    }
+}
+
+/// <summary>Runs the tests from Tkt000617HttpInterservicePostgreSqlTests as an independently schedulable PostgreSQL class.</summary>
+/// <param name="classDatabase">The xUnit-owned PostgreSQL clone fixture for this exact test class.</param>
+public sealed partial class Tkt000617HttpInterservicePostgreSqlTests(RuntimeEnrollmentPostgreSqlClassDatabase classDatabase)
+    : RuntimeEnrollmentPostgreSqlTestBase(classDatabase)
+{
+    /// <summary>
+    /// Proves the production Website PS256 client reaches the real SoftLicence controller,
+    /// authentication service, authority resolver, and PostgreSQL graph without a mocked response.
+    /// The same process then changes the graph to the authenticated alias-seat topology and proves
+    /// that both same-target paths return none while a different eligible target remains fail-closed.
+    /// </summary>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.Tkt000617_WebsiteToSoftLicenceHttp_ResolvesSameTargetAndAliasWithoutMock")]
+    public async Task Tkt000617_WebsiteToSoftLicenceHttp_ResolvesSameTargetAndAliasWithoutMock()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await ActivateCanonicalScenarioAsync(scenario, LegacyHardwareId);
+        using var loopbackCertificate = CreateLoopbackCertificate();
+        var temporary = Directory.CreateTempSubdirectory("softlicence-tkt000617-http-");
+        try
+        {
+            var websiteKey = await CreateWebsiteSigningKeyAsync(temporary.FullName);
+            using var websiteSigningKey = websiteKey.SigningKey;
+            var privateKeyPath = websiteKey.PrivateKeyPath;
+            var certificatePath = Path.Combine(temporary.FullName, "loopback-ca.pem");
+            await File.WriteAllTextAsync(certificatePath, loopbackCertificate.Certificate.ExportCertificatePem());
+            var authority = await ReadHttpAuthorityAsync(scenario);
+            var conflictLicenseId = await AddEligibleConflictTargetAsync(scenario, authority.LicenseId);
+            using var factory = CreateTkt000617ProviderFactory(scenario, websiteSigningKey.ExportSubjectPublicKeyInfoPem());
+            using var providerClient = factory.CreateClient(new WebApplicationFactoryClientOptions { BaseAddress = new Uri("https://localhost") });
+            await using var proxy = await StartHttpsProxyAsync(providerClient, loopbackCertificate.Certificate);
+            await RunWebsiteProbeAsync(new WebsiteProbeInput("direct", proxy.BaseAddress, privateKeyPath, certificatePath, authority.ProductId, authority.LicenseId, conflictLicenseId, authority.HardwareId));
+            await ConvertScenarioToAliasSeatTransitionAsync(scenario);
+            await RunWebsiteProbeAsync(new WebsiteProbeInput("alias", proxy.BaseAddress, privateKeyPath, certificatePath, authority.ProductId, authority.LicenseId, null, LegacyHardwareId));
+        }
+        finally
+        {
+            temporary.Delete(recursive: true);
+        }
     }
 }

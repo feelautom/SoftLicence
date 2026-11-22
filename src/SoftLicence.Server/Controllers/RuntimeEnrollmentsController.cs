@@ -60,6 +60,8 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
     /// Resolves provider-owned Runtime source authority when Website lacks its historical grant.
     /// The provider verifies the exact WebSetup proof. Version 1 remains byte-shape compatible;
     /// version 2 may additionally return one bounded provider-signed generation statement.
+    /// A principal without <see cref="DistributionS2SPrincipal.MayDriveInstallation"/> gets 403
+    /// <c>installation_not_authorized</c> before the lookup (TKT-003162).
     /// </summary>
     [HttpPost("/api/internal/v1/runtime-enrollments/reinstall-source-authority/resolve")]
     [EnableRateLimiting("DistributionS2SAPI")]
@@ -77,6 +79,8 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
             var productId = ExtractUniqueString(exactBody, "productId");
             var principal = await _s2s.AuthenticateAndReserveNonceAsync(
                 HttpContext, exactBody, productId, cancellationToken);
+            if (!principal.MayDriveInstallation)
+                return InstallationNotAuthorized();
             var request = Deserialize<RuntimeReinstallSourceResolutionRequest>(exactBody);
             var result = await _enrollments.ResolveReinstallSourceAuthorityAsync(
                 principal.ClientId, request, cancellationToken);
@@ -88,13 +92,68 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
         }
         catch (RuntimeEnrollmentException exception)
         {
-            return StatusCode(exception.StatusCode, new RuntimeEnrollmentApiError(exception.ErrorCode));
+            return RuntimeRefusal(exception);
         }
         catch (Exception exception) when (IsTransportFailure(exception))
         {
             return TransportError(exception);
         }
-        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested
+            // TKT-004085: an assignment-trigger refusal is answered as its named code by ApiExceptionSafetyNetMiddleware.
+            && !AssignmentRefusals.IsTriggerRefusal(exception))
+        {
+            return StatusCode(StatusCodes.Status500InternalServerError,
+                new RuntimeEnrollmentApiError("internal_error"));
+        }
+    }
+
+    /// <summary>
+    /// TKT-003647: tells the Website which licence is attached today to an installed Runtime enrollment, by its
+    /// opaque SoftLicence UUID only (never its type, name or key), and whether its key and seat are usable. Read-only.
+    /// Same S2S guards as the reinstall routes: exact path, strict JSON body, S2S signature and nonce, and a principal
+    /// with <see cref="DistributionS2SPrincipal.MayDriveInstallation"/> (403 <c>installation_not_authorized</c>
+    /// before any lookup otherwise). The answer is never cached by an intermediary (<c>no-store</c>).
+    /// </summary>
+    /// <param name="cancellationToken">Request cancellation.</param>
+    /// <returns>200 with the closed answer, or the bounded error of the failing guard or service.</returns>
+    [HttpPost("/api/internal/v1/runtime-enrollments/current-assignment/resolve")]
+    [EnableRateLimiting("DistributionS2SAPI")]
+    public async Task<IActionResult> ResolveCurrentAssignment(CancellationToken cancellationToken)
+    {
+        SetNoStore();
+        if (_options.Mode != "enabled")
+            return Unavailable();
+        try
+        {
+            const string path = "/api/internal/v1/runtime-enrollments/current-assignment/resolve";
+            EnsureExactTarget(path);
+            var exactBody = await ReadStrictBodyAsync(Request, cancellationToken);
+            ValidateJsonStructure(exactBody);
+            var productId = ExtractUniqueString(exactBody, "productId");
+            var principal = await _s2s.AuthenticateAndReserveNonceAsync(
+                HttpContext, exactBody, productId, cancellationToken);
+            if (!principal.MayDriveInstallation)
+                return InstallationNotAuthorized();
+            var request = Deserialize<RuntimeCurrentAssignmentRequest>(exactBody);
+            var result = await _enrollments.ResolveCurrentAssignmentAsync(
+                principal.ClientId, request, cancellationToken);
+            return Ok(result);
+        }
+        catch (DistributionS2SAuthenticationException exception)
+        {
+            return StatusCode(exception.StatusCode, new RuntimeEnrollmentApiError(exception.ErrorCode));
+        }
+        catch (RuntimeEnrollmentException exception)
+        {
+            return RuntimeRefusal(exception);
+        }
+        catch (Exception exception) when (IsTransportFailure(exception))
+        {
+            return TransportError(exception);
+        }
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested
+            // TKT-004085: an assignment-trigger refusal is answered as its named code by ApiExceptionSafetyNetMiddleware.
+            && !AssignmentRefusals.IsTriggerRefusal(exception))
         {
             return StatusCode(StatusCodes.Status500InternalServerError,
                 new RuntimeEnrollmentApiError("internal_error"));
@@ -103,7 +162,9 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
 
     /// <summary>
     /// Authorizes an exact reinstall proof and records bounded server-only refusal diagnostics
-    /// while preserving the generic public error contract.
+    /// while preserving the generic public error contract. A principal without
+    /// <see cref="DistributionS2SPrincipal.MayDriveInstallation"/> gets 403 <c>installation_not_authorized</c>
+    /// before the authority is evaluated (TKT-003162).
     /// </summary>
     /// <param name="cancellationToken">Request cancellation token.</param>
     /// <returns>The minimal authority assertion or a generic error response.</returns>
@@ -124,6 +185,8 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
             var productId = ExtractUniqueString(exactBody, "productId");
             var principal = await _s2s.AuthenticateAndReserveNonceAsync(
                 HttpContext, exactBody, productId, cancellationToken);
+            if (!principal.MayDriveInstallation)
+                return InstallationNotAuthorized();
             var request = Deserialize<RuntimeReinstallAuthorityRequest>(exactBody);
             correlationId = request.BootstrapId;
             var result = await _enrollments.AuthorizeReinstallAsync(
@@ -143,19 +206,28 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
                 "Runtime reinstall authority {Outcome} CorrelationId={CorrelationId} ReasonCode={ReasonCode} DiagnosticCode={DiagnosticCode}",
                 "refused", correlationId ?? "unavailable", exception.ErrorCode,
                 exception.DiagnosticCode ?? "unspecified");
-            return StatusCode(exception.StatusCode, new RuntimeEnrollmentApiError(exception.ErrorCode));
+            return RuntimeRefusal(exception);
         }
         catch (Exception exception) when (IsTransportFailure(exception))
         {
             return TransportError(exception);
         }
-        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested
+            // TKT-004085: an assignment-trigger refusal is answered as its named code by ApiExceptionSafetyNetMiddleware.
+            && !AssignmentRefusals.IsTriggerRefusal(exception))
         {
             return StatusCode(StatusCodes.Status500InternalServerError,
                 new RuntimeEnrollmentApiError("internal_error"));
         }
     }
 
+    /// <summary>
+    /// Prepares, or replays with frozen exact bytes, the Runtime enrollment of an installation for the authenticated
+    /// distribution client. A principal without <see cref="DistributionS2SPrincipal.MayDriveInstallation"/> gets 403
+    /// <c>installation_not_authorized</c> before any write (TKT-003162); a disabled Runtime mode answers 503 first.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels body reading, authentication, or provider work before commit.</param>
+    /// <returns>201 with the prepared body, 200 for an exact replay, or a bounded JSON error.</returns>
     [HttpPost("/api/internal/v1/runtime-enrollments/prepare")]
     [EnableRateLimiting("DistributionS2SAPI")]
     public async Task<IActionResult> Prepare(CancellationToken cancellationToken)
@@ -171,6 +243,8 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
             var productId = ExtractUniqueString(exactBody, "productId");
             var principal = await _s2s.AuthenticateAndReserveNonceAsync(
                 HttpContext, exactBody, productId, cancellationToken);
+            if (!principal.MayDriveInstallation)
+                return InstallationNotAuthorized();
             var request = Deserialize<RuntimeEnrollmentPrepareRequest>(exactBody);
             var result = await _enrollments.PrepareAsync(
                 principal.ClientId, Digest(exactBody.Span), request, cancellationToken);
@@ -183,13 +257,15 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
         }
         catch (RuntimeEnrollmentException exception)
         {
-            return StatusCode(exception.StatusCode, new RuntimeEnrollmentApiError(exception.ErrorCode));
+            return RuntimeRefusal(exception);
         }
         catch (Exception exception) when (IsTransportFailure(exception))
         {
             return TransportError(exception);
         }
-        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested
+            // TKT-004085: an assignment-trigger refusal is answered as its named code by ApiExceptionSafetyNetMiddleware.
+            && !AssignmentRefusals.IsTriggerRefusal(exception))
         {
             return StatusCode(StatusCodes.Status500InternalServerError,
                 new RuntimeEnrollmentApiError("internal_error"));
@@ -227,13 +303,15 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
         }
         catch (RuntimeEnrollmentException exception)
         {
-            return StatusCode(exception.StatusCode, new RuntimeEnrollmentApiError(exception.ErrorCode));
+            return RuntimeRefusal(exception);
         }
         catch (Exception exception) when (IsTransportFailure(exception))
         {
             return TransportError(exception);
         }
-        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested
+            // TKT-004085: an assignment-trigger refusal is answered as its named code by ApiExceptionSafetyNetMiddleware.
+            && !AssignmentRefusals.IsTriggerRefusal(exception))
         {
             return StatusCode(StatusCodes.Status500InternalServerError,
                 new RuntimeEnrollmentApiError("internal_error"));
@@ -279,13 +357,15 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
         }
         catch (RuntimeEnrollmentException exception)
         {
-            return StatusCode(exception.StatusCode, new RuntimeEnrollmentApiError(exception.ErrorCode));
+            return RuntimeRefusal(exception);
         }
         catch (Exception exception) when (IsTransportFailure(exception))
         {
             return TransportError(exception);
         }
-        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested
+            // TKT-004085: an assignment-trigger refusal is answered as its named code by ApiExceptionSafetyNetMiddleware.
+            && !AssignmentRefusals.IsTriggerRefusal(exception))
         {
             return StatusCode(StatusCodes.Status500InternalServerError,
                 new RuntimeEnrollmentApiError("internal_error"));
@@ -323,13 +403,15 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
         }
         catch (RuntimeEnrollmentException exception)
         {
-            return StatusCode(exception.StatusCode, new RuntimeEnrollmentApiError(exception.ErrorCode));
+            return RuntimeRefusal(exception);
         }
         catch (Exception exception) when (IsTransportFailure(exception))
         {
             return TransportError(exception);
         }
-        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested
+            // TKT-004085: an assignment-trigger refusal is answered as its named code by ApiExceptionSafetyNetMiddleware.
+            && !AssignmentRefusals.IsTriggerRefusal(exception))
         {
             return StatusCode(StatusCodes.Status500InternalServerError,
                 new RuntimeEnrollmentApiError("internal_error"));
@@ -370,13 +452,15 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
         }
         catch (RuntimeEnrollmentException exception)
         {
-            return StatusCode(exception.StatusCode, new RuntimeEnrollmentApiError(exception.ErrorCode));
+            return RuntimeRefusal(exception);
         }
         catch (Exception exception) when (IsTransportFailure(exception))
         {
             return TransportError(exception);
         }
-        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested
+            // TKT-004085: an assignment-trigger refusal is answered as its named code by ApiExceptionSafetyNetMiddleware.
+            && !AssignmentRefusals.IsTriggerRefusal(exception))
         {
             return StatusCode(StatusCodes.Status500InternalServerError,
                 new RuntimeEnrollmentApiError("internal_error"));
@@ -417,13 +501,15 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
         }
         catch (RuntimeEnrollmentException exception)
         {
-            return StatusCode(exception.StatusCode, new RuntimeEnrollmentApiError(exception.ErrorCode));
+            return RuntimeRefusal(exception);
         }
         catch (Exception exception) when (IsTransportFailure(exception))
         {
             return TransportError(exception);
         }
-        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested
+            // TKT-004085: an assignment-trigger refusal is answered as its named code by ApiExceptionSafetyNetMiddleware.
+            && !AssignmentRefusals.IsTriggerRefusal(exception))
         {
             return StatusCode(StatusCodes.Status500InternalServerError,
                 new RuntimeEnrollmentApiError("internal_error"));
@@ -485,13 +571,15 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
         }
         catch (RuntimeEnrollmentException exception)
         {
-            return StatusCode(exception.StatusCode, new RuntimeEnrollmentApiError(exception.ErrorCode));
+            return RuntimeRefusal(exception);
         }
         catch (Exception exception) when (IsTransportFailure(exception))
         {
             return TransportError(exception);
         }
-        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested
+            // TKT-004085: an assignment-trigger refusal is answered as its named code by ApiExceptionSafetyNetMiddleware.
+            && !AssignmentRefusals.IsTriggerRefusal(exception))
         {
             return StatusCode(StatusCodes.Status500InternalServerError,
                 new RuntimeEnrollmentApiError("internal_error"));
@@ -620,13 +708,15 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
                 HttpContext.Items[LogKeys.RuntimeAuthenticationDisposition] =
                     RuntimeEnrollmentService.ProofClockSkewDiagnosticCode;
             }
-            return StatusCode(exception.StatusCode, new RuntimeEnrollmentApiError(exception.ErrorCode));
+            return RuntimeRefusal(exception);
         }
         catch (Exception exception) when (IsTransportFailure(exception))
         {
             return TransportError(exception);
         }
-        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested
+            // TKT-004085: an assignment-trigger refusal is answered as its named code by ApiExceptionSafetyNetMiddleware.
+            && !AssignmentRefusals.IsTriggerRefusal(exception))
         {
             return StatusCode(StatusCodes.Status500InternalServerError,
                 new RuntimeEnrollmentApiError("internal_error"));
@@ -756,6 +846,32 @@ public sealed class RuntimeEnrollmentsController : ControllerBase
     {
         Response.Headers.CacheControl = "no-store, max-age=0";
         Response.Headers.Pragma = "no-cache";
+    }
+
+    /// <summary>
+    /// TKT-003162: answers 403 <c>installation_not_authorized</c> to an authenticated S2S principal that does not
+    /// hold <see cref="DistributionS2SPrincipal.MayDriveInstallation"/>. The prepare, reinstall and current-assignment
+    /// (TKT-003647) routes call it right after authentication and before deserialization or any service call, so a dedicated identity gets no
+    /// read, decision or write from them. No-store headers are already set by the calling route.
+    /// </summary>
+    /// <returns>The bounded 403 JSON error, without cause details.</returns>
+    private ObjectResult InstallationNotAuthorized() => StatusCode(
+        StatusCodes.Status403Forbidden,
+        new RuntimeEnrollmentApiError(DistributionS2SPrincipal.InstallationNotAuthorizedErrorCode));
+
+    /// <summary>
+    /// Answers a <see cref="RuntimeEnrollmentException"/> with its own status and <c>{"error":"code"}</c>. The bounded
+    /// diagnostic is published as <c>reasonCode</c> only under <see cref="AssignmentRefusals.PublicReasonCode"/>: for the
+    /// named assignment codes of TKT-004085 and, since TKT-004106, for an assignment-state reason under any code. The
+    /// busy code adds <c>Retry-After</c>; every other diagnostic stays server-side and the historical body is unchanged.
+    /// </summary>
+    /// <param name="exception">The Runtime refusal.</param>
+    /// <returns>The error response.</returns>
+    private ObjectResult RuntimeRefusal(RuntimeEnrollmentException exception)
+    {
+        AssignmentRefusals.ApplyRetryAfter(Response, exception.ErrorCode);
+        return StatusCode(exception.StatusCode, new RuntimeEnrollmentApiError(
+            exception.ErrorCode, AssignmentRefusals.PublicReasonCode(exception.ErrorCode, exception.DiagnosticCode)));
     }
 
     private ObjectResult Unavailable() => StatusCode(

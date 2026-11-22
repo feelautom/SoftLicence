@@ -7,20 +7,24 @@ using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql;
 using SoftLicence.Server.Data;
 using Xunit;
+using PreparedBootstrapScenario = SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTestBase.PreparedBootstrapScenario;
+using TestDbFactory = SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTestBase.TestDbFactory;
 
 namespace SoftLicence.Tests.Server;
 
 /// <summary>
 /// Adds real-psql PostgreSQL 17 coverage for the fail-closed TKT-000557 operator repair workflow.
 /// </summary>
-public sealed partial class RuntimeEnrollmentPostgreSqlTests
+/// <param name="classDatabase">The xUnit-owned PostgreSQL clone fixture for this exact test class.</param>
+public sealed class Tkt000557RepairScriptPostgreSqlTests(RuntimeEnrollmentPostgreSqlClassDatabase classDatabase)
+    : RuntimeEnrollmentPostgreSqlTestBase(classDatabase)
 {
     /// <summary>
     /// Executes the operator wrapper through a real PostgreSQL 17 psql process. A manifest for a
     /// different target must fail before SQL execution, while the exact target permits one bounded
     /// reason promotion and leaves every authority row otherwise unchanged.
     /// </summary>
-    [Fact]
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.Tkt000557RepairScript_RealPsqlRejectsWrongTargetThenAppliesExactSnapshot")]
     [Trait("Category", "PrivateRepository")]
     public async Task Tkt000557RepairScript_RealPsqlRejectsWrongTargetThenAppliesExactSnapshot()
     {
@@ -70,7 +74,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Proves the SQL wrapper preserves duplicate JSON properties and rejects the same malformed
     /// migration proof as the Runtime resolver instead of accepting jsonb's last-key value.
     /// </summary>
-    [Fact]
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.Tkt000557RepairScript_DuplicateHistoryPropertyFailsClosed")]
     [Trait("Category", "PrivateRepository")]
     public async Task Tkt000557RepairScript_DuplicateHistoryPropertyFailsClosed()
     {
@@ -110,7 +114,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Proves the global advisory lock and exact snapshot permit at most one concurrent Apply.
     /// The losing process observes the promoted reason and fails before a second mutation.
     /// </summary>
-    [Fact]
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.Tkt000557RepairScript_ConcurrentApplyCommitsExactlyOnce")]
     [Trait("Category", "PrivateRepository")]
     public async Task Tkt000557RepairScript_ConcurrentApplyCommitsExactlyOnce()
     {
@@ -158,8 +162,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     private static async Task<Tkt000557RepairGraph> PrepareTkt000557RepairGraphAsync(
         PreparedBootstrapScenario scenario)
     {
-        var historicalGraph = await ReleaseHistoricalAliasSeatAsync(scenario);
-        var licenseId = historicalGraph.LicenseId;
+        var licenseId = await ReleaseHistoricalAliasLicenseIdAsync(scenario);
         var adminFactory = new TestDbFactory(scenario.AdminConnectionString);
         await using (var upgrade = await adminFactory.CreateDbContextAsync())
         {
@@ -237,7 +240,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var scriptPath = Path.GetFullPath(Path.Combine(
             AppContext.BaseDirectory, "..", "..", "..", "..", "..",
             "scripts", "Repair-Tkt000557InactiveHardwareAlias.ps1"));
-        var start = new ProcessStartInfo("pwsh.exe")
+        var start = new ProcessStartInfo(OperatingSystem.IsWindows() ? "pwsh.exe" : "pwsh")
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,

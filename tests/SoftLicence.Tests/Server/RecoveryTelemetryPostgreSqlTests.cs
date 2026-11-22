@@ -1,6 +1,8 @@
+using System.Data.Common;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Npgsql;
 using SoftLicence.Server.Data;
 using SoftLicence.Server.Models;
@@ -46,11 +48,12 @@ public sealed class RecoveryTelemetryPostgreSqlTests
         var runId = RecoveryTelemetryParser.Parse(requests[0]).Envelope!.RecoveryRunId;
         await SeedRunStartedAsync(database, runId, "00000000-0000-4000-8000-000000000250");
 
+        var observationBarrier = new LastSequenceObservationBarrier(requests.Count);
         var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var tasks = requests.Select(async request =>
         {
             await start.Task;
-            await using var db = database.CreateContext();
+            await using var db = database.CreateContext(observationBarrier);
             return await new RecoveryTelemetryService(db, TimeProvider.System)
                 .IngestAsync(RecoveryTelemetryParser.Parse(request).Envelope!, request, Guid.NewGuid(), CancellationToken.None);
         }).ToArray();
@@ -155,6 +158,35 @@ public sealed class RecoveryTelemetryPostgreSqlTests
         return fixture.GetProperty("requestBytes").EnumerateArray().Select(item => Encoding.UTF8.GetBytes(item.GetString()!)).ToList();
     }
 
+    /// <summary>
+    /// Holds each concurrent ingestion after PostgreSQL has returned its pre-lock run sequence, proving
+    /// both requests observed the same arrival state before either request can advance the run.
+    /// </summary>
+    private sealed class LastSequenceObservationBarrier(int participantCount) : DbCommandInterceptor
+    {
+        private readonly TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int arrived;
+
+        public override async ValueTask<DbDataReader> ReaderExecutedAsync(
+            DbCommand command,
+            CommandExecutedEventData eventData,
+            DbDataReader result,
+            CancellationToken cancellationToken = default)
+        {
+            if (!command.CommandText.Contains("RecoveryTelemetryRuns", StringComparison.Ordinal)
+                || !command.CommandText.Contains("LastSequence", StringComparison.Ordinal))
+                return result;
+
+            var arrival = Interlocked.Increment(ref arrived);
+            if (arrival == participantCount)
+                release.TrySetResult();
+            if (arrival <= participantCount)
+                await release.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken);
+
+            return result;
+        }
+    }
+
     /// <summary>Owns one disposable PostgreSQL database created from the configured local test server.</summary>
     private sealed class PostgreSqlDatabase : IAsyncDisposable
     {
@@ -172,28 +204,25 @@ public sealed class RecoveryTelemetryPostgreSqlTests
         public string ConnectionString { get; }
 
         /// <summary>Creates an independent production-provider context for one concurrent request.</summary>
-        public LicenseDbContext CreateContext() => new(new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(ConnectionString).Options);
+        public LicenseDbContext CreateContext(DbCommandInterceptor? interceptor = null)
+        {
+            var options = new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(ConnectionString);
+            if (interceptor is not null)
+                options.AddInterceptors(interceptor);
+            return new LicenseDbContext(options.Options);
+        }
 
-        /// <summary>Creates, migrates, and seeds one random disposable database on the explicitly configured PostgreSQL test server.</summary>
+        /// <summary>Clones and seeds one random disposable current-schema database on the configured test server.</summary>
         public static async Task<PostgreSqlDatabase> CreateAsync()
         {
-            var configured = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES");
-            if (string.IsNullOrWhiteSpace(configured))
-                throw new InvalidOperationException("SOFTLICENCE_RUNTIME_TEST_POSTGRES is required for Recovery PostgreSQL tests.");
-            var maintenance = new NpgsqlConnectionStringBuilder(configured) { Database = "postgres" }.ConnectionString;
-            var databaseName = "recovery_v1_" + Guid.NewGuid().ToString("N");
-            await using (var connection = new NpgsqlConnection(maintenance))
-            {
-                await connection.OpenAsync();
-                await using var create = new NpgsqlCommand($"CREATE DATABASE \"{databaseName}\"", connection);
-                await create.ExecuteNonQueryAsync();
-            }
-            var target = new NpgsqlConnectionStringBuilder(configured) { Database = databaseName }.ConnectionString;
-            var database = new PostgreSqlDatabase(maintenance, databaseName, target);
+            var clone = await PostgreSqlModelDatabase.CloneAsync("recovery");
+            var database = new PostgreSqlDatabase(
+                clone.MaintenanceConnectionString,
+                clone.DatabaseName,
+                clone.ConnectionString);
             try
             {
                 await using var db = database.CreateContext();
-                await db.Database.MigrateAsync();
                 db.Products.Add(new Product { Name = "TIAConnect", PrivateKeyXml = "test", PublicKeyXml = "test", ApiSecret = "test" });
                 await db.SaveChangesAsync();
                 return database;
@@ -205,14 +234,8 @@ public sealed class RecoveryTelemetryPostgreSqlTests
             }
         }
 
-        /// <summary>Drops the random database with force after clearing pooled test connections.</summary>
+        /// <summary>Force-drops the random database through an unpooled maintenance connection.</summary>
         public async ValueTask DisposeAsync()
-        {
-            NpgsqlConnection.ClearAllPools();
-            await using var connection = new NpgsqlConnection(maintenanceConnectionString);
-            await connection.OpenAsync();
-            await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{databaseName}\" WITH (FORCE)", connection);
-            await drop.ExecuteNonQueryAsync();
-        }
+            => await PostgreSqlModelDatabase.DropAsync(maintenanceConnectionString, databaseName);
     }
 }

@@ -81,7 +81,7 @@ public sealed class MachineIdentityObservationService
     /// <param name="hardwareId">Submitted identifier, already validated as canonical by the endpoint.</param>
     /// <param name="systemUuid">Raw <c>SystemUuid</c> field, or <c>null</c>.</param>
     /// <param name="evidence">Raw <c>MachineEvidence</c> field, or <c>null</c>.</param>
-    /// <param name="endpoint">Endpoint label: <c>ACTIVATE</c>, <c>CHECK</c> or <c>TRIAL</c>.</param>
+    /// <param name="endpoint">Endpoint label from <see cref="MachineEvidenceEndpoints"/> (<c>ACTIVATE</c>, <c>CHECK</c>, <c>TRIAL</c> or <c>CLONE_GUARD_REACTIVATE</c>), stored as given; it must fit <see cref="MachineEvidenceObservation.MaxEndpointLength"/>, otherwise storage fails and the evidence is lost (fail-open, TKT-004112).</param>
     /// <param name="appVersion">Client application version, or <c>null</c>.</param>
     /// <param name="cancellationToken">Request cancellation.</param>
     /// <returns><see cref="MachineIdentityObservationOutcome.NotApplicable"/> for legacy clients, otherwise the decision.</returns>
@@ -151,7 +151,7 @@ public sealed class MachineIdentityObservationService
     /// <param name="productId">Product of the preflight.</param>
     /// <param name="systemUuid">Raw UUID sent by the WebSetup, or <c>null</c>.</param>
     /// <param name="evidence">Raw machine evidence object, or <c>null</c>.</param>
-    /// <param name="endpoint">Endpoint label, <c>PREFLIGHT</c>.</param>
+    /// <param name="endpoint">Endpoint label, <see cref="MachineEvidenceEndpoints.Preflight"/>.</param>
     /// <param name="cancellationToken">Request cancellation.</param>
     /// <param name="finalRefusalCode">
     /// Refusal code the caller finally applies when it refines the UUID rule (AR-02 for a reported read failure,

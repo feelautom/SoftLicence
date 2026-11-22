@@ -197,6 +197,44 @@
   <data name="Products_LicenseTypes" xml:space="preserve"><value>Types de licences</value></data>
   <data name="Products_ManageTypes" xml:space="preserve"><value>Gérer les types</value></data>
   <data name="Products_NoTypes" xml:space="preserve"><value>Aucun type défini.</value></data>
+  <data name="Products_TypePublicTrial" xml:space="preserve"><value>Essai public</value></data>
+  <data name="Products_TypePublicTrialHint" xml:space="preserve"><value>Autorise la demande d'essai publique anonyme (création et renouvellement automatique). Fermé par défaut.</value></data>
+  <data name="Products_TypePublicTrialOff" xml:space="preserve"><value>non</value></data>
+  <data name="Products_TypeTeam" xml:space="preserve"><value>Team</value></data>
+  <data name="Products_TypeTeamHint" xml:space="preserve"><value>Indique qu'une licence de ce type peut porter une équipe Team. SoftLicence stocke et expose ce réglage sans l'interpréter ; aucun effet sur les clés ni les activations. Désactivé par défaut.</value></data>
+  <data name="Common_Days" xml:space="preserve"><value>jours</value></data>
+  <data name="Common_Days_Short" xml:space="preserve"><value>j</value></data>
+  <data name="Products_TypeSlugPlaceholder" xml:space="preserve"><value>SLUG (ex. : PRO)</value></data>
+  <data name="Products_MaxActivationsPerDayHint" xml:space="preserve"><value>Activations maximales par jour (0 = illimité)</value></data>
+  <data name="Products_ActivationsPerDayShort" xml:space="preserve"><value>Act/j</value></data>
+  <data name="Products_RecurringHint" xml:space="preserve"><value>Abonnement récurrent</value></data>
+  <data name="Products_AnonymousHint" xml:space="preserve"><value>Clé anonyme (sans e-mail ni nom)</value></data>
+  <data name="Products_AnonymousShort" xml:space="preserve"><value>Anon</value></data>
+  <data name="Products_SingleUseHint" xml:space="preserve"><value>Un HWID ne peut consommer ce type qu'une seule fois</value></data>
+  <data name="Products_SingleUseShort" xml:space="preserve"><value>HWID unique</value></data>
+  <data name="Products_DisableNewActivationsHint" xml:space="preserve"><value>Bloque uniquement les nouvelles activations</value></data>
+  <data name="Products_DisableNewActivationsShort" xml:space="preserve"><value>Act. off</value></data>
+  <data name="Products_CustomParameters" xml:space="preserve"><value>Paramètres personnalisés</value></data>
+  <data name="Products_ParametersOf" xml:space="preserve"><value>Paramètres :</value></data>
+  <data name="Products_ParamKey" xml:space="preserve"><value>Clé</value></data>
+  <data name="Products_ParamValue" xml:space="preserve"><value>Valeur</value></data>
+  <data name="Products_NoParameters" xml:space="preserve"><value>Aucun paramètre défini.</value></data>
+  <data name="Products_ParamKeyPlaceholder" xml:space="preserve"><value>clé (ex. : maxAccounts)</value></data>
+  <data name="Products_ParamNamePlaceholder" xml:space="preserve"><value>Nom (ex. : Comptes max)</value></data>
+  <data name="Products_ParamValuePlaceholder" xml:space="preserve"><value>Valeur (ex. : 50)</value></data>
+  <data name="Products_ApplyToAllTypesHint" xml:space="preserve"><value>Ajoute ce paramètre à tous les types de ce produit (ignoré s'il existe déjà)</value></data>
+  <data name="Products_AllTypes" xml:space="preserve"><value>Tous les types</value></data>
+  <data name="Products_NoProductSelected" xml:space="preserve"><value>Aucun produit sélectionné.</value></data>
+  <data name="Products_TypeAddedWithParams" xml:space="preserve"><value>Type '{0}' ajouté ({1} paramètres copiés).</value></data>
+  <data name="Products_DurationChanged" xml:space="preserve"><value>Durée modifiée : {0} licences mises à jour.</value></data>
+  <data name="Products_ParamKeyAndNameRequired" xml:space="preserve"><value>Clé et Nom requis.</value></data>
+  <data name="Products_ParamKeyInvalid" xml:space="preserve"><value>La clé ne doit contenir que des caractères alphanumériques ou des underscores.</value></data>
+  <data name="Products_ParamKeyExists" xml:space="preserve"><value>La clé '{0}' existe déjà pour ce type.</value></data>
+  <data name="Products_ParamAddedToTypes" xml:space="preserve"><value>Paramètre '{0}' ajouté à {1}/{2} types (déjà présent sur {3}).</value></data>
+  <data name="Products_ParamAdded" xml:space="preserve"><value>Paramètre '{0}' ajouté.</value></data>
+  <data name="Products_ParamDeleted" xml:space="preserve"><value>Paramètre supprimé.</value></data>
+  <data name="Products_ParamUpdated" xml:space="preserve"><value>Paramètre '{0}' modifié.</value></data>
+  <data name="Products_Lifetime" xml:space="preserve"><value>∞ Illimitée</value></data>
   <data name="Products_Duration" xml:space="preserve"><value>Durée</value></data>
   <data name="Products_Mode" xml:space="preserve"><value>Mode</value></data>
   <data name="Products_Subscription" xml:space="preserve"><value>ABONNEMENT</value></data>
@@ -264,6 +302,16 @@
   <data name="Audit_BannedOn" xml:space="preserve"><value>Banni le</value></data>
   <data name="Audit_Unban" xml:space="preserve"><value>Débannir (Pardonner)</value></data>
   <data name="Audit_NoActiveBans" xml:space="preserve"><value>Aucun bannissement actif.</value></data>
+  <data name="Audit_ThreatScores" xml:space="preserve"><value>Scores de menace (50 et plus)</value></data>
+  <data name="Audit_ThreatScoresHelp" xml:space="preserve"><value>Quarantaine à 100 (requêtes ralenties), ban automatique à 200. Un score inférieur à 200 sans événement depuis 30 jours est effacé automatiquement (journal « inactif 30 j »). Une alerte est envoyée au passage de 50 puis de 100. La remise à zéro efface le score en base et en mémoire, sans redémarrage, et elle est journalisée ; elle ne lève pas un ban.</value></data>
+  <data name="Audit_ThreatScore" xml:space="preserve"><value>Score</value></data>
+  <data name="Audit_ThreatFirstSeen" xml:space="preserve"><value>Premier point</value></data>
+  <data name="Audit_ThreatLastHit" xml:space="preserve"><value>Dernier point</value></data>
+  <data name="Audit_ThreatScoreReset" xml:space="preserve"><value>Remettre à zéro</value></data>
+  <data name="Audit_ThreatScoreResetHint" xml:space="preserve"><value>Saisir d'abord la raison de la remise à zéro</value></data>
+  <data name="Audit_ThreatScoreResetReason" xml:space="preserve"><value>Raison de la remise à zéro (obligatoire)</value></data>
+  <data name="Audit_ThreatScoreResetReasonRequired" xml:space="preserve"><value>La raison de la remise à zéro est obligatoire.</value></data>
+  <data name="Audit_NoThreatScores" xml:space="preserve"><value>Aucune IP à 50 points ou plus.</value></data>
   <data name="Audit_ErrorDetails" xml:space="preserve"><value>Détails de l'erreur</value></data>
   <data name="Audit_UserAgent" xml:space="preserve"><value>User-Agent :</value></data>
   <data name="Audit_ISP" xml:space="preserve"><value>Fournisseur (ISP) :</value></data>

@@ -3,6 +3,7 @@ using System.ComponentModel.DataAnnotations;
 
 namespace SoftLicence.Server.Data
 {
+    /// <summary>Commercial license authority; effective purchase nature is separate from type capabilities and historical order proof.</summary>
     public class License
     {
         [Key]
@@ -28,6 +29,9 @@ namespace SoftLicence.Server.Data
         public DateTime? ActivationDate { get; set; }
 
         public int RecoveryCount { get; set; } = 0;
+
+        /// <summary>Effective purchase nature. Historical UNKNOWN is paid-equivalent; purchase evidence retains origin.</summary>
+        public string CommercialNature { get; set; } = "UNKNOWN";
 
         public bool IsActive { get; set; } = true;
         /// <summary>

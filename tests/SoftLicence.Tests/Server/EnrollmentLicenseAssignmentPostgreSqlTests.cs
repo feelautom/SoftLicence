@@ -5,7 +5,10 @@ using Xunit;
 
 namespace SoftLicence.Tests.Server;
 
-public sealed partial class RuntimeEnrollmentPostgreSqlTests
+/// <summary>Exercises enrollment-assignment migration boundaries in isolated model-derived databases.</summary>
+/// <param name="classDatabase">The xUnit-owned PostgreSQL clone fixture for this exact test class.</param>
+public sealed class EnrollmentLicenseAssignmentPostgreSqlTests(RuntimeEnrollmentPostgreSqlClassDatabase classDatabase)
+    : RuntimeEnrollmentPostgreSqlTestBase(classDatabase)
 {
     /// <summary>Last migration before the additive assignment and quarantine tables.</summary>
     private const string BeforeEnrollmentAssignmentMigration =
@@ -18,7 +21,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Proves the migration maps one coherent pending enrollment through its exact
     /// binding and seat, without importing hardware identity into the assignment.
     /// </summary>
-    [Fact]
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.AssignmentBackfill_CoherentPendingGraph_CreatesOneActiveAssignment")]
     public async Task AssignmentBackfill_CoherentPendingGraph_CreatesOneActiveAssignment()
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
@@ -81,7 +84,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Proves a conflicting enrollment-to-binding seat is quarantined instead of
     /// silently inheriting the binding's commercial right.
     /// </summary>
-    [Fact]
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.AssignmentBackfill_SeatMismatch_QuarantinesWithoutAssignment")]
     public async Task AssignmentBackfill_SeatMismatch_QuarantinesWithoutAssignment()
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
@@ -108,7 +111,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Proves the historical installation reference is compared byte-for-byte:
     /// changing only UUID letter case cannot silently select a commercial seat.
     /// </summary>
-    [Fact]
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.AssignmentBackfill_InstallationCaseDivergence_Quarantines")]
     public async Task AssignmentBackfill_InstallationCaseDivergence_Quarantines()
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
@@ -132,7 +135,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Proves two live enrollments naming the same seat cannot be ordered by a
     /// migration guess: both are quarantined even when their bindings are distinct.
     /// </summary>
-    [Fact]
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.AssignmentBackfill_TwoLiveClaimantsForSeat_QuarantinesBoth")]
     public async Task AssignmentBackfill_TwoLiveClaimantsForSeat_QuarantinesBoth()
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
@@ -193,7 +196,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Proves a genuine terminal enrollment receives history only and cannot keep
     /// a live commercial assignment after migration.
     /// </summary>
-    [Fact]
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.AssignmentBackfill_TerminalEnrollment_CreatesEndedHistory")]
     public async Task AssignmentBackfill_TerminalEnrollment_CreatesEndedHistory()
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
@@ -220,13 +223,6 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         Assert.Equal("legacy_enrollment_invalidated", assignment.EndReason);
         Assert.Empty(await check.EnrollmentLicenseAssignmentQuarantines.ToListAsync());
     }
-
-    /// <summary>
-    /// Uses the migration administrator connection so a rollback/reapply test does
-    /// not depend on the fixture's separate application-role grants for new tables.
-    /// </summary>
-    private static LicenseDbContext CreateEnrollmentAssignmentMigrationContext(string connectionString) =>
-        new(new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(connectionString).Options);
 
     /// <summary>
     /// Removes only the disposable fixture's trigger-generated assignment before

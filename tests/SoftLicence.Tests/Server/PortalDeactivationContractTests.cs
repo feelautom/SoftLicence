@@ -535,9 +535,12 @@ public sealed class PortalDeactivationContractTests
             (character >= '0' && character <= '9')
             || (character >= 'a' && character <= 'f'));
 
-    /// <summary>Proves a type-defined quota refuses without a seat, history, or receipt mutation.</summary>
+    /// <summary>
+    /// TKT-003751 (owner rule): with the daily limit of different PCs already reached (2 of 2), a dashboard unlink
+    /// is still accepted at once; unlinking is never counted nor refused by the quota.
+    /// </summary>
     [Fact]
-    public async Task Service_QuotaRefusalHasZeroEffectAndCanRetryNextUtcDay()
+    public async Task Service_UnlinkAtExhaustedDailyLimit_IsNeverRefused()
     {
         var fixture = CreateServiceFixture(active: true, seatAge: TimeSpan.FromHours(1));
         await using (var seed = fixture.Factory.CreateDbContext())
@@ -545,24 +548,19 @@ public sealed class PortalDeactivationContractTests
             var license = await seed.Licenses.Include(row => row.Type).SingleAsync();
             license.Type!.MaxActivationsPerDay = 2;
             for (var index = 0; index < 2; index++)
-                seed.LicenseSeats.Add(new LicenseSeat { LicenseId = license.Id, HardwareId = $"OTHER-{index}", IsActive = false, UnlinkedAt = Now.UtcDateTime });
+                seed.LicenseSeats.Add(new LicenseSeat
+                {
+                    LicenseId = license.Id, HardwareId = $"OTHER-{index}", IsActive = false,
+                    UnlinkedAt = Now.UtcDateTime, LastActivatedAt = Now.UtcDateTime
+                });
             await seed.SaveChangesAsync();
         }
         var request = ValidRequest("settings_button");
-        var refusal = await Record.ExceptionAsync(() => fixture.Service.DeactivateAsync("tia-connect-website-portal", new string('a', 64), request));
-        var quota = Assert.IsType<PortalDeactivationQuotaException>(refusal);
-        Assert.Equal(2, quota.Refusal.Limit);
-        Assert.Equal(RequestId, quota.Refusal.RequestId);
-        Assert.Equal(Now.UtcDateTime.Date.AddDays(1), quota.Refusal.ResetAtUtc);
-        await using (var verify = fixture.Factory.CreateDbContext())
-        {
-            Assert.True((await verify.LicenseSeats.SingleAsync(row => row.HardwareId == HardwareId)).IsActive);
-            Assert.Empty(await verify.PortalDeactivationOperations.ToListAsync());
-            Assert.Empty(await verify.LicenseHistories.ToListAsync());
-        }
-        var tomorrow = new PortalDeactivationService(fixture.Factory, new FixedTimeProvider(Now.AddDays(1)), NullLogger<PortalDeactivationService>.Instance);
-        var result = await tomorrow.DeactivateAsync("tia-connect-website-portal", new string('a', 64), request);
+        var result = await fixture.Service.DeactivateAsync("tia-connect-website-portal", new string('a', 64), request);
         Assert.Equal("deactivated", result.Response.Outcome);
+        await using var verify = fixture.Factory.CreateDbContext();
+        Assert.False((await verify.LicenseSeats.SingleAsync(row => row.HardwareId == HardwareId)).IsActive);
+        Assert.Single(await verify.PortalDeactivationOperations.ToListAsync());
     }
 
     /// <summary>Preserves unlimited policy for every non-positive type limit.</summary>

@@ -73,7 +73,11 @@ public class SecurityServiceTests
         var ban2 = await db2.BannedIps.FirstOrDefaultAsync(b => b.IpAddress == ip);
         Assert.NotNull(ban2);
         Assert.Equal("Test 4 (Score: 200)", ban2.Reason);
-        _notifierMock.Verify(n => n.Notify(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<object>()), Times.Once);
+        // TKT-002685: the 50 and 100 crossings each send one threshold alert; the ban alert is sent once.
+        // TKT-003668: an automatic IP ban is routine noise and never uses the serious-ban trigger.
+        _notifierMock.Verify(n => n.Notify(NotificationService.Triggers.SecurityIpAutoBanned, It.IsAny<string>(), It.IsAny<string>(), It.IsAny<object>()), Times.Once);
+        _notifierMock.Verify(n => n.Notify(NotificationService.Triggers.SecurityIpBanned, It.IsAny<string>(), It.IsAny<string>(), It.IsAny<object>()), Times.Never);
+        _notifierMock.Verify(n => n.Notify(NotificationService.Triggers.SecurityThreatScoreRaised, It.IsAny<string>(), It.IsAny<string>(), It.IsAny<object>()), Times.Exactly(2));
     }
 
     [Fact]
@@ -125,7 +129,7 @@ public class SecurityServiceTests
         Assert.True(ban.ExpiresAt > DateTime.UtcNow.AddDays(6));
         Assert.True(await _service.IsBannedAsync(ip));
         _notifierMock.Verify(n => n.Notify(
-            NotificationService.Triggers.SecurityIpBanned,
+            NotificationService.Triggers.SecurityIpAutoBanned,
             It.Is<string>(title => title.Contains("x2")),
             It.Is<string>(message => message.Contains("Repeated scan")),
             It.IsAny<object>()), Times.Once);

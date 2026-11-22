@@ -13,6 +13,39 @@ public class TelemetryBaseRequest
 
 public class TelemetryEventRequest : TelemetryBaseRequest
 {
+    /// <summary>
+    /// Gets or sets the optional wire classification. The ingestion service recognizes only the
+    /// exact ordinal value <c>Error</c>; every other value remains an event unless the legacy name
+    /// fallback applies.
+    /// </summary>
+    public string? Type { get; set; }
+
+    public Dictionary<string, string>? Properties { get; set; }
+
+    /// <summary>
+    /// Gets or sets the compatibility envelope emitted by clients that serialize the telemetry
+    /// request beneath <c>req</c>. Outer routing identity remains authoritative while type and
+    /// properties may be recovered from this envelope. Producers such as YOUR_APP_NAME send a plain
+    /// string here; any value that is not an object is ignored and never rejects the request.
+    /// </summary>
+    [JsonConverter(typeof(TelemetryEventCompatibilityEnvelopeConverter))]
+    public TelemetryEventCompatibilityEnvelope? Req { get; set; }
+}
+
+/// <summary>
+/// Represents the bounded compatibility payload accepted beneath the event request's <c>req</c>
+/// property. It intentionally excludes routing identity and recursive envelopes.
+/// </summary>
+public sealed class TelemetryEventCompatibilityEnvelope
+{
+    /// <summary>
+    /// Gets or sets the optional nested wire classification.
+    /// </summary>
+    public string? Type { get; set; }
+
+    /// <summary>
+    /// Gets or sets the nested event properties retained by legacy client serializers.
+    /// </summary>
     public Dictionary<string, string>? Properties { get; set; }
 }
 

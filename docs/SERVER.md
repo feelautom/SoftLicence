@@ -62,13 +62,21 @@ Activation automatique au premier lancement, ou renouvellement d'une licence ré
 }
 ```
 
+**Le type demandé doit être ouvert à l'essai public** (`AllowPublicTrial`, réglage du type, faux par défaut) ; sinon refus `LICENSE_TYPE_PUBLIC_TRIAL_NOT_ALLOWED`, même si ce PC détient déjà une licence de ce type.
+
 **Comportement quand une licence existe déjà pour ce HardwareId :**
 
 | Cas | Résultat |
 |---|---|
+| Licence en cours (active, non expirée) d'un **autre** type | Refus `HARDWARE_ALREADY_LICENSED`, rien n'est renvoyé ni modifié ; la licence se récupère avec sa clé |
+| Licence du type demandé de nature `PAID` ou `PAID_TRIAL` | Refus `HARDWARE_ALREADY_LICENSED` |
 | `IsActive = false` (révoquée) | `403 Forbidden` |
-| `IsRecurring = true` + expirée | Renouvellement auto : `ExpirationDate += DefaultDurationDays`, historique `RENEWED`, renvoi licence signée |
-| Sinon (active ou expirée non-récurrente) | Renvoi tel quel (le client gère le blocage) |
+| Licence du type demandé, valide | Renvoi de la licence signée ; l'e-mail et le nom enregistrés ne sont jamais remplacés par ceux de la demande |
+| Licence du type demandé, expirée et renouvelable | Renouvellement auto : `ExpirationDate += DefaultDurationDays`, historique `RENEWED`, renvoi licence signée |
+| Licence du type demandé, expirée et non renouvelable | Refus `LICENSE_EXPIRED`, rien n'est écrit |
+| Seulement des licences expirées d'autres types | Création d'une licence du type demandé (bascule) |
+
+Renouvelable : sur `/api/activation/trial`, seulement le type récurrent de slug `SIPLINE-COMMUNITY` (règle historique en cours de retrait) ; par la clé `-FREE-TRIAL`, tout type récurrent hors passe payant.
 
 **Première demande (HardwareId inconnu) :** crée une licence avec la durée `DefaultDurationDays` du type.
 

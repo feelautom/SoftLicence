@@ -8,7 +8,7 @@ namespace SoftLicence.Mcp;
 
 /// <summary>
 /// Access control in front of the online MCP endpoint (TKT-001169). Every MCP request must:
-/// 1. come from an allowed network (the WireGuard VPN, 10.10.0.0/24 by default) — otherwise 403;
+/// 1. come from an allowed network (the WireGuard VPN, 192.0.2.0/24 by default) — otherwise 403;
 /// 2. carry an X-Analytics-Key header — otherwise 401;
 /// 3. carry a key that the SoftLicence server accepts — otherwise 401 (403 if it lacks telemetry:read).
 /// Valid keys are cached briefly by fingerprint; repeated failures from one address are throttled.
@@ -54,7 +54,7 @@ public sealed class McpHttpAccessGate
             .Select(IPNetwork.Parse)
             .ToList();
         if (networks.Count == 0)
-            throw new InvalidOperationException("SOFTLICENCE_MCP_ALLOWED_CIDRS must list at least one network (e.g. 10.10.0.0/24).");
+            throw new InvalidOperationException("SOFTLICENCE_MCP_ALLOWED_CIDRS must list at least one network (e.g. 192.0.2.0/24).");
         if (networks.Any(network => network.PrefixLength == 0))
             throw new InvalidOperationException("SOFTLICENCE_MCP_ALLOWED_CIDRS must not contain an unrestricted network.");
         return networks;

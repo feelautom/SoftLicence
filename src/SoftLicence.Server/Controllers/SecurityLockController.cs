@@ -83,7 +83,22 @@ public sealed class SecurityLockController : ControllerBase
         }
         catch (RuntimeEnrollmentException exception)
         {
-            _logger.LogWarning("Security lock report rejected: {ErrorCode}", exception.ErrorCode);
+            if (exception.StatusCode == StatusCodes.Status401Unauthorized
+                && string.Equals(
+                    exception.DiagnosticCode,
+                    RuntimeEnrollmentService.ProofClockSkewDiagnosticCode,
+                    StringComparison.Ordinal))
+            {
+                // TKT-002685: same server-verified clock classification as the Runtime routes, so the
+                // audit does not score a client whose clock drifted (sleep, resume) as an attacker.
+                // The public response deliberately remains the generic authentication_failed.
+                HttpContext.Items[LogKeys.RuntimeAuthenticationDisposition] =
+                    RuntimeEnrollmentService.ProofClockSkewDiagnosticCode;
+            }
+            _logger.LogWarning(
+                "Security lock report rejected: {ErrorCode}, diagnostic {DiagnosticCode}",
+                exception.ErrorCode,
+                exception.DiagnosticCode ?? "none");
             return StatusCode(exception.StatusCode, new { error = exception.ErrorCode });
         }
     }

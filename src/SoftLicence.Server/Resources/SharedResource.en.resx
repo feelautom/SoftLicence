@@ -197,6 +197,44 @@
   <data name="Products_LicenseTypes" xml:space="preserve"><value>License types</value></data>
   <data name="Products_ManageTypes" xml:space="preserve"><value>Manage types</value></data>
   <data name="Products_NoTypes" xml:space="preserve"><value>No types defined.</value></data>
+  <data name="Products_TypePublicTrial" xml:space="preserve"><value>Public trial</value></data>
+  <data name="Products_TypePublicTrialHint" xml:space="preserve"><value>Allows the anonymous public trial request (creation and automatic renewal). Closed by default.</value></data>
+  <data name="Products_TypePublicTrialOff" xml:space="preserve"><value>no</value></data>
+  <data name="Products_TypeTeam" xml:space="preserve"><value>Team</value></data>
+  <data name="Products_TypeTeamHint" xml:space="preserve"><value>Marks a licence of this type as able to carry a Team. SoftLicence stores and exposes this setting without interpreting it; no effect on keys or activations. Off by default.</value></data>
+  <data name="Common_Days" xml:space="preserve"><value>days</value></data>
+  <data name="Common_Days_Short" xml:space="preserve"><value>d</value></data>
+  <data name="Products_TypeSlugPlaceholder" xml:space="preserve"><value>SLUG (e.g. PRO)</value></data>
+  <data name="Products_MaxActivationsPerDayHint" xml:space="preserve"><value>Maximum activations per day (0 = unlimited)</value></data>
+  <data name="Products_ActivationsPerDayShort" xml:space="preserve"><value>Act/d</value></data>
+  <data name="Products_RecurringHint" xml:space="preserve"><value>Recurring subscription</value></data>
+  <data name="Products_AnonymousHint" xml:space="preserve"><value>Anonymous key (no email or name)</value></data>
+  <data name="Products_AnonymousShort" xml:space="preserve"><value>Anon</value></data>
+  <data name="Products_SingleUseHint" xml:space="preserve"><value>A hardware ID can use this type only once</value></data>
+  <data name="Products_SingleUseShort" xml:space="preserve"><value>Single HWID</value></data>
+  <data name="Products_DisableNewActivationsHint" xml:space="preserve"><value>Blocks new activations only</value></data>
+  <data name="Products_DisableNewActivationsShort" xml:space="preserve"><value>Act. off</value></data>
+  <data name="Products_CustomParameters" xml:space="preserve"><value>Custom parameters</value></data>
+  <data name="Products_ParametersOf" xml:space="preserve"><value>Parameters:</value></data>
+  <data name="Products_ParamKey" xml:space="preserve"><value>Key</value></data>
+  <data name="Products_ParamValue" xml:space="preserve"><value>Value</value></data>
+  <data name="Products_NoParameters" xml:space="preserve"><value>No parameter defined.</value></data>
+  <data name="Products_ParamKeyPlaceholder" xml:space="preserve"><value>key (e.g. maxAccounts)</value></data>
+  <data name="Products_ParamNamePlaceholder" xml:space="preserve"><value>Name (e.g. Max accounts)</value></data>
+  <data name="Products_ParamValuePlaceholder" xml:space="preserve"><value>Value (e.g. 50)</value></data>
+  <data name="Products_ApplyToAllTypesHint" xml:space="preserve"><value>Adds this parameter to every type of this product (skipped where it already exists)</value></data>
+  <data name="Products_AllTypes" xml:space="preserve"><value>All types</value></data>
+  <data name="Products_NoProductSelected" xml:space="preserve"><value>No product selected.</value></data>
+  <data name="Products_TypeAddedWithParams" xml:space="preserve"><value>Type '{0}' added ({1} parameters copied).</value></data>
+  <data name="Products_DurationChanged" xml:space="preserve"><value>Duration changed: {0} licences updated.</value></data>
+  <data name="Products_ParamKeyAndNameRequired" xml:space="preserve"><value>Key and Name required.</value></data>
+  <data name="Products_ParamKeyInvalid" xml:space="preserve"><value>The key may contain only alphanumeric characters or underscores.</value></data>
+  <data name="Products_ParamKeyExists" xml:space="preserve"><value>The key '{0}' already exists for this type.</value></data>
+  <data name="Products_ParamAddedToTypes" xml:space="preserve"><value>Parameter '{0}' added to {1}/{2} types (already present on {3}).</value></data>
+  <data name="Products_ParamAdded" xml:space="preserve"><value>Parameter '{0}' added.</value></data>
+  <data name="Products_ParamDeleted" xml:space="preserve"><value>Parameter deleted.</value></data>
+  <data name="Products_ParamUpdated" xml:space="preserve"><value>Parameter '{0}' updated.</value></data>
+  <data name="Products_Lifetime" xml:space="preserve"><value>∞ Lifetime</value></data>
   <data name="Products_Duration" xml:space="preserve"><value>Duration</value></data>
   <data name="Products_Mode" xml:space="preserve"><value>Mode</value></data>
   <data name="Products_Subscription" xml:space="preserve"><value>SUBSCRIPTION</value></data>
@@ -264,6 +302,16 @@
   <data name="Audit_BannedOn" xml:space="preserve"><value>Banned on</value></data>
   <data name="Audit_Unban" xml:space="preserve"><value>Unban (Pardon)</value></data>
   <data name="Audit_NoActiveBans" xml:space="preserve"><value>No active bans.</value></data>
+  <data name="Audit_ThreatScores" xml:space="preserve"><value>Threat scores (50 and above)</value></data>
+  <data name="Audit_ThreatScoresHelp" xml:space="preserve"><value>Quarantine at 100 (requests delayed), automatic ban at 200. A score below 200 with no event for 30 days is erased automatically (journal reason &quot;inactif 30 j&quot;). An alert is sent when 50, then 100, is crossed. A reset erases the score in the database and in memory without restart and is journaled; it does not lift a ban.</value></data>
+  <data name="Audit_ThreatScore" xml:space="preserve"><value>Score</value></data>
+  <data name="Audit_ThreatFirstSeen" xml:space="preserve"><value>First point</value></data>
+  <data name="Audit_ThreatLastHit" xml:space="preserve"><value>Last point</value></data>
+  <data name="Audit_ThreatScoreReset" xml:space="preserve"><value>Reset</value></data>
+  <data name="Audit_ThreatScoreResetHint" xml:space="preserve"><value>Enter the reset reason first</value></data>
+  <data name="Audit_ThreatScoreResetReason" xml:space="preserve"><value>Reset reason (required)</value></data>
+  <data name="Audit_ThreatScoreResetReasonRequired" xml:space="preserve"><value>A reset reason is required.</value></data>
+  <data name="Audit_NoThreatScores" xml:space="preserve"><value>No IP at 50 points or more.</value></data>
   <data name="Audit_ErrorDetails" xml:space="preserve"><value>Error details</value></data>
   <data name="Audit_UserAgent" xml:space="preserve"><value>User-Agent:</value></data>
   <data name="Audit_ISP" xml:space="preserve"><value>Provider (ISP):</value></data>

@@ -28,13 +28,23 @@ internal sealed class FakeBugTraceProxyService : IBugTraceProxyService
     public string ExpectedProjectId { get; set; } = "9f3c8fea-8740-42af-be83-6f527c6d102a";
     /// <summary>Allows one fixture to simulate missing provider configuration without reading real settings.</summary>
     public bool IsConfigured { get; set; } = true;
+    /// <summary>Allows controller tests to independently simulate the dedicated T-IA authority gate.</summary>
+    public bool IsTiaConfigured { get; set; } = true;
 
-    /// <summary>Records server-projected synthetic Ticket submissions in fixture memory; no durable or network side effect is simulated.</summary>
+    /// <summary>Records legacy ticket submissions independently from Desktop T-IA routing.</summary>
+    public List<object> LegacySubmittedTickets { get; } = new();
+    /// <summary>Records Desktop ticket submissions independently from legacy routing.</summary>
+    public List<object> SubmittedTiaTickets { get; } = new();
+    /// <summary>Retains the historical aggregate used by integration fixtures while route-specific assertions use the independent collections.</summary>
     public List<object> SubmittedTickets { get; } = new();
-    /// <summary>Records exact synthetic legacy comment projections in fixture-owned memory for routing assertions; no provider mutation occurs.</summary>
-    public List<(string TicketNumber, object Body)> AddedComments { get; } = new();
-    /// <summary>Records synthetic legacy email lookups in call order; owned by one test fixture and never sent over a network.</summary>
-    public List<string> QueriedEmails { get; } = new();
+    /// <summary>Records legacy comment mutations independently from Desktop T-IA routing.</summary>
+    public List<(string TicketNumber, object Body)> LegacyAddedComments { get; } = new();
+    /// <summary>Records Desktop comment mutations independently from legacy routing.</summary>
+    public List<(string TicketNumber, object Body)> AddedTiaComments { get; } = new();
+    /// <summary>Records legacy email lookups independently from Desktop T-IA routing.</summary>
+    public List<string> LegacyQueriedEmails { get; } = new();
+    /// <summary>Records Desktop email lookups independently from legacy routing.</summary>
+    public List<string> QueriedTiaEmails { get; } = new();
     /// <summary>Records accepted create projections so tests can assert server-owned identity and source.</summary>
     public List<object> CreatedSupportCases { get; } = new();
     /// <summary>Supplies synthetic pages by zero-based offset divided by200, preserving ownership lookup order.</summary>
@@ -42,35 +52,79 @@ internal sealed class FakeBugTraceProxyService : IBugTraceProxyService
     /// <summary>Records owner filters in lookup order; each fixture owns this mutable collection.</summary>
     public List<string> QueriedSupportEmails { get; } = new();
 
+    /// <inheritdoc />
     public Task<JsonElement> SubmitTicketAsync(object ticketBody, CancellationToken ct = default)
     {
+        LegacySubmittedTickets.Add(ticketBody);
         SubmittedTickets.Add(ticketBody);
-        var json = JsonSerializer.Serialize(new { ticketNumber = "BT-00042", id = "fake-id-001" });
-        return Task.FromResult(JsonDocument.Parse(json).RootElement.Clone());
+        return Json(new { ticketNumber = "BT-00042", id = "fake-id-001" });
     }
 
+    /// <summary>Records a synthetic Desktop submission without invoking the legacy contract.</summary>
+    public Task<JsonElement> SubmitTiaTicketAsync(object ticketBody, CancellationToken ct = default)
+    {
+        SubmittedTiaTickets.Add(ticketBody);
+        SubmittedTickets.Add(ticketBody);
+        return Json(new { ticketNumber = "BT-00042", id = "fake-id-001" });
+    }
+
+    /// <summary>Records the exact idempotency keys of idempotent T-IA submissions, in call order (TKT-003093).</summary>
+    public List<string> TiaIdempotencyKeys { get; } = new();
+
+    /// <summary>Records a synthetic idempotent Desktop submission and its exact key without invoking the legacy contract.</summary>
+    public Task<JsonElement> SubmitTiaTicketAsync(object ticketBody, string idempotencyKey, CancellationToken ct = default)
+    {
+        TiaIdempotencyKeys.Add(idempotencyKey);
+        SubmittedTiaTickets.Add(ticketBody);
+        SubmittedTickets.Add(ticketBody);
+        return Json(new { ticketNumber = "BT-00042", id = "fake-id-001" });
+    }
+
+    /// <inheritdoc />
     public Task<JsonElement> AddCommentAsync(string ticketNumber, object commentBody, CancellationToken ct = default)
     {
-        AddedComments.Add((ticketNumber, commentBody));
-        var json = JsonSerializer.Serialize(new { id = "comment-id-001", ticketNumber });
-        return Task.FromResult(JsonDocument.Parse(json).RootElement.Clone());
+        LegacyAddedComments.Add((ticketNumber, commentBody));
+        return Json(new { id = "comment-id-001", ticketNumber });
     }
 
+    /// <summary>Records a synthetic Desktop comment without invoking the legacy contract.</summary>
+    public Task<JsonElement> AddTiaCommentAsync(string ticketNumber, object commentBody, CancellationToken ct = default)
+    {
+        AddedTiaComments.Add((ticketNumber, commentBody));
+        return Json(new { id = "comment-id-001", ticketNumber });
+    }
+
+    /// <inheritdoc />
     public Task<JsonElement> GetTicketsByEmailAsync(string email, CancellationToken ct = default)
     {
-        QueriedEmails.Add(email);
-        var json = JsonSerializer.Serialize(new[] { new { ticketNumber = "BT-00042", title = "Test" } });
-        return Task.FromResult(JsonDocument.Parse(json).RootElement.Clone());
+        LegacyQueriedEmails.Add(email);
+        return Json(new[] { new { ticketNumber = "BT-00042", title = "Test" } });
     }
 
-    public List<string> QueriedCommentTickets { get; } = new();
+    /// <summary>Records a synthetic Desktop ticket lookup without invoking the legacy contract.</summary>
+    public Task<JsonElement> GetTiaTicketsByEmailAsync(string email, CancellationToken ct = default)
+    {
+        QueriedTiaEmails.Add(email);
+        return Json(new[] { new { ticketNumber = "BT-00042", title = "Test" } });
+    }
+
+    /// <summary>Records legacy comment reads independently from Desktop T-IA routing.</summary>
+    public List<string> LegacyQueriedCommentTickets { get; } = new();
+    /// <summary>Records Desktop comment reads independently from legacy routing.</summary>
+    public List<string> QueriedTiaCommentTickets { get; } = new();
 
     /// <summary>Records the requested legacy reference and returns fixed public comments without provider authorization, cancellation or persistence simulation.</summary>
     public Task<JsonElement> GetTicketCommentsAsync(string ticketNumber, CancellationToken ct = default)
     {
-        QueriedCommentTickets.Add(ticketNumber);
-        var json = JsonSerializer.Serialize(new[] { new { id = "cmt-001", content = "Réponse du support", authorName = "Support" } });
-        return Task.FromResult(JsonDocument.Parse(json).RootElement.Clone());
+        LegacyQueriedCommentTickets.Add(ticketNumber);
+        return Json(new[] { new { id = "cmt-001", content = "Réponse du support", authorName = "Support" } });
+    }
+
+    /// <summary>Records a synthetic Desktop comment lookup without invoking the legacy contract.</summary>
+    public Task<JsonElement> GetTiaTicketCommentsAsync(string ticketNumber, CancellationToken ct = default)
+    {
+        QueriedTiaCommentTickets.Add(ticketNumber);
+        return Json(new[] { new { id = "cmt-001", content = "Réponse du support", authorName = "Support" } });
     }
 
     /// <summary>Records one synthetic create and returns a fixed receipt; provider durable replay is not simulated.</summary>
@@ -111,6 +165,57 @@ internal sealed class FakeBugTraceProxyService : IBugTraceProxyService
     /// <summary>Returns a detached synthetic JSON projection for the fake provider response.</summary>
     private static Task<JsonElement> Json(object value) =>
         Task.FromResult(JsonDocument.Parse(JsonSerializer.Serialize(value)).RootElement.Clone());
+}
+
+/// <summary>Implements only legacy and support contracts so tests can exercise the interface's fail-closed T-IA defaults.</summary>
+internal sealed class LegacyOnlyBugTraceProxyService : IBugTraceProxyService
+{
+    /// <inheritdoc />
+    public string ExpectedProjectId => "9f3c8fea-8740-42af-be83-6f527c6d102a";
+    /// <inheritdoc />
+    public bool IsConfigured => true;
+    /// <summary>Gets the number of legacy ticket and comment methods invoked by a test.</summary>
+    public int LegacyCalls { get; private set; }
+
+    /// <inheritdoc />
+    public Task<JsonElement> SubmitTicketAsync(object ticketBody, CancellationToken ct = default) => RecordLegacyCall();
+    /// <inheritdoc />
+    public Task<JsonElement> AddCommentAsync(string ticketNumber, object commentBody, CancellationToken ct = default) => RecordLegacyCall();
+    /// <inheritdoc />
+    public Task<JsonElement> GetTicketsByEmailAsync(string email, CancellationToken ct = default) => RecordLegacyCall();
+    /// <inheritdoc />
+    public Task<JsonElement> GetTicketCommentsAsync(string ticketNumber, CancellationToken ct = default) => RecordLegacyCall();
+
+    /// <inheritdoc />
+    public Task<JsonElement> CreateSupportCaseAsync(object body, string idempotencyKey, CancellationToken ct = default) =>
+        throw new NotSupportedException();
+    /// <inheritdoc />
+    public Task<JsonElement> ListSupportCasesAsync(string reporterEmail, int limit, CancellationToken ct = default, int offset = 0) =>
+        throw new NotSupportedException();
+    /// <inheritdoc />
+    public Task<JsonElement> GetSupportCaseAsync(string supportNumber, CancellationToken ct = default) =>
+        throw new NotSupportedException();
+    /// <inheritdoc />
+    public Task<JsonElement> AddSupportCaseMessageAsync(string supportNumber, object body, CancellationToken ct = default) =>
+        throw new NotSupportedException();
+    /// <inheritdoc />
+    public Task<JsonElement> ResolveSupportCaseAsync(string supportNumber, CancellationToken ct = default) =>
+        throw new NotSupportedException();
+    /// <inheritdoc />
+    public Task<JsonElement> StageSupportAttachmentAsync(IFormFile file, string reporterEmail, string idempotencyKey, CancellationToken ct = default) =>
+        throw new NotSupportedException();
+    /// <inheritdoc />
+    public Task<(byte[] Content, string ContentType, string FileName)> DownloadSupportAttachmentAsync(
+        string supportNumber,
+        string attachmentId,
+        CancellationToken ct = default) => throw new NotSupportedException();
+
+    /// <summary>Records an unexpected legacy call and returns an empty detached provider-shaped object.</summary>
+    private Task<JsonElement> RecordLegacyCall()
+    {
+        LegacyCalls++;
+        return Task.FromResult(JsonDocument.Parse("{}").RootElement.Clone());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -343,10 +448,12 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
     // -------------------------------------------------------------------------
     // 3. Submit relaie correctement vers BugTrace
     // -------------------------------------------------------------------------
+    /// <summary>Proves anonymous Desktop submission uses only the dedicated T-IA provider contract.</summary>
     [Fact]
     public async Task Submit_WithValidHardwareId_ShouldRelayTicketToBugTrace()
     {
-        _fakeBugTrace.SubmittedTickets.Clear();
+        _fakeBugTrace.SubmittedTiaTickets.Clear();
+        _fakeBugTrace.LegacySubmittedTickets.Clear();
         var client = CreateClient();
         var payload = new
         {
@@ -371,15 +478,16 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.True(result.TryGetProperty("ticketNumber", out var tn));
         Assert.Equal("BT-00042", tn.GetString());
 
-        // Le ticket a bien ete transmis au service proxy
-        Assert.Single(_fakeBugTrace.SubmittedTickets);
+        // Desktop traffic must use only the dedicated T-IA authority contract.
+        Assert.Single(_fakeBugTrace.SubmittedTiaTickets);
+        Assert.Empty(_fakeBugTrace.LegacySubmittedTickets);
     }
 
     [Fact]
     public async Task Submit_WithValidLicenseKey_ShouldRelayTicketToBugTrace()
     {
         await SeedLicenseAsync(FakeLicenseKey, hwid: FakeHwid, email: FakeEmail);
-        _fakeBugTrace.SubmittedTickets.Clear();
+        _fakeBugTrace.SubmittedTiaTickets.Clear();
 
         var client = CreateClient();
         var payload = new
@@ -392,7 +500,7 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
 
         var response = await client.PostAsJsonAsync("/api/bugtrace/submit", payload);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Single(_fakeBugTrace.SubmittedTickets);
+        Assert.Single(_fakeBugTrace.SubmittedTiaTickets);
     }
 
     /// <summary>Proves that an active same-licence seat authorizes relay without alias fallback.</summary>
@@ -402,12 +510,12 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
         const string submittedHardwareId = "1111222233334444";
         var authority = await SeedLicenseAsync(FakeLicenseKey + "-SEAT", hwid: "AAAABBBBCCCCDDDD");
         await SeedSeatAsync(authority.LicenseId, submittedHardwareId);
-        _fakeBugTrace.SubmittedTickets.Clear();
+        _fakeBugTrace.SubmittedTiaTickets.Clear();
 
         var response = await SubmitAsync(FakeLicenseKey + "-SEAT", submittedHardwareId);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Single(_fakeBugTrace.SubmittedTickets);
+        Assert.Single(_fakeBugTrace.SubmittedTiaTickets);
         _hardwareAuthorityAliases.Verify(resolver => resolver.ResolveAsync(
             It.IsAny<LicenseDbContext>(),
             It.IsAny<Guid>(),
@@ -426,12 +534,12 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
         var authority = await SeedLicenseAsync(FakeLicenseKey + "-ALIAS", hwid: "2222333344445555");
         var seatId = await SeedSeatAsync(authority.LicenseId, effectiveHardwareId);
         ConfigureAliasResolution(authority, submittedHardwareId, effectiveHardwareId, seatId);
-        _fakeBugTrace.SubmittedTickets.Clear();
+        _fakeBugTrace.SubmittedTiaTickets.Clear();
 
         var response = await SubmitAsync(FakeLicenseKey + "-ALIAS", submittedHardwareId);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Single(_fakeBugTrace.SubmittedTickets);
+        Assert.Single(_fakeBugTrace.SubmittedTiaTickets);
     }
 
     /// <summary>Proves that an adversarial cross-licence resolver result cannot authorize relay.</summary>
@@ -444,12 +552,12 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
         var foreign = await SeedLicenseAsync(FakeLicenseKey + "-FOREIGN", hwid: "4444555566667777");
         var foreignSeatId = await SeedSeatAsync(foreign.LicenseId, effectiveHardwareId);
         ConfigureAliasResolution(requested, submittedHardwareId, effectiveHardwareId, foreignSeatId);
-        _fakeBugTrace.SubmittedTickets.Clear();
+        _fakeBugTrace.SubmittedTiaTickets.Clear();
 
         var response = await SubmitAsync(FakeLicenseKey + "-REQUESTED", submittedHardwareId);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Empty(_fakeBugTrace.SubmittedTickets);
+        Assert.Empty(_fakeBugTrace.SubmittedTiaTickets);
     }
 
     /// <summary>Proves that an unknown alias remains a generic fail-closed mismatch.</summary>
@@ -458,12 +566,12 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
     {
         const string submittedHardwareId = "34567890ABCDEF12";
         await SeedLicenseAsync(FakeLicenseKey + "-UNKNOWN", hwid: "5555666677778888");
-        _fakeBugTrace.SubmittedTickets.Clear();
+        _fakeBugTrace.SubmittedTiaTickets.Clear();
 
         var response = await SubmitAsync(FakeLicenseKey + "-UNKNOWN", submittedHardwareId);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Empty(_fakeBugTrace.SubmittedTickets);
+        Assert.Empty(_fakeBugTrace.SubmittedTiaTickets);
     }
 
     /// <summary>Proves that alias evidence cannot reactivate an inactive seat through support submission.</summary>
@@ -475,12 +583,12 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
         var authority = await SeedLicenseAsync(FakeLicenseKey + "-INACTIVE", hwid: "6666777788889999");
         var seatId = await SeedSeatAsync(authority.LicenseId, effectiveHardwareId, isActive: false);
         ConfigureAliasResolution(authority, submittedHardwareId, effectiveHardwareId, seatId);
-        _fakeBugTrace.SubmittedTickets.Clear();
+        _fakeBugTrace.SubmittedTiaTickets.Clear();
 
         var response = await SubmitAsync(FakeLicenseKey + "-INACTIVE", submittedHardwareId);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Empty(_fakeBugTrace.SubmittedTickets);
+        Assert.Empty(_fakeBugTrace.SubmittedTiaTickets);
     }
 
     /// <summary>Proves that ambiguous alias evidence is rejected without provider relay.</summary>
@@ -503,12 +611,12 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
                 null,
                 HardwareAuthorityResolutionStatus.Refused,
                 RefusalReason: HardwareAuthorityRefusalReason.AmbiguousAlias));
-        _fakeBugTrace.SubmittedTickets.Clear();
+        _fakeBugTrace.SubmittedTiaTickets.Clear();
 
         var response = await SubmitAsync(FakeLicenseKey + "-AMBIGUOUS", submittedHardwareId);
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Empty(_fakeBugTrace.SubmittedTickets);
+        Assert.Empty(_fakeBugTrace.SubmittedTiaTickets);
     }
 
     /// <summary>Proves that the legacy unknown sentinel cannot authorize a keyed manual report.</summary>
@@ -516,12 +624,12 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
     public async Task Submit_WithLicenseKeyAndUnknownHardwareId_ShouldReturn400()
     {
         await SeedLicenseAsync(FakeLicenseKey + "-KEYED-UNKNOWN", hwid: "88889999AAAABBBB");
-        _fakeBugTrace.SubmittedTickets.Clear();
+        _fakeBugTrace.SubmittedTiaTickets.Clear();
 
         var response = await SubmitAsync(FakeLicenseKey + "-KEYED-UNKNOWN", "unknown");
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Empty(_fakeBugTrace.SubmittedTickets);
+        Assert.Empty(_fakeBugTrace.SubmittedTiaTickets);
     }
 
     /// <summary>Proves that omitting hardware authority cannot authorize a keyed manual report.</summary>
@@ -529,7 +637,7 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
     public async Task Submit_WithLicenseKeyAndMissingHardwareId_ShouldReturn400()
     {
         await SeedLicenseAsync(FakeLicenseKey + "-KEYED-MISSING", hwid: "9999AAAABBBBCCCC");
-        _fakeBugTrace.SubmittedTickets.Clear();
+        _fakeBugTrace.SubmittedTiaTickets.Clear();
         var client = CreateClient();
 
         var response = await client.PostAsJsonAsync("/api/bugtrace/submit", new
@@ -540,7 +648,7 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
         });
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Empty(_fakeBugTrace.SubmittedTickets);
+        Assert.Empty(_fakeBugTrace.SubmittedTiaTickets);
     }
 
     /// <summary>Proves that an unbound licence cannot authorize an arbitrary submitted machine.</summary>
@@ -548,12 +656,12 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
     public async Task Submit_WithUnboundLicenseAndArbitraryHardwareId_ShouldReturn400()
     {
         await SeedLicenseAsync(FakeLicenseKey + "-UNBOUND", hwid: null);
-        _fakeBugTrace.SubmittedTickets.Clear();
+        _fakeBugTrace.SubmittedTiaTickets.Clear();
 
         var response = await SubmitAsync(FakeLicenseKey + "-UNBOUND", "ABCDEFABCDEFABCD");
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Empty(_fakeBugTrace.SubmittedTickets);
+        Assert.Empty(_fakeBugTrace.SubmittedTiaTickets);
     }
 
     /// <summary>Configures an authenticated alias result without persisting any real identifier.</summary>
@@ -602,12 +710,15 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
     // -------------------------------------------------------------------------
     // 4. Comment relaie correctement vers BugTrace
     // -------------------------------------------------------------------------
+    /// <summary>Proves ownership lookup and comment mutation both stay on the dedicated T-IA contract.</summary>
     [Fact]
     public async Task Comment_WithValidLicenseKey_ShouldRelayCommentToBugTrace()
     {
         await SeedLicenseAsync(FakeLicenseKey, hwid: FakeHwid, email: FakeEmail);
-        _fakeBugTrace.AddedComments.Clear();
-        _fakeBugTrace.QueriedEmails.Clear();
+        _fakeBugTrace.AddedTiaComments.Clear();
+        _fakeBugTrace.QueriedTiaEmails.Clear();
+        _fakeBugTrace.LegacyAddedComments.Clear();
+        _fakeBugTrace.LegacyQueriedEmails.Clear();
         var client = CreateClient();
         var payload = new
         {
@@ -623,10 +734,12 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
         var response = await client.PostAsJsonAsync("/api/bugtrace/comment", payload);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
-        Assert.Single(_fakeBugTrace.QueriedEmails);
-        Assert.Equal(FakeEmail, _fakeBugTrace.QueriedEmails[0]);
-        Assert.Single(_fakeBugTrace.AddedComments);
-        Assert.Equal("BT-00042", _fakeBugTrace.AddedComments[0].TicketNumber);
+        Assert.Single(_fakeBugTrace.QueriedTiaEmails);
+        Assert.Equal(FakeEmail, _fakeBugTrace.QueriedTiaEmails[0]);
+        Assert.Single(_fakeBugTrace.AddedTiaComments);
+        Assert.Equal("BT-00042", _fakeBugTrace.AddedTiaComments[0].TicketNumber);
+        Assert.Empty(_fakeBugTrace.LegacyQueriedEmails);
+        Assert.Empty(_fakeBugTrace.LegacyAddedComments);
     }
 
     [Fact]
@@ -649,7 +762,7 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
     public async Task Comment_WhenTicketDoesNotBelongToLicense_ShouldReturn403()
     {
         await SeedLicenseAsync(FakeLicenseKey + "3", hwid: FakeHwid, email: FakeEmail);
-        _fakeBugTrace.AddedComments.Clear();
+        _fakeBugTrace.AddedTiaComments.Clear();
         var client = CreateClient();
         var payload = new
         {
@@ -662,32 +775,35 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
 
         var response = await client.PostAsJsonAsync("/api/bugtrace/comment", payload);
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
-        Assert.Empty(_fakeBugTrace.AddedComments);
+        Assert.Empty(_fakeBugTrace.AddedTiaComments);
     }
 
     // -------------------------------------------------------------------------
     // 5. Lecture tickets relaie correctement vers BugTrace
     // -------------------------------------------------------------------------
+    /// <summary>Proves Desktop ticket listing uses only the dedicated T-IA provider contract.</summary>
     [Fact]
     public async Task GetTickets_WithValidEmail_ShouldRelayToBugTrace()
     {
         await SeedLicenseAsync(FakeLicenseKey, hwid: FakeHwid, email: FakeEmail);
-        _fakeBugTrace.QueriedEmails.Clear();
+        _fakeBugTrace.QueriedTiaEmails.Clear();
+        _fakeBugTrace.LegacyQueriedEmails.Clear();
         var client = CreateClient();
 
         var response = await client.GetAsync(
             $"/api/bugtrace/tickets?email={FakeEmail}&licenseKey={FakeLicenseKey}&hardwareId={FakeHwid}&projectId={ValidProjectId}");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Single(_fakeBugTrace.QueriedEmails);
-        Assert.Equal(FakeEmail, _fakeBugTrace.QueriedEmails[0]);
+        Assert.Single(_fakeBugTrace.QueriedTiaEmails);
+        Assert.Equal(FakeEmail, _fakeBugTrace.QueriedTiaEmails[0]);
+        Assert.Empty(_fakeBugTrace.LegacyQueriedEmails);
     }
 
     [Fact]
     public async Task PostTickets_WithValidEmail_ShouldRelayToBugTrace()
     {
         await SeedLicenseAsync(FakeLicenseKey, hwid: FakeHwid, email: FakeEmail);
-        _fakeBugTrace.QueriedEmails.Clear();
+        _fakeBugTrace.QueriedTiaEmails.Clear();
         var client = CreateClient();
 
         var payload = new
@@ -701,8 +817,8 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
         var response = await client.PostAsJsonAsync("/api/bugtrace/tickets", payload);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Single(_fakeBugTrace.QueriedEmails);
-        Assert.Equal(FakeEmail, _fakeBugTrace.QueriedEmails[0]);
+        Assert.Single(_fakeBugTrace.QueriedTiaEmails);
+        Assert.Equal(FakeEmail, _fakeBugTrace.QueriedTiaEmails[0]);
         var result = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal("BT-00042", result[0].GetProperty("ticketNumber").GetString());
     }
@@ -711,10 +827,10 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
     public async Task BugTraceProxy_WithValidLicense_ShouldSupportFullTicketLifecycle()
     {
         await SeedLicenseAsync(FakeLicenseKey, hwid: FakeHwid, email: FakeEmail);
-        _fakeBugTrace.SubmittedTickets.Clear();
-        _fakeBugTrace.QueriedEmails.Clear();
-        _fakeBugTrace.QueriedCommentTickets.Clear();
-        _fakeBugTrace.AddedComments.Clear();
+        _fakeBugTrace.SubmittedTiaTickets.Clear();
+        _fakeBugTrace.QueriedTiaEmails.Clear();
+        _fakeBugTrace.QueriedTiaCommentTickets.Clear();
+        _fakeBugTrace.AddedTiaComments.Clear();
         var client = CreateClient();
 
         var submitResponse = await client.PostAsJsonAsync("/api/bugtrace/submit", new
@@ -730,7 +846,7 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.Contains("BT-00042", submitBody);
         Assert.DoesNotContain("BT-TKN-", submitBody, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("X-Project-Token", submitBody, StringComparison.OrdinalIgnoreCase);
-        Assert.Single(_fakeBugTrace.SubmittedTickets);
+        Assert.Single(_fakeBugTrace.SubmittedTiaTickets);
 
         var postTicketsResponse = await client.PostAsJsonAsync("/api/bugtrace/tickets", new
         {
@@ -776,10 +892,10 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.Contains("comment-id-001", commentBody);
         Assert.DoesNotContain("BT-TKN-", commentBody, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("X-Project-Token", commentBody, StringComparison.OrdinalIgnoreCase);
-        Assert.Single(_fakeBugTrace.AddedComments);
-        Assert.Equal("BT-00042", _fakeBugTrace.AddedComments[0].TicketNumber);
-        Assert.Contains(_fakeBugTrace.QueriedEmails, email => email == FakeEmail);
-        Assert.Contains(_fakeBugTrace.QueriedCommentTickets, ticket => ticket == "BT-00042");
+        Assert.Single(_fakeBugTrace.AddedTiaComments);
+        Assert.Equal("BT-00042", _fakeBugTrace.AddedTiaComments[0].TicketNumber);
+        Assert.Contains(_fakeBugTrace.QueriedTiaEmails, email => email == FakeEmail);
+        Assert.Contains(_fakeBugTrace.QueriedTiaCommentTickets, ticket => ticket == "BT-00042");
     }
 
     [Fact]
@@ -823,15 +939,15 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
     public async Task GetTickets_WithEncryptedLicenseKeyAndMatchingEmailHardware_ShouldRelayToBugTrace()
     {
         await SeedLicenseAsync(FakeLicenseKey + "-ENC", hwid: FakeHwid, email: FakeEmail);
-        _fakeBugTrace.QueriedEmails.Clear();
+        _fakeBugTrace.QueriedTiaEmails.Clear();
         var client = CreateClient();
 
         var response = await client.GetAsync(
             $"/api/bugtrace/tickets?email={FakeEmail}&licenseKey=ENC%3Atest-ciphertext&hardwareId={FakeHwid}&projectId={ValidProjectId}");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Single(_fakeBugTrace.QueriedEmails);
-        Assert.Equal(FakeEmail, _fakeBugTrace.QueriedEmails[0]);
+        Assert.Single(_fakeBugTrace.QueriedTiaEmails);
+        Assert.Equal(FakeEmail, _fakeBugTrace.QueriedTiaEmails[0]);
     }
 
     [Fact]
@@ -950,7 +1066,11 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
     [Fact]
     public async Task Submit_WhenBugTraceNotConfigured_ShouldReturn503()
     {
-        var unconfiguredFake = new FakeBugTraceProxyService { IsConfigured = false };
+        var unconfiguredFake = new FakeBugTraceProxyService
+        {
+            IsConfigured = false,
+            IsTiaConfigured = false
+        };
         var localFactory = _factory.WithWebHostBuilder(builder =>
         {
             builder.UseSetting("IsIntegrationTest", "true");
@@ -980,22 +1100,27 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
     // -------------------------------------------------------------------------
     // 9. Commentaires d'un ticket (lazy loading)
     // -------------------------------------------------------------------------
+    /// <summary>Proves Desktop ownership and comment reads use only the dedicated T-IA provider contract.</summary>
     [Fact]
     public async Task GetTicketComments_WithValidLicenseKey_ShouldRelayToBugTrace()
     {
         await SeedLicenseAsync(FakeLicenseKey, hwid: FakeHwid, email: FakeEmail);
-        _fakeBugTrace.QueriedEmails.Clear();
-        _fakeBugTrace.QueriedCommentTickets.Clear();
+        _fakeBugTrace.QueriedTiaEmails.Clear();
+        _fakeBugTrace.QueriedTiaCommentTickets.Clear();
+        _fakeBugTrace.LegacyQueriedEmails.Clear();
+        _fakeBugTrace.LegacyQueriedCommentTickets.Clear();
         var client = CreateClient();
 
         var response = await client.GetAsync(
             $"/api/bugtrace/tickets/BT-00042/comments?licenseKey={FakeLicenseKey}&hardwareId={FakeHwid}&projectId={ValidProjectId}");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Single(_fakeBugTrace.QueriedEmails);
-        Assert.Equal(FakeEmail, _fakeBugTrace.QueriedEmails[0]);
-        Assert.Single(_fakeBugTrace.QueriedCommentTickets);
-        Assert.Equal("BT-00042", _fakeBugTrace.QueriedCommentTickets[0]);
+        Assert.Single(_fakeBugTrace.QueriedTiaEmails);
+        Assert.Equal(FakeEmail, _fakeBugTrace.QueriedTiaEmails[0]);
+        Assert.Single(_fakeBugTrace.QueriedTiaCommentTickets);
+        Assert.Equal("BT-00042", _fakeBugTrace.QueriedTiaCommentTickets[0]);
+        Assert.Empty(_fakeBugTrace.LegacyQueriedEmails);
+        Assert.Empty(_fakeBugTrace.LegacyQueriedCommentTickets);
     }
 
     /// <summary>Proves desktop clients can authenticate comment reads without exposing the licence key in the URL.</summary>
@@ -1003,8 +1128,8 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
     public async Task GetTicketComments_WithLicenseKeyHeader_ShouldRelayToBugTrace()
     {
         await SeedLicenseAsync(FakeLicenseKey, hwid: FakeHwid, email: FakeEmail);
-        _fakeBugTrace.QueriedEmails.Clear();
-        _fakeBugTrace.QueriedCommentTickets.Clear();
+        _fakeBugTrace.QueriedTiaEmails.Clear();
+        _fakeBugTrace.QueriedTiaCommentTickets.Clear();
         var client = CreateClient();
         using var request = new HttpRequestMessage(
             HttpMethod.Get,
@@ -1014,10 +1139,10 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
         var response = await client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Single(_fakeBugTrace.QueriedEmails);
-        Assert.Equal(FakeEmail, _fakeBugTrace.QueriedEmails[0]);
-        Assert.Single(_fakeBugTrace.QueriedCommentTickets);
-        Assert.Equal("BT-00042", _fakeBugTrace.QueriedCommentTickets[0]);
+        Assert.Single(_fakeBugTrace.QueriedTiaEmails);
+        Assert.Equal(FakeEmail, _fakeBugTrace.QueriedTiaEmails[0]);
+        Assert.Single(_fakeBugTrace.QueriedTiaCommentTickets);
+        Assert.Equal("BT-00042", _fakeBugTrace.QueriedTiaCommentTickets[0]);
     }
 
     /// <summary>Proves ambiguous header and query credentials are rejected before licence or ticket lookup.</summary>
@@ -1025,8 +1150,8 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
     public async Task GetTicketComments_WithConflictingLicenseCredentials_ShouldReturn400()
     {
         await SeedLicenseAsync(FakeLicenseKey, hwid: FakeHwid, email: FakeEmail);
-        _fakeBugTrace.QueriedEmails.Clear();
-        _fakeBugTrace.QueriedCommentTickets.Clear();
+        _fakeBugTrace.QueriedTiaEmails.Clear();
+        _fakeBugTrace.QueriedTiaCommentTickets.Clear();
         var client = CreateClient();
         using var request = new HttpRequestMessage(
             HttpMethod.Get,
@@ -1038,8 +1163,8 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         var body = await response.Content.ReadAsStringAsync();
         Assert.Contains("Conflicting license credentials", body, StringComparison.Ordinal);
-        Assert.Empty(_fakeBugTrace.QueriedEmails);
-        Assert.Empty(_fakeBugTrace.QueriedCommentTickets);
+        Assert.Empty(_fakeBugTrace.QueriedTiaEmails);
+        Assert.Empty(_fakeBugTrace.QueriedTiaCommentTickets);
     }
 
     [Fact]
@@ -1057,14 +1182,14 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
     public async Task GetTicketComments_WhenTicketDoesNotBelongToLicense_ShouldReturn403()
     {
         await SeedLicenseAsync(FakeLicenseKey + "4", hwid: FakeHwid, email: FakeEmail);
-        _fakeBugTrace.QueriedCommentTickets.Clear();
+        _fakeBugTrace.QueriedTiaCommentTickets.Clear();
         var client = CreateClient();
 
         var response = await client.GetAsync(
             $"/api/bugtrace/tickets/BT-99999/comments?licenseKey={FakeLicenseKey}4&hardwareId={FakeHwid}&projectId={ValidProjectId}");
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
-        Assert.Empty(_fakeBugTrace.QueriedCommentTickets);
+        Assert.Empty(_fakeBugTrace.QueriedTiaCommentTickets);
     }
 
     [Fact]
@@ -1146,7 +1271,7 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Contains("Hardware ID mismatch", await response.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
-        Assert.Empty(_fakeBugTrace.SubmittedTickets);
+        Assert.Empty(_fakeBugTrace.SubmittedTiaTickets);
     }
 
     /// <summary>Rejects a foreign reporter before the synthetic provider can create a case.</summary>
@@ -1199,6 +1324,24 @@ public class BugTraceProxyTests : IClassFixture<WebApplicationFactory<Program>>
 /// <summary>Exercises provider HTTP projection and safe failure logging with synthetic handlers and configuration; no real provider service is contacted.</summary>
 public class BugTraceProxyServiceUnitTests
 {
+    /// <summary>Proves every inherited T-IA capability fails closed without consulting a legacy implementation.</summary>
+    [Fact]
+    public async Task TiaDefaults_LegacyOnlyImplementationRejectsEveryOperationWithoutFallback()
+    {
+        IBugTraceProxyService proxy = new LegacyOnlyBugTraceProxyService();
+        const string reportId = "a1111111-1111-1111-1111-111111111111";
+
+        Assert.False(proxy.IsTiaConfigured);
+        await Assert.ThrowsAsync<NotSupportedException>(() => proxy.VerifyTiaAuthorityAsync());
+        await Assert.ThrowsAsync<NotSupportedException>(() => proxy.SubmitTiaTicketAsync(new { title = "T" }));
+        await Assert.ThrowsAsync<NotSupportedException>(() => proxy.SubmitTiaTicketAsync(new { title = "T" }, reportId));
+        await Assert.ThrowsAsync<NotSupportedException>(() => proxy.AddTiaCommentAsync("BT-00042", new { content = "reply" }));
+        await Assert.ThrowsAsync<NotSupportedException>(() => proxy.GetTiaTicketsByEmailAsync("user@example.com"));
+        await Assert.ThrowsAsync<NotSupportedException>(() => proxy.GetTiaTicketCommentsAsync("BT-00042"));
+
+        Assert.Equal(0, Assert.IsType<LegacyOnlyBugTraceProxyService>(proxy).LegacyCalls);
+    }
+
     [Fact]
     public void BugTraceTransport_DisablesRedirectsCookiesAndDecompression()
     {
@@ -1210,6 +1353,7 @@ public class BugTraceProxyServiceUnitTests
     }
 
     private const string FakeToken = "BT-TKN-SUPER-SECRET-TOKEN";
+    private const string FakeTiaToken = "BT-TKN-0123456789abcdef0123456789abcdef0123456789abcdef";
     private const string FakeBaseUrl = "https://bugtrace.example.com";
     private const string FakeProjectId = "9f3c8fea-8740-42af-be83-6f527c6d102a";
 
@@ -1220,19 +1364,52 @@ public class BugTraceProxyServiceUnitTests
         var capturedRequests = new List<HttpRequestMessage>();
         var handler = new MockBugTraceHandler(response, capturedRequests);
 
-        var httpClient = new HttpClient(handler);
         var factoryMock = new Mock<IHttpClientFactory>();
-        factoryMock.Setup(f => f.CreateClient("BugTrace")).Returns(httpClient);
+        factoryMock.Setup(f => f.CreateClient("BugTrace")).Returns(() => new HttpClient(handler));
 
         var configMock = new Mock<IConfiguration>();
         configMock.Setup(c => c["BUGTRACE_BASE_URL"]).Returns(FakeBaseUrl);
         configMock.Setup(c => c["BUGTRACE_PROJECT_TOKEN"]).Returns(FakeToken);
+        configMock.Setup(c => c["BUGTRACE_TIA_PROJECT_TOKEN"]).Returns(FakeTiaToken);
         configMock.Setup(c => c["BUGTRACE_SUPPORT_PROJECT_TOKEN"]).Returns(FakeToken);
         configMock.Setup(c => c["BUGTRACE_PROJECT_ID"]).Returns(FakeProjectId);
 
         logger ??= new ListLogger<BugTraceProxyService>();
         var service = new BugTraceProxyService(factoryMock.Object, logger, configMock.Object);
         return (service, capturedRequests, logger);
+    }
+
+    /// <summary>Builds a no-network proxy whose response factory can distinguish identity checks from T-IA operations.</summary>
+    private (BugTraceProxyService service, List<HttpRequestMessage> capturedRequests, ListLogger<BugTraceProxyService> logger) BuildTiaService(
+        Func<HttpRequestMessage, HttpResponseMessage> responseFactory,
+        string? tiaToken = FakeTiaToken,
+        string? projectId = FakeProjectId,
+        string? baseUrl = FakeBaseUrl,
+        ListLogger<BugTraceProxyService>? logger = null,
+        TaskCompletionSource<bool>? identityStarted = null,
+        TaskCompletionSource<bool>? identityRelease = null)
+    {
+        var capturedRequests = new List<HttpRequestMessage>();
+        var handler = new RoutingBugTraceHandler(
+            responseFactory,
+            capturedRequests,
+            identityStarted,
+            identityRelease);
+        var factoryMock = new Mock<IHttpClientFactory>();
+        factoryMock.Setup(f => f.CreateClient("BugTrace")).Returns(() => new HttpClient(handler));
+
+        var configMock = new Mock<IConfiguration>();
+        configMock.Setup(c => c["BUGTRACE_BASE_URL"]).Returns(baseUrl);
+        configMock.Setup(c => c["BUGTRACE_PROJECT_TOKEN"]).Returns(FakeToken);
+        configMock.Setup(c => c["BUGTRACE_TIA_PROJECT_TOKEN"]).Returns(tiaToken);
+        configMock.Setup(c => c["BUGTRACE_SUPPORT_PROJECT_TOKEN"]).Returns(FakeToken);
+        configMock.Setup(c => c["BUGTRACE_PROJECT_ID"]).Returns(projectId);
+
+        logger ??= new ListLogger<BugTraceProxyService>();
+        return (
+            new BugTraceProxyService(factoryMock.Object, logger, configMock.Object),
+            capturedRequests,
+            logger);
     }
 
     [Fact]
@@ -1254,23 +1431,26 @@ public class BugTraceProxyServiceUnitTests
     }
 
     [Fact]
-    public async Task SubmitTicket_IdempotentAutoReport_ForwardsOpaqueKeyExactly()
+    public async Task SubmitTicket_IdempotentLegacy_ForwardsKeyWithLegacyTokenWithoutIdentityLookup()
     {
         const string reportId = "a1111111-1111-1111-1111-111111111111";
-        var fakeResponse = new HttpResponseMessage(HttpStatusCode.Created)
+        var response = new HttpResponseMessage(HttpStatusCode.Created)
         {
             Content = JsonContent.Create(new { ticketNumber = "BT-00042", id = "abc" })
         };
-        var (service, requests, _) = BuildService(fakeResponse);
+        var (service, requests, _) = BuildService(response);
 
         await service.SubmitTicketAsync(new { title = "T", description = "D" }, reportId);
 
         var request = Assert.Single(requests);
         Assert.Equal([reportId], request.Headers.GetValues("Idempotency-Key"));
+        Assert.Contains(FakeToken, request.Headers.GetValues("X-Project-Token"));
+        Assert.DoesNotContain(FakeTiaToken, request.Headers.GetValues("X-Project-Token"));
+        Assert.DoesNotContain(requests, item => item.RequestUri!.AbsolutePath.EndsWith("/project", StringComparison.Ordinal));
     }
 
     [Fact]
-    public async Task SubmitTicket_IdempotentAutoReport_RejectsNonCanonicalKeyWithoutSending()
+    public async Task SubmitTicket_IdempotentLegacy_RejectsNonCanonicalKeyWithoutSending()
     {
         const string uppercaseReportId = "A1111111-1111-1111-1111-111111111111";
         var fakeResponse = new HttpResponseMessage(HttpStatusCode.Created)
@@ -1286,16 +1466,16 @@ public class BugTraceProxyServiceUnitTests
     }
 
     [Fact]
-    public async Task SubmitTicket_IdempotentAutoReport_UpstreamEchoedKeyIsRedactedFromLogs()
+    public async Task SubmitTicket_IdempotentLegacy_UpstreamEchoedKeyIsRedactedFromLogs()
     {
         const string reportId = "c2111111-1111-1111-1111-111111111111";
-        var fakeResponse = new HttpResponseMessage(HttpStatusCode.BadGateway)
+        var logger = new ListLogger<BugTraceProxyService>();
+        var response = new HttpResponseMessage(HttpStatusCode.BadGateway)
         {
             Content = new StringContent(
                 $"{{\"message\":\"provider failure\",\"idempotencyKey\":\"{reportId}\"}} idempotency-key={reportId}")
         };
-        var logger = new ListLogger<BugTraceProxyService>();
-        var (service, _, _) = BuildService(fakeResponse, logger);
+        var (service, _, _) = BuildService(response, logger);
 
         await Assert.ThrowsAsync<HttpRequestException>(() =>
             service.SubmitTicketAsync(new { title = "T", description = "D" }, reportId));
@@ -1304,6 +1484,188 @@ public class BugTraceProxyServiceUnitTests
         Assert.DoesNotContain(reportId, error.Message, StringComparison.Ordinal);
         Assert.Contains("\"idempotencyKey\":\"<redacted>\"", error.Message, StringComparison.Ordinal);
         Assert.Contains("idempotency-key=<redacted>", error.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>Proves the explicit idempotent T-IA path verifies identity and never uses the legacy credential.</summary>
+    [Fact]
+    public async Task SubmitTiaTicket_IdempotentAutoReport_VerifiesIdentityAndUsesDedicatedToken()
+    {
+        const string reportId = "b1111111-1111-1111-1111-111111111111";
+        var (service, requests, _) = BuildTiaService(request =>
+            request.RequestUri!.AbsolutePath.EndsWith("/project", StringComparison.Ordinal)
+                ? new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(new { projectId = FakeProjectId }) }
+                : new HttpResponseMessage(HttpStatusCode.Created) { Content = JsonContent.Create(new { ticketNumber = "BT-00042" }) });
+
+        await service.SubmitTiaTicketAsync(new { title = "T", description = "D" }, reportId);
+
+        Assert.Equal(2, requests.Count);
+        Assert.Equal($"{FakeBaseUrl}/api/external/tickets/project", requests[0].RequestUri!.ToString());
+        Assert.Equal([reportId], requests[1].Headers.GetValues("Idempotency-Key"));
+        Assert.All(requests, request =>
+        {
+            Assert.Contains(FakeTiaToken, request.Headers.GetValues("X-Project-Token"));
+            Assert.DoesNotContain(FakeToken, request.Headers.GetValues("X-Project-Token"));
+        });
+    }
+
+    /// <summary>Proves ordinary Desktop submission verifies provider identity and uses only the dedicated token.</summary>
+    [Fact]
+    public async Task SubmitTiaTicket_VerifiesIdentityBeforeMutationAndUsesDedicatedToken()
+    {
+        var (service, requests, _) = BuildTiaService(request =>
+            request.RequestUri!.AbsolutePath.EndsWith("/project", StringComparison.Ordinal)
+                ? new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(new { projectId = FakeProjectId }) }
+                : new HttpResponseMessage(HttpStatusCode.Created) { Content = JsonContent.Create(new { ticketNumber = "BT-00042" }) });
+
+        await service.SubmitTiaTicketAsync(new { title = "T", description = "D" });
+
+        Assert.Equal(2, requests.Count);
+        Assert.Equal($"{FakeBaseUrl}/api/external/tickets/project", requests[0].RequestUri!.ToString());
+        Assert.Equal(HttpMethod.Get, requests[0].Method);
+        Assert.Equal($"{FakeBaseUrl}/api/external/tickets", requests[1].RequestUri!.ToString());
+        Assert.Equal(HttpMethod.Post, requests[1].Method);
+        Assert.All(requests, request =>
+        {
+            Assert.Contains(FakeTiaToken, request.Headers.GetValues("X-Project-Token"));
+            Assert.DoesNotContain(FakeToken, request.Headers.GetValues("X-Project-Token"));
+        });
+    }
+
+    /// <summary>Proves one successful identity check is shared across concurrent and subsequent T-IA reads.</summary>
+    [Fact]
+    public async Task TiaReads_ConcurrentCallsCacheOnlySuccessfulIdentityVerification()
+    {
+        var identityStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var identityRelease = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var (service, requests, _) = BuildTiaService(
+            request =>
+            {
+                var path = request.RequestUri!.AbsolutePath;
+                if (path.EndsWith("/project", StringComparison.Ordinal))
+                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(new { projectId = FakeProjectId }) };
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(Array.Empty<object>()) };
+            },
+            identityStarted: identityStarted,
+            identityRelease: identityRelease);
+
+        var firstRead = service.GetTiaTicketsByEmailAsync("user@example.com");
+        await identityStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        var concurrentRead = service.GetTiaTicketCommentsAsync("BT-00042");
+        await Task.Yield();
+        identityRelease.SetResult(true);
+        await Task.WhenAll(firstRead, concurrentRead);
+        await service.AddTiaCommentAsync("BT-00042", new { content = "reply" });
+
+        Assert.Equal(4, requests.Count);
+        Assert.Single(requests, request => request.RequestUri!.AbsolutePath.EndsWith("/project", StringComparison.Ordinal));
+        Assert.Contains(requests, request => request.RequestUri!.AbsolutePath.Contains("/email/", StringComparison.Ordinal));
+        Assert.Equal(2, requests.Count(request => request.RequestUri!.AbsolutePath.EndsWith("/comments", StringComparison.Ordinal)));
+        Assert.All(requests, request => Assert.Contains(FakeTiaToken, request.Headers.GetValues("X-Project-Token")));
+    }
+
+    /// <summary>Rejects absent and malformed T-IA authority before any provider request and without legacy fallback.</summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("BT-TKN-not-a-generated-token")]
+    public async Task SubmitTiaTicket_InvalidDedicatedTokenFailsClosedWithoutProviderCall(string? token)
+    {
+        var (service, requests, _) = BuildTiaService(
+            _ => throw new Xunit.Sdk.XunitException("Invalid T-IA configuration must not contact the provider."),
+            tiaToken: token);
+
+        var exception = await Assert.ThrowsAsync<BugTraceTiaAuthorityException>(() =>
+            service.SubmitTiaTicketAsync(new { title = "T", description = "D" }));
+
+        Assert.Equal(BugTraceTiaAuthorityFailureReason.ConfigurationInvalid, exception.Reason);
+        Assert.Empty(requests);
+    }
+
+    /// <summary>Rejects a valid token bound to another provider project before any ticket side effect.</summary>
+    [Fact]
+    public async Task SubmitTiaTicket_ProjectIdentityMismatchFailsBeforeMutation()
+    {
+        var (service, requests, _) = BuildTiaService(_ =>
+            new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = JsonContent.Create(new { projectId = "11111111-1111-1111-1111-111111111111" })
+            });
+
+        var exception = await Assert.ThrowsAsync<BugTraceTiaAuthorityException>(() =>
+            service.SubmitTiaTicketAsync(new { title = "T", description = "D" }));
+
+        Assert.Equal(BugTraceTiaAuthorityFailureReason.IdentityMismatch, exception.Reason);
+        Assert.Single(requests);
+        Assert.Equal(HttpMethod.Get, requests[0].Method);
+    }
+
+    /// <summary>Does not cache failed identity checks and never exposes an echoed credential through exception or logs.</summary>
+    [Fact]
+    public async Task SubmitTiaTicket_IdentityFailureIsRetriedAndKeepsSecretOutOfDiagnostics()
+    {
+        var logger = new ListLogger<BugTraceProxyService>();
+        var (service, requests, _) = BuildTiaService(
+            _ => new HttpResponseMessage(HttpStatusCode.Unauthorized)
+            {
+                Content = new StringContent($"rejected token={FakeTiaToken}")
+            },
+            logger: logger);
+
+        var first = await Assert.ThrowsAsync<BugTraceTiaAuthorityException>(() =>
+            service.GetTiaTicketsByEmailAsync("user@example.com"));
+        var second = await Assert.ThrowsAsync<BugTraceTiaAuthorityException>(() =>
+            service.GetTiaTicketCommentsAsync("BT-00042"));
+
+        Assert.Equal(BugTraceTiaAuthorityFailureReason.IdentityRejected, first.Reason);
+        Assert.Equal(BugTraceTiaAuthorityFailureReason.IdentityRejected, second.Reason);
+        Assert.Equal(2, requests.Count);
+        Assert.All(requests, request => Assert.Equal(HttpMethod.Get, request.Method));
+        Assert.DoesNotContain(FakeTiaToken, first.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(FakeTiaToken, second.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(logger.Entries, entry => entry.Message.Contains(FakeTiaToken, StringComparison.Ordinal));
+    }
+
+    /// <summary>Fails closed instead of forwarding a provider response that unexpectedly contains the dedicated credential.</summary>
+    [Fact]
+    public async Task SubmitTiaTicket_ProviderResponseEchoingCredentialIsRejected()
+    {
+        var logger = new ListLogger<BugTraceProxyService>();
+        var (service, _, _) = BuildTiaService(
+            request => request.RequestUri!.AbsolutePath.EndsWith("/project", StringComparison.Ordinal)
+                ? new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(new { projectId = FakeProjectId }) }
+                : new HttpResponseMessage(HttpStatusCode.Created)
+                {
+                    Content = JsonContent.Create(new { ticketNumber = "BT-00042", token = FakeTiaToken })
+                },
+            logger: logger);
+
+        var exception = await Assert.ThrowsAsync<HttpRequestException>(() =>
+            service.SubmitTiaTicketAsync(new { title = "T", description = "D" }));
+
+        Assert.DoesNotContain(FakeTiaToken, exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(logger.Entries, entry => entry.Message.Contains(FakeTiaToken, StringComparison.Ordinal));
+    }
+
+    /// <summary>Redacts a bare canonical project token echoed in an upstream failure without relying on a JSON property name.</summary>
+    [Fact]
+    public async Task SubmitTiaTicket_UpstreamFailureBareTokenIsRedactedFromLogs()
+    {
+        var logger = new ListLogger<BugTraceProxyService>();
+        var (service, _, _) = BuildTiaService(
+            request => request.RequestUri!.AbsolutePath.EndsWith("/project", StringComparison.Ordinal)
+                ? new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(new { projectId = FakeProjectId }) }
+                : new HttpResponseMessage(HttpStatusCode.BadGateway)
+                {
+                    Content = new StringContent($"provider echoed {FakeTiaToken}")
+                },
+            logger: logger);
+
+        await Assert.ThrowsAsync<HttpRequestException>(() =>
+            service.SubmitTiaTicketAsync(new { title = "T", description = "D" }));
+
+        var error = Assert.Single(logger.Entries, entry => entry.Level == LogLevel.Error);
+        Assert.Contains("<redacted>", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(FakeTiaToken, error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1680,6 +2042,31 @@ internal sealed class MockBugTraceHandler : HttpMessageHandler
     {
         _captured.Add(request);
         return Task.FromResult(_response);
+    }
+}
+
+/// <summary>Captures concurrent synthetic requests and returns a fresh route-specific response without network access.</summary>
+internal sealed class RoutingBugTraceHandler(
+    Func<HttpRequestMessage, HttpResponseMessage> responseFactory,
+    List<HttpRequestMessage> captured,
+    TaskCompletionSource<bool>? identityStarted,
+    TaskCompletionSource<bool>? identityRelease) : HttpMessageHandler
+{
+    /// <inheritdoc />
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (captured)
+            captured.Add(request);
+        if (identityRelease is not null
+            && request.RequestUri!.AbsolutePath.EndsWith("/project", StringComparison.Ordinal))
+        {
+            identityStarted?.TrySetResult(true);
+            await identityRelease.Task.WaitAsync(cancellationToken);
+        }
+        return responseFactory(request);
     }
 }
 

@@ -1,0 +1,56 @@
+/* TKT-001837: keep the decision column visible at 1366 px without a horizontal scrollbar. */
+.security-lock-card {
+    overflow: hidden;
+}
+
+.security-lock-table {
+    table-layout: fixed;
+    width: 100%;
+}
+
+.security-lock-table th,
+.security-lock-table td {
+    overflow: hidden;
+    padding-left: .35rem;
+    padding-right: .35rem;
+    vertical-align: middle;
+}
+
+.security-lock-table .cell-ellipsis,
+.security-lock-table .cell-ellipsis code {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.security-lock-table .decision-cell {
+    white-space: normal;
+}
+
+.security-lock-table .decision-cell .btn {
+    margin-bottom: .15rem;
+}
+
+.security-lock-table .col-reported { width: 8%; }
+.security-lock-table .col-client { width: 13%; }
+.security-lock-table .col-hwid { width: 13%; }
+.security-lock-table .col-cause { width: 12%; }
+.security-lock-table .col-level { width: 5%; }
+.security-lock-table .col-mode { width: 7%; }
+.security-lock-table .col-verdict { width: 7%; }
+.security-lock-table .col-state { width: 7%; }
+.security-lock-table .col-reports { width: 6%; }
+.security-lock-table .col-machine { width: 9%; }
+.security-lock-table .col-decision { width: 13%; }
+
+@media (max-width: 1366px) {
+    .security-lock-table {
+        font-size: .78rem;
+    }
+
+    .security-lock-table .btn-sm {
+        --bs-btn-padding-y: .15rem;
+        --bs-btn-padding-x: .3rem;
+        --bs-btn-font-size: .72rem;
+    }
+}

@@ -334,36 +334,14 @@ public sealed class CommercialSubjectProvisioningPostgreSqlTests
 
         public static async Task<PostgreSqlProvision> CreateAsync()
         {
-            var configured = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES");
-            if (string.IsNullOrWhiteSpace(configured))
-                throw new InvalidOperationException(
-                    "SOFTLICENCE_RUNTIME_TEST_POSTGRES is required for TKT-000780 PostgreSQL tests.");
-
-            var database = "tkt780_provisioning_" + Guid.NewGuid().ToString("N");
-            var maintenance = new NpgsqlConnectionStringBuilder(configured) { Database = "postgres" }.ConnectionString;
-            await using (var connection = new NpgsqlConnection(maintenance))
-            {
-                await connection.OpenAsync();
-                await using var command = connection.CreateCommand();
-                command.CommandText = $"CREATE DATABASE \"{database}\"";
-                await command.ExecuteNonQueryAsync();
-            }
-
-            var target = new NpgsqlConnectionStringBuilder(configured) { Database = database }.ConnectionString;
-            var options = new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(target).Options;
-            await using (var db = new LicenseDbContext(options))
-                await db.Database.MigrateAsync();
-            return new PostgreSqlProvision(maintenance, target, database);
+            var clone = await PostgreSqlModelDatabase.CloneAsync("subject");
+            return new PostgreSqlProvision(
+                clone.MaintenanceConnectionString,
+                clone.ConnectionString,
+                clone.DatabaseName);
         }
 
         public async ValueTask DisposeAsync()
-        {
-            NpgsqlConnection.ClearAllPools();
-            await using var connection = new NpgsqlConnection(maintenanceConnectionString);
-            await connection.OpenAsync();
-            await using var command = connection.CreateCommand();
-            command.CommandText = $"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)";
-            await command.ExecuteNonQueryAsync();
-        }
+            => await PostgreSqlModelDatabase.DropAsync(maintenanceConnectionString, database);
     }
 }

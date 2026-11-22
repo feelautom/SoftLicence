@@ -14,39 +14,6 @@ public partial class ActivationController
     /// <summary>Business checkpoint created only after the legacy path's existing submitted/canonical hardware locks.</summary>
     private const string LegacyHistorySavepoint = "legacy_decision_business";
 
-    /// <summary>Commits one generic offline refusal using only a previously authorized snapshot and a new private history context.</summary>
-    /// <remarks>No activation business transaction has begun. Existing ban-expiry maintenance may already have committed independently and is neither rolled back nor repeated. Five seconds linked to host shutdown, independent of client abort after decision, cover this history-only transaction. Failure returns the existing redacted500; lost commit acknowledgement is indeterminate. No key, request code, inferred HWID or finer refusal reason is stored.</remarks>
-    private async Task<IActionResult> PersistOfflinePrecheckRefusalAsync(LicenseDecisionSnapshot snapshot, string submittedHardwareId)
-    {
-        using var finalization = CancellationTokenSource.CreateLinkedTokenSource(_legacyApplicationStopping);
-        finalization.CancelAfter(TimeSpan.FromSeconds(5));
-        var committing = false;
-        try
-        {
-            var factory = HttpContext.RequestServices.GetRequiredService<IDbContextFactory<LicenseDbContext>>();
-            await using var historyDb = await factory.CreateDbContextAsync(finalization.Token);
-            await using var transaction = await ProductHardwareSeatLockAuthority.BeginReadCommittedTransactionAsync(historyDb, finalization.Token);
-            var operationId = Guid.NewGuid().ToString("D");
-            var correlation = HttpContext.TraceIdentifier is { Length: > 0 and <= 200 } value
-                && !value.Any(char.IsControl) ? value : null;
-            var decision = new LicenseDecisionHistory(1, "offline_precheck", operationId, "refused",
-                "offline_activation_denied", null, 403, submittedHardwareId, null, null, null,
-                snapshot, null, correlation);
-            await LicenseDecisionHistoryWriter.AddAsync(historyDb, decision, "legacy_request", operationId,
-                DateTimeOffset.UtcNow, finalization.Token);
-            await historyDb.SaveChangesAsync(finalization.Token);
-            committing = true;
-            if (transaction != null) await transaction.CommitAsync(finalization.Token);
-            return OfflineActivationDenied();
-        }
-        catch (Exception)
-        {
-            _logger.LogError("LicenseDecisionPersistenceFailed Phase=offline_precheck ObservedBusinessCode=offline_activation_denied CommitOutcome={CommitOutcome}",
-                committing ? "indeterminate" : "not_confirmed");
-            return StatusCode(StatusCodes.Status500InternalServerError, new { error = "offline_activation_failed" });
-        }
-    }
-
     /// <summary>Holds one independent legacy request's immutable observations and transaction ownership; never shared between HTTP requests.</summary>
     private sealed class LegacyHistoryObservation
     {
@@ -62,7 +29,7 @@ public partial class ActivationController
         internal string? ResolvedHardwareId { get; set; }
         /// <summary>provider_direct or provider_alias, never inferred from format or IP.</summary>
         internal string? ResolutionSource { get; set; }
-        /// <summary>Actual legacy or offline producer phase; Website correlation is unavailable.</summary>
+        /// <summary>Actual legacy producer phase; Website correlation is unavailable.</summary>
         internal required string Phase { get; init; }
         /// <summary>Application version supplied to the current predicate, or null if absent.</summary>
         internal string? AppVersion { get; init; }
@@ -147,16 +114,13 @@ public partial class ActivationController
     /// Five seconds linked to application shutdown cover rollback, history save and commit. Client
     /// cancellation does not interrupt an already-decided refusal. Failure keeps the existing localized
     /// HTTP500 mapping without provisional business-error headers; commit acknowledgement loss remains
-    /// indeterminate. No retry, fire-and-forget, external notification or fallback transaction is used.
+    /// indeterminate. An explicit commercialRevokeLicenseId must equal the observed locked license and requires
+    /// a transaction; only that new license is revoked after rollback, atomically with its refusal. Every other
+    /// caller retains history-only finalization. No retry, external notification or fallback transaction is used.
     /// </remarks>
-    private async Task<IActionResult> PersistLegacyRefusalAsync(LegacyHistoryObservation observation, IActionResult response)
+    private async Task<IActionResult> PersistLegacyRefusalAsync(LegacyHistoryObservation observation, IActionResult response, Guid? commercialRevokeLicenseId = null)
     {
         var status = (response as IStatusCodeActionResult)?.StatusCode ?? StatusCodes.Status200OK;
-        // The offline surface preserves OkObjectResult but maps all other business
-        // refusals to 403. Record that existing wrapper mapping, not the core's 400;
-        // never change the response merely to make it match the audit projection.
-        if (observation.Phase == "offline_activation" && response is not OkObjectResult && status < 500)
-            status = StatusCodes.Status403Forbidden;
         var code = HttpContext.Items[LogKeys.ResultStatusOverride] as string ?? "unknown";
         using var finalization = CancellationTokenSource.CreateLinkedTokenSource(_legacyApplicationStopping);
         finalization.CancelAfter(TimeSpan.FromSeconds(5));
@@ -166,6 +130,19 @@ public partial class ActivationController
             if (observation.Transaction != null && observation.HasSavepoint)
                 await observation.Transaction.RollbackToSavepointAsync(LegacyHistorySavepoint, finalization.Token);
             _db.ChangeTracker.Clear();
+            // Only the explicitly decided classic free-intro refusal revokes, after rollback, in this same transaction.
+            if (commercialRevokeLicenseId.HasValue)
+            {
+                if (commercialRevokeLicenseId != observation.Snapshot.LicenseId || observation.Transaction is null)
+                    throw new InvalidOperationException("Commercial refusal requires the original locked license transaction.");
+                var refusedLicense = await _db.Licenses.SingleAsync(x => x.Id == commercialRevokeLicenseId, finalization.Token);
+                refusedLicense.IsActive = false;
+                refusedLicense.RevokedAt = DateTime.UtcNow;
+                refusedLicense.RevocationReason = FirstOrderFreeActivationPolicy.RefusalCode;
+                _db.LicenseHistories.Add(new LicenseHistory { LicenseId = refusedLicense.Id,
+                    Action = "FIRST_ORDER_FREE_REVOKED", Details = FirstOrderFreeActivationPolicy.RefusalCode,
+                    PerformedBy = "Server (first-order activation protection)" });
+            }
             await AddLegacyDecisionAsync(observation, "refused", code, status, finalization.Token);
             await _db.SaveChangesAsync(finalization.Token);
             committing = true;

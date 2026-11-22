@@ -76,6 +76,14 @@ else
                 </select>
             </div>
             <div class="col-md-2">
+                <label class="form-label small text-muted">Partage</label>
+                <select class="form-select form-select-sm" @bind="selectedSharing">
+                    <option value="">Toutes</option>
+                    <option value="shared">Partagées avec les clients</option>
+                    <option value="unshared">Non partagées</option>
+                </select>
+            </div>
+            <div class="col-md-2">
                 <label class="form-label small text-muted">Tri</label>
                 <select class="form-select form-select-sm" @bind="selectedSort">
                     <option value="occurrences">Occurrences</option>
@@ -85,7 +93,7 @@ else
                     <option value="title">Titre</option>
                 </select>
             </div>
-            <div class="col-md-3">
+            <div class="col-md-1">
                 <label class="form-label small text-muted">Recherche</label>
                 <input class="form-control form-control-sm" placeholder="Titre, description ou hash" @bind="searchText" @bind:event="oninput" />
             </div>
@@ -137,7 +145,7 @@ else
                     <div class="card-body">
                         <h6 class="text-muted text-uppercase small fw-bold">A traiter</h6>
                         <h2 class="mb-0">@overview.NeedsReview</h2>
-                        <div class="small text-muted mt-2">Hors ignored/fixed</div>
+                        <div class="small text-muted mt-2">Hors ignored/fixed · @overview.SharedTips partagée(s)</div>
                     </div>
                 </div>
             </div>
@@ -213,6 +221,7 @@ else
                             <th>Contexte</th>
                             <th class="text-end">Occ.</th>
                             <th>Derniere vue</th>
+                            <th>Partage</th>
                             <th>Review</th>
                         </tr>
                     </thead>
@@ -233,6 +242,16 @@ else
                                 <td class="text-end fw-bold">@tip.OccurrenceCount</td>
                                 <td>@TZ.ToLocal(tip.LastSeenAtUtc).ToString("dd/MM/yyyy HH:mm")</td>
                                 <td>
+                                    @if (tip.SharedWithClients)
+                                    {
+                                        <span class="badge bg-success">Partagée</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-secondary">Non</span>
+                                    }
+                                </td>
+                                <td>
                                     <select class="form-select form-select-sm" value="@tip.ReviewStatus" @onclick:stopPropagation="true" @onchange="e => UpdateReviewStatus(tip.Id, e.Value?.ToString())">
                                         @foreach (var status in LlmTipFeedbackService.ReviewStatuses)
                                         {
@@ -244,7 +263,7 @@ else
                             @if (expanded && selectedTip != null)
                             {
                                 <tr>
-                                    <td colspan="9">
+                                    <td colspan="10">
                                         <div class="p-3 border rounded bg-black bg-opacity-25">
                                             <div class="row g-3">
                                                 <div class="col-md-7">
@@ -264,6 +283,38 @@ else
                                                         @if (!string.IsNullOrWhiteSpace(conversionMessage))
                                                         {
                                                             <span class="small text-muted">@conversionMessage</span>
+                                                        }
+                                                    </div>
+                                                    <div class="mt-3 p-2 border rounded">
+                                                        <h6 class="mb-2">Partage avec tous les clients</h6>
+                                                        @if (selectedTip.SharedWithClients)
+                                                        {
+                                                            <p class="small mb-2"><span class="badge bg-success">Partagée</span> depuis le @(selectedTip.SharingChangedAtUtc.HasValue ? TZ.ToLocal(selectedTip.SharingChangedAtUtc.Value).ToString("dd/MM/yyyy HH:mm") : "-") par @Display(selectedTip.SharingChangedBy)</p>
+                                                            <div class="d-flex gap-2 align-items-center">
+                                                                <input class="form-control form-control-sm" placeholder="Raison du retrait (obligatoire)" @bind="sharingReason" @bind:event="oninput" />
+                                                                <button class="btn btn-outline-danger btn-sm text-nowrap" disabled="@(changingSharing || string.IsNullOrWhiteSpace(sharingReason))" @onclick="() => SetSelectedTipSharing(false)">Retirer</button>
+                                                            </div>
+                                                        }
+                                                        else
+                                                        {
+                                                            <p class="small text-muted mb-2">Non partagée. L'approbation locale du client (@(selectedTip.Approved ? "oui" : "non")) ne la publie pas.</p>
+                                                            <div class="d-flex gap-2 align-items-center">
+                                                                <input class="form-control form-control-sm" placeholder="Raison (facultative)" @bind="sharingReason" @bind:event="oninput" />
+                                                                <button class="btn btn-success btn-sm text-nowrap" disabled="@changingSharing" @onclick="() => SetSelectedTipSharing(true)">Partager avec tous les clients</button>
+                                                            </div>
+                                                        }
+                                                        @if (!string.IsNullOrWhiteSpace(sharingMessage))
+                                                        {
+                                                            <div class="small text-muted mt-2">@sharingMessage</div>
+                                                        }
+                                                        @if (selectedTip.SharingDecisions is { Count: > 0 } decisions)
+                                                        {
+                                                            <ul class="small text-muted mt-2 mb-0">
+                                                                @foreach (var decision in decisions)
+                                                                {
+                                                                    <li>@TZ.ToLocal(decision.DecidedAtUtc).ToString("dd/MM/yyyy HH:mm") · @(decision.Action == LlmTipFeedbackSharingDecision.SharedAction ? "partagée" : "retirée") · @decision.DecidedBy (@decision.Channel)@(string.IsNullOrWhiteSpace(decision.Reason) ? "" : " · " + decision.Reason)</li>
+                                                                }
+                                                            </ul>
                                                         }
                                                     </div>
                                                 </div>
@@ -301,6 +352,10 @@ else
     private string selectedCategory = "";
     private string selectedVersion = "";
     private string selectedReviewStatus = "";
+    private string selectedSharing = "";
+    private string sharingReason = "";
+    private string? sharingMessage;
+    private bool changingSharing;
     private string selectedSort = "occurrences";
     private string searchText = "";
     private int selectedDays = 30;
@@ -341,6 +396,9 @@ else
             .ToListAsync();
     }
 
+    /// <summary>
+    /// Reloads the overview with the current filters, sharing filter included (TKT-003574), and closes the open detail.
+    /// </summary>
     private async Task LoadData()
     {
         loading = true;
@@ -353,6 +411,7 @@ else
             Category = EmptyToNull(selectedCategory),
             AppVersion = EmptyToNull(selectedVersion),
             ReviewStatus = EmptyToNull(selectedReviewStatus),
+            Shared = selectedSharing switch { "shared" => true, "unshared" => false, _ => null },
             Search = EmptyToNull(searchText),
             SortBy = selectedSort,
             Days = selectedDays,
@@ -368,9 +427,15 @@ else
         await LoadData();
     }
 
+    /// <summary>
+    /// Opens the detail of <paramref name="id"/> (with its sharing journal) or closes it when already open, and clears
+    /// the messages and the typed reason of the previous tip.
+    /// </summary>
     private async Task SelectTip(Guid id)
     {
         conversionMessage = null;
+        sharingMessage = null;
+        sharingReason = "";
         selectedTip = selectedTip?.Id == id
             ? null
             : await FeedbackService.GetTipDetailAsync(id);
@@ -383,6 +448,12 @@ else
         await LoadData();
     }
 
+    /// <summary>
+    /// Converts the selected tip through <see cref="LlmTipFeedbackService.ConvertToBugTraceAsync"/>, then reloads the
+    /// list and detail. The button is disabled while the call runs; a faster double click is still safe because the
+    /// service answers an already converted tip with its ticket and BugTrace replays the same idempotency key.
+    /// A missing product mapping gets a dedicated French message (TKT-003093); other failures show their message.
+    /// </summary>
     private async Task ConvertSelectedTipToBugTrace()
     {
         if (selectedTip == null) return;
@@ -401,17 +472,92 @@ else
 
             await LoadData();
             selectedTip = await FeedbackService.GetTipDetailAsync(selectedId);
-            conversionMessage = result == null
-                ? "Tip introuvable."
-                : $"Ticket {result.BugTraceTicketRef} cree.";
+            conversionMessage = DescribeConversion(result);
+        }
+        catch (LlmTipBugTraceProjectNotConfiguredException ex)
+        {
+            // TKT-003093: refused before any BugTrace call; say so instead of hinting at an outage.
+            conversionMessage = ex.MappingInvalid
+                ? $"Réglage {LlmTipBugTraceRouting.TiaProductIdsKey} invalide : aucune astuce ne peut être convertie. Aucun ticket créé."
+                : $"Aucun projet BugTrace n'est configuré pour le produit de cette astuce ({LlmTipBugTraceRouting.TiaProductIdsKey}). Aucun ticket créé.";
         }
         catch (Exception ex)
         {
+            // Unexpected or provider failures keep their own message (already sanitized by the proxy).
             conversionMessage = ex.Message;
         }
         finally
         {
             convertingToBugTrace = false;
+        }
+    }
+
+    /// <summary>
+    /// Builds the operator message after a conversion call: distinguishes an unknown tip, a new ticket and
+    /// an already converted tip (TKT-003093 anti-duplicate), so a replay is never reported as a creation.
+    /// </summary>
+    /// <param name="result">Service result; null when the tip no longer exists.</param>
+    /// <returns>The French message shown next to the conversion button.</returns>
+    private static string DescribeConversion(LlmTipFeedbackBugTraceConversionResult? result)
+    {
+        if (result == null)
+            return "Astuce introuvable.";
+
+        return result.Created
+            ? $"Ticket {result.BugTraceTicketRef} créé."
+            : $"Astuce déjà convertie : ticket {result.BugTraceTicketRef} (aucun nouveau ticket créé).";
+    }
+
+    /// <summary>
+    /// Shares the selected tip with every client or retracts it (TKT-003574), as the signed-in administrator
+    /// (<c>admin-ui:&lt;user&gt;</c>), then reloads the list and the detail so the badge and the journal show the new state.
+    /// </summary>
+    /// <param name="shared">True for "Partager avec tous les clients", false for "Retirer".</param>
+    /// <remarks>
+    /// The service refuses a retraction without a reason; the button is also disabled until one is typed. A validation
+    /// refusal or an unexpected error is shown next to the buttons, with its message, so the operator sees the real
+    /// cause; the state is then unchanged.
+    /// </remarks>
+    private async Task SetSelectedTipSharing(bool shared)
+    {
+        if (selectedTip == null) return;
+
+        var selectedId = selectedTip.Id;
+        changingSharing = true;
+        sharingMessage = null;
+        try
+        {
+            var adminName = (await Auth.GetAuthenticationStateAsync()).User.Identity?.Name;
+            var result = await FeedbackService.SetSharingAsync(
+                selectedId,
+                contentHash: null,
+                productId: null,
+                shared,
+                sharingReason,
+                "admin-ui:" + (string.IsNullOrWhiteSpace(adminName) ? "admin" : adminName),
+                "admin-ui",
+                callerIp: null);
+
+            await LoadData();
+            selectedTip = await FeedbackService.GetTipDetailAsync(selectedId);
+            sharingReason = "";
+            sharingMessage = result == null
+                ? "Tip introuvable."
+                : result.Changed
+                    ? (shared ? "Astuce partagée avec tous les clients." : "Astuce retirée.")
+                    : "Aucun changement : l'astuce était déjà dans cet état.";
+        }
+        catch (ArgumentException ex)
+        {
+            sharingMessage = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            sharingMessage = "Erreur : " + ex.Message;
+        }
+        finally
+        {
+            changingSharing = false;
         }
     }
 

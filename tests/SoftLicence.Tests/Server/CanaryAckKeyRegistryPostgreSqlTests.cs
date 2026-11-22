@@ -301,6 +301,8 @@ public sealed class CanaryAckKeyRegistryPostgreSqlTests
                 """
                 DO $roles$
                 BEGIN
+                    -- Role names are cluster-global, so parallel fixtures must serialize first creation.
+                    PERFORM pg_catalog.pg_advisory_xact_lock(1836, 1);
                     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'softlicence_runtime_authority_owner') THEN
                         CREATE ROLE softlicence_runtime_authority_owner NOLOGIN;
                     END IF;
@@ -315,31 +317,20 @@ public sealed class CanaryAckKeyRegistryPostgreSqlTests
                 connection))
                 await role.ExecuteNonQueryAsync();
 
-            var database = $"softlicence_canary_keyring_{Guid.NewGuid():N}";
-            await using (var create = new NpgsqlCommand($"CREATE DATABASE \"{database}\"", connection))
-                await create.ExecuteNonQueryAsync();
-            var target = new NpgsqlConnectionStringBuilder(configured) { Database = database }.ConnectionString;
-            await using (var db = new LicenseDbContext(
-                new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(target).Options))
-                await db.Database.MigrateAsync();
-            var application = new NpgsqlConnectionStringBuilder(target)
+            var clone = await PostgreSqlModelDatabase.CloneAsync("canary_keyring");
+            var application = new NpgsqlConnectionStringBuilder(clone.ConnectionString)
             {
                 Username = "softlicence_app",
                 Password = "runtime-production-role-test-only"
             }.ConnectionString;
-            return new PostgreSqlProvision(maintenance, target, application, database);
+            return new PostgreSqlProvision(
+                clone.MaintenanceConnectionString,
+                clone.ConnectionString,
+                application,
+                clone.DatabaseName);
         }
 
         public async ValueTask DisposeAsync()
-        {
-            NpgsqlConnection.ClearAllPools();
-            await using var connection = new NpgsqlConnection(maintenanceConnectionString);
-            await connection.OpenAsync();
-            await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)", connection)
-            {
-                CommandTimeout = 120
-            };
-            await drop.ExecuteNonQueryAsync();
-        }
+            => await PostgreSqlModelDatabase.DropAsync(maintenanceConnectionString, database);
     }
 }

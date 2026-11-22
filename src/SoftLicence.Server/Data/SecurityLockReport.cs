@@ -74,7 +74,7 @@ public sealed class SecurityLockReport
     /// <summary>Latest verdict returned (MAINTAIN, RELEASE, BAN).</summary>
     [MaxLength(16)]
     public string LastVerdict { get; set; } = string.Empty;
-    /// <summary>Admin decision (RELEASE or BAN), if any.</summary>
+    /// <summary>Admin decision (RELEASE, BAN, or explicit UNBAN), if any.</summary>
     [MaxLength(16)]
     public string? AdminDecision { get; set; }
     /// <summary>Admin decision time.</summary>
@@ -85,6 +85,8 @@ public sealed class SecurityLockReport
     /// <summary>Free-text reason recorded with the decision.</summary>
     [MaxLength(500)]
     public string? AdminDecisionReason { get; set; }
+    /// <summary>Remembered RELEASE that covered this lock, if any.</summary>
+    public Guid? RememberedReleaseDecisionId { get; set; }
 }
 
 /// <summary>Closed first-receipt hardware-link states and diagnostic reasons.</summary>

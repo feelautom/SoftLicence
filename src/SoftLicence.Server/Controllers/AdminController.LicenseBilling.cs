@@ -5,6 +5,8 @@ using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SoftLicence.Server.Data;
+using SoftLicence.Server.Models;
+using SoftLicence.Server.Services;
 
 namespace SoftLicence.Server.Controllers;
 
@@ -45,7 +47,27 @@ public partial class AdminController
         int ExpectedMaxSeats, BillingTypeSnapshot ExpectedType, BillingTypeSnapshot DesiredType, int DesiredMaxSeats,
         string CycleId, string CustomerId, string SubscriptionId, string InvoiceId,
         DateTime PeriodStartUtc, DateTime PeriodEndUtc, DateTime? GraceStartedAtUtc,
-        DateTime? PaidAtUtc, Guid? PreviousOperationId, DateTime? PreviousCycleTerminatedAtUtc);
+        DateTime? PaidAtUtc, Guid? PreviousOperationId, DateTime? PreviousCycleTerminatedAtUtc)
+    {
+        /// <summary>New cycles explicitly request 60 minutes. Omitted historical envelopes retain 1440 minutes and their original digest.</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public int? GraceDurationMinutes { get; init; }
+        /// <summary>Complete V2 purchase evidence for PAID only. Null omits the member and preserves V1 digest bytes.</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public CommercialEvidence? CommercialEvidence { get; init; }
+    }
+
+    /// <summary>Freezes paid invoice terms while excluding the replaceable operation and expected CAS observations.</summary>
+    private static string BillingCommercialAttributionDigest(ConditionalLicenseBillingRequest request) =>
+        CommercialEvidenceStore.AttributionDigest(request.CommercialEvidence!, BillingDigest(new {
+            request.LicenseId, request.ProductId, request.CommercialSubjectId, request.Command,
+            request.DesiredType, request.DesiredMaxSeats, request.CycleId, request.CustomerId,
+            request.SubscriptionId, request.InvoiceId, request.PeriodStartUtc, request.PeriodEndUtc,
+            request.GraceStartedAtUtc, request.PaidAtUtc, request.PreviousOperationId,
+            request.PreviousCycleTerminatedAtUtc, request.GraceDurationMinutes }));
+    /// <summary>Preserves the duration frozen by the original request rather than restarting grace on replay.</summary>
+    private static DateTime BillingGraceEnd(ConditionalLicenseBillingRequest request) =>
+        request.GraceStartedAtUtc!.Value.AddMinutes(request.GraceDurationMinutes ?? 1440);
 
     /// <summary>Provider result and predecessor context committed atomically with license authority.</summary>
     private sealed record BillingReceipt(string Digest, ConditionalLicenseBillingRequest Request,
@@ -60,6 +82,7 @@ public partial class AdminController
     /// Locks serialize operation IDs, configuration tables (including parameter insert phantoms), global
     /// authority, license and ownership. Timeouts fail closed. Receipt failure rolls back all changes;
     /// retries are accepted only while the resulting authority and configuration remain current.
+    /// Optional PAID V2 proof qualifies the existing license atomically; null keeps the V1 digest and behavior.
     /// </summary>
     [HttpPost("licenses/{licenseKey}/billing-conditional")]
     public async Task<IActionResult> ApplyLicenseBillingConditionally(
@@ -68,6 +91,12 @@ public partial class AdminController
         var (authorized, scopedProductId) = await GetAuthContextAsync();
         if (!authorized) return Unauthorized();
         var request = ParseBillingRequest(payload);
+        if (request?.CommercialEvidence is { } evidence && (!evidence.IsValid
+            || request.Command != "PAID" || evidence.Nature is not ("PAID" or "PAID_TRIAL")
+            || evidence.OperationId != request.OperationId))
+            return BadRequest(new { error = "commercial_evidence_invalid" });
+        if (request?.CommercialEvidence is { } subjectEvidence && subjectEvidence.CommercialSubjectId != request.CommercialSubjectId)
+            return Conflict(new { error = "commercial_evidence_subject_conflict" });
         if (request is null || !ValidBillingRequest(request))
             return BadRequest(new { error = "billing_evidence_invalid" });
         if (scopedProductId.HasValue && scopedProductId != request.ProductId) return Unauthorized();
@@ -86,6 +115,12 @@ public partial class AdminController
         await _db.Database.ExecuteSqlRawAsync(
             "LOCK TABLE public.\"LicenseTypes\", public.\"LicenseTypeCustomParams\" IN SHARE MODE", cancellationToken);
         await _db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(999831, 1)", cancellationToken);
+        if (request.CommercialEvidence is { } commercial)
+        {
+            var check = await CommercialEvidenceStore.CheckAsync(_db, commercial, request.ProductId,
+                request.LicenseId, "billing", request.InvoiceId, BillingCommercialAttributionDigest(request), digest, cancellationToken);
+            if (check.Conflict) return Conflict(new { error = "commercial_evidence_conflict" });
+        }
         var license = await _db.Licenses.FromSqlInterpolated($"""
             SELECT * FROM public."Licenses" WHERE "Id" = {request.LicenseId}
               AND "ProductId" = {request.ProductId} AND "LicenseKey" = {licenseKey} FOR UPDATE
@@ -163,22 +198,22 @@ public partial class AdminController
             if (!license.IsActive || license.RevocationReason is not null || license.RevokedAt is not null
                 || request.PreviousOperationId is not null || request.GraceStartedAtUtc > now
                 || (license.ExpirationDate > request.PeriodStartUtc
-                    && license.ExpirationDate != request.GraceStartedAtUtc!.Value.AddHours(24)
+                    && license.ExpirationDate != BillingGraceEnd(request)
                     && !await HasBillingContinuityAsync(license, currentType, request, cancellationToken))
                 || BillingDigest(currentType) != BillingDigest(desiredType) || request.DesiredMaxSeats != license.MaxSeats)
                 return Conflict(new { error = "billing_grace_conflict" });
             // Delayed delivery must still materialize the original expiry, even when already
             // past. Otherwise a delivered license with NULL expiry could activate for ValidityDays.
             // The original-expiry guard above protects any newer acquired paid period.
-            // An already exact H24 expiry may be adopted without changing it. The new atomic
+            // An expiry matching the frozen grace duration may be adopted without changing it. The new atomic
             // receipt proves this current CAS decision, never an inferred legacy mutation.
-            license.ExpirationDate = request.GraceStartedAtUtc!.Value.AddHours(24);
+            license.ExpirationDate = BillingGraceEnd(request);
         }
         else if (request.Command == "SUSPEND")
         {
             if (previous?.Request.Command != "GRACE" || !sameCycle || !license.IsActive
                 || request.GraceStartedAtUtc != previous.Request.GraceStartedAtUtc
-                || now < request.GraceStartedAtUtc!.Value.AddHours(24)
+                || now < BillingGraceEnd(request)
                 || BillingDigest(currentType) != BillingDigest(desiredType) || request.DesiredMaxSeats != license.MaxSeats)
                 return Conflict(new { error = "billing_suspension_conflict" });
             license.IsActive = false;
@@ -213,6 +248,11 @@ public partial class AdminController
             if (!await ApplyPaidEntitlementAsync(license, desiredType, request.DesiredMaxSeats, request.PeriodEndUtc, cancellationToken))
                 return Conflict(new { error = "billing_active_seats_conflict" });
         }
+        if (request.CommercialEvidence is { } acquiredEvidence)
+            await CommercialEvidenceStore.RecordAsync(_db, license, acquiredEvidence, "billing", request.InvoiceId,
+                BillingCommercialAttributionDigest(request), digest, false, cancellationToken);
+        else if (request.Command == "PAID")
+            CommercialEvidenceStore.RecordUnqualifiedAcquisition(license);
         await _db.SaveChangesAsync(cancellationToken);
         // Reload PostgreSQL timestamp precision and trigger-produced authority before persisting
         // the immutable receipt. A failed receipt INSERT rolls back this mutation as well.
@@ -233,7 +273,9 @@ public partial class AdminController
     /// The exact original envelope is required. Historical application and current authority are
     /// separate facts; callers must reobserve their business state and use their own current CAS.
     /// Configuration/authority locks give one coherent observation, never a future rights promise.
-    /// Transferred ownership and changed revocation causes fail closed even for genuine receipts.
+    /// V1 fails closed after transfer/revocation. V2 preserves historical acquisition while reporting only actual
+    /// current ownership (or null when unavailable), never the old request as current authority. Divergence makes
+    /// ProtectedResultMatchesCurrent false; observation never restores rights, qualification or ownership.
     /// </summary>
     [HttpPost("licenses/{licenseKey}/billing-receipt")]
     public async Task<IActionResult> ObserveLicenseBillingReceipt(
@@ -242,6 +284,12 @@ public partial class AdminController
         var (authorized, scopedProductId) = await GetAuthContextAsync();
         if (!authorized) return Unauthorized();
         var request = ParseBillingRequest(payload);
+        if (request?.CommercialEvidence is { } evidence && (!evidence.IsValid
+            || request.Command != "PAID" || evidence.Nature is not ("PAID" or "PAID_TRIAL")
+            || evidence.OperationId != request.OperationId))
+            return BadRequest(new { error = "commercial_evidence_invalid" });
+        if (request?.CommercialEvidence is { } subjectEvidence && subjectEvidence.CommercialSubjectId != request.CommercialSubjectId)
+            return Conflict(new { error = "commercial_evidence_subject_conflict" });
         if (request is null || !ValidBillingRequest(request)) return BadRequest(new { error = "billing_evidence_invalid" });
         if (scopedProductId.HasValue && scopedProductId != request.ProductId) return Unauthorized();
         if (!_db.Database.IsNpgsql()) return StatusCode(503, new { error = "billing_provider_unavailable" });
@@ -254,6 +302,12 @@ public partial class AdminController
         await _db.Database.ExecuteSqlRawAsync(
             "LOCK TABLE public.\"LicenseTypes\", public.\"LicenseTypeCustomParams\" IN SHARE MODE", cancellationToken);
         await _db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(999831, 1)", cancellationToken);
+        if (request.CommercialEvidence is { } commercial)
+        {
+            var check = await CommercialEvidenceStore.CheckAsync(_db, commercial, request.ProductId,
+                request.LicenseId, "billing", request.InvoiceId, BillingCommercialAttributionDigest(request), digest, cancellationToken);
+            if (check.Conflict) return Conflict(new { error = "commercial_evidence_conflict" });
+        }
         var license = await _db.Licenses.FromSqlInterpolated($"""
             SELECT * FROM public."Licenses" WHERE "Id" = {request.LicenseId}
               AND "ProductId" = {request.ProductId} AND "LicenseKey" = {licenseKey} FOR UPDATE
@@ -264,16 +318,17 @@ public partial class AdminController
             WHERE "ProductId" = {request.ProductId} AND "LicenseId" = {request.LicenseId} AND "State" = 'ACTIVE'
             ORDER BY "Id" FOR UPDATE
             """).AsNoTracking().ToListAsync(cancellationToken);
-        if (owners.Count != 1 || owners[0].Id != request.ExpectedOwnershipId
-            || owners[0].OwnerSubjectId != request.CommercialSubjectId || license.PartnerCode is not null)
+        var sameOwner = owners.Count == 1 && owners[0].Id == request.ExpectedOwnershipId
+            && owners[0].OwnerSubjectId == request.CommercialSubjectId && license.PartnerCode is null;
+        if (request.CommercialEvidence is null && !sameOwner)
             return Conflict(new { error = "billing_ownership_conflict" });
         var history = await _db.LicenseHistories.AsNoTracking().SingleOrDefaultAsync(h => h.Id == request.OperationId, cancellationToken);
         var receipt = history is null ? null : ReadBillingReceipt(history, license.Id);
         if (receipt is null || receipt.Digest != digest) return Conflict(new { error = "billing_receipt_conflict" });
-        if (license.RevocationReason != receipt.Reason || license.RevokedAt != receipt.RevokedAt)
+        if (request.CommercialEvidence is null && (license.RevocationReason != receipt.Reason || license.RevokedAt != receipt.RevokedAt))
             return Conflict(new { error = "billing_observation_cause_conflict" });
         var type = await ReadBillingTypeAsync(license.LicenseTypeId, request.ProductId, cancellationToken);
-        var protectedResultMatches = type is not null && EligibleBillingType(type)
+        var protectedResultMatches = sameOwner && type is not null && EligibleBillingType(type)
             && MatchesBillingReceipt(license, type, receipt, requireHistoricalVersion: false);
         await transaction.CommitAsync(cancellationToken);
         return Ok(new {
@@ -283,8 +338,8 @@ public partial class AdminController
             request.PreviousOperationId, request.PreviousCycleTerminatedAtUtc,
             HistoricalResult = new { receipt.AuthorityVersion, receipt.IsActive, receipt.Reason,
                 receipt.RevokedAt, receipt.ExpirationUtc, receipt.MaxSeats, receipt.TypeDigest, receipt.AllowedVersions },
-            CurrentAuthority = new { license.Id, license.ProductId, license.LicenseKey,
-                request.CommercialSubjectId, CommercialOwnershipId = request.ExpectedOwnershipId,
+            CurrentAuthority = owners.Count != 1 ? null : new { license.Id, license.ProductId, license.LicenseKey,
+                CommercialSubjectId = owners[0].OwnerSubjectId, CommercialOwnershipId = owners[0].Id,
                 license.AuthorityVersion, license.IsActive, license.RevocationReason, license.RevokedAt,
                 license.ExpirationDate, license.MaxSeats, license.AllowedVersions, Type = type },
             ResultVersionMatchesCurrent = license.AuthorityVersion == receipt.AuthorityVersion,
@@ -409,7 +464,8 @@ public partial class AdminController
     /// <summary>Compares all cycle identities and the absolute billed period with ordinal string semantics.</summary>
     private static bool SameBillingCycle(ConditionalLicenseBillingRequest left, ConditionalLicenseBillingRequest right) =>
         left.CycleId == right.CycleId && left.CustomerId == right.CustomerId && left.SubscriptionId == right.SubscriptionId
-        && left.InvoiceId == right.InvoiceId && left.PeriodStartUtc == right.PeriodStartUtc && left.PeriodEndUtc == right.PeriodEndUtc;
+        && left.InvoiceId == right.InvoiceId && left.PeriodStartUtc == right.PeriodStartUtc && left.PeriodEndUtc == right.PeriodEndUtc
+        && (left.GraceDurationMinutes ?? 1440) == (right.GraceDurationMinutes ?? 1440);
 
     /// <summary>Excludes free, anonymous, single-use and disabled types; Website additionally proves canonical Pro provenance.</summary>
     private static bool EligibleBillingType(BillingTypeSnapshot type) => !type.IsFree && !type.AllowAnonymous
@@ -424,6 +480,7 @@ public partial class AdminController
         && r.CommercialSubjectId != Guid.Empty && r.ExpectedOwnershipId != Guid.Empty && r.ExpectedAuthorityVersion != Guid.Empty
         && r.PreviousOperationId != Guid.Empty && r.PreviousOperationId != r.OperationId
         && r.Command is "GRACE" or "SUSPEND" or "PAID"
+        && (r.GraceDurationMinutes is null or 60)
         && ValidBillingId(r.CycleId) && ValidBillingId(r.CustomerId) && ValidBillingId(r.SubscriptionId) && ValidBillingId(r.InvoiceId)
         && ValidBillingDate(r.PeriodStartUtc) && ValidBillingDate(r.PeriodEndUtc)
         && r.PeriodEndUtc > r.PeriodStartUtc && r.PeriodEndUtc - r.PeriodStartUtc <= TimeSpan.FromDays(3660)
@@ -485,6 +542,9 @@ public partial class AdminController
             if (property.PropertyType == typeof(BillingParameter[]) && (field.Value.ValueKind != JsonValueKind.Array
                 || field.Value.GetArrayLength() > 128 || field.Value.EnumerateArray().Any(p => !CompleteBillingJson(p, typeof(BillingParameter))))) return false;
         }
-        return seen.Count == fields.Count;
+        // Additive nullable members are optional; every historical required/null field remains mandatory.
+        return fields.Keys.All(name => seen.Contains(name) || (shape == typeof(ConditionalLicenseBillingRequest)
+            && name is nameof(ConditionalLicenseBillingRequest.GraceDurationMinutes)
+                or nameof(ConditionalLicenseBillingRequest.CommercialEvidence)));
     }
 }

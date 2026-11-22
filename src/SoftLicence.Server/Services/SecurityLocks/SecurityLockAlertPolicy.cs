@@ -51,6 +51,16 @@ public static class SecurityLockAlertPolicy
     }
 
     /// <summary>
+    /// ntfy priority of a security-lock alert (TKT-003668): 5 (max, may bypass the phone's do-not-disturb) for a
+    /// level-5 lock such as an attached debugger and for a hardware ban issued by the lock system, 4 (high) for
+    /// levels 3 and 4. Lower levels are never alerted (<see cref="ShouldAlertNewLock"/>) and fall back to 4.
+    /// </summary>
+    /// <param name="level">Catalogued level of the lock.</param>
+    /// <param name="newBan">Whether the alert announces a new hardware ban.</param>
+    /// <returns>The ntfy priority as its decimal string.</returns>
+    public static string NtfyPriority(int level, bool newBan) => newBan || level >= 5 ? "5" : "4";
+
+    /// <summary>
     /// Masks a licence key so that the alert identifies it without disclosing it: only the first and last four
     /// characters are kept, and short keys are fully masked.
     /// </summary>
@@ -78,6 +88,9 @@ public static class SecurityLockAlertPolicy
         sb.Append("Verrou : ").AppendLine(d.LockId);
         sb.Append("Cause : ").Append(d.Cause).Append(" (niveau ").Append(d.Level.ToString(CultureInfo.InvariantCulture)).AppendLine(")");
         sb.Append("Mode serveur : ").Append(d.EffectiveMode).Append(" (client : ").Append(d.ClientMode).AppendLine(")");
+        if (string.Equals(d.EffectiveMode, SecurityLockCauseCatalog.ModeShadow, StringComparison.Ordinal)
+            && string.Equals(d.LastVerdict, SecurityLockVerdicts.Release, StringComparison.Ordinal))
+            sb.AppendLine("Mode SHADOW : alerte uniquement, aucun blocage n’est appliqué.");
         sb.Append("Verdict : ").Append(d.LastVerdict).Append(", état ").AppendLine(d.State);
         sb.Append("Première détection : ").Append(Utc(d.FirstSeenUtc)).Append(" ; premier rapport : ").AppendLine(Utc(d.FirstReportedUtc));
         sb.Append("Rapports reçus : ").AppendLine(d.ReportCount.ToString(CultureInfo.InvariantCulture));

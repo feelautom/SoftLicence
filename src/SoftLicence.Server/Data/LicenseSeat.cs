@@ -23,4 +23,13 @@ public class LicenseSeat
 
     public bool IsActive { get; set; } = true;
     public DateTime? UnlinkedAt { get; set; }
+
+    /// <summary>
+    /// UTC instant of the last time this seat became active on its <see cref="HardwareId"/>: created active,
+    /// reactivated after a release, or moved in place to another identifier. Null for a seat never activated since
+    /// the column exists (TKT-003751). Stamped only by <see cref="LicenseDbContext"/> when changes are saved, never
+    /// by callers, so every admission path records it; a check-in of an already active seat does not change it.
+    /// Read by <see cref="Services.SeatChangeQuota"/>, which counts the distinct identifiers activated in one UTC day.
+    /// </summary>
+    public DateTime? LastActivatedAt { get; set; }
 }

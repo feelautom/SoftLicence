@@ -7,7 +7,8 @@ var model = new LicenseModel
 {
     Id = Guid.Parse("11111111-1111-4111-8111-111111111111"),
     LicenseKey = "TEST-COMPAT-ONLY",
-    CustomerName = "Franck – 測試",
+    // Deliberate non-ASCII input (U+2013 dash and CJK characters) so the fixture exercises Unicode text in a signed licence.
+    CustomerName = "Alice – 測試",
     CustomerEmail = "compat@example.invalid",
     TypeSlug = "STANDARD",
     Reference = "plugin:mcp-tools:pluginVersion=β-1:allowedFeatures=read,write",

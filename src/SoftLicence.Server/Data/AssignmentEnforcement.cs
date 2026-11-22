@@ -3,11 +3,12 @@ using System.ComponentModel.DataAnnotations;
 namespace SoftLicence.Server.Data;
 
 /// <summary>
-/// Single-row switch of the commercial-assignment controls (TKT-001277 lot 2d, decided by Franck on 29/09/2026).
+/// Single-row switch of the commercial-assignment controls (TKT-001277 lot 2d, product decision of 29/09/2026).
 /// <c>open</c>: every control keeps its blocking code but, where it would block, records an
 /// <see cref="AssignmentEnforcementEvent"/> and lets the operation through. <c>closed</c>: every control blocks
 /// exactly as originally written. Read by the PostgreSQL assignment trigger and by the application; written at
-/// application startup from the <c>SOFTLICENCE_ASSIGNMENT_ENFORCEMENT</c> environment variable.
+/// application startup from the <c>SOFTLICENCE_ASSIGNMENT_ENFORCEMENT</c> environment variable, closed when it is
+/// absent (TKT-001428). The migration that created the table seeded <c>open</c>; the first startup overwrites it.
 /// </summary>
 public sealed class AssignmentEnforcementSetting
 {
@@ -21,9 +22,12 @@ public sealed class AssignmentEnforcementSetting
     [Key]
     public int Id { get; set; } = 1;
 
-    /// <summary>Gets or sets the mode, <see cref="Open"/> or <see cref="Closed"/>.</summary>
+    /// <summary>
+    /// Gets or sets the mode, <see cref="Open"/> or <see cref="Closed"/> (lowercase, enforced by a check constraint).
+    /// A new row defaults to <see cref="Closed"/> (TKT-001428).
+    /// </summary>
     [MaxLength(16)]
-    public string Mode { get; set; } = Open;
+    public string Mode { get; set; } = Closed;
 
     /// <summary>Gets or sets when the mode was last written (UTC).</summary>
     public DateTime UpdatedAtUtc { get; set; }

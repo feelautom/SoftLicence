@@ -48,11 +48,13 @@ Activation automatique au premier lancement. Pour les types récurrents (ex: Com
 ```
 
 **Comportement :**
+- **Type non ouvert à l'essai public** (réglage `AllowPublicTrial` du type, faux par défaut) : refus `LICENSE_TYPE_PUBLIC_TRIAL_NOT_ALLOWED`
 - **Première demande** : crée une licence (durée = `DefaultDurationDays` du type)
-- **HardwareId connu, licence active** : renvoi de la licence existante (recovery)
-- **HardwareId connu, licence expirée + `IsRecurring`** : renouvellement automatique (+30 jours)
+- **HardwareId connu, licence active du type demandé** : renvoi de la licence existante (recovery) ; l'e-mail et le nom envoyés sont ignorés
+- **HardwareId connu, licence en cours d'un autre type, ou licence payante** : refus `HARDWARE_ALREADY_LICENSED` ; récupérer la licence avec sa clé
+- **HardwareId connu, licence expirée renouvelable** : renouvellement automatique (+30 jours)
 - **HardwareId connu, licence révoquée** : `403 Forbidden`
-- **HardwareId connu, licence expirée non-récurrente** : renvoi tel quel (le client gère le blocage)
+- **HardwareId connu, licence du type demandé expirée et non renouvelable** : refus `LICENSE_EXPIRED` (le client reste restreint)
 
 ## 🛡️ Protection contre le Piratage
 

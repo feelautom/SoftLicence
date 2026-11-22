@@ -807,6 +807,33 @@ public sealed class SoftLicenceAnalyticsClient
         }, cancellationToken);
     }
 
+    /// <summary>
+    /// Calls <c>GET /api/analytics/licenses/paid-weekly-activity</c> (TKT-003652) and returns its JSON unchanged.
+    /// Arguments are expected already normalized by the tool layer; null optional values are omitted from the
+    /// query string. HTTP and scope failures surface through the shared analytics error handling.
+    /// </summary>
+    public async Task<JsonElement> GetPaidWeeklyActivityAsync(
+        string? licenseTypes,
+        string? status,
+        int weeks,
+        int skip,
+        int take,
+        CancellationToken cancellationToken,
+        string? productId = null,
+        string? productName = null)
+    {
+        return await GetAnalyticsAsync("licenses/paid-weekly-activity", new Dictionary<string, string?>
+        {
+            ["licenseTypes"] = licenseTypes,
+            ["status"] = status,
+            ["weeks"] = weeks.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["skip"] = skip.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["take"] = take.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["productId"] = productId,
+            ["productName"] = productName
+        }, cancellationToken);
+    }
+
     public async Task<JsonElement> GetLicenseTypesAsync(
         bool includeFree,
         CancellationToken cancellationToken,
@@ -818,6 +845,53 @@ public sealed class SoftLicenceAnalyticsClient
             ["includeFree"] = includeFree.ToString().ToLowerInvariant(),
             ["productId"] = productId,
             ["productName"] = productName
+        }, cancellationToken);
+    }
+
+    /// <summary>Reads full license type settings through the scoped analytics API.</summary>
+    /// <remarks>Optional selectors are exact and are passed without normalization.</remarks>
+    public async Task<JsonElement> GetLicenseTypeSettingsAsync(
+        CancellationToken cancellationToken,
+        string? productId = null,
+        string? productName = null,
+        string? slug = null,
+        string? parameterKey = null)
+    {
+        return await GetAnalyticsAsync("licenses/types/settings", new Dictionary<string, string?>
+        {
+            ["productId"] = productId,
+            ["productName"] = productName,
+            ["slug"] = slug,
+            ["parameterKey"] = parameterKey
+        }, cancellationToken);
+    }
+
+    /// <summary>
+    /// Sends one licence-type change batch to the preview or apply route (TKT-002781). The batch is sent as given: the
+    /// server normalizes and validates it, and refuses an apply whose fingerprint no longer matches.
+    /// </summary>
+    /// <param name="apply">False for the preview, true for the apply.</param>
+    /// <param name="batch">JSON object with productId or productName, operations, requestedBy and, for apply, previewHash.</param>
+    /// <param name="cancellationToken">Call cancellation.</param>
+    /// <returns>The preview, or the applied result with its journal row.</returns>
+    public async Task<JsonElement> SendLicenseTypeChangesAsync(bool apply, JsonElement batch, CancellationToken cancellationToken)
+    {
+        var uri = BuildRootedUri($"api/analytics/license-types/changes/{(apply ? "apply" : "preview")}", new Dictionary<string, string?>());
+        using var request = new HttpRequestMessage(HttpMethod.Post, uri);
+        request.Headers.Add("X-Analytics-Key", _credentials.GetApiKey());
+        request.Content = new StringContent(batch.GetRawText(), Encoding.UTF8, "application/json");
+        return await SendJsonAsync(request, cancellationToken);
+    }
+
+    /// <summary>Reads the licence-type change journal of one product, newest first.</summary>
+    public async Task<JsonElement> GetLicenseTypeChangeAuditAsync(
+        CancellationToken cancellationToken, string? productId = null, string? productName = null, int take = 50)
+    {
+        return await GetAnalyticsAsync("license-types/changes/audit", new Dictionary<string, string?>
+        {
+            ["productId"] = productId,
+            ["productName"] = productName,
+            ["take"] = take.ToString(System.Globalization.CultureInfo.InvariantCulture)
         }, cancellationToken);
     }
 
@@ -1575,6 +1649,159 @@ public sealed class SoftLicenceAnalyticsClient
         }, cancellationToken);
     }
 
+    /// <summary>Lists exact, product-scoped security-lock evidence through the security analytics API.</summary>
+    public async Task<JsonElement> ListSecurityLocksAsync(
+        string? state,
+        string? hardwareId,
+        string? email,
+        int take,
+        string? productId,
+        string? productName,
+        CancellationToken cancellationToken)
+    {
+        return await GetAnalyticsAsync("security/locks", new Dictionary<string, string?>
+        {
+            ["state"] = state,
+            ["hardwareId"] = hardwareId,
+            ["email"] = email,
+            ["take"] = take.ToString(CultureInfo.InvariantCulture),
+            ["productId"] = productId,
+            ["productName"] = productName
+        }, cancellationToken);
+    }
+
+    /// <summary>Gets one security-lock report by its exact row UUID.</summary>
+    public async Task<JsonElement> GetSecurityLockAsync(
+        Guid lockReportId,
+        string? productId,
+        string? productName,
+        CancellationToken cancellationToken)
+    {
+        return await GetAnalyticsAsync($"security/locks/{lockReportId:D}", new Dictionary<string, string?>
+        {
+            ["productId"] = productId,
+            ["productName"] = productName
+        }, cancellationToken);
+    }
+
+    /// <summary>Lists exact remembered security-lock RELEASE decisions.</summary>
+    public async Task<JsonElement> ListSecurityLockReleaseDecisionsAsync(
+        Guid? decisionId,
+        string? hardwareId,
+        string? cause,
+        bool includeInactive,
+        int take,
+        string? productId,
+        string? productName,
+        CancellationToken cancellationToken)
+    {
+        return await GetAnalyticsAsync("security/lock-release-decisions", new Dictionary<string, string?>
+        {
+            ["decisionId"] = decisionId?.ToString("D"),
+            ["hardwareId"] = hardwareId,
+            ["cause"] = cause,
+            ["includeInactive"] = includeInactive.ToString().ToLowerInvariant(),
+            ["take"] = take.ToString(CultureInfo.InvariantCulture),
+            ["productId"] = productId,
+            ["productName"] = productName
+        }, cancellationToken);
+    }
+
+    /// <summary>Records a RELEASE or BAN decision and returns the mutation plus an authenticated read-back.</summary>
+    public async Task<JsonElement> DecideSecurityLockAsync(
+        Guid lockReportId,
+        string decision,
+        string reason,
+        string auditReference,
+        string decidedBy,
+        string? productId,
+        string? productName,
+        CancellationToken cancellationToken)
+    {
+        const string operation = "decide_security_lock";
+        var endpoint = $"/api/admin/security-locks/{lockReportId:D}/decision";
+        if (!_credentials.TryGetAdminSecret(out var adminSecret, out var errorCode, out var errorMessage))
+            return await DeliverAdminCredentialErrorAsync(operation, endpoint, errorCode, errorMessage, cancellationToken);
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, BuildRootedUri(endpoint, new Dictionary<string, string?>()))
+        {
+            Content = JsonContent.Create(new
+            {
+                decision,
+                reason = BuildSecurityLockDecisionReason(reason, auditReference),
+                decidedBy
+            }, options: JsonOptions)
+        };
+        request.Headers.Add("X-Admin-Secret", adminSecret);
+        var mutation = await SendAdminJsonAsync(request, cancellationToken, returnStructuredError: true);
+        var verification = await GetSecurityLockAsync(lockReportId, productId, productName, cancellationToken);
+        return await _resultStore.DeliverAsync(JsonSerializer.SerializeToElement(new
+        {
+            operation,
+            mutation,
+            verification
+        }, JsonOptions), cancellationToken);
+    }
+
+    /// <summary>Explicitly unbans one BANNED security lock and verifies its released provider state.</summary>
+    public async Task<JsonElement> UnbanSecurityLockAsync(
+        Guid lockReportId,
+        string reason,
+        string auditReference,
+        string decidedBy,
+        string? productId,
+        string? productName,
+        CancellationToken cancellationToken)
+    {
+        const string operation = "unban_security_lock";
+        var endpoint = $"/api/admin/security-locks/{lockReportId:D}/unban";
+        if (!_credentials.TryGetAdminSecret(out var adminSecret, out var errorCode, out var errorMessage))
+            return await DeliverAdminCredentialErrorAsync(operation, endpoint, errorCode, errorMessage, cancellationToken);
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, BuildRootedUri(endpoint, new Dictionary<string, string?>()))
+        {
+            Content = JsonContent.Create(new { reason, auditReference, decidedBy }, options: JsonOptions)
+        };
+        request.Headers.Add("X-Admin-Secret", adminSecret);
+        var mutation = await SendAdminJsonAsync(request, cancellationToken, returnStructuredError: true);
+        var verification = await GetSecurityLockAsync(lockReportId, productId, productName, cancellationToken);
+        return await _resultStore.DeliverAsync(JsonSerializer.SerializeToElement(new
+        {
+            operation,
+            mutation,
+            verification
+        }, JsonOptions), cancellationToken);
+    }
+
+    /// <summary>Revokes one remembered RELEASE and returns the mutation plus its inactive read-back.</summary>
+    public async Task<JsonElement> RevokeSecurityLockReleaseDecisionAsync(
+        Guid decisionId,
+        string decidedBy,
+        string? productId,
+        string? productName,
+        CancellationToken cancellationToken)
+    {
+        const string operation = "revoke_security_lock_release_decision";
+        var endpoint = $"/api/admin/security-lock-release-decisions/{decisionId:D}/revoke";
+        if (!_credentials.TryGetAdminSecret(out var adminSecret, out var errorCode, out var errorMessage))
+            return await DeliverAdminCredentialErrorAsync(operation, endpoint, errorCode, errorMessage, cancellationToken);
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, BuildRootedUri(endpoint, new Dictionary<string, string?>()))
+        {
+            Content = JsonContent.Create(new { decidedBy }, options: JsonOptions)
+        };
+        request.Headers.Add("X-Admin-Secret", adminSecret);
+        var mutation = await SendAdminJsonAsync(request, cancellationToken, returnStructuredError: true);
+        var verification = await ListSecurityLockReleaseDecisionsAsync(
+            decisionId, null, null, true, 1, productId, productName, cancellationToken);
+        return await _resultStore.DeliverAsync(JsonSerializer.SerializeToElement(new
+        {
+            operation,
+            mutation,
+            verification
+        }, JsonOptions), cancellationToken);
+    }
+
     public JsonElement GetSecurityHardwareBanCategories()
     {
         return JsonSerializer.SerializeToElement(new
@@ -1691,6 +1918,76 @@ public sealed class SoftLicenceAnalyticsClient
         return await _resultStore.DeliverAsync(result, cancellationToken);
     }
 
+    /// <summary>
+    /// Reads IP threat scores through the global admin API (TKT-002685): the list at or above a minimum, or
+    /// the details of one IP (rows, last known client with masked licence, recent resets).
+    /// </summary>
+    public async Task<JsonElement> GetIpThreatScoresAsync(
+        string? ip,
+        int minScore,
+        int take,
+        CancellationToken cancellationToken)
+    {
+        const string operation = "list_ip_threat_scores";
+        var relative = ip == null
+            ? "api/admin/threat-scores"
+            : $"api/admin/threat-scores/{Uri.EscapeDataString(ip)}";
+        var endpoint = "/" + relative;
+        if (!_credentials.TryGetAdminSecret(out var adminSecret, out var errorCode, out var errorMessage))
+            return await DeliverAdminCredentialErrorAsync(operation, endpoint, errorCode, errorMessage, cancellationToken);
+
+        var uri = BuildRootedUri(relative, ip == null
+            ? new Dictionary<string, string?>
+            {
+                ["minScore"] = minScore.ToString(CultureInfo.InvariantCulture),
+                ["take"] = take.ToString(CultureInfo.InvariantCulture)
+            }
+            : new Dictionary<string, string?>());
+        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+        request.Headers.Add("X-Admin-Secret", adminSecret);
+        var data = await SendAdminJsonAsync(request, cancellationToken, returnStructuredError: true);
+        var result = JsonSerializer.SerializeToElement(new { operation, data }, JsonOptions);
+        return await _resultStore.DeliverAsync(result, cancellationToken);
+    }
+
+    /// <summary>
+    /// Erases one IP threat score in the server database and memory, without restart, through the global
+    /// admin API, then reads the IP back as verification. The server journals the reset.
+    /// </summary>
+    public async Task<JsonElement> ResetIpThreatScoreAsync(
+        string ip,
+        string reason,
+        string? ticketRef,
+        string? resetBy,
+        CancellationToken cancellationToken)
+    {
+        const string operation = "reset_ip_threat_score";
+        const string endpoint = "/api/admin/threat-scores/reset";
+        if (!_credentials.TryGetAdminSecret(out var adminSecret, out var errorCode, out var errorMessage))
+            return await DeliverAdminCredentialErrorAsync(operation, endpoint, errorCode, errorMessage, cancellationToken);
+
+        var uri = BuildRootedUri("api/admin/threat-scores/reset", new Dictionary<string, string?>());
+        using var request = new HttpRequestMessage(HttpMethod.Post, uri)
+        {
+            Content = JsonContent.Create(new
+            {
+                ip,
+                reason = BuildAuditedReason(reason, ticketRef, null, null, null),
+                resetBy = "mcp:" + (string.IsNullOrWhiteSpace(resetBy) ? "unnamed" : Truncate(resetBy.Trim(), 100))
+            }, options: JsonOptions)
+        };
+        request.Headers.Add("X-Admin-Secret", adminSecret);
+
+        var mutation = await SendAdminJsonAsync(request, cancellationToken, returnStructuredError: true);
+        var verificationUri = BuildRootedUri(
+            $"api/admin/threat-scores/{Uri.EscapeDataString(ip)}", new Dictionary<string, string?>());
+        using var verificationRequest = new HttpRequestMessage(HttpMethod.Get, verificationUri);
+        verificationRequest.Headers.Add("X-Admin-Secret", adminSecret);
+        var verification = await SendAdminJsonAsync(verificationRequest, cancellationToken, returnStructuredError: true);
+        var result = JsonSerializer.SerializeToElement(new { operation, mutation, verification }, JsonOptions);
+        return await _resultStore.DeliverAsync(result, cancellationToken);
+    }
+
     public async Task<JsonElement> CreateSecurityComponentBanAsync(
         string componentType,
         string componentHash,
@@ -1791,6 +2088,11 @@ public sealed class SoftLicenceAnalyticsClient
         return await _resultStore.DeliverAsync(result, cancellationToken);
     }
 
+    /// <summary>
+    /// Reads one page of centralized LLM tips from <c>GET api/llm-tips-feedback/admin/tips</c>; null filters are
+    /// omitted from the query string. <paramref name="shared"/> (TKT-003574) keeps only shared or unshared tips.
+    /// </summary>
+    /// <exception cref="SoftLicenceProviderRefusalException">Any non-success answer of the server.</exception>
     public async Task<JsonElement> ListLlmTipFeedbackAsync(
         string? fromUtc,
         string? toUtc,
@@ -1805,10 +2107,13 @@ public sealed class SoftLicenceAnalyticsClient
         int offset,
         string? sortBy,
         string? sortDir,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool? shared = null)
     {
         return await GetLlmTipFeedbackAsync("admin/tips", new Dictionary<string, string?>
         {
+            // TKT-003574: lower-case literal so ASP.NET binds it to bool? whatever the culture; omitted when null.
+            ["shared"] = shared.HasValue ? (shared.Value ? "true" : "false") : null,
             ["fromUtc"] = fromUtc,
             ["toUtc"] = toUtc,
             ["productId"] = productId,
@@ -1896,6 +2201,63 @@ public sealed class SoftLicenceAnalyticsClient
         return await SendJsonAsync(request, cancellationToken);
     }
 
+    /// <summary>
+    /// Publishes one LLM tip to every client or retracts it (TKT-003574) through
+    /// <c>POST api/llm-tips-feedback/admin/tips/sharing</c>, recording <c>mcp</c> as the path in the server journal.
+    /// </summary>
+    /// <param name="id">Tip UUID; optional when <paramref name="contentHash"/> is given.</param>
+    /// <param name="contentHash">Exact tip content hash; optional when <paramref name="id"/> is given.</param>
+    /// <param name="shared">True to publish, false to retract.</param>
+    /// <param name="reason">Operator reason; the server refuses a retraction without one.</param>
+    /// <param name="productId">Product UUID, required with a global key unless <paramref name="productName"/> is given.</param>
+    /// <param name="productName">Exact product name.</param>
+    /// <param name="cancellationToken">Caller cancellation.</param>
+    /// <returns>The server result: id, content hash, resulting state, whether it changed, instant and actor.</returns>
+    /// <exception cref="SoftLicenceProviderRefusalException">
+    /// Any refusal, for example 403 <c>INTERNAL_NETWORK_REQUIRED</c>, 403 <c>ANALYTICS_SCOPE_REQUIRED</c> naming
+    /// <c>llm-tips:share</c>, 400 for a missing reason, 404 for an unknown tip; nothing is changed in those cases.
+    /// </exception>
+    public async Task<JsonElement> SetLlmTipFeedbackSharingAsync(
+        string? id,
+        string? contentHash,
+        bool shared,
+        string? reason,
+        string? productId,
+        string? productName,
+        CancellationToken cancellationToken)
+    {
+        var uri = BuildRootedUri("api/llm-tips-feedback/admin/tips/sharing", new Dictionary<string, string?>());
+        using var request = new HttpRequestMessage(HttpMethod.Post, uri)
+        {
+            Content = JsonContent.Create(new
+            {
+                id,
+                contentHash,
+                shared,
+                reason,
+                source = "mcp",
+                productId,
+                productName
+            }, options: JsonOptions)
+        };
+        request.Headers.Add("X-Analytics-Key", _credentials.GetApiKey());
+
+        return await SendJsonAsync(request, cancellationToken);
+    }
+
+    /// <summary>
+    /// Reads one analytics endpoint and returns its JSON payload.
+    /// A product-scoped endpoint called without a selector is refused by the provider itself (HTTP 400
+    /// PRODUCT_SELECTOR_REQUIRED): this client never supplies a default product, and that refusal surfaces as
+    /// an error. Every non-success provider answer is raised as
+    /// <see cref="SoftLicenceProviderRefusalException"/>, so an MCP client sees a tool error and never a result.
+    /// </summary>
+    /// <param name="path">Endpoint path below <c>api/analytics/</c>.</param>
+    /// <param name="query">Exact query values; null values are omitted by the URI builder.</param>
+    /// <param name="cancellationToken">Caller cancellation, propagated to the provider request.</param>
+    /// <param name="protectOversized">True to route an oversized payload through the result store.</param>
+    /// <returns>The provider payload, parsed from a bounded response body.</returns>
+    /// <exception cref="SoftLicenceProviderRefusalException">Refused provider answer.</exception>
     private async Task<JsonElement> GetAnalyticsAsync(
         string path,
         IReadOnlyDictionary<string, string?> query,
@@ -1951,7 +2313,7 @@ public sealed class SoftLicenceAnalyticsClient
             // Servers before TKT-001168 also answer 401 when a valid key lacks the endpoint scope.
             var unauthorizedBody = Encoding.UTF8.GetString(
                 await ReadBoundedResponseBytesAsync(response.Content, cancellationToken)).Trim();
-            throw new InvalidOperationException(
+            throw new SoftLicenceProviderRefusalException("ANALYTICS_AUTH_FAILED", (int)response.StatusCode,
                 $"SoftLicence analytics API rejected SOFTLICENCE_API_KEY (HTTP 401 on {request.RequestUri?.AbsolutePath}"
                 + (unauthorizedBody.Length == 0 ? ")" : $": {Truncate(unauthorizedBody, 300)})")
                 + ". The key is missing, unknown, inactive or expired, or (older servers) lacks the scope required by this "
@@ -1964,17 +2326,11 @@ public sealed class SoftLicenceAnalyticsClient
                 await ReadBoundedResponseBytesAsync(response.Content, cancellationToken));
             if (TryGetProductSelectorError(errorBody, out var errorCode, out var message))
             {
-                var selectorError = await BuildProductSelectorErrorAsync(
-                    request, response, errorCode, message, errorBody, cancellationToken);
-                return protectOversized
-                    ? await _resultStore.DeliverAsync(selectorError, cancellationToken)
-                    : selectorError;
+                throw await BuildProductSelectorRefusalAsync(
+                    request, response, errorCode, message, cancellationToken);
             }
 
-            var analyticsError = BuildAnalyticsError(request, response, errorBody);
-            return protectOversized
-                ? await _resultStore.DeliverAsync(analyticsError, cancellationToken)
-                : analyticsError;
+            throw BuildAnalyticsRefusal(request, response, errorBody);
         }
 
         if (protectOversized)
@@ -2084,31 +2440,67 @@ public sealed class SoftLicenceAnalyticsClient
         return await _resultStore.DeliverAsync(result, cancellationToken);
     }
 
-    private async Task<JsonElement> BuildProductSelectorErrorAsync(
+    /// <summary>
+    /// Describes the products the key may target, so a refusal names the values the caller can retry with.
+    /// Returns null when the provider list is unavailable or empty. Keeps every nonblank name or fallback
+    /// identifier in provider order, without normalization, so later products never appear inaccessible.
+    /// The caller has already applied the HTTP response byte bound before parsing this optional hint.
+    /// </summary>
+    private static string? DescribeProductNames(JsonElement? availableProducts)
+    {
+        if (availableProducts is not { } payload) return null;
+
+        // The provider answers with a bare array or with a {"products":[…] } wrapper depending on the endpoint
+        // version, so both shapes are accepted instead of failing the hint on one of them.
+        var products = payload.ValueKind switch
+        {
+            JsonValueKind.Array => payload,
+            JsonValueKind.Object when payload.TryGetProperty("products", out var wrapped)
+                && wrapped.ValueKind == JsonValueKind.Array => wrapped,
+            _ => default,
+        };
+        if (products.ValueKind != JsonValueKind.Array) return null;
+
+        var names = new List<string>();
+        foreach (var product in products.EnumerateArray())
+        {
+            var name = TryGetStringProperty(product, "name")
+                ?? TryGetStringProperty(product, "productName")
+                ?? TryGetStringProperty(product, "slug")
+                ?? TryGetStringProperty(product, "id");
+            if (!string.IsNullOrWhiteSpace(name)) names.Add(name);
+        }
+
+        return names.Count == 0 ? null : string.Join(", ", names);
+    }
+
+    /// <summary>
+    /// Builds the refusal raised when the provider rejects a request for a missing or invalid product selector.
+    /// The message keeps the provider code and text, the actionable hint and the products the key may target.
+    /// The provider body is never relayed, so a hidden diagnostic field cannot leak through this message.
+    /// </summary>
+    private async Task<SoftLicenceProviderRefusalException> BuildProductSelectorRefusalAsync(
         HttpRequestMessage failedRequest,
         HttpResponseMessage response,
         string errorCode,
         string message,
-        string errorBody,
         CancellationToken cancellationToken)
     {
         var availableProducts = await TryFetchAvailableProductsAsync(cancellationToken);
-        var originalError = TryParseJsonElement(errorBody);
+        var productNames = DescribeProductNames(availableProducts);
 
-        return JsonSerializer.SerializeToElement(new
-        {
-            ok = false,
-            errorCode,
-            message,
-            hint = "This SoftLicence analytics key is global or the product selector is invalid. Call list_products, then retry with an exact productName or productId.",
-            endpoint = failedRequest.RequestUri?.AbsolutePath,
-            statusCode = (int)response.StatusCode,
-            reasonPhrase = response.ReasonPhrase,
-            availableProducts,
-            originalError
-        }, JsonOptions);
+        return new SoftLicenceProviderRefusalException(errorCode, (int)response.StatusCode,
+            $"{errorCode} on {failedRequest.RequestUri?.AbsolutePath} (HTTP {(int)response.StatusCode}): {message} "
+            + "This analytics key is global or the product selector is invalid: call list_products, then retry with "
+            + "an exact productName or productId."
+            + (productNames is null ? string.Empty : $" Products available to this key: {productNames}."));
     }
 
+    /// <summary>
+    /// Reads the optional product hint with the caller's analytics key and the existing HTTP byte bound.
+    /// Returns detached JSON on success or null when the hint cannot be obtained; cancellation propagates
+    /// so enrichment never replaces a canceled request with a provider refusal.
+    /// </summary>
     private async Task<JsonElement?> TryFetchAvailableProductsAsync(CancellationToken cancellationToken)
     {
         try
@@ -2136,7 +2528,11 @@ public sealed class SoftLicenceAnalyticsClient
         }
     }
 
-    private static JsonElement BuildAnalyticsError(
+    /// <summary>
+    /// Builds the refusal raised for any other non-success analytics answer, keeping the provider code and
+    /// message for statuses below 500 and a generic description above, plus the endpoint, status and hint.
+    /// </summary>
+    private static SoftLicenceProviderRefusalException BuildAnalyticsRefusal(
         HttpRequestMessage failedRequest,
         HttpResponseMessage response,
         string errorBody)
@@ -2153,17 +2549,11 @@ public sealed class SoftLicenceAnalyticsClient
         var hint = mayExposeStructuredDetails ? TryGetStringProperty(document?.RootElement, "hint") : null;
         var maxDays = mayExposeStructuredDetails ? TryGetInt32Property(document?.RootElement, "maxDays") : null;
 
-        return JsonSerializer.SerializeToElement(new
-        {
-            ok = false,
-            errorCode,
-            message,
-            hint,
-            maxDays,
-            endpoint = failedRequest.RequestUri?.AbsolutePath,
-            statusCode = (int)response.StatusCode,
-            reasonPhrase = response.ReasonPhrase
-        }, JsonOptions);
+        return new SoftLicenceProviderRefusalException(errorCode, (int)response.StatusCode,
+            $"{errorCode} on {failedRequest.RequestUri?.AbsolutePath} "
+            + $"(HTTP {(int)response.StatusCode} {response.ReasonPhrase}): {message}"
+            + (hint is null ? string.Empty : $" {hint}")
+            + (maxDays is null ? string.Empty : $" maxDays={maxDays}."));
     }
 
     private static string? TryGetStringProperty(JsonElement? element, string propertyName)
@@ -2268,6 +2658,15 @@ public sealed class SoftLicenceAnalyticsClient
             parts.Add($"note={Truncate(auditNote.Trim(), 70)}");
 
         return string.Join(" | ", parts);
+    }
+
+    /// <summary>Builds a bounded reason that always retains the mandatory named audit reference.</summary>
+    private static string BuildSecurityLockDecisionReason(string reason, string auditReference)
+    {
+        var value = $"{reason.Trim()} | auditRef={auditReference.Trim()}";
+        if (value.Length > 500)
+            throw new ArgumentException("reason and auditReference must fit in the 500-character audit field.", nameof(reason));
+        return value;
     }
 
     private static bool HasAuditMetadata(string reason, string key, string expectedValue)

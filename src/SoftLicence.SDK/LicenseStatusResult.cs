@@ -21,6 +21,21 @@ namespace SoftLicence.SDK
         public string? ServerErrorCode { get; }
         public string? CorrelationId { get; }
 
+        /// <summary>
+        /// Gets the single-use control token answer (server TKT-003615), or <see langword="null"/> when the server sent
+        /// none: request without <see cref="CloneGuardPresentation"/>, server older than the feature, or failure before
+        /// a parsable answer. A <see langword="null"/> value after a guarded request means "keep the pair and resend it".
+        /// </summary>
+        public CloneGuardOutcome? CloneGuard { get; private set; }
+
+        /// <summary>Attaches the parsed clone guard member to a result built by one of the factories; returns the same instance.</summary>
+        /// <param name="cloneGuard">Parsed member, or <see langword="null"/> when absent.</param>
+        internal LicenseStatusResult WithCloneGuard(CloneGuardOutcome? cloneGuard)
+        {
+            CloneGuard = cloneGuard;
+            return this;
+        }
+
         private LicenseStatusResult(bool success, string? status, StatusErrorCode errorCode, string? errorMessage, string? licenseFile = null, string? serverErrorCode = null, string? correlationId = null)
         {
             Success = success;

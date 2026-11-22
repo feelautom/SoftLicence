@@ -177,6 +177,10 @@ if (result.IsSuccess)
 
 ### 3. Request a Trial
 
+The server only issues a public trial for a license type whose administrator enabled **Public trial**
+(`AllowPublicTrial`). Pass that type's slug explicitly; any other type is refused with
+`LICENSE_TYPE_PUBLIC_TRIAL_NOT_ALLOWED`.
+
 ```csharp
 var result = await client.RequestTrialAsync("YourAppName",
     customerEmail: "user@example.com",   // optional
@@ -199,6 +203,30 @@ if (status.IsValid)
 {
     Console.WriteLine("License is valid!");
 }
+```
+
+### 4 bis. Detect a Copied Installation (single-use control token, 3.0.0)
+
+Present a token pair on each periodic status check. Persist the next token **before** sending, send at most one guarded check at a time, and resend the exact same pair after a network failure.
+
+```csharp
+var next = CloneGuardPresentation.GenerateToken();
+store.SavePending(next);                                   // durable write before the call
+var status = await client.CheckStatusAsync(key, "YourAppName", null, appVersion, hardwareId,
+    new CloneGuardPresentation(store.CurrentToken, next, vmGenerationId: null));
+
+if (status.CloneGuard?.NextTokenBecomesCurrent == true)
+    store.Promote();                                       // current = next
+else if (status.Status == "DUPLICATE_DETECTED")
+{
+    // Another copy of this installation is running: suspend protected features and offer reactivation.
+    var fresh = CloneGuardPresentation.GenerateToken();
+    store.SavePending(fresh);
+    var reactivation = await client.ReactivateCloneGuardAsync(key, "YourAppName", null, appVersion, hardwareId, fresh, null);
+    if (reactivation.CloneGuard?.Outcome == CloneGuardOutcome.Reactivated)
+        store.Promote();
+}
+// Success == false or CloneGuard == null: keep the pair and resend it unchanged next time.
 ```
 
 ### 5. Transfer to Another Machine

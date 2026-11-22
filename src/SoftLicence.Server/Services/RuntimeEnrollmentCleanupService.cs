@@ -34,7 +34,13 @@ public sealed class RuntimeEnrollmentCleanupService(
         while (await timer.WaitForNextTickAsync(stoppingToken));
     }
 
-    private async Task CleanupAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// Runs one retention pass in a single SQL batch: expired proof, quota and mutex rows, expired delivery
+    /// bodies and challenges, and completed account relinks older than 30 days (TKT-002919). Internal so tests
+    /// can prove the retention on a real PostgreSQL database; idempotent.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the batch.</param>
+    internal async Task CleanupAsync(CancellationToken cancellationToken)
     {
         await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
         if (!db.Database.IsNpgsql())
@@ -64,6 +70,10 @@ public sealed class RuntimeEnrollmentCleanupService(
             WHERE "ExpiresAtUtc" < clock_timestamp();
             DELETE FROM public."RuntimeEnrollmentQuotas"
             WHERE "ExpiresAtUtc" < clock_timestamp();
+            -- TKT-002919: completed account relinks stay replayable for 30 days, then the ledger row goes.
+            DELETE FROM public."RuntimeAccountRelinkRequests"
+            WHERE "State" = 'COMPLETED'
+              AND "CompletedAtUtc" < clock_timestamp() - interval '30 days';
             DELETE FROM public."RuntimeEnrollmentCredentialMutexes"
             WHERE "ExpiresAtUtc" < clock_timestamp();
             UPDATE public."RuntimeCriticalRecoveryReceipts"

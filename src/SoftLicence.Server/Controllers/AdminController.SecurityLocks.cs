@@ -14,6 +14,8 @@ public sealed class SecurityLockDecisionRequest
     public string? Reason { get; set; }
     /// <summary>Administrator recording the decision.</summary>
     public string? DecidedBy { get; set; }
+    /// <summary>Named audit reference required by the explicit UNBAN operation.</summary>
+    public string? AuditReference { get; set; }
 }
 
 /// <summary>Admin request changing the enforcement mode of one irreversible-candidate cause.</summary>
@@ -99,16 +101,37 @@ public partial class AdminController
             row.Id, row.ProductId, row.EnrollmentId, row.InstallationId, row.HardwareId, row.AppVersion,
             row.LockId, row.Cause, row.Level, row.ClientMode, row.EffectiveMode, row.EvidenceDigestSha256,
             row.FirstSeenUtc, row.FirstReportedUtc, row.LastReportedUtc, row.ReportCount, row.State, row.LastVerdict,
-            row.AdminDecision, row.AdminDecisionAtUtc, row.AdminDecisionBy, row.AdminDecisionReason
+            row.AdminDecision, row.AdminDecisionAtUtc, row.AdminDecisionBy, row.AdminDecisionReason,
+            row.RememberedReleaseDecisionId
         }).ToListAsync();
         TagLog("SECURITY_LOCKS_LIST", state ?? "all");
         return Ok(rows);
     }
 
+    /// <summary>Revokes a remembered RELEASE for future detections only.</summary>
+    [HttpPost("security-lock-release-decisions/{id:guid}/revoke")]
+    public async Task<IActionResult> RevokeSecurityLockReleaseDecision(
+        Guid id, [FromBody] SecurityLockDecisionRequest request)
+    {
+        var auth = await GetAuthContextAsync();
+        if (!auth.Authorized) return Unauthorized();
+        if (request is null) return BadRequest(new { error = SecurityLockAdminOutcomes.DecidedByInvalid });
+        var admin = HttpContext.RequestServices.GetRequiredService<SecurityLockAdminService>();
+        var outcome = await admin.RevokeRememberedReleaseAsync(
+            id, request.DecidedBy, auth.ScopedProductId, HttpContext.RequestAborted);
+        return outcome switch
+        {
+            SecurityLockAdminOutcomes.Ok => Ok(new { id, active = false }),
+            SecurityLockAdminOutcomes.NotFound => NotFound(),
+            SecurityLockAdminOutcomes.Forbidden => Forbid(),
+            _ => BadRequest(new { error = outcome })
+        };
+    }
+
     /// <summary>
-    /// Records an admin decision. Security contract: BAN adds an active hardware ban immediately; RELEASE is
-    /// delivered as a signed verdict at the next report (within five minutes); a lock already banned by ENFORCE
-    /// can never be released, because levels 4 and 5 enforced are irreversible by decision of the owner.
+    /// Records an admin decision. Security contract: BAN adds an active hardware ban immediately; RELEASE marks
+    /// the lock released and atomically resolves every open critical incident for its exact installation. A lock
+    /// already banned by ENFORCE can never be released, because levels 4 and 5 enforced are irreversible.
     /// BAN without an immutable first-receipt hardware link returns 422 hardware_unlinked; the bounded
     /// internal reason is logged without the hardware identifier or proof material.
     /// </summary>
@@ -129,17 +152,70 @@ public partial class AdminController
             case SecurityLockAdminOutcomes.Ok:
                 var row = result.Row!;
                 TagLog("SECURITY_LOCK_DECISION", row.LockId + ":" + row.AdminDecision);
-                return Ok(new { row.Id, row.State, row.AdminDecision, row.AdminDecisionAtUtc });
+                return Ok(new
+                {
+                    row.Id,
+                    row.State,
+                    row.AdminDecision,
+                    row.AdminDecisionAtUtc,
+                    rememberedReleaseDecisionId = row.RememberedReleaseDecisionId,
+                    diagnosticCode = result.DiagnosticCode
+                });
             case SecurityLockAdminOutcomes.NotFound:
                 return NotFound();
             case SecurityLockAdminOutcomes.Forbidden:
                 return Forbid();
             case SecurityLockAdminOutcomes.LockBannedIrreversible:
+            case SecurityLockAdminOutcomes.RecoveryConflict:
                 return Conflict(new { error = result.Outcome });
             case SecurityLockAdminOutcomes.HardwareUnlinked:
                 _logger.LogWarning("Security-lock admin BAN refused for report {ReportId}: {DiagnosticCode}",
                     id, result.DiagnosticCode ?? "report_hardware_unlinked");
                 return UnprocessableEntity(new { error = SecurityLockAdminOutcomes.HardwareUnlinked });
+            default:
+                return BadRequest(new { error = result.Outcome });
+        }
+    }
+
+    /// <summary>
+    /// Explicitly reverses a BANNED lock, its matching open critical incidents, and applicable active hardware bans
+    /// in one authority transaction. This does not weaken RELEASE and does not create a remembered release.
+    /// </summary>
+    /// <param name="id">Exact security-lock report row identifier.</param>
+    /// <param name="request">Required reason, named audit reference, and administrator.</param>
+    [HttpPost("security-locks/{id:guid}/unban")]
+    public async Task<IActionResult> UnbanSecurityLock(Guid id, [FromBody] SecurityLockDecisionRequest request)
+    {
+        var auth = await GetAuthContextAsync();
+        if (!auth.Authorized) return Unauthorized();
+        if (request is null) return BadRequest(new { error = SecurityLockAdminOutcomes.ReasonRequired });
+
+        var admin = HttpContext.RequestServices.GetRequiredService<SecurityLockAdminService>();
+        var result = await admin.UnbanAsync(id, request.Reason, request.AuditReference, request.DecidedBy,
+            auth.ScopedProductId, HttpContext.RequestAborted);
+        switch (result.Outcome)
+        {
+            case SecurityLockAdminOutcomes.Ok:
+                var row = result.Row!;
+                TagLog("SECURITY_LOCK_UNBAN", row.LockId);
+                return Ok(new
+                {
+                    row.Id,
+                    row.State,
+                    row.AdminDecision,
+                    row.AdminDecisionAtUtc,
+                    result.RecoveredIncidentCount,
+                    result.DeactivatedHardwareBanCount,
+                    result.DiagnosticCode
+                });
+            case SecurityLockAdminOutcomes.NotFound:
+                return NotFound();
+            case SecurityLockAdminOutcomes.Forbidden:
+                return Forbid();
+            case SecurityLockAdminOutcomes.RecoveryConflict:
+                return Conflict(new { error = result.Outcome, diagnosticCode = result.DiagnosticCode });
+            case SecurityLockAdminOutcomes.HardwareUnlinked:
+                return UnprocessableEntity(new { error = result.Outcome, diagnosticCode = result.DiagnosticCode });
             default:
                 return BadRequest(new { error = result.Outcome });
         }

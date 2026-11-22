@@ -44,8 +44,21 @@ public sealed class MachineEvidenceObservation
     [MaxLength(64)]
     public string EvidenceSha256 { get; set; } = string.Empty;
 
-    /// <summary>Gets or sets the endpoint of the latest report (<c>ACTIVATE</c>, <c>CHECK</c>, <c>TRIAL</c>).</summary>
-    [MaxLength(16)]
+    /// <summary>
+    /// Maximum length of <see cref="LastEndpoint"/>, shared by the column, the model and the label guard test.
+    /// </summary>
+    /// <remarks>
+    /// Was 16 until TKT-004112: the clone-guard reactivation label (22 characters) then failed on PostgreSQL with
+    /// 22001 and the reactivation's evidence was lost. Every label in <see cref="Services.MachineEvidenceEndpoints"/>
+    /// must fit; a test enforces it, so a new longer label fails in CI instead of in production storage.
+    /// </remarks>
+    public const int MaxEndpointLength = 32;
+
+    /// <summary>
+    /// Gets or sets the endpoint label of the latest report, one of <see cref="Services.MachineEvidenceEndpoints"/>
+    /// (for example <c>CHECK</c> or <c>CLONE_GUARD_REACTIVATE</c>), stored exactly as given (upper-case ASCII).
+    /// </summary>
+    [MaxLength(MaxEndpointLength)]
     public string LastEndpoint { get; set; } = string.Empty;
 
     /// <summary>Gets or sets the client application version of the latest report, truncated to 64 characters.</summary>

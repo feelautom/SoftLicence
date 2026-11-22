@@ -962,6 +962,8 @@ public sealed class LicenseTypeAnalyticsItem
     public string Name { get; set; } = "";
     public bool IsFree { get; set; }
     public int DefaultDurationDays { get; set; }
+    /// <summary>Read-only view of the type's public trial opt-in (TKT-002466); never changed through analytics.</summary>
+    public bool AllowPublicTrial { get; set; }
     public int TotalLicenses { get; set; }
     public int ActiveLicenses { get; set; }
     public int ExpiredLicenses { get; set; }

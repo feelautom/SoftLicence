@@ -27,6 +27,19 @@ namespace SoftLicence.Server.Controllers
             _logger = logger;
         }
 
+        /// <summary>
+        /// Signs an administrator in with the root account from configuration or an enabled database
+        /// user, and issues a persistent 7-day authentication cookie.
+        /// </summary>
+        /// <remarks>
+        /// A failed attempt from a non-whitelisted IP adds 50 threat points under category
+        /// <see cref="ThreatScoreCategory.AdminLoginFailure"/>, which is never shielded by the
+        /// active-client protection (TKT-003189), and always sends a failed-CHANGE_ME_LOGIN_PATH notification.
+        /// </remarks>
+        /// <param name="username">Submitted user name, compared exactly.</param>
+        /// <param name="password">Submitted password, compared with the root secret or the stored hash.</param>
+        /// <param name="returnUrl">Local URL to return to after success; only local redirects are issued.</param>
+        /// <returns>A local redirect on success, a redirect back to the login page on failure, or 500 when the root account is not configured.</returns>
         [HttpPost("login")]
         public async Task<IActionResult> Login([FromForm] string username, [FromForm] string password, [FromForm] string returnUrl = "/")
         {
@@ -91,11 +104,13 @@ namespace SoftLicence.Server.Controllers
                 return LocalRedirect(returnUrl);
             }
 
-            // Échec login — scoring de menace + notification
+            // Failed login: threat scoring, then a notification.
             _logger.LogWarning("[LOGIN] Failed login attempt for user '{Username}' from {IP}", username, clientIp);
             if (!_security.IsWhitelisted(clientIp))
             {
-                await _security.ReportThreatAsync(clientIp, 50, $"Failed login attempt (user: {username})");
+                // The category keeps admin brute force outside the active-client protection (TKT-003189).
+                await _security.ReportThreatAsync(clientIp, 50, $"Failed login attempt (user: {username})",
+                    new ThreatScoreContext(ThreatScoreCategory.AdminLoginFailure, "POST", loginPath));
             }
             _notifier.Notify(NotificationService.Triggers.SecurityAuthFailure,
                 "⚠️ Failed Login Attempt",

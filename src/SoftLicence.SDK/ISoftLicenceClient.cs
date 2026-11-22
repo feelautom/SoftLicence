@@ -42,6 +42,11 @@ namespace SoftLicence.SDK
         /// <summary>
         /// Effectue une demande de version d'essai (Auto-Trial) pour cette machine.
         /// </summary>
+        /// <remarks>
+        /// Le serveur ne délivre ou ne renouvelle une licence que si le type demandé est autorisé à l'essai public
+        /// (réglage AllowPublicTrial du type). Sinon le résultat est un échec portant le code serveur
+        /// LICENSE_TYPE_PUBLIC_TRIAL_NOT_ALLOWED. Passer explicitement le slug du type autorisé.
+        /// </remarks>
         Task<ActivationResult> RequestTrialAsync(string appName, string? appId = null, string typeSlug = "TRIAL", string? appVersion = null, string? customerEmail = null, string? customerName = null);
 
         // LEGACY-EXPIRY(TKT-001430, 2026-12-31): caller-held identifier overload (TKT-001277 lot 5). Remove by 31/12/2026 (see TKT-001430).
@@ -60,6 +65,52 @@ namespace SoftLicence.SDK
         /// <param name="authoritativeHardwareId">Exact 16-character uppercase ASCII hexadecimal hardware authority selected by the Runtime.</param>
         /// <returns>The server status result. Invalid authority syntax throws before any network request.</returns>
         Task<LicenseStatusResult> CheckStatusAsync(string licenseKey, string appName, string? appId, string? appVersion, string authoritativeHardwareId);
+
+        /// <summary>
+        /// Checks a license with the exact Runtime-selected hardware authority, like the overload without
+        /// <paramref name="cloneGuard"/>, and presents the single-use control token pair so the server can detect a
+        /// copied or restored installation (server TKT-003615).
+        /// </summary>
+        /// <param name="licenseKey">License key to check.</param>
+        /// <param name="appName">Server product name.</param>
+        /// <param name="appId">Optional canonical product identifier.</param>
+        /// <param name="appVersion">Optional client version used by server compatibility policy.</param>
+        /// <param name="authoritativeHardwareId">Exact 16-character uppercase ASCII hexadecimal hardware authority selected by the Runtime.</param>
+        /// <param name="cloneGuard">Validated token pair; see <see cref="CloneGuardPresentation"/> for the client contract.</param>
+        /// <returns>
+        /// The status result with <see cref="LicenseStatusResult.CloneGuard"/> filled from the answer. A copy holding a
+        /// stale or missing token gets <c>Success = true</c>, <c>Status = "DUPLICATE_DETECTED"</c> and no licence file.
+        /// Network or server failures return <c>Success = false</c> and a <see langword="null"/> clone guard member:
+        /// resend the same pair.
+        /// </returns>
+        /// <exception cref="ArgumentException">Invalid authority syntax, thrown before any network request.</exception>
+        /// <exception cref="ArgumentNullException"><paramref name="cloneGuard"/> is <see langword="null"/>.</exception>
+        Task<LicenseStatusResult> CheckStatusAsync(string licenseKey, string appName, string? appId, string? appVersion, string authoritativeHardwareId, CloneGuardPresentation cloneGuard);
+
+        /// <summary>
+        /// Guided reactivation of an installation answered <c>DUPLICATE_DETECTED</c> (server TKT-003615): the caller
+        /// becomes the single active copy of its seat and the other copy is suspended at its next check. Counts one
+        /// change in the licence's daily quota of machine changes. Sends the same identity as the status check (system UUID
+        /// and machine evidence when the identifier derives from this machine's UUID), so the server refuses exactly what
+        /// the check refuses.
+        /// </summary>
+        /// <param name="licenseKey">License key of the installation.</param>
+        /// <param name="appName">Server product name.</param>
+        /// <param name="appId">Optional canonical product identifier.</param>
+        /// <param name="appVersion">Optional client version used by server compatibility policy.</param>
+        /// <param name="authoritativeHardwareId">Exact 16-character uppercase ASCII hexadecimal hardware authority selected by the Runtime.</param>
+        /// <param name="nextToken">New token drawn by <see cref="CloneGuardPresentation.GenerateToken"/> and persisted before the call; it becomes the current token on <c>REACTIVATED</c>.</param>
+        /// <param name="vmGenerationId">VM Generation ID (32 hexadecimal characters) or <see langword="null"/>.</param>
+        /// <returns>
+        /// <c>Status = "VALID"</c> with a licence file and <see cref="CloneGuardOutcome.Reactivated"/>;
+        /// <c>Status = "VALID"</c> without licence file and <see cref="CloneGuardOutcome.ReactivationLimitReached"/>
+        /// when the daily quota is exhausted (the other copy stays active; retry after midnight UTC); or the refusing
+        /// status (<c>REVOKED</c>, <c>EXPIRED</c>, <c>UPDATE_REQUIRED</c>, <c>HARDWARE_NOT_ACTIVATED</c>). A network
+        /// failure returns <c>Success = false</c>: retrying with the same <paramref name="nextToken"/> is safe and is
+        /// counted once.
+        /// </returns>
+        /// <exception cref="ArgumentException">Invalid authority, token or VM Generation ID syntax, thrown before any network request.</exception>
+        Task<LicenseStatusResult> ReactivateCloneGuardAsync(string licenseKey, string appName, string? appId, string? appVersion, string authoritativeHardwareId, string nextToken, string? vmGenerationId);
 
         /// <summary>
         /// Valide une licence pour un matériel spécifique (Signature RSA + Hardware ID + Expiration).

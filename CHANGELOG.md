@@ -1,5 +1,22 @@
 # Changelog
 
+## SDK v3.0.0 - préparée le 2026-11-16, non publiée (TKT-003615, TKT-004065)
+
+Major version: this release adds two members to the public interface `ISoftLicenceClient`, which breaks every class that implements it. It was prepared as 2.1.0 and renumbered 3.0.0 before publication; no 2.1.0 package exists.
+
+### Breaking change
+
+- breaking(sdk): `ISoftLicenceClient` gains `CheckStatusAsync(licenseKey, appName, appId, appVersion, authoritativeHardwareId, cloneGuard)` and `ReactivateCloneGuardAsync(...)`; a class that implements this interface itself (test doubles, wrappers, decorators) no longer compiles until it adds both members. Code that only calls `SoftLicenceClient` or the interface is not affected
+
+### Single-use control token (copied installation detection)
+
+- feat(sdk): `CloneGuardPresentation` (validated token pair and optional VM Generation ID, `GenerateToken()` for 32 random bytes in unpadded base64url) and `CloneGuardOutcome`
+- feat(sdk): `CheckStatusAsync(licenseKey, appName, appId, appVersion, authoritativeHardwareId, cloneGuard)` sends the `CloneGuard` member (protocol 1) on `/api/activation/check`; `LicenseStatusResult.CloneGuard` exposes the server answer (`ARMED`, `ACCEPTED`, `REPLAYED`, `DUPLICATE_DETECTED`, `NOT_EVALUATED`, `NOT_APPLICABLE`, `MALFORMED`, `UNSUPPORTED_PROTOCOL`)
+- feat(sdk): `ReactivateCloneGuardAsync(...)` calls `/api/activation/clone-guard/reactivate`: the caller becomes the single active copy of its seat; one unit of the licence daily quota; `REACTIVATION_LIMIT_REACHED` only while the other copy still beats
+- feat(server): token digests per seat (`SeatCloneGuards`), append-only journal (`SeatCloneGuardEvents`), logical status `DUPLICATE_DETECTED` (HTTP 200, no licence file, never a ban nor a threat score), `Security.CloneSuspected` alert, admin read route `GET /api/admin/licenses/{licenseKey}/clone-guard`
+- compatibility(sdk): existing overloads send exactly the same body as 2.0.0 (except `SdkVersion`); the server answer to a request without `CloneGuard` is unchanged
+- compatibility(server): the licence routes only record the announced `SdkVersion` as a diagnostic, and the only server rule that compares it (Runtime hardware-authority migration) requires 2.0.0 or later, so a 3.0.0 client is served like a 2.0.0 client
+
 ## SDK v2.0.0 - 2026-10-03 (TKT-001277, TKT-001312, TKT-001510)
 
 ### Machine identity from the system UUID

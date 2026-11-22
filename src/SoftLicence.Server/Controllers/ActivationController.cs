@@ -2,7 +2,6 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -38,7 +37,6 @@ namespace SoftLicence.Server.Controllers
         private readonly Services.FingerprintService _fingerprint;
         private readonly Services.SeatCleanupService _seatCleanup;
         private readonly Services.HwidReuseAlertService _hwidReuseAlerts;
-        private readonly Services.AdminSecretAuthenticationService _adminSecretAuthentication;
         private readonly Services.ISignedLicenseFileService _signedLicenseFiles;
         private readonly Services.IHardwareAuthorityAliasResolver _hardwareAuthorityAliases;
         private readonly Services.MachineIdentityObservationService _machineIdentityObservations;
@@ -61,7 +59,6 @@ namespace SoftLicence.Server.Controllers
         /// <param name="fingerprint">Optional component fingerprint persistence service.</param>
         /// <param name="seatCleanup">Cross-license seat cleanup service.</param>
         /// <param name="hwidReuseAlerts">Hardware reuse alert service.</param>
-        /// <param name="adminSecretAuthentication">Offline activation administrator authentication service.</param>
         /// <param name="signedLicenseFiles">Central signer used by activation and status responses.</param>
         /// <param name="hardwareAuthorityAliases">Fail-closed resolver for server-authenticated legacy aliases.</param>
         /// <param name="machineIdentityObservations">UUID machine-identity rule and evidence store for UUID-aware clients (TKT-001277).</param>
@@ -80,7 +77,6 @@ namespace SoftLicence.Server.Controllers
             Services.FingerprintService fingerprint,
             Services.SeatCleanupService seatCleanup,
             Services.HwidReuseAlertService hwidReuseAlerts,
-            Services.AdminSecretAuthenticationService adminSecretAuthentication,
             Services.ISignedLicenseFileService signedLicenseFiles,
             Services.IHardwareAuthorityAliasResolver hardwareAuthorityAliases,
             Services.MachineIdentityObservationService machineIdentityObservations,
@@ -99,7 +95,6 @@ namespace SoftLicence.Server.Controllers
             _fingerprint = fingerprint;
             _seatCleanup = seatCleanup;
             _hwidReuseAlerts = hwidReuseAlerts;
-            _adminSecretAuthentication = adminSecretAuthentication;
             _signedLicenseFiles = signedLicenseFiles;
             _hardwareAuthorityAliases = hardwareAuthorityAliases;
             _machineIdentityObservations = machineIdentityObservations;
@@ -109,7 +104,7 @@ namespace SoftLicence.Server.Controllers
         /// <summary>
         /// TEMP-FAIL-OPEN(TKT-001262): temporary compatibility only. Strict Runtime-graph authority
         /// is the intended behavior, but the current code or persisted graph is known to be buggy;
-        /// Franck requested logging instead of refusing legitimate clients. Every logged case must
+        /// The product owner requested logging instead of refusing legitimate clients. Every logged case must
         /// be analysed and corrected, then this branch must return to the strict decision and this
         /// marker must be removed. Cross-authority aliases remain closed, active bans stay enforced,
         /// and the warning is deliberately identifier-free.
@@ -217,8 +212,14 @@ namespace SoftLicence.Server.Controllers
             public string? BuildHash { get; set; }
             /// <summary>Gets or sets the raw system UUID sent by UUID-aware clients (TKT-001277); <c>null</c> for legacy clients.</summary>
             public string? SystemUuid { get; set; }
-            /// <summary>Gets or sets the raw machine evidence object sent by UUID-aware clients; stored for investigation only.</summary>
+            /// <summary>Gets or sets current machine observations for UUID validation and restricted-offer policy; historical public observations never grant authority.</summary>
             public JsonElement? MachineEvidence { get; set; }
+            /// <summary>
+            /// Gets or sets the single-use control token pair of a guard-aware managed check (TKT-003615), or
+            /// <see langword="null"/> for installed versions and the native heartbeat, whose answer stays unchanged.
+            /// Read only by <see cref="CheckStatus"/>; ignored by activation.
+            /// </summary>
+            public Services.CloneGuard.CloneGuardCheckRequest? CloneGuard { get; set; }
         }
 
         public class TrialRequest
@@ -241,28 +242,9 @@ namespace SoftLicence.Server.Controllers
             public string? BuildHash { get; set; }
             /// <summary>Gets or sets the raw system UUID sent by UUID-aware clients (TKT-001277); <c>null</c> for legacy clients.</summary>
             public string? SystemUuid { get; set; }
-            /// <summary>Gets or sets the raw machine evidence object sent by UUID-aware clients; stored for investigation only.</summary>
+            /// <summary>Gets or sets current machine observations for UUID validation and restricted-offer policy; historical public observations never grant authority.</summary>
             public JsonElement? MachineEvidence { get; set; }
         }
-
-        /// <summary>Administrator-authorized offline issuance with an explicit client version when the product requires it.</summary>
-        public sealed class OfflineActivationRequest
-        {
-            public string? LicenseKey { get; set; }
-            public string? HardwareId { get; set; }
-            public string? OfflineRequestCode { get; set; }
-            /// <summary>Declared client version; never inferred from a previous seat or the administrator's software.</summary>
-            public string? AppVersion { get; set; }
-
-            [JsonExtensionData]
-            public Dictionary<string, JsonElement>? UnknownProperties { get; set; }
-        }
-
-        private sealed record OfflineActivationContext(Dictionary<string, string> Features);
-
-        private static readonly Regex OfflineRequestCodeRegex = new(
-            @"^[A-F0-9]{4}(?:-[A-F0-9]{4}){3}$",
-            RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
         private async Task<Product?> FindProductAsync(string name, string? id)
         {
@@ -317,15 +299,16 @@ namespace SoftLicence.Server.Controllers
         /// <param name="cleanKey">Normalized licence key, for logs.</param>
         /// <returns>
         /// <c>null</c> to continue the activation (detached, or nothing to detach); otherwise the refusal response
-        /// when the daily seat-change quota is exhausted or the release graph is unsafe.
+        /// when the daily hardware quota refuses the new identifier (TKT-003751) or the release graph is unsafe.
         /// </returns>
         /// <remarks>
         /// The previous identifier is used only when it is an active seat of this exact licence and differs from the
         /// new one; any other value is ignored and the ordinary seat-limit rule applies. The detachment is recorded as
-        /// a customer <c>UNLINKED_API</c> event, which is what <see cref="Services.SeatChangeQuota"/> counts, and it
-        /// reuses the release authority of <c>/api/activation/deactivate</c> so the commercial assignment ends
-        /// exactly as for a manual detachment. The anonymous five-minute guard of that endpoint does not apply: the
-        /// caller proves the licence key and the held identifier, and the quota bounds repetition.
+        /// an uncounted <c>UNLINKED_API</c> history row and reuses the release authority of
+        /// <c>/api/activation/deactivate</c> so the commercial assignment ends exactly as for a manual detachment.
+        /// <see cref="Services.SeatChangeQuota"/> counts the arrival of the key on the new identifier, checked here
+        /// before anything is detached. The anonymous five-minute guard of that endpoint does not apply: the caller
+        /// proves the licence key and the held identifier, and the quota bounds the number of identifiers per day.
         /// </remarks>
         private async Task<IActionResult?> DetachPreviousHardwareIdAsync(
             License license, string previousHardwareId, string newHardwareId, string cleanKey)
@@ -352,19 +335,22 @@ namespace SoftLicence.Server.Controllers
             catch (Services.DistributionOperationException exception)
             {
                 TagActivationFailure("HARDWARE_ID_SWITCH_UNAVAILABLE");
-                return StatusCode(exception.StatusCode, new { Error = exception.ErrorCode });
+                return DistributionRefusalResult(exception);
             }
             var now = releaseScope.ObservedAtUtc;
 
-            var seatChangeQuota = await Services.SeatChangeQuota.GetStatusAsync(
-                _db, license, now, HttpContext.RequestAborted);
-            if (seatChangeQuota.IsExhausted)
+            // TKT-003751: the daily hardware quota limits the arrival on the new identifier, never the
+            // release of the previous one. Refuse that arrival here, before detaching, so a refusal leaves
+            // the previous seat exactly as it was (a quota refusal never blocks the licence).
+            if (await Services.SeatChangeQuota.IsActivationRefusedAsync(
+                    _db, license, newHardwareId, now, HttpContext.RequestAborted))
             {
+                var limit = Services.SeatChangeQuota.GetDailyLimit(license);
                 _logger.LogWarning(
-                    "HARDWARE_ID_SWITCH_REFUSED licence {LicenseId}: daily seat-change limit reached ({Max}/day) for key '{LicenseKey}'.",
-                    license.Id, seatChangeQuota.Limit, cleanKey);
-                TagActivationFailure("MAX_DAILY_DEACTIVATIONS_REACHED");
-                return BadRequest(string.Format(_localizer["Api_MaxDailyUnlinksReached"].Value, seatChangeQuota.Limit));
+                    "HARDWARE_ID_SWITCH_REFUSED licence {LicenseId}: daily hardware limit reached ({Max}/day) for key '{LicenseKey}'.",
+                    license.Id, limit, cleanKey);
+                TagActivationFailure("MAX_DAILY_ACTIVATIONS_REACHED");
+                return BadRequest(string.Format(_localizer["Api_MaxDailyActivationsReached"].Value, limit));
             }
 
             previousSeat.IsActive = false;
@@ -386,7 +372,7 @@ namespace SoftLicence.Server.Controllers
             catch (Services.DistributionOperationException exception)
             {
                 TagActivationFailure("HARDWARE_ID_SWITCH_UNAVAILABLE");
-                return StatusCode(exception.StatusCode, new { Error = exception.ErrorCode });
+                return DistributionRefusalResult(exception);
             }
 
             _logger.LogInformation(
@@ -401,10 +387,10 @@ namespace SoftLicence.Server.Controllers
         private string DeviceRefusedMessage(Services.MachineIdentityObservationOutcome identity) =>
             string.Format(_localizer["Api_DeviceRefused"].Value, identity.SupportCode);
 
-        private IActionResult ActivationJsonFailure(string errorCode, string errorMessage)
+        private IActionResult ActivationJsonFailure(string errorCode, string errorMessage, int statusCode = StatusCodes.Status200OK)
         {
             TagActivationFailure(errorCode);
-            return Ok(new
+            var payload = new
             {
                 isSuccess = false,
                 errorCode,
@@ -413,8 +399,32 @@ namespace SoftLicence.Server.Controllers
                 errorMessage,
                 correlationId = HttpContext.TraceIdentifier,
                 contractVersion = 1
-            });
+            };
+            return statusCode == StatusCodes.Status200OK ? Ok(payload) : StatusCode(statusCode, payload);
         }
+
+        /// <summary>Generic English refusal message; the client renders its own text from the closed code.</summary>
+        internal const string KeyActivationDisabledMessage =
+            "Key activation is disabled for this license. Activate this device through the publisher's sign-in.";
+
+        /// <summary>Builds the closed 409 <c>key_activation_disabled</c> refusal (TKT-002475).</summary>
+        private IActionResult KeyActivationDisabledFailure() =>
+            ActivationJsonFailure(
+                Services.LicenseKeyActivationChecker.RefusalCode,
+                KeyActivationDisabledMessage,
+                StatusCodes.Status409Conflict);
+
+        /// <summary>
+        /// Returns whether a trial path would admit a new seat on a licence whose key activation is disabled:
+        /// the setting is posed and the machine holds no active seat on that licence (TKT-002475).
+        /// </summary>
+        /// <param name="licenseId">The existing licence found for the machine.</param>
+        /// <param name="hardwareId">The exact requesting hardware identifier.</param>
+        private async Task<bool> KeyActivationRefusesNewSeatAsync(Guid licenseId, string hardwareId) =>
+            await Services.LicenseKeyActivationChecker.IsDisabledAsync(_db, licenseId, HttpContext.RequestAborted)
+            && !await _db.LicenseSeats.AnyAsync(
+                seat => seat.LicenseId == licenseId && seat.HardwareId == hardwareId && seat.IsActive,
+                HttpContext.RequestAborted);
 
         /// <summary>
         /// Rejects a primary hardware identity that violates the exact uppercase ASCII hexadecimal wire contract.
@@ -621,6 +631,29 @@ namespace SoftLicence.Server.Controllers
             return BadRequest("Freemium access has already been used on this machine.");
         }
 
+        /// <summary>Public refusal code returned when an anonymous trial route targets a type that is not opted in.</summary>
+        internal const string PublicTrialNotAllowedCode = "LICENSE_TYPE_PUBLIC_TRIAL_NOT_ALLOWED";
+
+        /// <summary>
+        /// Refuses, before any write, an anonymous public trial route that would create or renew rights for a type
+        /// whose <see cref="LicenseType.AllowPublicTrial"/> is false (TKT-002466). The decision reads only the stored
+        /// per-type setting: no slug, product or commercial rule is evaluated here.
+        /// </summary>
+        /// <param name="type">The resolved license type; a missing type is refused.</param>
+        /// <returns><c>null</c> when the type is opted in, otherwise the typed activation failure.</returns>
+        private IActionResult? RejectIfPublicTrialNotAllowed(LicenseType? type)
+        {
+            if (type?.AllowPublicTrial == true)
+                return null;
+
+            _logger.LogWarning(
+                "Public trial refused: license type {LicenseTypeSlug} ({LicenseTypeId}) is not enabled for public trials.",
+                type?.Slug,
+                type?.Id);
+
+            return ActivationJsonFailure(PublicTrialNotAllowedCode, "This license type is not available as a public trial.");
+        }
+
         private IActionResult? RejectIfNewActivationsDisabled(LicenseType? type)
         {
             if (!DisablesNewActivations(type))
@@ -682,8 +715,8 @@ namespace SoftLicence.Server.Controllers
             return string.Compare(current, minimum, StringComparison.Ordinal) < 0;
         }
 
-        /// <summary>Issues or reuses a trial licence using existing hardware-lock rules. The reserved paid-pass type can only recover an existing key, never receive an unpaid new key. A configured TIAConnect minimum requires an eligible current declaration before renewal, seat mutation or signing.</summary>
-        /// <remarks>Pre-identity refusals are not attributed to a claimed licence. Existing-licence refusal history commits after the business savepoint is rolled back; accepted history shares the existing commit after successful signing. Product-scope ownership changes acquire global and item2 authority before hardware or seat rows, end losing assignments without changing Runtime identity, and roll back with signing failure. History faults use existing technical failure handling.</remarks>
+        /// <summary>Issues or reuses a trial licence using existing hardware-lock rules. Creating, renewing or returning a licence requires the requested type's AllowPublicTrial opt-in (TKT-002466); a held licence is returned only when it is of that type and not of a paid nature, a current licence of another type is refused, and the stored customer e-mail and name are never replaced (TKT-002468). The reserved paid-pass type is always refused. A configured TIAConnect minimum requires an eligible current declaration before renewal, seat mutation or signing.</summary>
+        /// <remarks>New public trials are FREE; restricted existing rights require current physical evidence, while PAID/UNKNOWN recoveries remain exempt. Machine refusals issue no rights and revoke nothing. Pre-identity refusals are not attributed to a claimed licence. Existing-licence refusal history commits after the business savepoint is rolled back; accepted history shares the existing commit after successful signing. Product-scope ownership changes acquire global and item2 authority before hardware or seat rows, end losing assignments without changing Runtime identity, and roll back with signing failure. History faults use existing technical failure handling. The created or returned seat records the PC display name from MachineEvidence through Services.SeatMachineName (TKT-003404), never erasing a stored name.</remarks>
         [HttpPost("trial")]
         public async Task<IActionResult> GetTrial([FromBody] TrialRequest req)
         {
@@ -715,7 +748,7 @@ namespace SoftLicence.Server.Controllers
             HttpContext.Items[LogKeys.AppName] = product.Name;
 
             var trialIdentity = await _machineIdentityObservations.ObserveAsync(
-                product.Id, req.HardwareId, req.SystemUuid, req.MachineEvidence, "TRIAL", req.AppVersion,
+                product.Id, req.HardwareId, req.SystemUuid, req.MachineEvidence, Services.MachineEvidenceEndpoints.Trial, req.AppVersion,
                 HttpContext.RequestAborted);
             if (trialIdentity.IsRefused)
                 return ActivationJsonFailure("DEVICE_REFUSED", DeviceRefusedMessage(trialIdentity));
@@ -729,18 +762,24 @@ namespace SoftLicence.Server.Controllers
                 return BadRequest(string.Format(_localizer["Api_LicenseTypeUnknown"].Value, req.TypeSlug));
             }
 
-            // Vérifier si ce PC a déjà une licence pour ce produit
-            // Priorité : même type demandé > active > expiration la plus récente
-            var requestedSlug = req.TypeSlug.Trim().ToUpper();
-            var existing = await _db.Licenses
-                .Include(l => l.Type).ThenInclude(t => t!.CustomParams)
-                .Where(l => l.ProductId == product.Id
-                    && (l.HardwareId == req.HardwareId
-                        || l.Seats.Any(s => s.HardwareId == req.HardwareId)))
-                .OrderByDescending(l => l.Type != null && l.Type.Slug.ToUpper() == requestedSlug ? 1 : 0)
-                .ThenByDescending(l => l.IsActive ? 1 : 0)
-                .ThenByDescending(l => l.ExpirationDate)
-                .FirstOrDefaultAsync();
+            // A reserved paid pass is never delivered by this anonymous route, not even as a recovery (TKT-002468).
+            if (Services.PersonalDayPassPolicy.IsPassType(type.Slug))
+                return ActivationJsonFailure("PAYMENT_REQUIRED", "A confirmed payment is required for this license type.");
+
+            // TKT-002466/TKT-002468: only an opted-in type may be created, renewed or returned by this anonymous route.
+            var trialNotAllowed = RejectIfPublicTrialNotAllowed(type);
+            if (trialNotAllowed != null)
+                return trialNotAllowed;
+
+            // TKT-002468: a licence held by this HWID is processed only when it is of the requested type and not paid;
+            // a current licence of another type is refused, an expired one leads to creation (switch to the free type).
+            // Renewal on this route stays limited to the hard-coded Community slug (TKT-001889).
+            var heldSelection = await SelectHeldLicenceForPublicTrialAsync(product.Id, type, req.HardwareId,
+                held => string.Equals(held.Type?.Slug, "YOUR_APP_NAME-COMMUNITY", StringComparison.OrdinalIgnoreCase)
+                    && held.Type?.IsRecurring == true && held.Type.AllowPublicTrial);
+            if (heldSelection.Refusal != null)
+                return heldSelection.Refusal;
+            var existing = heldSelection.Held;
 
             if (existing != null)
             {
@@ -751,6 +790,19 @@ namespace SoftLicence.Server.Controllers
                 var trialHistory = await CaptureTrialHistoryAsync(existing, existingTrialTransaction,
                     req.HardwareId, req.AppVersion, "trial_existing");
                 await BeginLegacyHistorySavepointAsync(trialHistory);
+                // TKT-002041: an excluded machine cannot re-create or reactivate its seat on this
+                // existing licence, before any renewal or seat write.
+                try
+                {
+                    await Services.LicenseHardwareExclusionChecker.EnsureNotExcludedAsync(
+                        _db, existing.Id, req.HardwareId, req.HardwareId, HttpContext.RequestAborted);
+                }
+                catch (Services.DistributionOperationException exception) when (IsLicenseHardwareExclusion(exception))
+                {
+                    // TKT-004085: answered like every other refusal of this path instead of escaping as an empty 500.
+                    TagActivationFailure(exception.ErrorCode);
+                    return await PersistLegacyRefusalAsync(trialHistory, LicenseHardwareExcludedFailure());
+                }
 
                 // Révoquée → 403 Forbidden
                 if (!existing.IsActive || Services.LegacyMinimumVersionPolicy.AppliesTo(product.Name) && existing.RevokedAt != null)
@@ -760,15 +812,30 @@ namespace SoftLicence.Server.Controllers
                 }
 
                 var trialVersionRefusal = RejectMinimumVersion(product, req.AppVersion, existing);
+                var trialMachineRefusal = Services.VirtualMachinePolicy.Refusal(existing.CommercialNature,
+                    Services.VirtualMachinePolicy.Classify(req.MachineEvidence));
+                if (trialMachineRefusal != null)
+                    return await PersistLegacyRefusalAsync(trialHistory, ActivationJsonFailure(
+                        trialMachineRefusal, Services.VirtualMachinePolicy.Message(trialMachineRefusal)!));
                 if (trialVersionRefusal != null)
                     return await PersistLegacyRefusalAsync(trialHistory, trialVersionRefusal);
 
                 bool isExpired = existing.ExpirationDate.HasValue && DateTime.UtcNow > existing.ExpirationDate.Value;
-                bool isDifferentType = !string.Equals(existing.Type?.Slug, req.TypeSlug.Trim(), StringComparison.OrdinalIgnoreCase);
+
+                // TKT-002475: only the creation of a new seat on the held licence of the requested type is refused
+                // when its key activation is disabled; an active seat of this machine keeps recovering. An expired
+                // licence of another type never reaches this block (TKT-002468 selection), so creating another
+                // licence is untouched. The refusal never revokes the licence and precedes any renewal or seat write.
+                if (await KeyActivationRefusesNewSeatAsync(existing.Id, req.HardwareId))
+                    return await PersistLegacyRefusalAsync(trialHistory, KeyActivationDisabledFailure());
+
                 bool isCommunitySlug = string.Equals(existing.Type?.Slug, "YOUR_APP_NAME-COMMUNITY", StringComparison.OrdinalIgnoreCase);
 
-                // Renouvellement automatique : UNIQUEMENT Community gratuite expirée qui redemande Community
-                if (isCommunitySlug && existing.Type?.IsRecurring == true && isExpired && !isDifferentType)
+                // Renouvellement automatique : UNIQUEMENT Community gratuite expirée qui redemande Community.
+                // La sélection ci-dessus garantit le même type, ouvert à l'essai public (TKT-002466) ; une licence de ce type
+                // expirée et non renouvelable a déjà été refusée en LICENSE_EXPIRED (TKT-002468). Le slug en dur reste
+                // suivi par TKT-001889.
+                if (isCommunitySlug && existing.Type?.IsRecurring == true && existing.Type.AllowPublicTrial && isExpired)
                 {
                     existing.ExpirationDate = DateTime.UtcNow.AddDays(existing.Type.DefaultDurationDays);
                     _db.LicenseHistories.Add(new LicenseHistory {
@@ -781,32 +848,22 @@ namespace SoftLicence.Server.Controllers
                     _logger.LogInformation("Renouvellement Community : {HardwareId} → expiration {Expiry}", req.HardwareId, existing.ExpirationDate);
                 }
 
-                // Licence expirée + type différent demandé → créer une nouvelle licence
-                // Couvre : Trial FIXE expiré → Community, plan payant expiré → Community
-                if (isExpired && isDifferentType)
+                // Renvoi de la licence du type demandé (valide ou tout juste renouvelée). TKT-002468 : l'e-mail et le nom
+                // enregistrés ne sont jamais remplacés par ceux de la demande. Une licence expirée d'un autre type n'arrive
+                // pas ici : la sélection laisse alors la création ci-dessous (bascule vers le type gratuit).
                 {
-                    _logger.LogInformation("Licence expirée ({OldType}) → création d'une nouvelle licence {NewType} pour {HardwareId}",
-                        existing.Type?.Slug, req.TypeSlug, req.HardwareId);
-                    // Fall through to licence creation below
-                }
-                else
-                {
-                    // Retourner la licence existante (valide, ou plan payant actif non expiré)
-                    // Mise à jour des infos client si fournies
-                    if (!string.IsNullOrWhiteSpace(req.CustomerEmail))
-                        existing.CustomerEmail = req.CustomerEmail;
-                    if (!string.IsNullOrWhiteSpace(req.CustomerName))
-                        existing.CustomerName = req.CustomerName;
-
                     var seat = await _db.LicenseSeats.FirstOrDefaultAsync(s => s.LicenseId == existing.Id && s.HardwareId == req.HardwareId && s.IsActive);
                     if (seat == null)
                     {
-                        _db.LicenseSeats.Add(new LicenseSeat {
+                        seat = new LicenseSeat {
                             LicenseId = existing.Id, HardwareId = req.HardwareId,
                             FirstActivatedAt = DateTime.UtcNow, LastCheckInAt = DateTime.UtcNow,
                             IsActive = true
-                        });
+                        };
+                        _db.LicenseSeats.Add(seat);
                     }
+                    // TKT-003404: display name of the PC, never erased by a request without evidence.
+                    Services.SeatMachineName.Apply(seat, req.MachineEvidence);
                     AddHardwareIdV2Observation(existing, product, "TRIAL_EXISTING", req);
                     await _db.SaveChangesAsync();
                     try
@@ -816,7 +873,7 @@ namespace SoftLicence.Server.Controllers
                     }
                     catch (Services.DistributionOperationException exception)
                     {
-                        return StatusCode(exception.StatusCode, new { Error = exception.ErrorCode });
+                        return DistributionRefusalResult(exception);
                     }
 
                     var model = new LicenseModel
@@ -844,6 +901,11 @@ namespace SoftLicence.Server.Controllers
                         _logger.LogInformation("Licence recovery : Renvoi de la licence existante ({TypeSlug}) pour {HardwareId}", existing.Type?.Slug, req.HardwareId);
                         return Ok(new { LicenseFile = signed });
                     }
+                    catch (Exception ex) when (Services.AssignmentRefusals.TryTranslate(ex, out var assignmentRefusal))
+                    {
+                        // TKT-004085: the database refused the write or the commit itself, so nothing was committed.
+                        return AssignmentTriggerRefusal(ex, assignmentRefusal, "trial_existing");
+                    }
                     catch (Exception ex)
                     {
                         _logger.LogError(ex, "Erreur signature licence recovery pour {HardwareId}", req.HardwareId);
@@ -852,11 +914,11 @@ namespace SoftLicence.Server.Controllers
                 }
             }
 
-            // A paid pass may recover above, but public trial selection must never mint paid time.
-            if (Services.PersonalDayPassPolicy.IsPassType(type.Slug))
-                return ActivationJsonFailure("PAYMENT_REQUIRED", "A confirmed payment is required for this license type.");
-
-            // Sinon, création d'une nouvelle licence Trial
+            // Sinon, création d'une nouvelle licence Trial (type ouvert, aucune licence en cours d'un autre type)
+            var newTrialMachineRefusal = Services.VirtualMachinePolicy.Refusal("FREE",
+                Services.VirtualMachinePolicy.Classify(req.MachineEvidence));
+            if (newTrialMachineRefusal != null)
+                return ActivationJsonFailure(newTrialMachineRefusal, Services.VirtualMachinePolicy.Message(newTrialMachineRefusal)!);
             var newTrialVersionRefusal = RejectMinimumVersion(product, req.AppVersion);
             if (newTrialVersionRefusal != null) return newTrialVersionRefusal;
 
@@ -882,6 +944,7 @@ namespace SoftLicence.Server.Controllers
                 LicenseTypeId = type.Id,
                 LicenseKey = newKey,
                 CustomerName = req.CustomerName ?? "Auto Trial",
+                CommercialNature = "FREE",
                 CustomerEmail = req.CustomerEmail ?? "trial@auto.local",
                 HardwareId = req.HardwareId,
                 ActivationDate = DateTime.UtcNow,
@@ -904,6 +967,8 @@ namespace SoftLicence.Server.Controllers
                 LastCheckInAt = DateTime.UtcNow,
                 IsActive = true
             };
+            // TKT-003404: display name of the PC reported in the evidence.
+            Services.SeatMachineName.Apply(firstSeat, req.MachineEvidence);
             _db.LicenseSeats.Add(firstSeat);
 
             _db.LicenseHistories.Add(new LicenseHistory {
@@ -952,7 +1017,13 @@ namespace SoftLicence.Server.Controllers
             {
                 if (trialTransaction != null && !trialCommitStarted)
                     await trialTransaction.RollbackAsync();
-                return StatusCode(exception.StatusCode, new { Error = exception.ErrorCode });
+                return DistributionRefusalResult(exception);
+            }
+            catch (Exception ex) when (Services.AssignmentRefusals.TryTranslate(ex, out var assignmentRefusal))
+            {
+                // TKT-004085: the database refused the write or the commit itself, so nothing was committed.
+                if (trialTransaction != null && !trialCommitStarted) await trialTransaction.RollbackAsync();
+                return AssignmentTriggerRefusal(ex, assignmentRefusal, "trial_create");
             }
             catch (Exception ex)
             {
@@ -998,93 +1069,25 @@ namespace SoftLicence.Server.Controllers
                 return Task.FromResult<IActionResult>(BadRequest(new { error = "extra_params_not_allowed" }));
             }
 
-            return ActivateCoreAsync(req, offlineContext: null);
-        }
-
-        /// <summary>Activates one uniquely administrator-authorized offline licence, preserving the existing generic403 refusal contract.</summary>
-        /// <param name="req">At most4KiB of offline request data under the existing key, HWID and request-code validation rules.</param>
-        /// <returns>The existing signed success,401/400 before authority,403 generic refusal, or redacted500 when history/activation fails.</returns>
-        /// <remarks>Prechecks capture the loaded licence before predicate evaluation and never infer a resolved HWID or narrower refusal reason. Ban-expiry maintenance retains its separate legacy transaction. Refusal history alone commits in a private context with bounded host-linked finalization. Core delegation preserves its original offline status mapping; no decision is attributed before a unique authorized licence exists.</remarks>
-        [HttpPost("offline")]
-        [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("AdminAPI")]
-        [RequestSizeLimit(4 * 1024)]
-        public async Task<IActionResult> ActivateOffline([FromBody] OfflineActivationRequest req)
-        {
-            HttpContext.Items[LogKeys.AppName] = "SYSTEM";
-            HttpContext.Items[LogKeys.Endpoint] = "OFFLINE_ACTIVATE";
-
-            var auth = await _adminSecretAuthentication.AuthenticateAsync(HttpContext);
-            if (!auth.Authorized)
-                return Unauthorized(new { error = "unauthorized" });
-
-            if (!TryNormalizeOfflineRequest(req, out var cleanKey, out var hardwareId, out var requestCode))
-                return BadRequest(new { error = "invalid_request" });
-
-            var candidates = await _db.Licenses
-                .Include(l => l.Product)
-                .Include(l => l.Type).ThenInclude(t => t!.CustomParams)
-                .Include(l => l.Seats)
-                .Where(l => l.LicenseKey.ToUpper() == cleanKey)
-                .Where(l => !auth.ScopedProductId.HasValue || l.ProductId == auth.ScopedProductId.Value)
-                .Take(2)
-                .ToListAsync();
-
-            if (candidates.Count != 1)
-                return OfflineActivationDenied();
-
-            var license = candidates[0];
-            // Freeze the already authorized loaded graph before evaluating the original
-            // compound predicate. Its ban helper may commit legacy expiry maintenance
-            // in a separate context; this observation does not assert its later result.
-            var offlineObservation = Services.LicenseDecisionHistoryWriter.CaptureObserved(license,
-                DateTimeOffset.UtcNow, null, "authorized_offline_precheck_observation")
-                with { ActivationsToday = null };
-            if (!license.IsActive
-                || license.RevokedAt != null
-                || license.Type == null
-                || license.Type.IsFree
-                || license.ExpirationDate is DateTime expiration && DateTime.UtcNow > expiration
-                || await _security.IsHardwareIdBannedAsync(hardwareId)
-                || !TryBuildOfflineFeatures(license.Type.CustomParams, requestCode, out var features))
-            {
-                return await PersistOfflinePrecheckRefusalAsync(offlineObservation, hardwareId);
-            }
-
-            var activationRequest = new ActivationRequest
-            {
-                LicenseKey = cleanKey,
-                HardwareId = hardwareId,
-                AppName = license.Product?.Name ?? string.Empty,
-                AppVersion = req.AppVersion
-            };
-
-            if (string.IsNullOrWhiteSpace(activationRequest.AppName))
-                return await PersistOfflinePrecheckRefusalAsync(offlineObservation, hardwareId);
-
-            var result = await ActivateCoreAsync(activationRequest, new OfflineActivationContext(features));
-            if (result is OkObjectResult)
-                return result;
-
-            if (result is ObjectResult { StatusCode: >= 500 })
-                return StatusCode(StatusCodes.Status500InternalServerError, new { error = "offline_activation_failed" });
-
-            return OfflineActivationDenied();
+            return ActivateCoreAsync(req);
         }
 
         /// <summary>
         /// Activates or reactivates exactly one canonical seat after resolving any authenticated legacy alias.
         /// Known invalid aliases fail closed before quota or seat creation, while successful responses are signed for the authenticated identifier presented by the caller.
-        /// Auto-trial cannot create the reserved paid-pass type or extend its existing key without payment; paid recovery is retained.
+        /// Restricted online licenses require current physical machine evidence before first-order revocation or business mutation; PAID and UNKNOWN commercial natures remain exempt.
+        /// Auto-trial always refuses the reserved paid-pass type, even as a recovery (TKT-002468).
+        /// Auto-trial creation, recurring renewal and return of a held licence require the type's AllowPublicTrial opt-in, and creation honours DisableNewActivations (TKT-002466).
+        /// Auto-trial returns a held licence only when it is of the resolved type and not of a paid nature (PAID, PAID_TRIAL), refuses a current licence of another type and an expired non-renewable one with typed codes, and never replaces the stored customer e-mail or name (TKT-002468).
         /// Configured TIAConnect minimums require an eligible declared version before paid auto-unban, seat mutation, pass consumption or signing.
         /// </summary>
-        /// <remarks>Existing-license decisions are frozen under global commercial authority followed by item2 and exact hardware locks. Product-scope cleanup deactivates losing seats and ends their assignments without invalidating Runtime identity; signing failure rolls back both winner and loser mutations. Refusals commit history only after business savepoint rollback; unconfirmed history returns the existing technical error while retaining correlation. Auto-trial creation remains a separate producer.</remarks>
+        /// <remarks>Existing-license decisions are frozen under global commercial authority followed by item2 and exact hardware locks. Product-scope cleanup deactivates losing seats and ends their assignments without invalidating Runtime identity; signing failure rolls back both winner and loser mutations. Classic first-order-free cross-subject refusal revokes only the new license atomically with history after business savepoint rollback; all other refusals commit history only; unconfirmed history returns the existing technical error while retaining correlation. Auto-trial creation remains a separate producer. Every seat this path creates, resumes or keeps records the PC display name from MachineEvidence through Services.SeatMachineName (TKT-003404); a request without a usable name leaves the stored one untouched.</remarks>
         /// <param name="req">Validated JSON request containing the submitted primary hardware identity.</param>
-        /// <param name="offlineContext">Optional administrator-authenticated offline feature override.</param>
         /// <returns>An activation response, including typed compatibility refusal without creating a legacy seat.</returns>
-        private async Task<IActionResult> ActivateCoreAsync(ActivationRequest req, OfflineActivationContext? offlineContext)
+        private async Task<IActionResult> ActivateCoreAsync(ActivationRequest req)
         {
             var cleanKey = req.LicenseKey.Trim().ToUpper();
-            TagLog(req, offlineContext == null ? "ACTIVATE" : "OFFLINE_ACTIVATE");
+            TagLog(req, "ACTIVATE");
 
             if (req.ComponentFingerprints != null)
             {
@@ -1099,14 +1102,11 @@ namespace SoftLicence.Server.Controllers
                 return BadRequest(string.Format(_localizer["Api_AppUnknown"].Value, req.AppName));
             }
 
-            if (offlineContext == null)
-            {
-                var activationIdentity = await _machineIdentityObservations.ObserveAsync(
-                    product.Id, req.HardwareId, req.SystemUuid, req.MachineEvidence, "ACTIVATE", req.AppVersion,
-                    HttpContext.RequestAborted);
-                if (activationIdentity.IsRefused)
-                    return ActivationJsonFailure("DEVICE_REFUSED", DeviceRefusedMessage(activationIdentity));
-            }
+            var activationIdentity = await _machineIdentityObservations.ObserveAsync(
+                product.Id, req.HardwareId, req.SystemUuid, req.MachineEvidence, Services.MachineEvidenceEndpoints.Activate, req.AppVersion,
+                HttpContext.RequestAborted);
+            if (activationIdentity.IsRefused)
+                return ActivationJsonFailure("DEVICE_REFUSED", DeviceRefusedMessage(activationIdentity));
 
             // Check ban status. HWID auto-unban is deferred until the license is fully validated.
             var hwidBanned = await _security.IsHardwareIdBannedAsync(req.HardwareId);
@@ -1123,7 +1123,7 @@ namespace SoftLicence.Server.Controllers
             HttpContext.Items[LogKeys.AppName] = product.Name;
 
             // --- INTERCEPTION AUTO-TRIAL ---
-            if (offlineContext == null && (cleanKey.EndsWith("-FREE-TRIAL") || cleanKey == "FREE-TRIAL"))
+            if (cleanKey.EndsWith("-FREE-TRIAL") || cleanKey == "FREE-TRIAL")
             {
                 if (hwidBanned)
                     return ActivationJsonFailure("BANNED", "Access denied by server");
@@ -1131,7 +1131,7 @@ namespace SoftLicence.Server.Controllers
                 _logger.LogInformation("Detection d'une demande AUTO-TRIAL pour {AppName}", product.Name);
                 HttpContext.Items[LogKeys.Endpoint] = "TRIAL_AUTO";
                 
-                // On cherche d'abord une correspondance exacte du Slug avec la clé, sinon le slug "TRIAL" — toujours filtré par produit
+                // On cherche d'abord une correspondance exacte du Slug avec la clé, sinon le slug "TRIAL", toujours filtré par produit
                 var type = await _db.LicenseTypes.Include(t => t.CustomParams).FirstOrDefaultAsync(t => t.ProductId == product.Id && t.Slug.ToLower() == cleanKey.ToLower())
                            ?? await _db.LicenseTypes.Include(t => t.CustomParams).FirstOrDefaultAsync(t => t.ProductId == product.Id && t.Slug.ToLower() == "trial");
 
@@ -1142,12 +1142,23 @@ namespace SoftLicence.Server.Controllers
                     return BadRequest(_localizer["Api_TrialNotEnabled"].Value);
                 }
 
-                // On vérifie si ce PC a déjà une licence pour ce produit
-                var existing = await _db.Licenses
-                    .Include(l => l.Type).ThenInclude(t => t!.CustomParams)
-                    .FirstOrDefaultAsync(l => l.ProductId == product.Id
-                        && (l.HardwareId == req.HardwareId
-                            || l.Seats.Any(s => s.HardwareId == req.HardwareId)));
+                // A reserved paid pass is never delivered by this anonymous route, not even as a recovery (TKT-002468).
+                if (Services.PersonalDayPassPolicy.IsPassType(type.Slug))
+                    return ActivationJsonFailure("PAYMENT_REQUIRED", "A confirmed payment is required for this license type.");
+
+                // TKT-002466/TKT-002468: same per-type opt-in as the trial route, for creation, renewal and return alike.
+                var autoTrialNotAllowed = RejectIfPublicTrialNotAllowed(type);
+                if (autoTrialNotAllowed != null)
+                    return autoTrialNotAllowed;
+
+                // TKT-002468: only a held licence of the resolved type, not paid, is processed; a current licence of
+                // another type is refused; an expired one of another type leads to creation. Recurring types renew.
+                var autoHeldSelection = await SelectHeldLicenceForPublicTrialAsync(product.Id, type, req.HardwareId,
+                    held => held.Type?.IsRecurring == true && held.Type.AllowPublicTrial
+                        && !Services.PersonalDayPassPolicy.IsPassType(held.Type.Slug));
+                if (autoHeldSelection.Refusal != null)
+                    return autoHeldSelection.Refusal;
+                var existing = autoHeldSelection.Held;
 
                 if (existing != null)
                 {
@@ -1158,6 +1169,19 @@ namespace SoftLicence.Server.Controllers
                     var autoTrialHistory = await CaptureTrialHistoryAsync(existing, existingAutoTrialTransaction,
                         req.HardwareId, req.AppVersion, "auto_trial_existing");
                     await BeginLegacyHistorySavepointAsync(autoTrialHistory);
+                    // TKT-002041: an excluded machine cannot re-create or reactivate its seat on
+                    // this existing licence, before any renewal or seat write.
+                    try
+                    {
+                        await Services.LicenseHardwareExclusionChecker.EnsureNotExcludedAsync(
+                            _db, existing.Id, req.HardwareId, req.HardwareId, HttpContext.RequestAborted);
+                    }
+                    catch (Services.DistributionOperationException exception) when (IsLicenseHardwareExclusion(exception))
+                    {
+                        // TKT-004085: answered like every other refusal of this path instead of escaping as an empty 500.
+                        TagActivationFailure(exception.ErrorCode);
+                        return await PersistLegacyRefusalAsync(autoTrialHistory, LicenseHardwareExcludedFailure());
+                    }
 
                     // Révoquée → 403 Forbidden
                     if (!existing.IsActive || Services.LegacyMinimumVersionPolicy.AppliesTo(product.Name) && existing.RevokedAt != null)
@@ -1167,13 +1191,25 @@ namespace SoftLicence.Server.Controllers
                     }
 
                     var autoTrialVersionRefusal = RejectMinimumVersion(product, req.AppVersion, existing);
+                    var autoTrialMachineRefusal = Services.VirtualMachinePolicy.Refusal(existing.CommercialNature,
+                        Services.VirtualMachinePolicy.Classify(req.MachineEvidence));
+                    if (autoTrialMachineRefusal != null)
+                        return await PersistLegacyRefusalAsync(autoTrialHistory, ActivationJsonFailure(
+                            autoTrialMachineRefusal, Services.VirtualMachinePolicy.Message(autoTrialMachineRefusal)!));
                     if (autoTrialVersionRefusal != null)
                         return await PersistLegacyRefusalAsync(autoTrialHistory, autoTrialVersionRefusal);
 
+                    // TKT-002475: same guard as the trial route. The licence was found by this machine, so
+                    // only a missing active seat would be a new admission; recovery of an active seat stays.
+                    if (await KeyActivationRefusesNewSeatAsync(existing.Id, req.HardwareId))
+                        return await PersistLegacyRefusalAsync(autoTrialHistory, KeyActivationDisabledFailure());
+
                     // Récurrent (Community) + expirée → renouvellement automatique
                     // Reserved paid passes never receive free time, even after an erroneous admin recurring toggle.
+                    // TKT-002466: a renewal creates new rights, so it also requires AllowPublicTrial on the held type.
                     if (!Services.PersonalDayPassPolicy.IsPassType(existing.Type?.Slug)
-                        && existing.Type?.IsRecurring == true && existing.ExpirationDate.HasValue && DateTime.UtcNow > existing.ExpirationDate.Value)
+                        && existing.Type?.IsRecurring == true && existing.Type.AllowPublicTrial
+                        && existing.ExpirationDate.HasValue && DateTime.UtcNow > existing.ExpirationDate.Value)
                     {
                         existing.ExpirationDate = DateTime.UtcNow.AddDays(existing.Type.DefaultDurationDays);
                         _db.LicenseHistories.Add(new LicenseHistory {
@@ -1186,22 +1222,28 @@ namespace SoftLicence.Server.Controllers
                         _logger.LogInformation("Renouvellement {TypeSlug} : {HardwareId} → expiration {Expiry}", existing.Type.Slug, req.HardwareId, existing.ExpirationDate);
                     }
 
-                    // Sinon → renvoi tel quel (trial non renouvelable reste expiré côté client)
+                    // Une licence de ce type expirée et non renouvelable a déjà été refusée en LICENSE_EXPIRED par la
+                    // sélection (TKT-002468) : il n'y a pas de « renvoi tel quel » d'une licence expirée.
 
                     // S'assurer que le siège existe (pour les licences créées avant le système de seats)
                     var seat = await _db.LicenseSeats.FirstOrDefaultAsync(s => s.LicenseId == existing.Id && s.HardwareId == req.HardwareId && s.IsActive);
                     if (seat == null)
                     {
-                        _db.LicenseSeats.Add(new LicenseSeat {
+                        var autoTrialSeat = new LicenseSeat {
                             LicenseId = existing.Id, HardwareId = req.HardwareId,
                             FirstActivatedAt = DateTime.UtcNow, LastCheckInAt = DateTime.UtcNow,
                             IsActive = true
-                        });
+                        };
+                        // TKT-003404: display name of the PC reported in the evidence.
+                        Services.SeatMachineName.Apply(autoTrialSeat, req.MachineEvidence);
+                        _db.LicenseSeats.Add(autoTrialSeat);
                         AddHardwareIdV2Observation(existing, product, "TRIAL_AUTO_EXISTING", req);
                         await _db.SaveChangesAsync();
                     }
                     else {
                         seat.LastCheckInAt = DateTime.UtcNow;
+                        // TKT-003404: refresh the PC name when it changed, never erase it.
+                        Services.SeatMachineName.Apply(seat, req.MachineEvidence);
                         AddHardwareIdV2Observation(existing, product, "TRIAL_AUTO_EXISTING", req);
                         await _db.SaveChangesAsync();
                     }
@@ -1212,16 +1254,10 @@ namespace SoftLicence.Server.Controllers
                     }
                     catch (Services.DistributionOperationException exception)
                     {
-                        return StatusCode(exception.StatusCode, new { Error = exception.ErrorCode });
+                        return DistributionRefusalResult(exception);
                     }
 
-                    // Mise à jour des infos client si fournies
-                    if (!string.IsNullOrWhiteSpace(req.CustomerEmail))
-                        existing.CustomerEmail = req.CustomerEmail;
-                    if (!string.IsNullOrWhiteSpace(req.CustomerName))
-                        existing.CustomerName = req.CustomerName;
-                    if (!string.IsNullOrWhiteSpace(req.CustomerEmail) || !string.IsNullOrWhiteSpace(req.CustomerName))
-                        await _db.SaveChangesAsync();
+                    // TKT-002468 : l'e-mail et le nom enregistrés ne sont jamais remplacés par ceux de la demande.
 
                     // On met à jour le log avec la vraie clé trouvée
                     HttpContext.Items[LogKeys.LicenseKey] = existing.LicenseKey;
@@ -1244,6 +1280,11 @@ namespace SoftLicence.Server.Controllers
                             await existingAutoTrialTransaction.CommitAsync();
                         return Ok(new { LicenseFile = signed });
                     }
+                    catch (Exception ex) when (Services.AssignmentRefusals.TryTranslate(ex, out var assignmentRefusal))
+                    {
+                        // TKT-004085: the database refused the write or the commit itself, so nothing was committed.
+                        return AssignmentTriggerRefusal(ex, assignmentRefusal, "auto_trial_existing");
+                    }
                     catch (Exception ex)
                     {
                         _logger.LogError(ex, "Erreur signature recovery trial");
@@ -1251,11 +1292,16 @@ namespace SoftLicence.Server.Controllers
                     }
                 }
 
-                // Recovery above preserves paid keys; only creation of the reserved paid type is denied.
-                if (Services.PersonalDayPassPolicy.IsPassType(type.Slug))
-                    return ActivationJsonFailure("PAYMENT_REQUIRED", "A confirmed payment is required for this license type.");
+                // TKT-002466: creation also honours the closure switch of the type.
+                var autoTrialNewActivationsDisabled = RejectIfNewActivationsDisabled(type);
+                if (autoTrialNewActivationsDisabled != null)
+                    return autoTrialNewActivationsDisabled;
 
                 // Création auto (atomique)
+                var newAutoTrialMachineRefusal = Services.VirtualMachinePolicy.Refusal("FREE",
+                    Services.VirtualMachinePolicy.Classify(req.MachineEvidence));
+                if (newAutoTrialMachineRefusal != null)
+                    return ActivationJsonFailure(newAutoTrialMachineRefusal, Services.VirtualMachinePolicy.Message(newAutoTrialMachineRefusal)!);
                 var newAutoTrialVersionRefusal = RejectMinimumVersion(product, req.AppVersion);
                 if (newAutoTrialVersionRefusal != null) return newAutoTrialVersionRefusal;
 
@@ -1272,6 +1318,7 @@ namespace SoftLicence.Server.Controllers
                 {
                 var newKey = Guid.NewGuid().ToString("D").ToUpper();
                 var newLic = new License {
+                    CommercialNature = "FREE",
                     ProductId = product.Id, LicenseTypeId = type.Id, LicenseKey = newKey,
                     CustomerName = req.CustomerName ?? "Auto Trial", CustomerEmail = req.CustomerEmail ?? "trial@auto.local",
                     HardwareId = req.HardwareId, ActivationDate = DateTime.UtcNow, CreationDate = DateTime.UtcNow,
@@ -1291,6 +1338,8 @@ namespace SoftLicence.Server.Controllers
                     LastCheckInAt = DateTime.UtcNow,
                     IsActive = true
                 };
+                // TKT-003404: display name of the PC reported in the evidence.
+                Services.SeatMachineName.Apply(firstSeat, req.MachineEvidence);
                 _db.LicenseSeats.Add(firstSeat);
 
                 _db.LicenseHistories.Add(new LicenseHistory {
@@ -1336,7 +1385,13 @@ namespace SoftLicence.Server.Controllers
                 {
                     if (autoTrialTx != null && !autoTrialCommitStarted)
                         await autoTrialTx.RollbackAsync();
-                    return StatusCode(exception.StatusCode, new { Error = exception.ErrorCode });
+                    return DistributionRefusalResult(exception);
+                }
+                catch (Exception ex) when (Services.AssignmentRefusals.TryTranslate(ex, out var assignmentRefusal))
+                {
+                    // TKT-004085: the database refused the write or the commit itself, so nothing was committed.
+                    if (autoTrialTx != null && !autoTrialCommitStarted) await autoTrialTx.RollbackAsync();
+                    return AssignmentTriggerRefusal(ex, assignmentRefusal, "auto_trial_create");
                 }
                 catch (Exception ex)
                 {
@@ -1376,7 +1431,7 @@ namespace SoftLicence.Server.Controllers
                 Snapshot = Services.LicenseDecisionHistoryWriter.CaptureObserved(license, DateTimeOffset.UtcNow, null),
                 Transaction = activationTransaction,
                 SubmittedHardwareId = req.HardwareId,
-                Phase = offlineContext == null ? "legacy_activation" : "offline_activation",
+                Phase = "legacy_activation",
                 AppVersion = req.AppVersion
             };
             var hardwareResolution = await _hardwareAuthorityAliases.ResolveAsync(
@@ -1410,6 +1465,19 @@ namespace SoftLicence.Server.Controllers
             legacyHistory.ResolutionSource = hardwareResolution.UsedAlias ? "provider_alias" : "provider_direct";
             legacyHistory.Snapshot = Services.LicenseDecisionHistoryWriter.CaptureObserved(
                 license, DateTimeOffset.UtcNow, authoritativeHardwareId);
+            // TKT-002041: a licence-scoped machine exclusion is a commercial admission refusal
+            // checked before any seat mutation, quota consumption or authority lock.
+            try
+            {
+                await Services.LicenseHardwareExclusionChecker.EnsureNotExcludedAsync(
+                    _db, license.Id, req.HardwareId, authoritativeHardwareId, HttpContext.RequestAborted);
+            }
+            catch (Services.DistributionOperationException exception) when (IsLicenseHardwareExclusion(exception))
+            {
+                // TKT-004085: answered like every other refusal of this path instead of escaping as an empty 500.
+                TagActivationFailure(exception.ErrorCode);
+                return await PersistLegacyRefusalAsync(legacyHistory, LicenseHardwareExcludedFailure());
+            }
             if (hardwareResolution.UsedAlias || compatibilityAliasUsed)
             {
                 await Services.ProductHardwareSeatLockAuthority.AcquireAsync(
@@ -1439,6 +1507,20 @@ namespace SoftLicence.Server.Controllers
                     license.ExpirationDate);
                 return await PersistLegacyRefusalAsync(legacyHistory, BadRequest(_localizer["Api_LicenseExpired"].Value));
             }
+
+            // Decide before auto-unban, first-activation time, seat switch or product cleanup can mutate authority.
+            // Refuse before the separate first-order rule can revoke this licence or unlink another seat.
+            var machineRefusal = Services.VirtualMachinePolicy.Refusal(license.CommercialNature,
+                Services.VirtualMachinePolicy.Classify(req.MachineEvidence));
+            if (machineRefusal != null)
+                return await PersistLegacyRefusalAsync(legacyHistory, ActivationJsonFailure(
+                    machineRefusal, Services.VirtualMachinePolicy.Message(machineRefusal)!));
+
+            if (await Services.FirstOrderFreeActivationPolicy.MustRefuseAsync(
+                _db, license, authoritativeHardwareId, HttpContext.RequestAborted))
+                return await PersistLegacyRefusalAsync(legacyHistory, ActivationJsonFailure(
+                    Services.FirstOrderFreeActivationPolicy.RefusalCode,
+                    "This first-order free license cannot be activated on this computer."), license.Id);
 
             // The licence's own TIAConnect policy also applies when a parent product resolves it.
             var versionProduct = license.Product != null && Services.LegacyMinimumVersionPolicy.AppliesTo(license.Product.Name)
@@ -1568,24 +1650,36 @@ namespace SoftLicence.Server.Controllers
                 // Poste déjà connu : On met à jour la date de passage
                 existingSeat.LastCheckInAt = DateTime.UtcNow;
                 if (!string.IsNullOrEmpty(req.AppVersion)) existingSeat.AppVersion = req.AppVersion;
+                // TKT-003404: refresh the PC name when it changed, never erase it.
+                Services.SeatMachineName.Apply(existingSeat, req.MachineEvidence);
                 license.HardwareId = authoritativeHardwareId;
                 license.ActivationDate = existingSeat.FirstActivatedAt;
                 var resolvedVersion = req.AppVersion ?? existingSeat.AppVersion ?? "Unknown";
                 license.RecoveryCount++;
-                TagLog(req, offlineContext == null ? "RECOVERY" : "OFFLINE_ACTIVATE");
+                TagLog(req, "RECOVERY");
                 _logger.LogInformation("License recovery succeeded for license {LicenseId}.", license.Id);
 
                 _db.LicenseHistories.Add(new LicenseHistory {
                     LicenseId = license.Id,
                     Action = HistoryActions.Recovery,
-                    Details = offlineContext == null
-                        ? string.Format(_localizer["Licenses_Action_Activated"].Value, authoritativeHardwareId, resolvedVersion)
-                        : "Offline license recovery",
+                    Details = string.Format(_localizer["Licenses_Action_Activated"].Value, authoritativeHardwareId, resolvedVersion),
                     PerformedBy = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown"
                 });
             }
             else
             {
+                // TKT-002475: the publisher-owned setting refuses every new seat admission by key
+                // (first activation, identifier switch and automatic switch) while recoveries of an
+                // already-active seat keep working above. No seat or quota write happens on refusal.
+                if (await Services.LicenseKeyActivationChecker.IsDisabledAsync(_db, license.Id, HttpContext.RequestAborted))
+                {
+                    _logger.LogWarning(
+                        "Activation refused: key activation is disabled for license {LicenseId}.",
+                        license.Id);
+                    // Never pass the licence as commercial revocation target: this refusal keeps it active.
+                    return await PersistLegacyRefusalAsync(legacyHistory, KeyActivationDisabledFailure());
+                }
+
                 var newActivationsDisabled = RejectIfNewActivationsDisabled(license.Type);
                 if (newActivationsDisabled != null)
                     return await PersistLegacyRefusalAsync(legacyHistory, newActivationsDisabled);
@@ -1595,7 +1689,7 @@ namespace SoftLicence.Server.Controllers
                     return await PersistLegacyRefusalAsync(legacyHistory, freemiumAlreadyConsumed);
 
                 // LEGACY-EXPIRY(TKT-001430, 2026-12-31): identifier switch, remove by 31/12/2026.
-                if (offlineContext == null && req.PreviousHardwareId != null)
+                if (req.PreviousHardwareId != null)
                 {
                     var switchRefusal = await DetachPreviousHardwareIdAsync(license, req.PreviousHardwareId, authoritativeHardwareId, cleanKey);
                     if (switchRefusal != null)
@@ -1628,17 +1722,19 @@ namespace SoftLicence.Server.Controllers
                     }
                     catch (Services.DistributionOperationException exception)
                     {
+                        // TKT-003751: the switch is refused as an activation on one PC too many
+                        // today, never as an unlink; same code and message as the main new-seat check.
                         if (exception.ReasonCode == "seat_change_quota_exhausted")
                         {
-                            TagActivationFailure("MAX_DAILY_DEACTIVATIONS_REACHED");
+                            TagActivationFailure("MAX_DAILY_ACTIVATIONS_REACHED");
                             return await PersistLegacyRefusalAsync(legacyHistory,
-                                BadRequest(string.Format(_localizer["Api_MaxDailyUnlinksReached"].Value,
-                                    license.Type?.MaxActivationsPerDay ?? 0)));
+                                BadRequest(string.Format(_localizer["Api_MaxDailyActivationsReached"].Value,
+                                    Services.SeatChangeQuota.GetDailyLimit(license))));
                         }
                         TagActivationFailure(exception.ErrorCode == "entitlement_ineligible"
                             ? "LICENSE_DISABLED" : "AUTOMATIC_SEAT_SWITCH_UNAVAILABLE");
                         return await PersistLegacyRefusalAsync(legacyHistory,
-                            StatusCode(exception.StatusCode, new { Error = exception.ErrorCode }));
+                            DistributionRefusalResult(exception));
                     }
                 }
 
@@ -1658,14 +1754,19 @@ namespace SoftLicence.Server.Controllers
                     return await PersistLegacyRefusalAsync(legacyHistory, BadRequest(string.Format(_localizer["Api_MaxActivationsReached"].Value, license.MaxSeats)));
                 }
 
-                // Vérification du quota d'activations par jour
-                var maxPerDay = license.Type?.MaxActivationsPerDay ?? 0;
-                if (maxPerDay > 0 && (license.MaxSeats != 1 || req.PreviousHardwareId != null))
+                // TKT-003751 (owner rule): a key may not be activated on more than N different
+                // identifiers in one UTC day, N = MaxActivationsPerDay x seats read live from the type.
+                // It applies to every seat count; an identifier already activated today and the last
+                // PC of the key are always accepted. Automatic switch and identifier switch above
+                // already ran the same check before releasing anything.
+                var maxPerDay = Services.SeatChangeQuota.GetDailyLimit(license);
+                if (maxPerDay > 0)
                 {
-                    var todayStart = DateTime.UtcNow.Date;
-                    var activationsToday = await _db.LicenseSeats.CountAsync(s => s.LicenseId == license.Id && s.FirstActivatedAt >= todayStart);
-                    legacyHistory.Snapshot = legacyHistory.Snapshot with { ActivationsToday = activationsToday };
-                    if (activationsToday >= maxPerDay)
+                    var quotaNow = DateTime.UtcNow;
+                    var dailyQuota = await Services.SeatChangeQuota.GetStatusAsync(_db, license, quotaNow, HttpContext.RequestAborted);
+                    legacyHistory.Snapshot = legacyHistory.Snapshot with { ActivationsToday = dailyQuota.UsedToday };
+                    if (await Services.SeatChangeQuota.IsActivationRefusedAsync(
+                            _db, license, authoritativeHardwareId, quotaNow, HttpContext.RequestAborted))
                     {
                         TagActivationFailure("MAX_DAILY_ACTIVATIONS_REACHED");
                         _logger.LogWarning("Activation refused: daily activation limit reached for license {LicenseId}.", license.Id);
@@ -1699,13 +1800,13 @@ namespace SoftLicence.Server.Controllers
                 newSeat.UnlinkedAt = null;
                 newSeat.LastCheckInAt = acceptedAtUtc;
                 newSeat.AppVersion = req.AppVersion;
+                // TKT-003404: a resumed seat keeps its previous name unless the evidence carries one.
+                Services.SeatMachineName.Apply(newSeat, req.MachineEvidence);
 
                 _db.LicenseHistories.Add(new LicenseHistory {
                     LicenseId = license.Id,
                     Action = HistoryActions.Activated,
-                    Details = offlineContext == null
-                        ? string.Format(_localizer["Licenses_Action_Activated"].Value, authoritativeHardwareId, req.AppVersion ?? "Unknown")
-                        : "Offline license activation",
+                    Details = string.Format(_localizer["Licenses_Action_Activated"].Value, authoritativeHardwareId, req.AppVersion ?? "Unknown"),
                     PerformedBy = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown"
                 });
 
@@ -1731,7 +1832,7 @@ namespace SoftLicence.Server.Controllers
             }
 
             // Mise à jour du nom client uniquement si la licence n'en avait pas (anonyme réclamée)
-            // L'email est géré dans la section VÉRIFICATION EMAIL ci-dessus — on ne l'écrase jamais
+            // L'email est géré dans la section VÉRIFICATION EMAIL ci-dessus, on ne l'écrase jamais
             if (string.IsNullOrWhiteSpace(license.CustomerName) && !string.IsNullOrWhiteSpace(req.CustomerName))
                 license.CustomerName = req.CustomerName.Trim();
 
@@ -1744,15 +1845,15 @@ namespace SoftLicence.Server.Controllers
             try
             {
                 await _seatCleanup.UnlinkHwidFromOtherProductLicensesAsync(
-                    authoritativeHardwareId, license.Id, license.ProductId, redactSensitiveDetails: offlineContext != null);
+                    authoritativeHardwareId, license.Id, license.ProductId, redactSensitiveDetails: false);
             }
             catch (Services.DistributionOperationException exception)
             {
-                return StatusCode(exception.StatusCode, new { Error = exception.ErrorCode });
+                return DistributionRefusalResult(exception);
             }
 
             // Génération du fichier signé
-            var features = offlineContext?.Features ?? BuildFeatures(license.Type?.CustomParams);
+            var features = BuildFeatures(license.Type?.CustomParams);
 
             try
             {
@@ -1787,6 +1888,11 @@ namespace SoftLicence.Server.Controllers
                     await _hwidReuseAlerts.CheckAndNotifyAsync(license.ProductId, authoritativeHardwareId, license.Id);
                 return Ok(new { LicenseFile = signedLicenseString });
             }
+            catch (Exception ex) when (Services.AssignmentRefusals.TryTranslate(ex, out var assignmentRefusal))
+            {
+                // TKT-004085: the database refused the write or the commit itself, so nothing was committed.
+                return AssignmentTriggerRefusal(ex, assignmentRefusal, "key_activation");
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Erreur lors de la signature de la licence pour '{AppName}'", req.AppName);
@@ -1794,100 +1900,34 @@ namespace SoftLicence.Server.Controllers
             }
         }
 
-        private IActionResult OfflineActivationDenied()
-        {
-            TagActivationFailure("OFFLINE_ACTIVATION_DENIED");
-            return StatusCode(StatusCodes.Status403Forbidden, new { error = "offline_activation_denied" });
-        }
-
-        private static bool TryNormalizeOfflineRequest(
-            OfflineActivationRequest req,
-            out string licenseKey,
-            out string hardwareId,
-            out string requestCode)
-        {
-            licenseKey = string.Empty;
-            hardwareId = string.Empty;
-            requestCode = string.Empty;
-            var normalizedRequestCode = req.OfflineRequestCode?.ToUpperInvariant();
-
-            if (req.UnknownProperties is { Count: > 0 }
-                || string.IsNullOrWhiteSpace(req.LicenseKey)
-                || req.LicenseKey.Length > 128
-                || string.IsNullOrWhiteSpace(req.HardwareId)
-                || req.HardwareId.Length > 512
-                || string.IsNullOrWhiteSpace(normalizedRequestCode)
-                || normalizedRequestCode.Length != 19
-                || !OfflineRequestCodeRegex.IsMatch(normalizedRequestCode))
-            {
-                return false;
-            }
-
-            licenseKey = req.LicenseKey.Trim().ToUpperInvariant();
-            hardwareId = req.HardwareId.Trim();
-            requestCode = normalizedRequestCode;
-            return licenseKey.Length > 0 && hardwareId.Length > 0;
-        }
-
-        private static bool TryBuildOfflineFeatures(
-            IEnumerable<LicenseTypeCustomParam> customParams,
-            string requestCode,
-            out Dictionary<string, string> features)
-        {
-            features = new Dictionary<string, string>(StringComparer.Ordinal);
-            LicenseTypeCustomParam? allowOffline = null;
-
-            foreach (var parameter in customParams)
-            {
-                if (string.IsNullOrWhiteSpace(parameter.Key))
-                    return false;
-
-                var normalizedKey = parameter.Key.Trim();
-                if (normalizedKey.Equals("offlineMode", StringComparison.OrdinalIgnoreCase)
-                    || normalizedKey.Equals("offlineRequestCode", StringComparison.OrdinalIgnoreCase))
-                {
-                    return false;
-                }
-
-                if (normalizedKey.Equals("allowOffline", StringComparison.OrdinalIgnoreCase))
-                {
-                    if (allowOffline != null || !string.Equals(parameter.Key, "allowOffline", StringComparison.Ordinal))
-                        return false;
-                    allowOffline = parameter;
-                }
-
-                if (!features.TryAdd(parameter.Key, parameter.Value))
-                    return false;
-            }
-
-            if (allowOffline == null
-                || !bool.TryParse(allowOffline.Value, out var enabled)
-                || !enabled)
-            {
-                return false;
-            }
-
-            features.Add("offlineMode", bool.TrueString);
-            features.Add("offlineRequestCode", requestCode);
-            return true;
-        }
-
         /// <summary>
-        /// Returns the current license status for the submitted or resolved canonical authority and refreshes a valid signed license for that same authority.
-        /// Non-canonical primary input is rejected without normalization, while known divergent aliases return HARDWARE_AUTHORITY_REFUSED and never fall back to direct legacy identity.
-        /// Ineligible TIAConnect versions return no signed licence, independently of telemetry and commercial tier.
+        /// Single source of the licence status shared by <see cref="CheckStatus"/> and the clone guard reactivation
+        /// (TKT-003615, review 2439): canonical identifier, product, machine identity, hardware and component bans,
+        /// licence lookup, legacy alias resolution, revocation, expiry, seat ownership, minimum version, single use per
+        /// hardware identifier (Freemium) and disabled new activations, in this exact order.
         /// </summary>
-        /// <param name="req">Status request whose hardware identity is checked against submitted and canonical bans.</param>
-        /// <returns>An HTTP status contract with a centralized signed license when the logical status is VALID.</returns>
-        /// <remarks>Security, revocation, expiry and hardware ownership retain priority. Missing client versions are never inferred from historical seats.</remarks>
-        [HttpPost("check")]
-        public async Task<IActionResult> CheckStatus([FromBody] ActivationRequest req)
+        /// <param name="req">Status request; <c>LicenseKey</c>, <c>HardwareId</c> and <c>AppName</c> are required.</param>
+        /// <param name="endpoint">Audit tag and machine-identity endpoint label, <see cref="Services.MachineEvidenceEndpoints.Check"/> or <see cref="Services.MachineEvidenceEndpoints.CloneGuardReactivate"/>.</param>
+        /// <param name="evaluation">Filled with the product, licence, authoritative identifier, alias resolution and logical status when the method returns <see langword="null"/>.</param>
+        /// <returns>
+        /// The early answer of a refusal that ends the request before any status-dependent write (400 non-canonical
+        /// identifier, 404 unknown product or key, 200 <c>DEVICE_REFUSED</c>, <c>REVOKED</c>, <c>UPDATE_REQUIRED</c>,
+        /// <c>HARDWARE_AUTHORITY_REFUSED</c>, minimum-version refusal); <see langword="null"/> when a logical status was
+        /// computed, which may itself be a refusal such as <c>FREEMIUM_HWID_ALREADY_CONSUMED</c>.
+        /// </returns>
+        /// <remarks>
+        /// Any route that can sign a licence file for a check-like request must call this method and sign only when the
+        /// status is <c>VALID</c>, so the two routes can never diverge again (the first reactivation route skipped the
+        /// single-use refusal). Side effects are those the check always had: machine-identity observation, background
+        /// component fingerprint upsert, audit tags.
+        /// </remarks>
+        private async Task<IActionResult?> EvaluateStatusAsync(ActivationRequest req, string endpoint, StatusEvaluation evaluation)
         {
             if (!Services.HardwareAuthorityAliasResolver.IsCanonicalHardwareId(req.HardwareId))
                 return RejectInvalidPrimaryHardwareId();
 
             var cleanKey = req.LicenseKey.Trim().ToUpper();
-            TagLog(req, "CHECK");
+            TagLog(req, endpoint);
 
             var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == req.AppName.ToLower());
             if (product == null)
@@ -1900,7 +1940,7 @@ namespace SoftLicence.Server.Controllers
             HttpContext.Items[LogKeys.AppName] = product.Name;
 
             var checkIdentity = await _machineIdentityObservations.ObserveAsync(
-                product.Id, req.HardwareId, req.SystemUuid, req.MachineEvidence, "CHECK", req.AppVersion,
+                product.Id, req.HardwareId, req.SystemUuid, req.MachineEvidence, endpoint, req.AppVersion,
                 HttpContext.RequestAborted);
             if (checkIdentity.IsRefused)
             {
@@ -2064,6 +2104,81 @@ namespace SoftLicence.Server.Controllers
                     license.Id);
             }
 
+            evaluation.Product = product;
+            evaluation.License = license;
+            evaluation.AuthoritativeHardwareId = authoritativeHardwareId;
+            evaluation.HardwareResolution = hardwareResolution;
+            evaluation.CompatibilityAliasUsed = compatibilityAliasUsed;
+            evaluation.Status = status;
+            evaluation.ErrorMessage = errorMessage;
+            return null;
+        }
+
+        /// <summary>
+        /// Result of <see cref="EvaluateStatusAsync"/> when no early answer was returned. Mutable on purpose: the check
+        /// keeps updating <see cref="Status"/> and <see cref="ErrorMessage"/> with the clone guard decision.
+        /// </summary>
+        private sealed class StatusEvaluation
+        {
+            /// <summary>Gets or sets the product matched by name.</summary>
+            public Product Product { get; set; } = null!;
+            /// <summary>Gets or sets the licence of the key, with type, custom parameters, product and seats loaded and tracked.</summary>
+            public License License { get; set; } = null!;
+            /// <summary>Gets or sets the identifier the status was computed for (after alias resolution).</summary>
+            public string AuthoritativeHardwareId { get; set; } = string.Empty;
+            /// <summary>Gets or sets the alias resolution, used to choose the identifier a licence file is signed for.</summary>
+            public Services.HardwareAuthorityResolution HardwareResolution { get; set; } = null!;
+            /// <summary>Gets or sets whether a logged compatibility alias replaced a refused one.</summary>
+            public bool CompatibilityAliasUsed { get; set; }
+            /// <summary>Gets or sets the logical status (<c>VALID</c> or a refusal status).</summary>
+            public string Status { get; set; } = string.Empty;
+            /// <summary>Gets or sets the message that goes with a refusal status, or <see langword="null"/>.</summary>
+            public string? ErrorMessage { get; set; }
+            /// <summary>Gets the identifier a licence file must be signed for: the submitted one when an alias was used.</summary>
+            public string SigningHardwareId => HardwareResolution.UsedAlias || CompatibilityAliasUsed
+                ? HardwareResolution.SubmittedHardwareId
+                : AuthoritativeHardwareId;
+        }
+
+        /// <summary>
+        /// Returns the current license status for the submitted or resolved canonical authority and refreshes a valid signed license for that same authority.
+        /// Non-canonical primary input is rejected without normalization, while known divergent aliases return HARDWARE_AUTHORITY_REFUSED and never fall back to direct legacy identity.
+        /// Ineligible TIAConnect versions return no signed licence, independently of telemetry and commercial tier.
+        /// </summary>
+        /// <param name="req">Status request whose hardware identity is checked against submitted and canonical bans.</param>
+        /// <returns>An HTTP status contract with a centralized signed license when the logical status is VALID.</returns>
+        /// <remarks>Security, revocation, expiry and hardware ownership retain priority. Missing client versions are never inferred from historical seats. After the ban and device refusals, the caller's own active seat takes the PC display name from MachineEvidence when it changed (TKT-003404); the check never creates a seat and never erases a stored name.</remarks>
+        /// <param name="cloneGuards">Single-use control token authority (TKT-003615); used only when <see cref="ActivationRequest.CloneGuard"/> is present and the status is VALID, and then may turn the answer into the logical status <c>DUPLICATE_DETECTED</c> without licence file.</param>
+        [HttpPost("check")]
+        public async Task<IActionResult> CheckStatus(
+            [FromBody] ActivationRequest req,
+            [FromServices] Services.CloneGuard.SeatCloneGuardService cloneGuards)
+        {
+            var evaluation = new StatusEvaluation();
+            var refusal = await EvaluateStatusAsync(req, Services.MachineEvidenceEndpoints.Check, evaluation);
+            if (refusal != null)
+                return refusal;
+            var product = evaluation.Product;
+            var license = evaluation.License;
+            var authoritativeHardwareId = evaluation.AuthoritativeHardwareId;
+            var hardwareResolution = evaluation.HardwareResolution;
+            var compatibilityAliasUsed = evaluation.CompatibilityAliasUsed;
+            var status = evaluation.Status;
+            var errorMessage = evaluation.ErrorMessage;
+            var cleanKey = req.LicenseKey.Trim().ToUpper();
+
+            // TKT-003615: the single-use control token is evaluated last, only for a guard-aware client whose status is
+            // VALID on an active seat, so every existing refusal keeps priority and consumes no token. A collision
+            // suspends this copy only (no licence file, logical status, HTTP 200: never a ban nor a threat score).
+            var cloneGuardResponse = await EvaluateCloneGuardAsync(
+                req, license, authoritativeHardwareId, status, cloneGuards, HttpContext.RequestAborted);
+            if (cloneGuardResponse?.Outcome == Services.CloneGuard.CloneGuardOutcomes.DuplicateDetected)
+            {
+                status = DuplicateDetectedStatus;
+                errorMessage = DuplicateDetectedMessage;
+                TagActivationFailure(DuplicateDetectedStatus);
+            }
+
             // Générer un fichier de licence frais avec les paramètres actuels du LicenseType
             string? licenseFile = null;
             if (status == "VALID")
@@ -2090,10 +2205,20 @@ namespace SoftLicence.Server.Controllers
             {
                 AddHardwareIdV2Observation(license, product, "CHECK", req);
             }
-            if (addedObservation || hardwareResolution.UsedAlias)
+            // TKT-003404: the periodic check refreshes the PC name of the caller's active seat only. It never creates
+            // a seat, never touches another machine's seat, and runs after the ban and device refusals above, which
+            // return early, so a refused caller cannot rename a seat. No evidence means no change.
+            var checkedSeat = license.Seats.FirstOrDefault(seat => seat.IsActive
+                && string.Equals(seat.HardwareId, authoritativeHardwareId, StringComparison.Ordinal));
+            var renamedSeat = checkedSeat != null && Services.SeatMachineName.Apply(checkedSeat, req.MachineEvidence);
+            if (addedObservation || hardwareResolution.UsedAlias || renamedSeat)
                 await _db.SaveChangesAsync();
 
-            return Ok(new { Status = status, LicenseFile = licenseFile, ErrorMessage = errorMessage });
+            // TKT-003615: the clone guard member is serialized only for a request that carried one, so the answer to an
+            // installed version (and to the native heartbeat) keeps exactly its historical shape.
+            if (cloneGuardResponse == null)
+                return Ok(new { Status = status, LicenseFile = licenseFile, ErrorMessage = errorMessage });
+            return Ok(new { Status = status, LicenseFile = licenseFile, ErrorMessage = errorMessage, CloneGuard = cloneGuardResponse });
         }
 
         public class ResetRequest
@@ -2150,8 +2275,8 @@ namespace SoftLicence.Server.Controllers
 
         /// <summary>
         /// Consumes an authorized reset code and atomically releases all active commercial seat assignments.
-        /// When at least one seat is active, the live daily seat-change quota of
-        /// <see cref="Services.SeatChangeQuota"/> is enforced first; a refusal leaves the code unconsumed.
+        /// Never counted nor refused by the daily hardware quota of
+        /// <see cref="Services.SeatChangeQuota"/> (TKT-003751), which limits only activations on new identifiers.
         /// </summary>
         [HttpPost("reset-confirm")]
         public async Task<IActionResult> ConfirmReset([FromBody] ResetConfirmRequest req)
@@ -2185,7 +2310,7 @@ namespace SoftLicence.Server.Controllers
             }
             catch (Services.DistributionOperationException exception)
             {
-                return StatusCode(exception.StatusCode, new { Error = exception.ErrorCode });
+                return DistributionRefusalResult(exception);
             }
             var now = releaseScope.ObservedAtUtc;
 
@@ -2197,20 +2322,8 @@ namespace SoftLicence.Server.Controllers
                 return BadRequest(_localizer["Api_InvalidResetCode"].Value);
             }
 
-            // A customer reset releases seats like a dashboard or Desktop unlink, so it obeys the
-            // same live daily seat-change quota (TKT-001206). The check runs before the one-time
-            // code is consumed, so a refused reset can be retried after the UTC reset. A reset
-            // with no active seat releases nothing and is not limited.
-            if (license.Seats?.Any(s => s.IsActive) == true)
-            {
-                var seatChangeQuota = await Services.SeatChangeQuota.GetStatusAsync(
-                    _db, license, now, HttpContext.RequestAborted);
-                if (seatChangeQuota.IsExhausted)
-                {
-                    TagActivationFailure("MAX_DAILY_DEACTIVATIONS_REACHED");
-                    return BadRequest(string.Format(_localizer["Api_MaxDailyUnlinksReached"].Value, seatChangeQuota.Limit));
-                }
-            }
+            // TKT-003751 (owner rule): a reset releases seats and is never counted nor refused by
+            // the daily hardware quota, which limits only activations on new identifiers.
 
             // Reset effectif
             license.HardwareId = null;
@@ -2244,7 +2357,7 @@ namespace SoftLicence.Server.Controllers
             }
             catch (Services.DistributionOperationException exception)
             {
-                return StatusCode(exception.StatusCode, new { Error = exception.ErrorCode });
+                return DistributionRefusalResult(exception);
             }
             if (releaseTransaction != null)
                 await releaseTransaction.CommitAsync(HttpContext.RequestAborted);
@@ -2267,7 +2380,7 @@ namespace SoftLicence.Server.Controllers
         /// <summary>
         /// Atomically deactivates the proven canonical seat and ends its commercial assignment while preserving Runtime identity for later authenticated reactivation.
         /// Non-canonical primary input, alias divergence, compatibility retirement, and bans fail before any seat mutation.
-        /// The live daily seat-change quota shared with the Website dashboard is enforced before the release.
+        /// Never counted nor refused by the daily hardware quota (TKT-003751), which limits only activations on new identifiers.
         /// </summary>
         /// <param name="req">Deactivation request containing the submitted identity and audited source.</param>
         /// <returns>A success response only after the exact active canonical seat is deactivated and persisted.</returns>
@@ -2350,7 +2463,7 @@ namespace SoftLicence.Server.Controllers
             }
             catch (Services.DistributionOperationException exception)
             {
-                return StatusCode(exception.StatusCode, new { Error = exception.ErrorCode });
+                return DistributionRefusalResult(exception);
             }
             var now = releaseScope.ObservedAtUtc;
             if (await _security.IsHardwareIdBannedAsync(authoritativeHardwareId))
@@ -2359,17 +2472,8 @@ namespace SoftLicence.Server.Controllers
                 return StatusCode(403, "Access denied");
             }
 
-            // Daily seat-change quota shared with the Website dashboard (TKT-001206). It counts
-            // durable release events, so unlinking, reactivating and unlinking the same seat again
-            // cannot reset the counter; the limit is read live from the licence type.
-            var seatChangeQuota = await Services.SeatChangeQuota.GetStatusAsync(
-                _db, license, now, HttpContext.RequestAborted);
-            if (seatChangeQuota.IsExhausted)
-            {
-                _logger.LogWarning("Deliement refuse : Limite quotidienne atteinte ({Max}/jour) pour la clé '{LicenseKey}'", seatChangeQuota.Limit, cleanKey);
-                TagActivationFailure("MAX_DAILY_DEACTIVATIONS_REACHED");
-                return BadRequest(string.Format(_localizer["Api_MaxDailyUnlinksReached"].Value, seatChangeQuota.Limit));
-            }
+            // TKT-003751 (owner rule): signing out or deactivating is never counted nor refused by
+            // the daily hardware quota; only an activation on a new identifier can be refused.
 
             var seatAge = now - seat.FirstActivatedAt;
             if (seatAge < AnonymousDeactivationGuardWindow
@@ -2411,7 +2515,7 @@ namespace SoftLicence.Server.Controllers
             }
             catch (Services.DistributionOperationException exception)
             {
-                return StatusCode(exception.StatusCode, new { Error = exception.ErrorCode });
+                return DistributionRefusalResult(exception);
             }
             if (releaseTransaction != null)
                 await releaseTransaction.CommitAsync(HttpContext.RequestAborted);

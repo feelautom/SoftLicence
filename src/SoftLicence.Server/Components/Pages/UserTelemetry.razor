@@ -620,7 +620,7 @@
                             <tr class="bg-dark bg-opacity-25 animate-fade">
                                 <td colspan="7" class="p-0 border-start border-4 border-info">
                                     <div class="p-3">
-                                        @if (rec.Type == TelemetryType.Event && rec.EventData != null)
+                                        @if (rec.EventData != null && (rec.Type == TelemetryType.Event || rec.Type == TelemetryType.Error))
                                         {
                                             var props = ParseJsonProperties(rec.EventData.PropertiesJson);
                                             if (props.Any())

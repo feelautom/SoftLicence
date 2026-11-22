@@ -137,6 +137,35 @@ public sealed class MachineEvidenceObservationPostgreSqlTests
         Assert.Null(rows.Single(row => row.RefusalCode == MachineIdentity.RefusalUuidGenericKnown).SystemUuidCanonical);
     }
 
+    /// <summary>
+    /// TKT-004112: the clone-guard reactivation route observes the machine under its own label, the longest one in
+    /// use. On PostgreSQL the label must fit the column, otherwise storage fails (22001) and the reactivation's
+    /// machine evidence is silently lost, both for a new row and for an update of an existing one.
+    /// </summary>
+    [Fact]
+    public async Task CloneGuardReactivationLabel_IsStored_OnInsertAndOnUpdate()
+    {
+        await using var provision = await Provision.CreateAsync();
+        var service = CreateService(provision.ConnectionString);
+        var hardwareId = MachineIdentity.FromUuid(Uuid).HardwareId!;
+        var evidence = Json("{\"bios\":\"SN-4112\"}");
+        var insertedProduct = Guid.NewGuid();
+        var updatedProduct = Guid.NewGuid();
+
+        await service.ObserveAsync(insertedProduct, hardwareId, Uuid, evidence, MachineEvidenceEndpoints.CloneGuardReactivate, "3.0.0", default);
+        await service.ObserveAsync(updatedProduct, hardwareId, Uuid, evidence, MachineEvidenceEndpoints.Check, "3.0.0", default);
+        await service.ObserveAsync(updatedProduct, hardwareId, Uuid, evidence, MachineEvidenceEndpoints.CloneGuardReactivate, "3.0.0", default);
+
+        await using var db = CreateDb(provision.ConnectionString);
+        var inserted = Assert.Single(await db.MachineEvidenceObservations.AsNoTracking()
+            .Where(row => row.ProductId == insertedProduct).ToListAsync());
+        Assert.Equal(MachineEvidenceEndpoints.CloneGuardReactivate, inserted.LastEndpoint);
+        var updated = Assert.Single(await db.MachineEvidenceObservations.AsNoTracking()
+            .Where(row => row.ProductId == updatedProduct).ToListAsync());
+        Assert.Equal(MachineEvidenceEndpoints.CloneGuardReactivate, updated.LastEndpoint);
+        Assert.Equal(2, updated.ObservationCount);
+    }
+
     private static MachineEvidenceObservation Row(Guid productId) => new()
     {
         ProductId = productId,
@@ -170,45 +199,14 @@ public sealed class MachineEvidenceObservationPostgreSqlTests
 
         public static async Task<Provision> CreateAsync()
         {
-            var configured = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES");
-            if (string.IsNullOrWhiteSpace(configured))
-                throw new InvalidOperationException("SOFTLICENCE_RUNTIME_TEST_POSTGRES is required for PostgreSQL contract tests.");
-
-            var database = "machine_evidence_" + Guid.NewGuid().ToString("N");
-            var maintenance = new NpgsqlConnectionStringBuilder(configured) { Database = "postgres" }.ConnectionString;
-            await using (var connection = new NpgsqlConnection(maintenance))
+            var clone = await PostgreSqlModelDatabase.CloneAsync("machine_evidence");
+            return new Provision(clone.MaintenanceConnectionString, clone.DatabaseName)
             {
-                await connection.OpenAsync();
-                await using var command = connection.CreateCommand();
-                command.CommandText = $"CREATE DATABASE \"{database}\"";
-                await command.ExecuteNonQueryAsync();
-            }
-
-            var provision = new Provision(maintenance, database)
-            {
-                ConnectionString = new NpgsqlConnectionStringBuilder(configured) { Database = database }.ConnectionString
+                ConnectionString = clone.ConnectionString
             };
-            try
-            {
-                await using var db = CreateDb(provision.ConnectionString);
-                await db.Database.MigrateAsync();
-                return provision;
-            }
-            catch
-            {
-                await provision.DisposeAsync();
-                throw;
-            }
         }
 
         public async ValueTask DisposeAsync()
-        {
-            NpgsqlConnection.ClearAllPools();
-            await using var connection = new NpgsqlConnection(maintenance);
-            await connection.OpenAsync();
-            await using var command = connection.CreateCommand();
-            command.CommandText = $"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)";
-            await command.ExecuteNonQueryAsync();
-        }
+            => await PostgreSqlModelDatabase.DropAsync(maintenance, database);
     }
 }

@@ -22,7 +22,7 @@ using Xunit;
 namespace SoftLicence.Tests.Server;
 
 /// <summary>Real local HTTP/PG evidence for additive migrations, atomic paid issuance, races and authority preservation.</summary>
-public sealed class PersonalDayPassPostgreSqlTests
+public sealed partial class PersonalDayPassPostgreSqlTests
 {
     /// <summary>Proves an actual purchased pass keeps all paid time deferred on version refusal, then starts once after updating.</summary>
     [Theory]
@@ -73,6 +73,65 @@ public sealed class PersonalDayPassPostgreSqlTests
         Assert.Equal(1, await after.LicenseHistories.CountAsync(row => row.Action == "PERSONAL_PASS_FIRST_ACTIVATION_STARTED"));
     }
 
+    /// <summary>Reproduces real classic cross-subject free-intro activation through HTTP and PostgreSQL, preserving the old authority.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Tkt1424_FirstOrderFreeOnAnotherSubjectsHardware_RevokesOnlyNewLicense(bool oldSeatActive)
+    {
+        await using var f = await Fixture.CreateAsync();
+        var old = await f.ReadResponseAsync(f.Request());
+        var hardware = VmPolicyHardware;
+        await ActivatePhysicalCommercialAsync(f, old.LicenseKey, hardware);
+        await using (var setup = f.Db())
+        {
+            var seat = await setup.LicenseSeats.SingleAsync();
+            if (!oldSeatActive)
+            {
+                seat.IsActive = false;
+                seat.UnlinkedAt = DateTime.UtcNow;
+                await setup.SaveChangesAsync();
+            }
+        }
+        var request = f.Request() with { CommercialSubjectId = Guid.NewGuid() };
+        // JSON uses the published wire contract so this regression compiles against the pre-fix server.
+        var payload = JsonSerializer.SerializeToNode(request)!.AsObject();
+        payload["commercialEvidence"] = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(new
+        {
+            version = 2, operationId = request.OperationId, orderId = "intro-" + request.OperationId,
+            commercialSubjectId = request.CommercialSubjectId, nature = "FIRST_ORDER_FREE",
+            paidAmountMinor = 0, currency = "eur"
+        }));
+        using var issuance = await f.Client.PostAsJsonAsync("/api/admin/personal-day-passes/payments", payload);
+        Assert.Equal(HttpStatusCode.OK, issuance.StatusCode);
+        var issued = (await issuance.Content.ReadFromJsonAsync<AdminController.PersonalDayPassResponse>())!;
+        await using var before = f.Db();
+        var oldLicense = JsonSerializer.Serialize(await before.Licenses.AsNoTracking().SingleAsync(x => x.Id == old.LicenseId));
+        var oldSeat = JsonSerializer.Serialize(await before.LicenseSeats.AsNoTracking().SingleAsync(x => x.LicenseId == old.LicenseId));
+        using var activation = await f.Client.PostAsJsonAsync("/api/activation", new
+        {
+            AppName = f.ProductName, issued.LicenseKey, HardwareId = hardware,
+            SystemUuid = VmPolicyUuid, MachineEvidence = VmPolicyEvidence("Dell Inc.", "Precision 7680"),
+            AppVersion = "2.4.600", CustomerEmail = request.CustomerEmail
+        });
+        var body = await activation.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("licenseFile", body, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("FIRST_ORDER_FREE_HARDWARE_CONFLICT", body, StringComparison.Ordinal);
+        await using var after = f.Db();
+        var denied = await after.Licenses.AsNoTracking().SingleAsync(x => x.Id == issued.LicenseId);
+        Assert.False(denied.IsActive);
+        Assert.NotNull(denied.RevokedAt);
+        Assert.Equal("FIRST_ORDER_FREE_HARDWARE_CONFLICT", denied.RevocationReason);
+        Assert.Equal(1, await after.LicenseHistories.CountAsync(x => x.LicenseId == issued.LicenseId && x.Action == "FIRST_ORDER_FREE_REVOKED"));
+        var decision = await after.LicenseHistories.SingleAsync(x => x.LicenseId == issued.LicenseId && x.Action == "ACTIVATION_DECISION_V1");
+        Assert.Contains("\"outcome\":\"refused\"", decision.Details);
+        Assert.Contains("FIRST_ORDER_FREE_HARDWARE_CONFLICT", decision.Details);
+        Assert.False(await after.LicenseHistories.AnyAsync(x => x.LicenseId == issued.LicenseId && x.Action == "PERSONAL_PASS_FIRST_ACTIVATION_STARTED"));
+        Assert.Equal(oldLicense, JsonSerializer.Serialize(await after.Licenses.AsNoTracking().SingleAsync(x => x.Id == old.LicenseId)));
+        Assert.Equal(oldSeat, JsonSerializer.Serialize(await after.LicenseSeats.AsNoTracking().SingleAsync(x => x.LicenseId == old.LicenseId)));
+        Assert.False(await after.LicenseSeats.AnyAsync(x => x.LicenseId == issued.LicenseId));
+        Assert.False(await after.LicenseHistories.AnyAsync(x => x.LicenseId == old.LicenseId && x.Action == HistoryActions.AutoUnlinkedProductScope));
+    }
     /// <summary>Representative fixture values; production capability authority remains in the persisted catalogue.</summary>
     private static readonly IReadOnlyDictionary<string, string> FixturePaidFeatures = new Dictionary<string, string>(StringComparer.Ordinal)
     {
@@ -81,7 +140,7 @@ public sealed class PersonalDayPassPostgreSqlTests
         ["hasPLCSim"] = "true", ["hasPrefix"] = "false", ["hasReports"] = "true", ["hasVcs"] = "true",
         ["hasTestHarness"] = "true", ["hasPatterns"] = "true", ["hasPipelines"] = "true", ["hasCodesys"] = "true",
         ["hasClassroom"] = "true", ["hasRemoteAccess"] = "true", ["hasRemoteArtifacts"] = "true",
-        ["maxOpenProjects"] = "0", ["allowOffline"] = "false", ["maintenanceDurationDays"] = "365",
+        ["maxOpenProjects"] = "0", ["maintenanceDurationDays"] = "365",
         ["maxApiPerDay"] = "true", ["maxApiPerHour"] = "true", ["maxCopilotPerDay"] = "true",
         ["maxCopilotPerHour"] = "true", ["maxMajorVersion"] = "2", ["maxMcpPerDay"] = "true",
         ["maxMcpPerHour"] = "true", ["version"] = "2"
@@ -706,7 +765,11 @@ public sealed class PersonalDayPassPostgreSqlTests
         Assert.Equal(issued.CurrentExpirationUtc, (await observer.Licenses.SingleAsync()).ExpirationDate);
     }
 
-    /// <summary>A failure after license creation rolls back provenance, ownership and payment with it.</summary>
+    /// <summary>
+    /// A failure after license creation rolls back provenance, ownership and payment with it. Since TKT-004085 the
+    /// unhandled database error is answered by the API safety net as a 500 JSON <c>internal_error</c> with a correlation
+    /// reference, without the database text, instead of propagating out of the test server.
+    /// </summary>
     [Fact]
     public async Task ReceiptFailureRollsBackEntireIssuanceAndRetrySucceeds()
     {
@@ -717,9 +780,15 @@ public sealed class PersonalDayPassPostgreSqlTests
             CREATE TRIGGER tkt991_fail BEFORE INSERT ON "PersonalDayPassOperations" FOR EACH ROW EXECUTE FUNCTION tkt991_fail_receipt();
             """);
         var request = f.Request();
-        // TestServer propagates unhandled server exceptions instead of synthesizing the socket-host 500.
-        var failed = await Assert.ThrowsAsync<DbUpdateException>(() => f.PostAsync(request));
-        Assert.IsType<PostgresException>(failed.InnerException);
+        using var failed = await f.PostAsync(request);
+        Assert.Equal(HttpStatusCode.InternalServerError, failed.StatusCode);
+        var failedText = await failed.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("synthetic receipt failure", failedText, StringComparison.Ordinal);
+        using (var failedBody = JsonDocument.Parse(failedText))
+        {
+            Assert.Equal("internal_error", failedBody.RootElement.GetProperty("error").GetString());
+            Assert.False(string.IsNullOrWhiteSpace(failedBody.RootElement.GetProperty("correlationId").GetString()));
+        }
         Assert.Equal(0, await db.Licenses.CountAsync());
         Assert.Equal(0, await db.PersonalDayPassPayments.CountAsync());
         Assert.Equal(0, await db.LicenseProvisioningRequests.CountAsync());
@@ -810,7 +879,10 @@ public sealed class PersonalDayPassPostgreSqlTests
         await toggles.SaveChangesAsync();
     }
 
-    /// <summary>FREE-TRIAL may recover a paid key but cannot extend it, even if an administrator toggles recurring.</summary>
+    /// <summary>
+    /// FREE-TRIAL neither returns nor extends a paid key, even if an administrator toggles recurring: the resolved TRIAL
+    /// type is closed to public trials, so the typed refusal comes first (TKT-002468; the route used to return the key).
+    /// </summary>
     [Fact]
     public async Task FreeTrialRecoveryPreservesPaidKeyAndExpiredTime()
     {
@@ -826,7 +898,10 @@ public sealed class PersonalDayPassPostgreSqlTests
         await db.SaveChangesAsync();
         using var response = await f.Client.PostAsJsonAsync("/api/activation", new { AppName = f.ProductName,
             LicenseKey = "FREE-TRIAL", HardwareId = license.HardwareId, AppVersion = "2.2.999" });
-        Assert.True(response.StatusCode == HttpStatusCode.OK, await response.Content.ReadAsStringAsync());
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.True(response.StatusCode == HttpStatusCode.OK, body);
+        Assert.DoesNotContain("licenseFile", body, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(SoftLicence.Server.Controllers.ActivationController.PublicTrialNotAllowedCode, body, StringComparison.Ordinal);
         var after = await db.Licenses.AsNoTracking().SingleAsync();
         Assert.Equal(paid.LicenseKey, after.LicenseKey);
         Assert.Equal(paid.CurrentExpirationUtc, after.ExpirationDate);
@@ -941,6 +1016,38 @@ public sealed class PersonalDayPassPostgreSqlTests
             await db.SaveChangesAsync();
             return license;
         }
+        /// <summary>Commercial subject of the fixture account, as the Website sends it.</summary>
+        public Guid SubjectId => subjectId;
+
+        /// <summary>
+        /// TKT-003260: seeds a key of the fixture product with its own per-customer licence type, as the configurator and
+        /// support recoveries create them, an expiry, stored customer text that differs from the Website profile, and an
+        /// optional active owner (null: no ownership row at all) and partner code.
+        /// </summary>
+        public async Task<License> SeedForeignTypeLicenseAsync(DateTime expirationUtc, Guid? ownerSubject, string? partnerCode = null)
+        {
+            await using var db = Db();
+            var type = new LicenseType { ProductId = productId, Name = "Configurator - Customer",
+                Slug = "CFG-TEST-" + Guid.NewGuid().ToString("N")[..8].ToUpperInvariant(),
+                DefaultDurationDays = 30, DefaultMaxSeats = 1, DefaultAllowedVersions = "2.*", IsRecurring = true };
+            db.Add(type);
+            await db.SaveChangesAsync();
+            var license = new License { ProductId = productId, LicenseTypeId = type.Id,
+                LicenseKey = Guid.NewGuid().ToString("D").ToUpperInvariant(), ExpirationDate = expirationUtc,
+                ValidityDays = null, MaxSeats = 1, AllowedVersions = "2.*", PartnerCode = partnerCode,
+                CustomerEmail = "Buyer@Example.test", CustomerName = "Configurator customer" };
+            db.Add(license);
+            if (ownerSubject is Guid owner)
+            {
+                if (!await db.RuntimeRecoveryCommercialSubjects.AnyAsync(s => s.ProductId == productId && s.Id == owner))
+                    db.Add(new RuntimeRecoveryCommercialSubject { ProductId = productId, Id = owner, CreatedAtUtc = DateTime.UtcNow });
+                db.Add(new RuntimeRecoveryCommercialOwnership { Id = Guid.NewGuid(), ProductId = productId,
+                    LicenseId = license.Id, OwnerSubjectId = owner, State = "ACTIVE", CreatedAtUtc = DateTime.UtcNow });
+            }
+            await db.SaveChangesAsync();
+            return license;
+        }
+
         /// <summary>Attaches an observed current snapshot; the caller controls whether to allocate a fresh operation UUID.</summary>
         public AdminController.PersonalDayPassRequest Extend(AdminController.PersonalDayPassRequest request, AdminController.PersonalDayPassResponse response) =>
             request with { ExpectedLicenseId = response.LicenseId, ExpectedOwnershipId = response.CurrentOwnershipId,
@@ -977,28 +1084,18 @@ public sealed class PersonalDayPassPostgreSqlTests
             return (await response.Content.ReadFromJsonAsync<AdminController.PersonalDayPassResponse>())!;
         }
 
-        /// <summary>Creates and migrates only an owned generated database; a non-loopback target is always rejected.</summary>
+        /// <summary>Clones only an owned current-schema database; a non-loopback target is always rejected.</summary>
         public static async Task<Fixture> CreateAsync()
         {
-            var settings = new NpgsqlConnectionStringBuilder(Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES")
-                ?? throw new InvalidOperationException("A synthetic loopback PostgreSQL runner is required."));
-            if (settings.Host is not ("localhost" or "127.0.0.1" or "::1")) throw new InvalidOperationException("Loopback required.");
-            var database = "tkt991_" + Guid.NewGuid().ToString("N");
-            settings.Database = "postgres";
-            var maintenance = settings.ConnectionString;
-            await using (var admin = new NpgsqlConnection(maintenance))
-            {
-                await admin.OpenAsync();
-                await using var command = new NpgsqlCommand($"CREATE DATABASE \"{database}\"", admin);
-                await command.ExecuteNonQueryAsync();
-            }
-            settings.Database = database;
-            var fixture = new Fixture(maintenance, database, settings.ConnectionString);
+            var clone = await PostgreSqlModelDatabase.CloneAsync("day_pass");
+            var fixture = new Fixture(
+                clone.MaintenanceConnectionString,
+                clone.DatabaseName,
+                clone.ConnectionString);
             try
             {
                 await using var db = fixture.Db();
-                await db.Database.MigrateAsync();
-                var product = new Product { Name = database, ApiSecret = "tkt991-fixture-product" };
+                var product = new Product { Name = clone.DatabaseName, ApiSecret = "tkt991-fixture-product" };
                 // Signing material is generated in memory and encrypted with the fixture's ephemeral data protector.
                 using var rsa = RSA.Create(2048);
                 using var scope = fixture.host.Services.CreateScope();
@@ -1019,10 +1116,7 @@ public sealed class PersonalDayPassPostgreSqlTests
         public async ValueTask DisposeAsync()
         {
             Client.Dispose(); await host.DisposeAsync();
-            await using var admin = new NpgsqlConnection(maintenance);
-            await admin.OpenAsync();
-            await using var command = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)", admin);
-            await command.ExecuteNonQueryAsync();
+            await PostgreSqlModelDatabase.DropAsync(maintenance, database);
         }
     }
 }

@@ -251,9 +251,12 @@ public sealed class LicenseDecisionHistoryPresentationTests
         var client = new SoftLicenceAnalyticsClient(http, Options.Create(new SoftLicenceMcpOptions
             { SoftLicenceBaseUrl = "https://synthetic.invalid", SoftLicenceApiKey = "synthetic" }));
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var refusal = await Assert.ThrowsAsync<SoftLicenceProviderRefusalException>(() =>
             client.GetRuntimeEnrollmentAuthorityDiagnosticAsync(Guid.NewGuid().ToString("D"), null,
                 "tiaconnect", CancellationToken.None));
+
+        Assert.Equal("ANALYTICS_SERVER_ERROR", refusal.ErrorCode);
+        Assert.Equal((int)HttpStatusCode.BadGateway, refusal.StatusCode);
     }
 
     /// <summary>A large provider page stays composable instead of becoming an unreadable intermediate artifact.</summary>

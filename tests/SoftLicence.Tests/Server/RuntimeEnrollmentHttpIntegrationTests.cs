@@ -346,7 +346,8 @@ public sealed class RuntimeEnrollmentHttpIntegrationTests
 
     /// <summary>
     /// All three critical recovery transports preserve business denial versus unavailable
-    /// infrastructure without exposing the bounded internal assignment diagnostic.
+    /// infrastructure. Since TKT-004106 an assignment-state diagnostic (relation missing) is published as
+    /// <c>reasonCode</c>, while a plain released-seat diagnostic (<c>assignment_missing</c>) stays server-side.
     /// </summary>
     [Fact]
     public async Task CriticalRecoveryRoutes_CommercialDenialAndUnavailable_KeepDistinctStatus()
@@ -390,7 +391,7 @@ public sealed class RuntimeEnrollmentHttpIntegrationTests
             Assert.Equal(HttpStatusCode.UnprocessableEntity, denied.StatusCode);
             Assert.Equal("{\"error\":\"authority_ineligible\"}", await denied.Content.ReadAsStringAsync());
             Assert.Equal(HttpStatusCode.ServiceUnavailable, unavailable.StatusCode);
-            Assert.Equal("{\"error\":\"authority_unavailable\"}",
+            Assert.Equal("{\"error\":\"authority_unavailable\",\"reasonCode\":\"assignment_relation_missing\"}",
                 await unavailable.Content.ReadAsStringAsync());
             AssertNoStore(denied);
             AssertNoStore(unavailable);
@@ -411,7 +412,7 @@ public sealed class RuntimeEnrollmentHttpIntegrationTests
                     "https://runtime.example.test"),
                 Interlocked.Increment(ref calls) > 1,
                 exact));
-        using var factory = CreateFactory(enrollment.Object);
+        using var factory = CreateFactory(enrollment.Object, allowLicenseBootstrap: true);
         using var client = factory.CreateClient();
 
         using var first = await PostPrepareAsync(client);
@@ -441,7 +442,7 @@ public sealed class RuntimeEnrollmentHttpIntegrationTests
                     "https://runtime.example.test") { SecurityEpoch = 5 },
                 false,
                 exact));
-        using var factory = CreateFactory(enrollment.Object);
+        using var factory = CreateFactory(enrollment.Object, allowLicenseBootstrap: true);
         using var client = factory.CreateClient();
 
         using var response = await client.PostAsync(
@@ -580,9 +581,38 @@ public sealed class RuntimeEnrollmentHttpIntegrationTests
         Assert.Equal(HttpStatusCode.UnprocessableEntity, denied.StatusCode);
         Assert.Equal("{\"error\":\"refresh_ineligible\"}", await denied.Content.ReadAsStringAsync());
         Assert.Equal(HttpStatusCode.ServiceUnavailable, unavailable.StatusCode);
-        Assert.Equal("{\"error\":\"authority_unavailable\"}", await unavailable.Content.ReadAsStringAsync());
+        Assert.Equal("{\"error\":\"authority_unavailable\",\"reasonCode\":\"assignment_relation_missing\"}",
+            await unavailable.Content.ReadAsStringAsync());
         AssertNoStore(denied);
         AssertNoStore(unavailable);
+    }
+
+    /// <summary>
+    /// TKT-004106: a quarantined assignment keeps the public <c>refresh_ineligible</c> code and publishes its bounded
+    /// reason, while a hardware ban under the same code stays without reason (anti-piracy refusals stay opaque).
+    /// </summary>
+    [Fact]
+    public async Task Refresh_QuarantinedAssignmentIsNamed_BanStaysOpaque()
+    {
+        var enrollment = new Mock<IRuntimeEnrollmentService>();
+        enrollment.SetupSequence(service => service.RefreshPendingAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<RuntimeEnrollmentRefreshRequest>(),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new RuntimeEnrollmentException("refresh_ineligible", 422, "assignment_quarantined"))
+            .ThrowsAsync(new RuntimeEnrollmentException("refresh_ineligible", 422, "hardware_banned"));
+        using var factory = CreateFactory(enrollment.Object, allowLicenseBootstrap: true);
+        using var client = factory.CreateClient();
+
+        using var quarantined = await client.PostAsync(
+            RefreshPath, new StringContent(RefreshBody, Encoding.UTF8, "application/json"));
+        using var banned = await client.PostAsync(
+            RefreshPath, new StringContent(RefreshBody, Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, quarantined.StatusCode);
+        Assert.Equal("{\"error\":\"refresh_ineligible\",\"reasonCode\":\"assignment_quarantined\"}",
+            await quarantined.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, banned.StatusCode);
+        Assert.Equal("{\"error\":\"refresh_ineligible\"}", await banned.Content.ReadAsStringAsync());
     }
 
     [Theory]
@@ -630,7 +660,7 @@ public sealed class RuntimeEnrollmentHttpIntegrationTests
                 new("runtime-enrollment-prepare-response-v1", "runtime-enrollment-v1", "pending",
                     "55555555-5555-4555-8555-555555555555", 1, "challenge", "2026-07-19T04:00:00.0000000Z",
                     "https://runtime.example.test"), false, exact));
-        using var factory = CreateFactory(enrollment.Object);
+        using var factory = CreateFactory(enrollment.Object, allowLicenseBootstrap: true);
         using var client = factory.CreateClient();
 
         HttpResponseMessage? rejected = null;

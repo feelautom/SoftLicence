@@ -1,3 +1,4 @@
+using SoftLicence.Server.Models;
 using SoftLicence.Server.Services;
 using Xunit;
 
@@ -40,5 +41,18 @@ public sealed class PersonalDayPassPolicyTests
         Assert.Equal("A", PersonalDayPassPolicy.Allocate([new("a", now, 1), new("A", now, 1)])[0].Identity);
         Assert.Throws<ArgumentException>(() => PersonalDayPassPolicy.Allocate([new("a", now, 1), new("a", now, 1)]));
         Assert.Throws<ArgumentException>(() => PersonalDayPassPolicy.Allocate([new("a", now, 11)]));
+    }
+
+    /// <summary>TKT-002098: PAID_TRIAL accepts exactly the 9700 introductory and 10000 historical amounts.</summary>
+    [Theory]
+    [InlineData(9700, true)]
+    [InlineData(10000, true)]
+    [InlineData(9600, false)]
+    [InlineData(9701, false)]
+    [InlineData(0, false)]
+    public void PaidTrialEvidenceAcceptsOnlyIntroductoryAndHistoricalAmounts(int amount, bool valid)
+    {
+        var evidence = new CommercialEvidence(2, Guid.NewGuid(), "trial-order", Guid.NewGuid(), "PAID_TRIAL", amount, "eur");
+        Assert.Equal(valid, evidence.IsValid);
     }
 }

@@ -63,6 +63,8 @@ public sealed class BugTraceAutoReportPostgreSqlTests
 
         Assert.Equal(1, proxy.SubmissionCount);
         Assert.Equal(request.ReportId, proxy.LastIdempotencyKey);
+        // Only the first durable acceptance needs provider identity; receipt replay is a local read.
+        Assert.Equal(1, proxy.AuthorityVerificationCount);
     }
 
     /// <summary>Creates one service instance with an intentionally fresh process-local cache.</summary>
@@ -172,6 +174,12 @@ public sealed class BugTraceAutoReportPostgreSqlTests
         /// <inheritdoc />
         public bool IsConfigured => true;
 
+        /// <summary>Declares that this report-only substitute explicitly supports the T-IA authority contract.</summary>
+        public bool IsTiaConfigured => true;
+
+        /// <summary>Gets the number of provider-authority checks made before initial and replay acceptance.</summary>
+        public int AuthorityVerificationCount { get; private set; }
+
         /// <summary>Gets the number of provider submissions.</summary>
         public int SubmissionCount { get; private set; }
 
@@ -184,6 +192,20 @@ public sealed class BugTraceAutoReportPostgreSqlTests
 
         /// <inheritdoc />
         public Task<JsonElement> SubmitTicketAsync(
+            object ticketBody,
+            string idempotencyKey,
+            CancellationToken ct = default) =>
+            throw new NotSupportedException("The PostgreSQL auto-report proof must not use legacy idempotent submission.");
+
+        /// <summary>Records explicit T-IA authority verification without contacting a provider.</summary>
+        public Task VerifyTiaAuthorityAsync(CancellationToken ct = default)
+        {
+            AuthorityVerificationCount++;
+            return Task.CompletedTask;
+        }
+
+        /// <summary>Records the explicit idempotent T-IA relay and returns one stable synthetic receipt.</summary>
+        public Task<JsonElement> SubmitTiaTicketAsync(
             object ticketBody,
             string idempotencyKey,
             CancellationToken ct = default)

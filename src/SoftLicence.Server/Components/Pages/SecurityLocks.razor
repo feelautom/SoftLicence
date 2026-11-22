@@ -18,7 +18,7 @@
     }
     else
     {
-        <div class="d-flex justify-content-between align-items-center mb-4">
+        <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mb-4">
             <h3 class="mb-0">
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="me-2"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
                 Verrous de sécurité <small class="text-muted fs-6">(@openCount à examiner)</small>
@@ -35,9 +35,21 @@
             </div>
         </div>
 
-        <div class="card shadow-sm mb-4">
-            <div class="table-responsive">
-                <table class="table table-sm table-hover mb-0 align-middle">
+        <div class="card shadow-sm mb-4 security-lock-card">
+                <table class="table table-sm table-hover mb-0 align-middle security-lock-table">
+                    <colgroup>
+                        <col class="col-reported" />
+                        <col class="col-client" />
+                        <col class="col-hwid" />
+                        <col class="col-cause" />
+                        <col class="col-level" />
+                        <col class="col-mode" />
+                        <col class="col-verdict" />
+                        <col class="col-state" />
+                        <col class="col-reports" />
+                        <col class="col-machine" />
+                        <col class="col-decision" />
+                    </colgroup>
                     <thead>
                         <tr>
                             <th>Dernier rapport</th>
@@ -49,7 +61,7 @@
                             <th>Verdict</th>
                             <th>État</th>
                             <th>Rapports</th>
-                            <th>Verrou</th>
+                            <th>Poste</th>
                             <th class="text-end">Décision</th>
                         </tr>
                     </thead>
@@ -60,39 +72,84 @@
                         }
                         @foreach (var r in rows)
                         {
-                            <tr>
+                            <tr title="Verrou : @r.LockId&#10;Preuve : @r.EvidenceDigest">
                                 <td><small>@TZ.ToLocal(r.LastReportedUtc).ToString("dd/MM/yy HH:mm")</small></td>
-                                <td><small>@(r.CustomerEmail ?? "?")<br /><span class="text-muted">@r.Product</span></small></td>
-                                <td><code class="small">@r.HardwareId</code></td>
-                                <td><small>@r.Cause</small></td>
+                                <td class="cell-ellipsis" title="@(r.CustomerEmail ?? "?") — @r.Product"><small>@(r.CustomerEmail ?? "?")<br /><span class="text-muted">@r.Product</span></small></td>
+                                <td class="cell-ellipsis" title="@r.HardwareId"><code class="small">@r.HardwareId</code></td>
+                                <td class="cell-ellipsis" title="@r.Cause"><small>@r.Cause</small></td>
                                 <td><span class="badge @LevelBadge(r.Level)">@r.Level</span></td>
                                 <td><small>@r.EffectiveMode</small></td>
                                 <td><small>@r.LastVerdict</small></td>
                                 <td><span class="badge @StateBadge(r.State)">@r.State</span></td>
                                 <td><small>@r.ReportCount</small></td>
-                                <td><code class="small" title="@r.EvidenceDigest">@r.LockId</code></td>
-                                <td class="text-end text-nowrap">
+                                <td class="text-nowrap" title="@MachineTitle(r)">
+                                    <small>@r.DistinctLockCount verrou · @r.CoveredDetectionCount couverte</small>
+                                    @if (r.DistinctLockCount >= 60)
+                                    {
+                                        <span class="text-danger fw-semibold" aria-label="Alerte capacité">!</span>
+                                    }
+                                    else if (r.DistinctLockCount >= 48)
+                                    {
+                                        <span class="text-warning" aria-label="Avertissement capacité">!</span>
+                                    }
+                                </td>
+                                <td class="text-end decision-cell">
                                     @if (r.State == SecurityLockReportStates.Banned)
                                     {
-                                        <small class="text-muted">@(r.AdminDecisionBy ?? "automatique")</small>
-                                    }
-                                    else if (pendingBan == r.Id)
-                                    {
-                                        <span class="small text-danger me-1">Ban définitif ?</span>
-                                        <button class="btn btn-sm btn-danger" @onclick="() => Decide(r.Id, SecurityLockAdminDecisions.Ban)">Confirmer</button>
-                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => pendingBan = null">Annuler</button>
+                                        <small class="text-muted me-1">@(r.AdminDecisionBy ?? "automatique")</small>
+                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => RequestLockDecision(r.Id, SecurityLockDecisionDialog.UnbanAction)">Débannir</button>
                                     }
                                     else
                                     {
-                                        @if (r.AdminDecision != SecurityLockAdminDecisions.Release)
+                                        @if (r.State != SecurityLockReportStates.Released || r.OpenIncidentCount > 0)
                                         {
-                                            <button class="btn btn-sm btn-outline-success me-1" @onclick="() => Decide(r.Id, SecurityLockAdminDecisions.Release)">Relâcher</button>
+                                            <button class="btn btn-sm btn-outline-success me-1" @onclick="() => RequestLockDecision(r.Id, SecurityLockDecisionDialog.ReleaseAction)">Relâcher</button>
                                         }
                                         else
                                         {
                                             <small class="text-success me-1">relâché (@r.AdminDecisionBy)</small>
                                         }
-                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => pendingBan = r.Id">Bannir</button>
+                                        @if (r.RememberedReleaseDecisionId.HasValue)
+                                        {
+                                            <small class="text-info me-1">décision mémorisée</small>
+                                        }
+                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => RequestLockDecision(r.Id, SecurityLockDecisionDialog.BanAction)">Bannir</button>
+                                    }
+                                    @if (r.OpenIncidentCount > 0)
+                                    {
+                                        <div><small class="text-danger">@r.OpenIncidentCount incident(s) critique(s) ouvert(s)</small></div>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+        </div>
+
+        <h5 class="mb-2">Décisions Relâcher mémorisées</h5>
+        <p class="text-muted small mb-2">Les détections couvertes restent enregistrées et visibles, mais ne bloquent plus jusqu’à révocation.</p>
+        <div class="card shadow-sm mb-4">
+            <div class="table-responsive">
+                <table class="table table-sm mb-0 align-middle">
+                    <thead><tr><th>Produit</th><th>Matériel</th><th>Cause</th><th>Activation</th><th>Couvertes</th><th>État</th><th class="text-end">Action</th></tr></thead>
+                    <tbody>
+                        @if (releaseDecisions.Count == 0)
+                        {
+                            <tr><td colspan="7" class="text-center text-muted py-3">Aucune décision mémorisée.</td></tr>
+                        }
+                        @foreach (var decision in releaseDecisions)
+                        {
+                            <tr>
+                                <td><small>@decision.Product</small></td>
+                                <td><code class="small">@decision.HardwareId</code></td>
+                                <td><small>@decision.Cause</small></td>
+                                <td><small>@decision.ActivatedBy, @TZ.ToLocal(decision.ActivatedAtUtc).ToString("dd/MM/yy HH:mm")</small></td>
+                                <td><small>@decision.CoveredDetectionCount @(decision.LastCoveredAtUtc.HasValue ? "— " + TZ.ToLocal(decision.LastCoveredAtUtc.Value).ToString("dd/MM/yy HH:mm") : "")</small></td>
+                                <td><span class="badge @(decision.IsActive ? "bg-success" : "bg-secondary")">@(decision.IsActive ? "ACTIVE" : "RÉVOQUÉE")</span></td>
+                                <td class="text-end">
+                                    @if (decision.IsActive)
+                                    {
+                                        <button class="btn btn-sm btn-outline-danger" @onclick="() => RequestRevoke(decision.Id)">Révoquer</button>
                                     }
                                 </td>
                             </tr>
@@ -102,8 +159,14 @@
             </div>
         </div>
 
+        @if (pendingDecision is not null)
+        {
+            <SecurityLockDecisionDialog @key="pendingDecision" Request="pendingDecision"
+                                        Confirmed="ConfirmDecision" Canceled="CancelDecision" />
+        }
+
         <h5 class="mb-2">Modes des causes irréversibles (niveaux 4 et 5)</h5>
-        <p class="text-muted small mb-2">SHADOW : observation seule. REVIEW : blocage réversible, décision admin. ENFORCE : ban automatique définitif.</p>
+        <p class="text-muted small mb-2">SHADOW : alerte seule sur les deux barrières, rien n’est bloqué. REVIEW : le poste est bloqué jusqu’à décision. ENFORCE : bannissement automatique.</p>
         <div class="d-flex gap-2 align-items-center mb-2">
             <select class="form-select form-select-sm" style="width: 240px" @bind="policyProductId" @bind:after="LoadPolicies">
                 @foreach (var p in products)
@@ -150,9 +213,19 @@
 </div>
 
 @code {
+    /// <summary>
+    /// Captures one rendered lock and the stable-scope state required to explain administrative consequences before
+    /// confirmation. <c>HasActiveEnrollment</c> is informational and never grants mutation authority.
+    /// </summary>
     private sealed record LockRow(Guid Id, string Product, string? CustomerEmail, string HardwareId, string Cause, int Level,
         string EffectiveMode, string LastVerdict, string State, int ReportCount, string LockId, string EvidenceDigest,
-        DateTime LastReportedUtc, string? AdminDecision, string? AdminDecisionBy);
+        DateTime LastReportedUtc, string? AdminDecision, string? AdminDecisionBy, int OpenIncidentCount,
+        string LinkStatus, Guid? RememberedReleaseDecisionId, bool HasActiveEnrollment,
+        int DistinctLockCount, int CoveredDetectionCount);
+
+    private sealed record ReleaseDecisionRow(Guid Id, string Product, string HardwareId, string Cause,
+        string ActivatedBy, DateTime ActivatedAtUtc, bool IsActive, int CoveredDetectionCount,
+        DateTime? LastCoveredAtUtc);
 
     private sealed record PolicyRow(string Cause, int Level, string Mode, string? UpdatedBy, DateTime? UpdatedAtUtc);
 
@@ -165,7 +238,8 @@
     private List<Product> products = new();
     private Guid policyProductId;
     private List<PolicyRow> policies = new();
-    private Guid? pendingBan;
+    private List<ReleaseDecisionRow> releaseDecisions = new();
+    private SecurityLockDecisionDialog.DialogRequest? pendingDecision;
     private string? pendingEnforce;
 
     protected override async Task OnInitializedAsync()
@@ -179,22 +253,63 @@
         policyProductId = (products.FirstOrDefault(p => string.Equals(p.Name, "TIAConnect", StringComparison.Ordinal))
                            ?? products.FirstOrDefault())?.Id ?? Guid.Empty;
         await LoadData();
+        await LoadReleaseDecisions();
         await LoadPolicies();
     }
 
+    /// <summary>
+    /// Loads the bounded review table and computes incident and ACTIVE-enrollment state in PostgreSQL for each stable
+    /// product/binding/installation scope. Display filtering never changes the exact authority identifiers.
+    /// </summary>
     private async Task LoadData()
     {
         await using var db = await DbFactory.CreateDbContextAsync();
-        openCount = await db.SecurityLockReports.CountAsync(r => r.State == SecurityLockReportStates.Open);
+        openCount = await db.SecurityLockReports.CountAsync(r =>
+            r.State == SecurityLockReportStates.Open
+            || (r.State == SecurityLockReportStates.Released
+                && db.RuntimeCriticalIncidents.Any(incident => incident.BindingId == r.BindingId
+                    && incident.InstallationId == r.InstallationId
+                    && incident.State == "OPEN")));
         var query = from r in db.SecurityLockReports.AsNoTracking()
                     join p in db.Products.AsNoTracking() on r.ProductId equals p.Id
                     join b in db.DistributionInstallationBindings.AsNoTracking() on r.BindingId equals b.Id into bindings
                     from b in bindings.DefaultIfEmpty()
                     join l in db.Licenses.AsNoTracking() on b.LicenseId equals l.Id into licenses
                     from l in licenses.DefaultIfEmpty()
-                    select new { r, Product = p.Name, Email = l == null ? null : l.CustomerEmail };
-        if (!string.IsNullOrEmpty(stateFilter))
+                    select new
+                    {
+                        r,
+                        Product = p.Name,
+                        Email = l == null ? null : l.CustomerEmail,
+                        OpenIncidentCount = db.RuntimeCriticalIncidents.Count(incident =>
+                            incident.BindingId == r.BindingId
+                            && incident.InstallationId == r.InstallationId
+                            && incident.State == "OPEN"),
+                        HasActiveEnrollment = db.RuntimeEnrollments.Any(enrollment =>
+                            enrollment.ProductId == r.ProductId
+                            && enrollment.BindingId == r.BindingId
+                            && enrollment.InstallationId == r.InstallationId
+                            && enrollment.State == "ACTIVE"),
+                        DistinctLockCount = db.SecurityLockReports
+                            .Where(other => other.ProductId == r.ProductId
+                                && other.InstallationId == r.InstallationId)
+                            .Select(other => other.LockId).Distinct().Count(),
+                        CoveredDetectionCount = db.SecurityLockReleaseDecisions
+                            .Where(decision => decision.ProductId == r.ProductId
+                                && decision.HardwareId == r.HardwareId
+                                && db.LicenseSeats.Any(seat => seat.Id == r.LinkLicenseSeatId
+                                    && seat.LicenseId == decision.LicenseId))
+                            .Sum(decision => (int?)decision.CoveredDetectionCount) ?? 0
+                    };
+        if (stateFilter == SecurityLockReportStates.Open)
+        {
+            query = query.Where(x => x.r.State == SecurityLockReportStates.Open
+                || (x.r.State == SecurityLockReportStates.Released && x.OpenIncidentCount > 0));
+        }
+        else if (!string.IsNullOrEmpty(stateFilter))
+        {
             query = query.Where(x => x.r.State == stateFilter);
+        }
         if (!string.IsNullOrWhiteSpace(searchText))
         {
             // Display search only: case-insensitive on purpose, never used for a security decision.
@@ -205,8 +320,21 @@
         rows = await query.OrderByDescending(x => x.r.LastReportedUtc).Take(300)
             .Select(x => new LockRow(x.r.Id, x.Product, x.Email, x.r.HardwareId, x.r.Cause, x.r.Level, x.r.EffectiveMode,
                 x.r.LastVerdict, x.r.State, x.r.ReportCount, x.r.LockId, x.r.EvidenceDigestSha256, x.r.LastReportedUtc,
-                x.r.AdminDecision, x.r.AdminDecisionBy))
+                x.r.AdminDecision, x.r.AdminDecisionBy, x.OpenIncidentCount, x.r.LinkStatus,
+                x.r.RememberedReleaseDecisionId, x.HasActiveEnrollment, x.DistinctLockCount, x.CoveredDetectionCount))
             .ToListAsync();
+    }
+
+    private async Task LoadReleaseDecisions()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        releaseDecisions = await (from decision in db.SecurityLockReleaseDecisions.AsNoTracking()
+                                  join product in db.Products.AsNoTracking() on decision.ProductId equals product.Id
+                                  orderby decision.IsActive descending, decision.ActivatedAtUtc descending
+                                  select new ReleaseDecisionRow(decision.Id, product.Name, decision.HardwareId,
+                                      decision.Cause, decision.ActivatedBy, decision.ActivatedAtUtc,
+                                      decision.IsActive, decision.CoveredDetectionCount,
+                                      decision.LastCoveredAtUtc)).Take(300).ToListAsync();
     }
 
     private async Task LoadPolicies()
@@ -226,18 +354,90 @@
             .ToList();
     }
 
-    private async Task Decide(Guid id, string decision)
+    /// <summary>Captures one exact lock action before opening the shared modal confirmation shell.</summary>
+    private void RequestLockDecision(Guid id, string action)
     {
-        pendingBan = null;
-        var result = await LockAdmin.DecideAsync(id, decision, null, adminName, null);
-        if (result.Outcome == SecurityLockAdminOutcomes.Ok)
-            Toast.ShowSuccess(decision == SecurityLockAdminDecisions.Ban
-                ? "Matériel banni définitivement."
-                : "Verrou relâché : il sera levé au prochain rapport (5 minutes au plus).");
-        else
-            Toast.ShowError("Décision refusée : " + result.Outcome);
-        await LoadData();
+        if (pendingDecision is not null) return;
+        var row = rows.Single(candidate => candidate.Id == id);
+        pendingDecision = new SecurityLockDecisionDialog.DialogRequest(
+            row.Id, action, row.LockId, row.HardwareId, row.Cause, row.EvidenceDigest,
+            row.OpenIncidentCount,
+            row.LinkStatus is SecurityLockReportLinkStatuses.VerifiedSeat
+                or SecurityLockReportLinkStatuses.VerifiedAlias,
+            row.HasActiveEnrollment);
     }
+
+    /// <summary>Captures one exact remembered-release decision before modal confirmation.</summary>
+    private void RequestRevoke(Guid id)
+    {
+        if (pendingDecision is not null) return;
+        var decision = releaseDecisions.Single(candidate => candidate.Id == id && candidate.IsActive);
+        pendingDecision = new SecurityLockDecisionDialog.DialogRequest(
+            decision.Id, SecurityLockDecisionDialog.RevokeAction, decision.Id.ToString("D"),
+            decision.HardwareId, decision.Cause, null, 0, false, false);
+    }
+
+    /// <summary>Closes the current decision modal without calling an administrative service.</summary>
+    private void CancelDecision() => pendingDecision = null;
+
+    /// <summary>
+    /// Executes one immutable modal action and preserves either the refusal diagnostic or the successful UNBAN
+    /// reinstall requirement. The page reloads only after the administrative operation has returned.
+    /// </summary>
+    private async Task ConfirmDecision(SecurityLockDecisionDialog.Confirmation confirmation)
+    {
+        var request = confirmation.Request;
+        switch (request.Action)
+        {
+            case SecurityLockDecisionDialog.ReleaseAction:
+            case SecurityLockDecisionDialog.BanAction:
+            {
+                var result = await LockAdmin.DecideAsync(request.TargetId, request.Action, null, adminName, null);
+                if (result.Outcome == SecurityLockAdminOutcomes.Ok)
+                    Toast.ShowSuccess(request.Action == SecurityLockDecisionDialog.BanAction
+                        ? "Matériel banni." : "Verrou relâché.");
+                else
+                    ShowRefusal(result.Outcome, result.DiagnosticCode);
+                break;
+            }
+            case SecurityLockDecisionDialog.UnbanAction:
+            {
+                var result = await LockAdmin.UnbanAsync(
+                    request.TargetId, confirmation.Reason, confirmation.AuditReference, adminName, null);
+                if (result.Outcome == SecurityLockAdminOutcomes.Ok)
+                    Toast.ShowSuccess(result.DiagnosticCode == SecurityLockAdminOutcomes.ReleaseNoActiveEnrollment
+                        ? "Débanni et incidents clos. Aucun enrôlement actif : le client doit réinstaller T-IA Connect pour repartir."
+                        : $"Verrou débanni · {result.RecoveredIncidentCount} incident(s) · {result.DeactivatedHardwareBanCount} ban(s).");
+                else
+                    ShowRefusal(result.Outcome, result.DiagnosticCode);
+                break;
+            }
+            case SecurityLockDecisionDialog.RevokeAction:
+            {
+                var outcome = await LockAdmin.RevokeRememberedReleaseAsync(request.TargetId, adminName, null);
+                if (outcome == SecurityLockAdminOutcomes.Ok)
+                    Toast.ShowSuccess("Décision mémorisée révoquée.");
+                else
+                    ShowRefusal(outcome, null);
+                break;
+            }
+            default:
+                ShowRefusal(SecurityLockAdminOutcomes.DecisionInvalid, null);
+                break;
+        }
+        pendingDecision = null;
+        await LoadData();
+        await LoadReleaseDecisions();
+    }
+
+    /// <summary>Displays the server's stable refusal code and optional bounded diagnostic code.</summary>
+    private void ShowRefusal(string outcome, string? diagnosticCode) =>
+        Toast.ShowError(diagnosticCode is null ? $"Refus [{outcome}]." : $"Refus [{outcome}] ({diagnosticCode}).");
+
+    /// <summary>Builds the compact machine-cell hover text, including the capacity warning when applicable.</summary>
+    private static string MachineTitle(LockRow row) => row.DistinctLockCount >= 48
+        ? $"{row.DistinctLockCount} verrou(s), {row.CoveredDetectionCount} détection(s) couverte(s). Attention : limite de 64 verrous."
+        : $"{row.DistinctLockCount} verrou(s), {row.CoveredDetectionCount} détection(s) couverte(s).";
 
     private async Task RequestMode(string cause, string mode)
     {

@@ -279,6 +279,8 @@ public sealed record DistributionInstallationInvalidationResponse(
 
 public sealed record DistributionOperationResult<T>(T Response, bool Idempotent);
 
+/// <summary>Preserves existing S2S errors when optional fields are null; policy refusals add only their public explanatory message.</summary>
 public sealed record DistributionApiError(
     string Error,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ReasonCode = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ReasonCode = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Message = null);

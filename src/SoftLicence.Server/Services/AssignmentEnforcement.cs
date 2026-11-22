@@ -4,14 +4,16 @@ using SoftLicence.Server.Data;
 namespace SoftLicence.Server.Services;
 
 /// <summary>
-/// Application side of the commercial-assignment open/closed switch (TKT-001277 lot 2d, decided by Franck on
+/// Application side of the commercial-assignment open/closed switch (TKT-001277 lot 2d, product decision of
 /// 29/09/2026). Every guarded control keeps its original blocking code; it asks <see cref="IsOpenAsync"/> first and,
 /// when the switch is open, records "would have blocked" with <see cref="Record"/> and lets the operation through.
+/// Since TKT-001428 the switch is closed unless <c>open</c> is configured explicitly: the observation period ended
+/// and the controls block. The open position is kept only as a rollback lever until a follow-up ticket removes it.
 /// </summary>
 /// <remarks>
 /// String contract: the environment value is trimmed and compared case-insensitively against <c>open</c> and
 /// <c>closed</c> only (ASCII, invariant); the persisted value is always the lowercase canonical constant, which the
-/// database check constraint also enforces. Any other value is refused and the switch stays open.
+/// database check constraint also enforces. A missing, blank or invalid value means closed (fail closed).
 /// </remarks>
 internal static class AssignmentEnforcement
 {
@@ -21,12 +23,16 @@ internal static class AssignmentEnforcement
     /// <summary>Control name recorded for the seat-release checks.</summary>
     internal const string SeatReleaseControl = "seat_release";
 
-    // LEGACY-EXPIRY(TKT-001428, 2026-11-15): a missing row means open while the switch is observed. By 15/11/2026 production must run
-    // closed and this default, TryParseMode's default and the startup default must become closed.
     /// <summary>
-    /// Reads the switch from the database. A missing row means open, the decision in force; database failures
+    /// Reads the switch from the database. Only a stored <c>open</c> opens it: a missing row or any other value means
+    /// closed, so a lost or damaged setting can never silently disable the controls (TKT-001428). Database failures
     /// propagate like any other read of the caller's transaction.
     /// </summary>
+    /// <remarks>
+    /// The trigger's SQL helper <c>assignment_enforcement_is_open()</c> still treats a missing row as open. The row
+    /// always exists in production (seeded by the migration, rewritten at startup, and the application role cannot
+    /// delete it); aligning the SQL helper is left to the removal of the open mode (TKT-004056).
+    /// </remarks>
     /// <param name="db">Context of the caller's transaction.</param>
     /// <param name="cancellationToken">Cancels the read.</param>
     /// <returns><see langword="true"/> when controls must record instead of blocking.</returns>
@@ -36,7 +42,7 @@ internal static class AssignmentEnforcement
             .Where(setting => setting.Id == 1)
             .Select(setting => setting.Mode)
             .SingleOrDefaultAsync(cancellationToken);
-        return !string.Equals(mode, AssignmentEnforcementSetting.Closed, StringComparison.Ordinal);
+        return string.Equals(mode, AssignmentEnforcementSetting.Open, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -69,32 +75,31 @@ internal static class AssignmentEnforcement
         });
     }
 
-    // LEGACY-EXPIRY(TKT-001428, 2026-11-15): empty or invalid values default to open; by 15/11/2026 the default must become closed.
-    /// <summary>Parses the environment value into the canonical persisted mode.</summary>
-    /// <param name="value">Raw value; <see langword="null"/> or blank means open.</param>
-    /// <param name="mode">The canonical mode (<c>open</c> when the value is invalid).</param>
+    /// <summary>
+    /// Parses the environment value into the canonical persisted mode. Closed is the default since TKT-001428: only an
+    /// explicit <c>open</c> (trimmed, ASCII case-insensitive) opens the switch, as a deliberate operator rollback.
+    /// </summary>
+    /// <param name="value">Raw value; <see langword="null"/> or blank means closed.</param>
+    /// <param name="mode">The canonical mode (<c>closed</c> when the value is invalid, so a typo never opens it).</param>
     /// <returns><see langword="false"/> when the value is neither empty, <c>open</c> nor <c>closed</c>.</returns>
     internal static bool TryParseMode(string? value, out string mode)
     {
         var trimmed = value?.Trim() ?? string.Empty;
-        if (trimmed.Length == 0 || string.Equals(trimmed, AssignmentEnforcementSetting.Open, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(trimmed, AssignmentEnforcementSetting.Open, StringComparison.OrdinalIgnoreCase))
         {
             mode = AssignmentEnforcementSetting.Open;
             return true;
         }
-        if (string.Equals(trimmed, AssignmentEnforcementSetting.Closed, StringComparison.OrdinalIgnoreCase))
-        {
-            mode = AssignmentEnforcementSetting.Closed;
-            return true;
-        }
-        mode = AssignmentEnforcementSetting.Open;
-        return false;
+        mode = AssignmentEnforcementSetting.Closed;
+        return trimmed.Length == 0
+            || string.Equals(trimmed, AssignmentEnforcementSetting.Closed, StringComparison.OrdinalIgnoreCase);
     }
 }
 
 /// <summary>
 /// Writes the switch from <c>SOFTLICENCE_ASSIGNMENT_ENFORCEMENT</c> into the database at startup, so the PostgreSQL
-/// trigger and the application read the same value. A failure is logged and never stops the server.
+/// trigger and the application read the same value. Without the variable the switch is written closed (TKT-001428).
+/// A failure is logged and never stops the server; the database then keeps its previous value.
 /// </summary>
 public sealed class AssignmentEnforcementModeSynchronizer : IHostedService
 {
@@ -113,14 +118,21 @@ public sealed class AssignmentEnforcementModeSynchronizer : IHostedService
         _logger = logger;
     }
 
-    /// <summary>Applies the configured mode once.</summary>
+    /// <summary>
+    /// Writes the configured mode once at host startup: <c>open</c> only when the variable says so explicitly,
+    /// otherwise <c>closed</c> (absent, blank or invalid value; an invalid value is also logged as an error). The
+    /// row is created when missing and stamped <c>startup:env</c>. A database failure is logged and swallowed so the
+    /// server still starts; the database then keeps its previous mode, which is why an operator must read the row
+    /// back after changing the variable. Cancellation propagates.
+    /// </summary>
+    /// <param name="cancellationToken">Host startup cancellation.</param>
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         var raw = _configuration[AssignmentEnforcement.EnvironmentVariable];
         if (!AssignmentEnforcement.TryParseMode(raw, out var mode))
         {
             _logger.LogError(
-                "ASSIGNMENT_ENFORCEMENT invalid value for {Variable}; expected 'open' or 'closed'. The switch stays open.",
+                "ASSIGNMENT_ENFORCEMENT invalid value for {Variable}; expected 'open' or 'closed'. The switch is closed.",
                 AssignmentEnforcement.EnvironmentVariable);
         }
 

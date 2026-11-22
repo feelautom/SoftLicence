@@ -87,55 +87,25 @@ public sealed class BugTraceSupportPostgreSqlTests
         /// <summary>Gets the isolated ticket-owned database connection string.</summary>
         public string ConnectionString { get; } = connectionString;
 
-        /// <summary>Creates and migrates a uniquely named database from the test-only provider authority.</summary>
+        /// <summary>Clones a uniquely named database from the shared current-schema model.</summary>
         /// <returns>An owner that guarantees exact database cleanup.</returns>
         public static async Task<PostgreSqlProvision> CreateAsync()
         {
-            var configured = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES");
-            if (string.IsNullOrWhiteSpace(configured))
-                throw new InvalidOperationException(
-                    "SOFTLICENCE_RUNTIME_TEST_POSTGRES is required for TKT-000871 PostgreSQL tests.");
-
-            var database = "tkt871_support_" + Guid.NewGuid().ToString("N");
-            var maintenance = new NpgsqlConnectionStringBuilder(configured) { Database = "postgres" }.ConnectionString;
-            await using (var connection = new NpgsqlConnection(maintenance))
-            {
-                await connection.OpenAsync();
-                await using var command = connection.CreateCommand();
-                command.CommandText = $"CREATE DATABASE \"{database}\"";
-                await command.ExecuteNonQueryAsync();
-            }
-
-            var target = new NpgsqlConnectionStringBuilder(configured) { Database = database }.ConnectionString;
-            try
-            {
-                await using var db = new LicenseDbContext(
-                    new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(target).Options);
-                await db.GetService<IMigrator>().MigrateAsync();
-                return new PostgreSqlProvision(maintenance, target, database);
-            }
-            catch
-            {
-                await DropDatabaseAsync(maintenance, database);
-                throw;
-            }
+            var clone = await PostgreSqlModelDatabase.CloneAsync("bugtrace_support");
+            return new PostgreSqlProvision(
+                clone.MaintenanceConnectionString,
+                clone.ConnectionString,
+                clone.DatabaseName);
         }
 
         /// <summary>Drops the exact generated database even when a relational assertion fails.</summary>
         public async ValueTask DisposeAsync() =>
             await DropDatabaseAsync(maintenanceConnectionString, database);
 
-        /// <summary>Clears provider pools and removes one generated database name, never caller input.</summary>
+        /// <summary>Removes one generated database name through an unpooled connection, never caller input.</summary>
         /// <param name="maintenanceConnectionString">Test-only maintenance authority.</param>
         /// <param name="database">Internally generated lowercase database identifier.</param>
         private static async Task DropDatabaseAsync(string maintenanceConnectionString, string database)
-        {
-            NpgsqlConnection.ClearAllPools();
-            await using var connection = new NpgsqlConnection(maintenanceConnectionString);
-            await connection.OpenAsync();
-            await using var command = connection.CreateCommand();
-            command.CommandText = $"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)";
-            await command.ExecuteNonQueryAsync();
-        }
+            => await PostgreSqlModelDatabase.DropAsync(maintenanceConnectionString, database);
     }
 }

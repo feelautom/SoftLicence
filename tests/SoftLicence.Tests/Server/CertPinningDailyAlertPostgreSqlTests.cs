@@ -3,15 +3,19 @@ using Microsoft.Extensions.Logging.Abstractions;
 using SoftLicence.Server.Data;
 using SoftLicence.Server.Services;
 using Xunit;
+using TestDbFactory = SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTestBase.TestDbFactory;
 
 namespace SoftLicence.Tests.Server;
 
-public sealed partial class RuntimeEnrollmentPostgreSqlTests
+/// <summary>Exercises certificate-pinning daily alert aggregation in an independently cloned database.</summary>
+/// <param name="classDatabase">The xUnit-owned PostgreSQL clone fixture for this exact test class.</param>
+public sealed class CertPinningDailyAlertPostgreSqlTests(RuntimeEnrollmentPostgreSqlClassDatabase classDatabase)
+    : RuntimeEnrollmentPostgreSqlTestBase(classDatabase)
 {
-    [Fact]
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.CertPinningDailyAlert_ConcurrentExactHardwareEvents_CreateOneClaimAndExactCount")]
     public async Task CertPinningDailyAlert_ConcurrentExactHardwareEvents_CreateOneClaimAndExactCount()
     {
-        var connections = await ProvisionAsync();
+        await using var connections = await ProvisionCleanedIsolatedAsync();
         var factory = new TestDbFactory(connections.App);
         var productId = Guid.NewGuid();
         await using (var seed = await factory.CreateDbContextAsync())

@@ -73,7 +73,7 @@ namespace SoftLicence.Server.Migrations
                 table: "AssignmentEnforcementEvents",
                 column: "ObservedAtUtc");
 
-            // TKT-001277 lot 2d (decided by Franck, 29/09/2026): every blocking branch of the commercial-assignment
+            // TKT-001277 lot 2d (product decision, 29/09/2026): every blocking branch of the commercial-assignment
             // trigger is kept verbatim behind a single open/closed switch. Open (default): the would-be block is
             // recorded in AssignmentEnforcementEvents (and as a PostgreSQL WARNING) and the right is produced as if
             // the operation were valid, when the data allows it. Closed: the original code runs unchanged.

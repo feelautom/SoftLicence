@@ -622,42 +622,18 @@ public sealed class RuntimeAuthorityKeyRegistryPostgreSqlTests
         /// <summary>Gets the isolated application database connection string.</summary>
         public string ConnectionString { get; } = connectionString;
 
-        /// <summary>Creates and migrates one UUID-named database on the configured PostgreSQL authority.</summary>
+        /// <summary>Clones one UUID-named database from the exact registry schema model.</summary>
         public static async Task<PostgreSqlProvision> CreateAsync()
         {
-            var configured = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES");
-            if (string.IsNullOrWhiteSpace(configured))
-                throw new InvalidOperationException(
-                    "SOFTLICENCE_RUNTIME_TEST_POSTGRES is required for TKT-000789 PostgreSQL tests.");
-            var database = "tkt789_registry_" + Guid.NewGuid().ToString("N");
-            var maintenance = new NpgsqlConnectionStringBuilder(configured)
-            {
-                Database = "postgres",
-                Pooling = false
-            }.ConnectionString;
-            await using (var connection = new NpgsqlConnection(maintenance))
-            {
-                await connection.OpenAsync();
-                await ExecuteAsync(connection, $"CREATE DATABASE \"{database}\"");
-            }
-            var target = new NpgsqlConnectionStringBuilder(configured)
-            {
-                Database = database,
-                Pooling = false
-            }.ConnectionString;
-            var options = new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(target).Options;
-            await using (var db = new LicenseDbContext(options))
-                await db.GetService<IMigrator>().MigrateAsync(Migration);
-            return new(maintenance, target, database);
+            var clone = await PostgreSqlModelDatabase.CloneAsync("key_registry", Migration);
+            return new(
+                clone.MaintenanceConnectionString,
+                clone.ConnectionString,
+                clone.DatabaseName);
         }
 
-        /// <summary>Clears pools and force-drops only the fixture-owned UUID database.</summary>
+        /// <summary>Force-drops only the fixture-owned UUID database through an unpooled maintenance connection.</summary>
         public async ValueTask DisposeAsync()
-        {
-            NpgsqlConnection.ClearAllPools();
-            await using var connection = new NpgsqlConnection(maintenanceConnectionString);
-            await connection.OpenAsync();
-            await ExecuteAsync(connection, $"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)");
-        }
+            => await PostgreSqlModelDatabase.DropAsync(maintenanceConnectionString, database);
     }
 }

@@ -33,6 +33,22 @@ namespace SoftLicence.Server.Data
 
         public bool DisableNewActivations { get; set; } = false; // Bloque uniquement les nouvelles activations, pas les recoveries/checks existants
 
+        /// <summary>
+        /// Gets or sets whether the anonymous public trial routes (<c>POST /api/activation/trial</c> and the
+        /// AUTO-TRIAL key interception of <c>POST /api/activation</c>) may create a licence of this type or
+        /// automatically renew an expired one. Defaults to <c>false</c>: every type is refused unless an
+        /// administrator opts it in (TKT-002466). Returning a licence the hardware already holds and that is
+        /// still valid never requires this setting.
+        /// </summary>
+        public bool AllowPublicTrial { get; set; } = false;
+
+        /// <summary>
+        /// Gets or sets whether an external client may treat a licence of this type as able to carry a team
+        /// (TKT-002717). SoftLicence only stores and exposes this flag: no key, activation, quota or rule reads it.
+        /// Defaults to <c>false</c>.
+        /// </summary>
+        public bool TeamEligible { get; set; } = false;
+
         // Produit propriétaire
         public Guid ProductId { get; set; }
         public Product? Product { get; set; }

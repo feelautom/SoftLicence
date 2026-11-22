@@ -4,6 +4,8 @@ using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Localization;
 using SoftLicence.SDK;
 using SoftLicence.Server.Data;
+using SoftLicence.Server.Models;
+using SoftLicence.Server.Services;
 using System.Data;
 using System.Security.Cryptography;
 using System.Text;
@@ -32,8 +34,9 @@ namespace SoftLicence.Server.Controllers
         private readonly ILogger<AdminController> _logger;
         private readonly Services.FingerprintService _fingerprint;
         private readonly Services.AdminSecretAuthenticationService _adminSecretAuthentication;
+        private readonly Services.ILicenseKeyActivationSettingService _keyActivationSettings;
 
-        public AdminController(LicenseDbContext db, IConfiguration config, Services.EncryptionService encryption, IStringLocalizer<SharedResource> localizer, Services.SettingsService settings, Services.SecurityService security, Services.NotificationService notifier, ILogger<AdminController> logger, Services.FingerprintService fingerprint, Services.AdminSecretAuthenticationService adminSecretAuthentication)
+        public AdminController(LicenseDbContext db, IConfiguration config, Services.EncryptionService encryption, IStringLocalizer<SharedResource> localizer, Services.SettingsService settings, Services.SecurityService security, Services.NotificationService notifier, ILogger<AdminController> logger, Services.FingerprintService fingerprint, Services.AdminSecretAuthenticationService adminSecretAuthentication, Services.ILicenseKeyActivationSettingService keyActivationSettings)
         {
             _db = db;
             _config = config;
@@ -45,6 +48,7 @@ namespace SoftLicence.Server.Controllers
             _logger = logger;
             _fingerprint = fingerprint;
             _adminSecretAuthentication = adminSecretAuthentication;
+            _keyActivationSettings = keyActivationSettings;
         }
 
         // Retourne (authorized, scopedProductId)
@@ -66,7 +70,7 @@ namespace SoftLicence.Server.Controllers
         /// <summary>
         /// TEMP-FAIL-OPEN(TKT-001262): temporary compatibility only. Strict Runtime-graph authority
         /// is the intended behavior, but the current code or persisted graph is known to be buggy;
-        /// Franck requested logging instead of refusing legitimate clients. Every logged case must
+        /// The product owner requested logging instead of refusing legitimate clients. Every logged case must
         /// be analysed and corrected, then this branch must return to the strict decision and this
         /// marker must be removed. Cross-authority aliases remain closed and no HWID is logged.
         /// </summary>
@@ -169,7 +173,55 @@ namespace SoftLicence.Server.Controllers
             return null;
         }
 
-        // ── License Types (interne uniquement) ───────────────────────────────────
+        /// <summary>
+        /// Guards every licence-type administration route (TKT-002469, audit finding C6). A private
+        /// address alone is not enough: any application or container on the server has one. The
+        /// caller must also present a valid <c>X-Admin-Secret</c>, global or product-scoped.
+        /// </summary>
+        /// <returns>
+        /// The refusal to return (the existing private-address refusal, or 401 for a missing or invalid
+        /// secret) and, when accepted, the product the secret is limited to (null for the global secret).
+        /// </returns>
+        private async Task<(IActionResult? Denied, Guid? ScopedProductId)> AuthorizeLicenseTypeRouteAsync()
+        {
+            var deny = RequireInternalIp();
+            if (deny != null) return (deny, null);
+            var (authorized, scopedProductId) = await GetAuthContextAsync();
+            return authorized ? (null, scopedProductId) : (Unauthorized(), null);
+        }
+
+        /// <summary>
+        /// Refuses with a plain 403 when a product-scoped secret targets another product. The product is
+        /// always compared by identifier after resolution, never by name, so no spelling of a product
+        /// name can widen the scope. <c>Forbid()</c> is not used because the cookie scheme would turn it
+        /// into a redirect instead of an API status.
+        /// </summary>
+        /// <param name="scopedProductId">Product of the presented secret, or null for the global secret.</param>
+        /// <param name="productId">Product owning the targeted catalogue or type.</param>
+        /// <returns>The 403 result to return, or null when the secret covers the product.</returns>
+        private IActionResult? DenyOutsideProductScope(Guid? scopedProductId, Guid productId) =>
+            scopedProductId.HasValue && scopedProductId.Value != productId
+                ? StatusCode(StatusCodes.Status403Forbidden)
+                : null;
+
+        /// <summary>
+        /// Resolves the product owning a licence type for the routes addressed by type identifier, then
+        /// applies the scope check before any read of parameters or any write.
+        /// </summary>
+        /// <param name="typeId">Targeted licence type.</param>
+        /// <param name="scopedProductId">Product of the presented secret, or null for the global secret.</param>
+        /// <returns>404 when the type does not exist, 403 outside the scope, otherwise null.</returns>
+        private async Task<IActionResult?> DenyLicenseTypeOutsideScopeAsync(Guid typeId, Guid? scopedProductId)
+        {
+            var productId = await _db.LicenseTypes.AsNoTracking()
+                .Where(t => t.Id == typeId)
+                .Select(t => (Guid?)t.ProductId)
+                .SingleOrDefaultAsync();
+            if (productId == null) return NotFound("Type de licence introuvable.");
+            return DenyOutsideProductScope(scopedProductId, productId.Value);
+        }
+
+        // ── License Types (adresse interne, secret admin et périmètre produit, TKT-002469) ──
 
         public class CreateLicenseTypeRequest
         {
@@ -185,6 +237,10 @@ namespace SoftLicence.Server.Controllers
             public bool IsFree { get; set; } = false;
             public bool EnforceSingleUsePerHardwareId { get; set; } = false;
             public bool DisableNewActivations { get; set; } = false;
+            /// <summary>Opts the new type in to the anonymous public trial routes; closed by default (TKT-002466).</summary>
+            public bool AllowPublicTrial { get; set; } = false;
+            /// <summary>Marks the new type as team eligible; stored and exposed only, false by default (TKT-002717).</summary>
+            public bool TeamEligible { get; set; } = false;
             public List<LicenseTypeParamDto> Params { get; set; } = new();
         }
 
@@ -208,12 +264,17 @@ namespace SoftLicence.Server.Controllers
             public bool? IsFree { get; set; }
             public bool? EnforceSingleUsePerHardwareId { get; set; }
             public bool? DisableNewActivations { get; set; }
+            /// <summary>Changes the public trial opt-in when provided (TKT-002466).</summary>
+            public bool? AllowPublicTrial { get; set; }
+            /// <summary>Changes the team eligibility flag when provided; omitted leaves it unchanged (TKT-002717).</summary>
+            public bool? TeamEligible { get; set; }
         }
 
         [HttpPost("products/{productName}/license-types")]
         public async Task<IActionResult> CreateLicenseType(string productName, [FromBody] CreateLicenseTypeRequest req)
         {
-            var deny = RequireInternalIp(); if (deny != null) return deny;
+            var (denied, scopedProductId) = await AuthorizeLicenseTypeRouteAsync();
+            if (denied != null) return denied;
             TagLog("CREATE_LICENSE_TYPE", $"{productName}/{req.Slug}");
 
             if (string.IsNullOrWhiteSpace(req.Name) || string.IsNullOrWhiteSpace(req.Slug))
@@ -221,6 +282,8 @@ namespace SoftLicence.Server.Controllers
 
             var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == productName.ToLower());
             if (product == null) return NotFound(_localizer["Api_ProductNotFound"].Value);
+            var outOfScope = DenyOutsideProductScope(scopedProductId, product.Id);
+            if (outOfScope != null) return outOfScope;
 
             var slug = req.Slug.Trim().ToUpper().Replace(" ", "_");
             var existingType = await _db.LicenseTypes
@@ -267,6 +330,8 @@ namespace SoftLicence.Server.Controllers
                     existingType.IsFree,
                     existingType.EnforceSingleUsePerHardwareId,
                     existingType.DisableNewActivations,
+                    existingType.AllowPublicTrial,
+                    existingType.TeamEligible,
                     existingType.DefaultMaxSeats,
                     existingType.MaxActivationsPerDay,
                     Params = existingType.CustomParams.Select(cp => new { cp.Key, cp.Name, cp.Value })
@@ -287,7 +352,9 @@ namespace SoftLicence.Server.Controllers
                 AllowAnonymous = req.AllowAnonymous,
                 IsFree = req.IsFree,
                 EnforceSingleUsePerHardwareId = req.EnforceSingleUsePerHardwareId,
-                DisableNewActivations = req.DisableNewActivations
+                DisableNewActivations = req.DisableNewActivations,
+                AllowPublicTrial = req.AllowPublicTrial,
+                TeamEligible = req.TeamEligible
             };
 
             foreach (var p in req.Params)
@@ -325,6 +392,8 @@ namespace SoftLicence.Server.Controllers
                 licenseType.IsFree,
                 licenseType.EnforceSingleUsePerHardwareId,
                 licenseType.DisableNewActivations,
+                licenseType.AllowPublicTrial,
+                licenseType.TeamEligible,
                 licenseType.DefaultMaxSeats,
                 licenseType.MaxActivationsPerDay,
                 Params = licenseType.CustomParams.Select(cp => new { cp.Key, cp.Name, cp.Value })
@@ -334,11 +403,14 @@ namespace SoftLicence.Server.Controllers
         [HttpGet("products/{productName}/license-types")]
         public async Task<IActionResult> GetLicenseTypes(string productName)
         {
-            var deny = RequireInternalIp(); if (deny != null) return deny;
+            var (denied, scopedProductId) = await AuthorizeLicenseTypeRouteAsync();
+            if (denied != null) return denied;
             TagLog("LIST_LICENSE_TYPES", productName);
 
             var product = await _db.Products.FirstOrDefaultAsync(p => p.Name.ToLower() == productName.ToLower());
             if (product == null) return NotFound(_localizer["Api_ProductNotFound"].Value);
+            var outOfScope = DenyOutsideProductScope(scopedProductId, product.Id);
+            if (outOfScope != null) return outOfScope;
 
             var types = await _db.LicenseTypes
                 .Include(t => t.CustomParams)
@@ -358,6 +430,8 @@ namespace SoftLicence.Server.Controllers
                     t.IsFree,
                     t.EnforceSingleUsePerHardwareId,
                     t.DisableNewActivations,
+                    t.AllowPublicTrial,
+                    t.TeamEligible,
                     Params = t.CustomParams.Select(cp => new { cp.Key, cp.Name, cp.Value })
                 })
                 .ToListAsync();
@@ -404,7 +478,7 @@ namespace SoftLicence.Server.Controllers
         }
 
         /// <summary>Projects the complete immutable type contract consumed by internal billing clients.</summary>
-        private static object ProjectLicenseType(LicenseType type) => new
+        internal static object ProjectLicenseType(LicenseType type) => new
         {
             type.Id,
             type.Name,
@@ -419,14 +493,19 @@ namespace SoftLicence.Server.Controllers
             type.IsFree,
             type.EnforceSingleUsePerHardwareId,
             type.DisableNewActivations,
+            type.AllowPublicTrial,
+            type.TeamEligible,
             Params = type.CustomParams.Select(param => new { param.Key, param.Name, param.Value })
         };
 
         [HttpPut("license-types/{typeId:guid}")]
         public async Task<IActionResult> UpdateLicenseType(Guid typeId, [FromBody] UpdateLicenseTypeRequest req)
         {
-            var deny = RequireInternalIp(); if (deny != null) return deny;
+            var (denied, scopedProductId) = await AuthorizeLicenseTypeRouteAsync();
+            if (denied != null) return denied;
             TagLog("UPDATE_LICENSE_TYPE", typeId.ToString());
+            var outOfScope = await DenyLicenseTypeOutsideScopeAsync(typeId, scopedProductId);
+            if (outOfScope != null) return outOfScope;
 
             var lt = await _db.LicenseTypes.FindAsync(typeId);
             if (lt == null) return NotFound("Type de licence introuvable.");
@@ -442,16 +521,21 @@ namespace SoftLicence.Server.Controllers
             if (req.IsFree.HasValue) lt.IsFree = req.IsFree.Value;
             if (req.EnforceSingleUsePerHardwareId.HasValue) lt.EnforceSingleUsePerHardwareId = req.EnforceSingleUsePerHardwareId.Value;
             if (req.DisableNewActivations.HasValue) lt.DisableNewActivations = req.DisableNewActivations.Value;
+            if (req.AllowPublicTrial.HasValue) lt.AllowPublicTrial = req.AllowPublicTrial.Value;
+            if (req.TeamEligible.HasValue) lt.TeamEligible = req.TeamEligible.Value;
 
             await _db.SaveChangesAsync();
-            return Ok(new { lt.Id, lt.Name, lt.Slug, lt.DefaultDurationDays, lt.IsRecurring, lt.AllowAnonymous, lt.IsFree, lt.EnforceSingleUsePerHardwareId, lt.DisableNewActivations, lt.DefaultMaxSeats, lt.MaxActivationsPerDay });
+            return Ok(new { lt.Id, lt.Name, lt.Slug, lt.DefaultDurationDays, lt.IsRecurring, lt.AllowAnonymous, lt.IsFree, lt.EnforceSingleUsePerHardwareId, lt.DisableNewActivations, lt.AllowPublicTrial, lt.TeamEligible, lt.DefaultMaxSeats, lt.MaxActivationsPerDay });
         }
 
         [HttpDelete("license-types/{typeId:guid}")]
         public async Task<IActionResult> DeleteLicenseType(Guid typeId)
         {
-            var deny = RequireInternalIp(); if (deny != null) return deny;
+            var (denied, scopedProductId) = await AuthorizeLicenseTypeRouteAsync();
+            if (denied != null) return denied;
             TagLog("DELETE_LICENSE_TYPE", typeId.ToString());
+            var outOfScope = await DenyLicenseTypeOutsideScopeAsync(typeId, scopedProductId);
+            if (outOfScope != null) return outOfScope;
 
             var lt = await _db.LicenseTypes.Include(t => t.Licenses).FirstOrDefaultAsync(t => t.Id == typeId);
             if (lt == null) return NotFound("Type de licence introuvable.");
@@ -465,8 +549,11 @@ namespace SoftLicence.Server.Controllers
         [HttpPost("license-types/{typeId:guid}/params")]
         public async Task<IActionResult> AddLicenseTypeParam(Guid typeId, [FromBody] LicenseTypeParamDto req)
         {
-            var deny = RequireInternalIp(); if (deny != null) return deny;
+            var (denied, scopedProductId) = await AuthorizeLicenseTypeRouteAsync();
+            if (denied != null) return denied;
             TagLog("ADD_TYPE_PARAM", $"{typeId}/{req.Key}");
+            var outOfScope = await DenyLicenseTypeOutsideScopeAsync(typeId, scopedProductId);
+            if (outOfScope != null) return outOfScope;
 
             var lt = await _db.LicenseTypes.FindAsync(typeId);
             if (lt == null) return NotFound("Type de licence introuvable.");
@@ -484,8 +571,11 @@ namespace SoftLicence.Server.Controllers
         [HttpPut("license-types/{typeId:guid}/params/{key}")]
         public async Task<IActionResult> UpdateLicenseTypeParam(Guid typeId, string key, [FromBody] LicenseTypeParamDto req)
         {
-            var deny = RequireInternalIp(); if (deny != null) return deny;
+            var (denied, scopedProductId) = await AuthorizeLicenseTypeRouteAsync();
+            if (denied != null) return denied;
             TagLog("UPDATE_TYPE_PARAM", $"{typeId}/{key}");
+            var outOfScope = await DenyLicenseTypeOutsideScopeAsync(typeId, scopedProductId);
+            if (outOfScope != null) return outOfScope;
 
             var param = await _db.LicenseTypeCustomParams.FirstOrDefaultAsync(p => p.LicenseTypeId == typeId && p.Key == key);
             if (param == null) return NotFound($"Paramètre '{key}' introuvable.");
@@ -499,8 +589,11 @@ namespace SoftLicence.Server.Controllers
         [HttpDelete("license-types/{typeId:guid}/params/{key}")]
         public async Task<IActionResult> DeleteLicenseTypeParam(Guid typeId, string key)
         {
-            var deny = RequireInternalIp(); if (deny != null) return deny;
+            var (denied, scopedProductId) = await AuthorizeLicenseTypeRouteAsync();
+            if (denied != null) return denied;
             TagLog("DELETE_TYPE_PARAM", $"{typeId}/{key}");
+            var outOfScope = await DenyLicenseTypeOutsideScopeAsync(typeId, scopedProductId);
+            if (outOfScope != null) return outOfScope;
 
             var param = await _db.LicenseTypeCustomParams.FirstOrDefaultAsync(p => p.LicenseTypeId == typeId && p.Key == key);
             if (param == null) return NotFound($"Paramètre '{key}' introuvable.");
@@ -761,8 +854,12 @@ namespace SoftLicence.Server.Controllers
             }
         }
 
+        /// <summary>Existing administrative provisioning terms plus optional complete V2 proof for one license.</summary>
         public class CreateLicenseRequest
         {
+            /// <summary>Optional complete V2 purchase proof; null retains the original V1 request representation.</summary>
+            [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+            public CommercialEvidence? CommercialEvidence { get; set; }
             public required string ProductName { get; set; }
             public required string CustomerName { get; set; }
             public string CustomerEmail { get; set; } = "";
@@ -978,6 +1075,8 @@ namespace SoftLicence.Server.Controllers
         /// A created or idempotently replayed license batch, or the existing authentication, validation,
         /// product-scope, and reference-conflict responses.
         /// </returns>
+        /// <remarks>V2 requires PostgreSQL and one license before clamping. Its common order proof and qualification
+        /// commit with provisioning under the global authority lock; historical V1 hashes and batch behavior remain unchanged.</remarks>
         [HttpPost("licenses")]
         public async Task<IActionResult> CreateLicense([FromBody] CreateLicenseRequest req)
         {
@@ -1000,16 +1099,9 @@ namespace SoftLicence.Server.Controllers
                 if (plugin == null) return NotFound(_localizer["Api_ProductNotFound"].Value);
 
                 // Vérifier que le plugin appartient bien à la hiérarchie du produit parent
-                var current = plugin;
-                var belongsToProduct = false;
-                while (current != null)
-                {
-                    if (current.Id == product.Id) { belongsToProduct = true; break; }
-                    current = current.ParentProductId.HasValue
-                        ? await _db.Products.FirstOrDefaultAsync(p => p.Id == current.ParentProductId.Value)
-                        : null;
-                }
-                if (!belongsToProduct) return BadRequest("Plugin does not belong to the specified product.");
+                // (même remontée bornée que les routes par clé, TKT-002551).
+                if (!await IsSameOrDescendantProductAsync(plugin.Id, product.Id, HttpContext.RequestAborted))
+                    return BadRequest("Plugin does not belong to the specified product.");
 
                 targetProduct = plugin;
             }
@@ -1017,6 +1109,13 @@ namespace SoftLicence.Server.Controllers
             var type = await _db.LicenseTypes.FirstOrDefaultAsync(t => t.ProductId == targetProduct.Id && t.Slug.ToLower() == req.TypeSlug.Trim().ToLower());
             if (type == null) return BadRequest(string.Format(_localizer["Api_LicenseTypeUnknown"].Value, req.TypeSlug));
 
+            var commercial = req.CommercialEvidence;
+            if (commercial is not null && (!commercial.IsValid || req.Quantity != 1))
+                return BadRequest(new { error = "commercial_evidence_invalid" });
+            if (commercial is not null && commercial.CommercialSubjectId != req.CommercialSubjectId)
+                return Conflict(new { error = "commercial_evidence_subject_conflict" });
+            if (commercial is not null && !_db.Database.IsNpgsql())
+                return StatusCode(503, new { error = "commercial_evidence_postgres_required" });
             var quantity = Math.Clamp(req.Quantity, 1, 100);
             if (req.MaxSeats is < 1 or > 100)
                 return BadRequest(new { error = "max_seats_out_of_range" });
@@ -1051,14 +1150,23 @@ namespace SoftLicence.Server.Controllers
                 normalizedPartnerCode,
                 quantity));
 
+            var attributionDigest = commercial is null ? "" : CommercialEvidenceStore.AttributionDigest(commercial, requestHash);
+            if (commercial is not null)
+                requestHash = CommercialEvidenceStore.Digest(new { Version = 2, Legacy = requestHash, Evidence = commercial });
+            await using var transaction = _db.Database.IsRelational()
+                ? await _db.Database.BeginTransactionAsync()
+                : null;
+            if (commercial is not null)
+            {
+                await _db.Database.ExecuteSqlRawAsync("SET LOCAL lock_timeout = '5000ms'; SET LOCAL statement_timeout = '30000ms'; SELECT pg_advisory_xact_lock(999831, 1)");
+                var check = await CommercialEvidenceStore.CheckAsync(_db, commercial, targetProduct.Id,
+                    null, "create", provisioningReference, attributionDigest, requestHash);
+                if (check.Conflict) return Conflict(new { error = "commercial_evidence_conflict" });
+            }
             var existing = await FindAttributedProvisioningRequestAsync(provisioningReference);
             if (existing != null)
                 return BuildProvisioningRetryResponse(
                     existing, requestHash, targetProduct.Id, commercialSubjectId, type);
-
-            await using var transaction = _db.Database.IsRelational()
-                ? await _db.Database.BeginTransactionAsync()
-                : null;
             var generatedLicenses = new List<License>();
 
             try
@@ -1153,6 +1261,9 @@ namespace SoftLicence.Server.Controllers
                     generatedLicenses.Add(license);
                 }
 
+                if (commercial is not null)
+                    await CommercialEvidenceStore.RecordAsync(_db, generatedLicenses.Single(), commercial,
+                        "create", provisioningReference, attributionDigest, requestHash, true);
                 await ExtendResellerDemoLicenseAfterPartnerSaleAsync(targetProduct.Id, normalizedPartnerCode, type);
                 await _db.SaveChangesAsync();
                 if (transaction != null)
@@ -1324,6 +1435,8 @@ namespace SoftLicence.Server.Controllers
                     ?? candidate.License.CreationDate)
                 .ThenBy(candidate => candidate.License.Id)
                 .First();
+            if (!hasLicenseKey)
+                LogProductScopeInvariantViolation(req.ProductId, candidates, now);
             var reasonCode = GetTargetedResolutionReason(selected.License, selected.Seat, now);
             var status = reasonCode == "active_license_found" ? "Active" : "Inactive";
             return Ok(BuildTargetedResolution(selected.License, selected.Seat, status, reasonCode));
@@ -1382,7 +1495,7 @@ namespace SoftLicence.Server.Controllers
             // TEMP-FAIL-OPEN(TKT-001262): TEMPORARY observation path, never leave as is. The update
             // check resolved the raw legacy identifier only, so a machine known through an
             // authenticated alias was reported "seat_inactive" by its stale legacy seat and the
-            // Desktop update preflight failed after a successful activation (SUP-000040). Franck's
+            // Desktop update preflight failed after a successful activation (SUP-000040). The owner's
             // directive (2026-09-21): no known HWID alias divergence blocks a legitimate client; accept
             // and log. Every alias of this legacy digest in the product is examined (no arbitrary cap,
             // so the only active licence can never be skipped) through the shared resolver, which
@@ -1390,7 +1503,7 @@ namespace SoftLicence.Server.Controllers
             // eligible licence. Active HWID bans are checked by the resolver only in its divergent
             // graph branch; this read-only resolution grants nothing by itself, and activation, check
             // and the distribution preflight keep enforcing bans. Keep during observation; removal
-            // requires conclusive telemetry and Franck's approval.
+            // requires conclusive telemetry and owner approval.
             if (Services.HardwareAuthorityAliasResolver.IsCanonicalHardwareId(hardwareId))
             {
                 var legacyDigest = Services.HardwareAuthorityAliasResolver.Sha256(hardwareId);
@@ -1472,6 +1585,36 @@ namespace SoftLicence.Server.Controllers
             return "active_license_found";
         }
 
+        /// <summary>
+        /// TKT-003751 invariant check: one machine must never hold active seats on two licences of the same
+        /// product. When a hardware resolution finds more than one distinct licence answering
+        /// <c>active_license_found</c>, logs one warning <c>PRODUCT_SCOPE_INVARIANT_VIOLATED</c> naming the product,
+        /// the count and the licence identifiers (never the hardware identifier nor a key) so the incident is
+        /// visible in the central logs. Read-only: the resolution answer and its ordering are unchanged, because
+        /// refusing here would block a start instead of revealing the defect (owner rule: never blocked except for
+        /// security).
+        /// </summary>
+        /// <param name="productId">Exact product scope of the resolution.</param>
+        /// <param name="candidates">All candidates found for the hardware selector, aliases included.</param>
+        /// <param name="now">UTC instant used for the expiry part of the active rule.</param>
+        private void LogProductScopeInvariantViolation(
+            Guid productId, IReadOnlyCollection<TargetedLicenseCandidate> candidates, DateTime now)
+        {
+            var activeLicenseIds = candidates
+                .Where(candidate => GetTargetedResolutionReason(candidate.License, candidate.Seat, now) == "active_license_found")
+                .Select(candidate => candidate.License.Id)
+                .Distinct()
+                .OrderBy(licenseId => licenseId)
+                .ToList();
+            if (activeLicenseIds.Count > 1)
+                _logger.LogWarning(
+                    "PRODUCT_SCOPE_INVARIANT_VIOLATED product {ProductId}: {Count} active licences on one hardware identifier ({LicenseIds}).",
+                    productId, activeLicenseIds.Count, string.Join(",", activeLicenseIds));
+        }
+
+        /// <summary>One licence found by a targeted resolution, with the seat that matched, if any.</summary>
+        /// <param name="License">The candidate licence, with its type loaded.</param>
+        /// <param name="Seat">The matching seat, or null for a legacy licence row without seats.</param>
         private sealed record TargetedLicenseCandidate(License License, LicenseSeat? Seat);
 
         private static bool IsCanonicalTargetedSelector(string value) =>
@@ -1495,7 +1638,7 @@ namespace SoftLicence.Server.Controllers
 
             if (license == null) return NotFound(_localizer["Api_LicenseNotFound"].Value);
 
-            if (scopedProductId != null && license.ProductId != scopedProductId)
+            if (!await IsLicenseProductInScopeAsync(scopedProductId, license.ProductId, HttpContext.RequestAborted))
                 return Unauthorized();
 
             var seat = license.Seats?.FirstOrDefault(s => s.HardwareId == hardwareId && s.IsActive);
@@ -1756,7 +1899,7 @@ namespace SoftLicence.Server.Controllers
                 .FirstOrDefaultAsync(l => l.LicenseKey == licenseKey);
 
             if (license == null) return NotFound("Licence introuvable.");
-            if (scopedProductId != null && license.ProductId != scopedProductId) return Unauthorized();
+            if (!await IsLicenseProductInScopeAsync(scopedProductId, license.ProductId, HttpContext.RequestAborted)) return Unauthorized();
             if (!license.IsActive)
                 return Ok(new
                 {
@@ -1818,7 +1961,7 @@ namespace SoftLicence.Server.Controllers
                 .FirstOrDefaultAsync(l => l.LicenseKey == licenseKey);
 
             if (license == null) return NotFound("Licence introuvable.");
-            if (scopedProductId != null && license.ProductId != scopedProductId) return Unauthorized();
+            if (!await IsLicenseProductInScopeAsync(scopedProductId, license.ProductId, HttpContext.RequestAborted)) return Unauthorized();
             if (license.IsActive)
                 return Ok(new { license.LicenseKey, IsActive = true, Idempotent = true });
 
@@ -1907,8 +2050,11 @@ namespace SoftLicence.Server.Controllers
         /// Reads a product-scoped license, preserving effective expiry status while exposing the
         /// independent revocation state and opaque database version for conditional reactivation.
         /// HasAnyActivation includes released seats, legacy hardware and activation timestamps; zero active seats is not first-use proof.
-        /// SeatChangeQuota reports the live daily seat-change quota (limit, used today, remaining,
-        /// exhaustion, next UTC reset) so the dashboard can block an unlink before offering it.
+        /// AdministrativeExtension exposes only a coherent current audited grant, without operator identity or payment claims.
+        /// SeatChangeQuota reports the live daily hardware quota (limit, distinct identifiers activated today,
+        /// remaining, exhaustion, next UTC reset); since TKT-003751 it never blocks an unlink, only an activation on a new identifier.
+        /// Each active activation carries MachineName, the cleaned PC display name last reported by that seat,
+        /// or null when none was ever received (TKT-003404); it is display data, never an identity.
         /// </summary>
         [HttpGet("licenses/{licenseKey}")]
         public async Task<IActionResult> GetLicenseByKey(string licenseKey)
@@ -1924,7 +2070,7 @@ namespace SoftLicence.Server.Controllers
                 .FirstOrDefaultAsync(l => l.LicenseKey == licenseKey);
 
             if (license == null) return NotFound("Licence introuvable.");
-            if (scopedProductId != null && license.ProductId != scopedProductId) return Unauthorized();
+            if (!await IsLicenseProductInScopeAsync(scopedProductId, license.ProductId, HttpContext.RequestAborted)) return Unauthorized();
 
             // Read on every request so a limit changed in SoftLicence is visible to the Website
             // dashboard immediately, without caching or a client release (TKT-001206).
@@ -1937,6 +2083,9 @@ namespace SoftLicence.Server.Controllers
                 Product = license.Product?.Name ?? "Unknown",
                 license.ProductId,
                 license.AuthorityVersion,
+                // Explicit administrative time is distinct from an invoice and remains bounded by live authority.
+                AdministrativeExtension = await Services.AdminLicenseExtensionService.ReadEntitlementAsync(
+                    _db, license, DateTime.UtcNow, HttpContext.RequestAborted),
                 AuthorityIsActive = license.IsActive,
                 // Expose the ownership version, never the provider-private subject identifier.
                 CommercialOwnershipId = await _db.RuntimeRecoveryCommercialOwnerships
@@ -1951,13 +2100,16 @@ namespace SoftLicence.Server.Controllers
                 license.PartnerCode,
                 LicenseTypeSlug = license.Type?.Slug ?? "UNKNOWN",
                 LicenseTypeId = license.Type?.Id,
+                // Stored type flag read by the website; SoftLicence never interprets it (TKT-002717).
+                TeamEligible = license.Type?.TeamEligible ?? false,
                 IsActive = license.IsActive && (!license.ExpirationDate.HasValue || license.ExpirationDate > DateTime.UtcNow),
                 license.ExpirationDate,
                 license.MaxSeats,
                 CurrentActivations = license.Seats.Count(s => s.IsActive),
                 // An inactive historical seat still proves that this is not a never-activated pass.
                 HasAnyActivation = license.ActivationDate.HasValue || license.HardwareId != null || license.Seats.Any(),
-                Activations = license.Seats.Where(s => s.IsActive).Select(s => new { s.HardwareId, ActivatedAt = s.FirstActivatedAt }),
+                // MachineName (TKT-003404): display name last reported by the PC, or null when none was ever received.
+                Activations = license.Seats.Where(s => s.IsActive).Select(s => new { s.HardwareId, ActivatedAt = s.FirstActivatedAt, s.MachineName }),
                 CreatedAt = license.CreationDate,
                 Params = license.Type?.CustomParams.Select(cp => new { cp.Key, cp.Name, cp.Value }),
                 // Advisory read model for the dashboard; enforcement stays in the release paths.
@@ -1999,7 +2151,7 @@ namespace SoftLicence.Server.Controllers
                 .Include(candidate => candidate.Seats)
                 .SingleOrDefaultAsync(candidate => candidate.LicenseKey == licenseKey);
             if (license == null) return NotFound("Licence introuvable.");
-            if (scopedProductId != null && license.ProductId != scopedProductId) return Unauthorized();
+            if (!await IsLicenseProductInScopeAsync(scopedProductId, license.ProductId, HttpContext.RequestAborted)) return Unauthorized();
             if (!license.IsActive || license.RevokedAt != null
                 || (license.ExpirationDate.HasValue && license.ExpirationDate.Value <= DateTime.UtcNow))
                 return Ok(new { CoveredByActiveSeat = false });
@@ -2047,7 +2199,7 @@ namespace SoftLicence.Server.Controllers
 
             if (license == null) return NotFound("Licence introuvable.");
 
-            if (scopedProductId != null && license.ProductId != scopedProductId)
+            if (!await IsLicenseProductInScopeAsync(scopedProductId, license.ProductId, HttpContext.RequestAborted))
                 return Unauthorized();
 
             var changes = new List<string>();
@@ -2178,6 +2330,9 @@ namespace SoftLicence.Server.Controllers
         /// </summary>
         public class RenewLicenseRequest
         {
+            /// <summary>Optional complete V2 purchase proof; null retains the original V1 request representation.</summary>
+            [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+            public CommercialEvidence? CommercialEvidence { get; set; }
             private string? _reference;
             private int? _daysToAdd;
             private DateTimeOffset? _targetExpirationUtc;
@@ -2330,10 +2485,10 @@ namespace SoftLicence.Server.Controllers
         /// Determines whether a persisted renewal fingerprint is canonical and supported by this server.
         /// </summary>
         /// <param name="renewal">The persisted renewal ledger row.</param>
-        /// <returns><see langword="true"/> only for version 1 lowercase ASCII SHA-256 text.</returns>
+        /// <returns><see langword="true"/> only for supported V1/V2 lowercase ASCII SHA-256 text.</returns>
         private static bool HasVerifiableLicenseRenewalFingerprint(LicenseRenewal renewal)
         {
-            if (renewal.RequestFingerprintVersion != LicenseRenewalFingerprintVersion
+            if (renewal.RequestFingerprintVersion is not (1 or 2)
                 || renewal.RequestFingerprint is not { Length: 64 } stored)
                 return false;
 
@@ -2368,13 +2523,14 @@ namespace SoftLicence.Server.Controllers
         /// <param name="renewal">The existing immutable transaction result.</param>
         /// <param name="requestFingerprint">The digest of the complete current canonical request.</param>
         /// <returns>The frozen success response or a deterministic conflict response.</returns>
+        /// <param name="expectedFingerprintVersion">Version selected by the actual request evidence; a V1 request never accepts a V2-marked legacy digest.</param>
         private IActionResult BuildLicenseRenewalReplayResponse(
             License license,
             LicenseRenewal renewal,
-            string requestFingerprint)
+            string requestFingerprint, int expectedFingerprintVersion = LicenseRenewalFingerprintVersion)
         {
             // Historical, malformed, or unsupported fingerprints cannot prove request equality and fail closed.
-            if (!HasVerifiableLicenseRenewalFingerprint(renewal))
+            if (!HasVerifiableLicenseRenewalFingerprint(renewal) || renewal.RequestFingerprintVersion != expectedFingerprintVersion)
                 return Conflict(new { error = "legacy_transaction_unverified", retryable = false });
 
             if (renewal.LicenseId != license.Id)
@@ -2399,6 +2555,8 @@ namespace SoftLicence.Server.Controllers
         /// A persisted transaction is replayable only when its supported request fingerprint matches exactly.
         /// Historical, malformed, and unsupported fingerprints fail closed with
         /// <c>legacy_transaction_unverified</c> and are never synthesized or backfilled.
+        /// V2 records a purchase and qualification atomically. New attribution requires current ownership;
+        /// exact historical replay remains valid after transfer. Null evidence retains the V1 omission-aware digest.
         /// Pass-backed licenses acquire the shared paid-horizon lock order before renewal so a simultaneous
         /// daily, monthly, or annual period cannot lose either purchased duration.
         /// </remarks>
@@ -2409,6 +2567,11 @@ namespace SoftLicence.Server.Controllers
             var (authorized, scopedProductId) = await GetAuthContextAsync();
             if (!authorized) return Unauthorized();
 
+            var commercial = req.CommercialEvidence;
+            if (commercial is not null && !commercial.IsValid)
+                return BadRequest(new { error = "commercial_evidence_invalid" });
+            if (commercial is not null && !_db.Database.IsNpgsql())
+                return StatusCode(503, new { error = "commercial_evidence_postgres_required" });
             if (string.IsNullOrEmpty(req.TransactionId) || req.TransactionId.Length > 256)
                 return BadRequest(new { error = "invalid_transaction_id" });
 
@@ -2445,7 +2608,7 @@ namespace SoftLicence.Server.Controllers
             if (license == null) return NotFound(_localizer["Api_LicenseNotFound"].Value);
 
             // Si accès scopé, vérifier que la licence appartient au produit autorisé
-            if (scopedProductId != null && license.ProductId != scopedProductId)
+            if (!await IsLicenseProductInScopeAsync(scopedProductId, license.ProductId, HttpContext.RequestAborted))
                 return Unauthorized();
 
             if (license.Type == null) return BadRequest(_localizer["Api_LicenseTypeUnknown"].Value);
@@ -2466,12 +2629,22 @@ namespace SoftLicence.Server.Controllers
                     req.TargetExpirationUtcSpecified,
                     requestedTargetExpiration));
 
+            var attributionDigest = commercial is null ? "" : CommercialEvidenceStore.AttributionDigest(commercial, requestFingerprint);
+            if (commercial is not null)
+            {
+                requestFingerprint = CommercialEvidenceStore.Digest(new { Version = 2, Legacy = requestFingerprint, Evidence = commercial });
+                var check = await CommercialEvidenceStore.CheckAsync(_db, commercial, license.ProductId,
+                    license.Id, "renew", req.TransactionId, attributionDigest, requestFingerprint);
+                if (check.Conflict) return Conflict(new { error = "commercial_evidence_conflict" });
+            }
             var existingRenewal = await _db.LicenseRenewals
                 .AsNoTracking()
                 .FirstOrDefaultAsync(r => r.TransactionId == req.TransactionId);
             if (existingRenewal != null)
-                return BuildLicenseRenewalReplayResponse(license, existingRenewal, requestFingerprint);
+                return BuildLicenseRenewalReplayResponse(license, existingRenewal, requestFingerprint, commercial is null ? 1 : 2);
 
+            if (commercial is not null && !await CommercialEvidenceStore.OwnsAsync(_db, license, commercial.CommercialSubjectId))
+                return Conflict(new { error = "commercial_evidence_subject_conflict" });
             if (paidPeriod is not null && _db.Database.IsNpgsql())
             {
                 // Pass-backed renewals share the same global authority lock as paid-period insertion.
@@ -2545,10 +2718,15 @@ namespace SoftLicence.Server.Controllers
                 RenewalDate = renewalTime,
                 ResultingExpirationDate = pendingFirstActivation ? paidPeriod!.PaidThroughUtc : license.ExpirationDate,
                 ResultingReference = license.Reference,
-                RequestFingerprintVersion = LicenseRenewalFingerprintVersion,
+                RequestFingerprintVersion = commercial is null ? LicenseRenewalFingerprintVersion : 2,
                 RequestFingerprint = requestFingerprint
             };
             _db.LicenseRenewals.Add(renewal);
+            if (commercial is not null)
+                await CommercialEvidenceStore.RecordAsync(_db, license, commercial, "renew", req.TransactionId,
+                    attributionDigest, requestFingerprint, false);
+            else
+                CommercialEvidenceStore.RecordUnqualifiedAcquisition(license);
 
             try
             {
@@ -2574,7 +2752,7 @@ namespace SoftLicence.Server.Controllers
                 return BuildLicenseRenewalReplayResponse(
                     persistedLicense,
                     concurrentRenewal,
-                    requestFingerprint);
+                    requestFingerprint, commercial is null ? 1 : 2);
             }
 
             return BuildRenewalResponse(license, renewal, idempotent: false);

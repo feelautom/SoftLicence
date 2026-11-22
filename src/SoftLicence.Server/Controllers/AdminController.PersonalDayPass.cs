@@ -1,6 +1,8 @@
 using System.Data;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using SoftLicence.Server.Models;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SoftLicence.Server.Data;
@@ -26,7 +28,21 @@ public partial class AdminController
         DateTime PaidAtUtc, int AmountMinor, string Currency, int MaxSeats, string? AllowedVersions,
         string CustomerEmail, string CustomerName, bool PrioritySupport = false,
         Guid? ExpectedLicenseId = null, Guid? ExpectedOwnershipId = null, Guid? ExpectedAuthorityVersion = null,
-        string Offer = "day_pass", int DurationSeconds = 86_400);
+        string Offer = "day_pass", int DurationSeconds = 86_400)
+    {
+        /// <summary>Optional V2 purchase proof; omission preserves the historical V1 request digest exactly.</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public CommercialEvidence? CommercialEvidence { get; init; }
+
+        /// <summary>
+        /// TKT-003260: the account's existing key named by the Website on a first payment (no pass ledger yet), so this
+        /// endpoint extends that key instead of finding one by ownership or minting a new one (rule "one Pro key per
+        /// customer", the Website decides and SoftLicence executes). Omitted from the digest when null, like
+        /// CommercialEvidence, so historical requests keep their exact digest. Ignored once a pass ledger exists.
+        /// </summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public Guid? DesignatedLicenseId { get; init; }
+    }
 
     /// <summary>
     /// Immutable historical receipt and separately locked current authority. CurrentPendingFirstActivation
@@ -49,7 +65,15 @@ public partial class AdminController
     /// expiry and seat changes behind the paid horizon. CAS conflicts never revive revocation.
     /// Chronological recomputation retains late money without moving periods to processing time.
     /// A replay exposes historical success separately from current authority, even after revocation/ABA.
+    /// V2 commercial proof commits with its native receipt; current ownership is checked only for new money.
+    /// V1 typed fingerprints remain byte-identical when proof is null. Shared order conflicts cannot add rights.
     /// No provider calls, email or billing occurs inside or outside this transaction.
+    /// TKT-003260: on a first payment the Website may designate the key (DesignatedLicenseId; ignored once a pass ledger
+    /// exists). An owned key must be that key (personal_pass_designated_key_conflict); an unowned key is attached to the
+    /// paying subject inside the transaction; a key owned by another subject, a partner key or an unknown key is refused
+    /// (personal_pass_designated_owner_conflict, personal_pass_designated_partner_key, personal_pass_designated_key_missing).
+    /// A designated payment never mints a key. An owned key is extended whatever its licence type, which stays unchanged;
+    /// its stored name and e-mail are no longer compared, ownership and the CAS triplet are the identity.
     /// </summary>
     [HttpPost("personal-day-passes/payments")]
     public async Task<IActionResult> ApplyPersonalDayPassPayment([FromBody] PersonalDayPassRequest request,
@@ -60,12 +84,22 @@ public partial class AdminController
         if (!ValidPersonalDayPassRequest(request)) return BadRequest(new { error = "personal_pass_invalid_request" });
         if (!_db.Database.IsNpgsql()) return StatusCode(503, new { error = "personal_pass_postgres_required" });
 
+        var commercial = request.CommercialEvidence;
+        if (commercial is not null && (!commercial.IsValid || commercial.OperationId != request.OperationId))
+            return BadRequest(new { error = "commercial_evidence_invalid" });
+        if (commercial is not null && commercial.CommercialSubjectId != request.CommercialSubjectId)
+            return Conflict(new { error = "commercial_evidence_subject_conflict" });
         var identity = PersonalDayPassPolicy.Identity(request.Provider, request.ProviderAccount, request.Environment, request.PaymentId);
+        // The provider tuple can exceed 512 UTF-16 units; store its framed hash, never truncate an opaque identity.
+        var commercialReceiptKey = PersonalDayPassDigest(identity);
         var digest = PersonalDayPassDigest(request);
         var evidenceDigest = PersonalDayPassDigest(new { Version = 1, request.ProductId, request.CommercialSubjectId,
             request.LicenseTypeId, request.Provider, request.ProviderAccount, request.Environment, request.PaymentId,
             request.PaidAtUtc, request.AmountMinor, request.Currency, request.MaxSeats, request.AllowedVersions,
             request.CustomerEmail, request.CustomerName, request.PrioritySupport, request.Offer, request.DurationSeconds });
+        var attributionDigest = commercial is null ? "" : CommercialEvidenceStore.AttributionDigest(commercial, evidenceDigest);
+        if (commercial is not null)
+            evidenceDigest = CommercialEvidenceStore.Digest(new { Version = 2, Legacy = evidenceDigest, Attribution = attributionDigest });
         await using var transaction = await _db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken);
         await _db.Database.ExecuteSqlRawAsync("SET LOCAL lock_timeout = '5000ms'; SET LOCAL statement_timeout = '30000ms';", cancellationToken);
         await LockPersonalDayPassAsync($"personal-pass-operation-v1|{request.OperationId:D}", cancellationToken);
@@ -74,6 +108,12 @@ public partial class AdminController
         await LockPersonalDayPassAsync($"personal-pass-v1|{request.ProductId:D}|{request.CommercialSubjectId:D}", cancellationToken);
         await _db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(999831, 1)", cancellationToken);
 
+        if (commercial is not null)
+        {
+            var check = await CommercialEvidenceStore.CheckAsync(_db, commercial, request.ProductId,
+                request.ExpectedLicenseId, "payments", commercialReceiptKey, attributionDigest, digest, cancellationToken);
+            if (check.Conflict) return Conflict(new { error = "commercial_evidence_conflict" });
+        }
         var oldOperation = await _db.PersonalDayPassOperations.AsNoTracking().SingleOrDefaultAsync(o => o.Id == request.OperationId, cancellationToken);
         if (oldOperation is not null && !string.Equals(oldOperation.RequestDigest, digest, StringComparison.Ordinal))
             return Conflict(new { error = "personal_pass_operation_conflict" });
@@ -109,7 +149,43 @@ public partial class AdminController
                 ORDER BY "LicenseId", "Id" FOR UPDATE
                 """).AsNoTracking().ToListAsync(cancellationToken);
             if (owners.Count > 1) return Conflict(new { error = "personal_pass_existing_authority_ambiguous" });
-            if (owners.Count == 1)
+            if (request.DesignatedLicenseId is Guid designated)
+            {
+                // TKT-003260: the Website named the key. An owned key must be that one; an unowned key is attached to
+                // this subject (product decision, 07/11/2026); a key owned by another subject or by a partner, or an
+                // unknown key, is refused. In every case no new key is ever minted for a designated payment.
+                if (owners.Count == 1 && owners[0].LicenseId != designated)
+                    return Conflict(new { error = "personal_pass_designated_key_conflict" });
+                license = await _db.Licenses.FromSqlInterpolated($"""
+                    SELECT * FROM public."Licenses" WHERE "Id" = {designated} AND "ProductId" = {request.ProductId} FOR UPDATE
+                    """).SingleOrDefaultAsync(cancellationToken);
+                if (license is null) return Conflict(new { error = "personal_pass_designated_key_missing" });
+                if (owners.Count == 0)
+                {
+                    var foreign = await _db.RuntimeRecoveryCommercialOwnerships.FromSqlInterpolated($"""
+                        SELECT * FROM public."RuntimeRecoveryCommercialOwnerships"
+                        WHERE "ProductId" = {request.ProductId} AND "LicenseId" = {designated} AND "State" = 'ACTIVE'
+                        ORDER BY "Id" FOR UPDATE
+                        """).AsNoTracking().ToListAsync(cancellationToken);
+                    if (foreign.Count != 0) return Conflict(new { error = "personal_pass_designated_owner_conflict" });
+                    if (license.PartnerCode is not null) return Conflict(new { error = "personal_pass_designated_partner_key" });
+                    // Rolled back with the transaction if a later check refuses; persisted with the payment otherwise.
+                    await _db.Database.ExecuteSqlInterpolatedAsync($"""
+                        INSERT INTO "RuntimeRecoveryCommercialSubjects" ("ProductId", "Id", "CreatedAtUtc")
+                        VALUES ({request.ProductId}, {request.CommercialSubjectId}, {DateTime.UtcNow})
+                        ON CONFLICT ("ProductId", "Id") DO NOTHING
+                        """, cancellationToken);
+                    var attached = new RuntimeRecoveryCommercialOwnership { Id = Guid.NewGuid(), ProductId = request.ProductId,
+                        LicenseId = license.Id, OwnerSubjectId = request.CommercialSubjectId, State = "ACTIVE", CreatedAtUtc = DateTime.UtcNow };
+                    _db.Add(attached);
+                    // Written now, inside the same transaction: CommercialEvidenceStore.OwnsAsync reads ownership from
+                    // the database (AsNoTracking) further down, and an only-tracked row made every payment that carries
+                    // V2 commercial evidence fail with commercial_evidence_subject_conflict (review of PR #498).
+                    await _db.SaveChangesAsync(cancellationToken);
+                    owners.Add(attached);
+                }
+            }
+            else if (owners.Count == 1)
             {
                 license = await _db.Licenses.FromSqlInterpolated($"""
                     SELECT * FROM public."Licenses" WHERE "Id" = {owners[0].LicenseId} AND "ProductId" = {request.ProductId} FOR UPDATE
@@ -131,6 +207,12 @@ public partial class AdminController
                 _db.Add(receipt);
                 await _db.SaveChangesAsync(cancellationToken);
             }
+            if (commercial is not null)
+            {
+                await CommercialEvidenceStore.RecordAsync(_db, license!, commercial, "payments", commercialReceiptKey,
+                    attributionDigest, digest, false, cancellationToken);
+                await _db.SaveChangesAsync(cancellationToken);
+            }
             var replayPending = await PersonalDayPassActivationService.IsPendingAsync(_db, pass!, license!, cancellationToken);
             var replayResult = PersonalDayPassReadback(pass!, license!, owners, receipt, replayPending, true);
             await transaction.CommitAsync(cancellationToken);
@@ -138,6 +220,10 @@ public partial class AdminController
         }
         if (oldOperation is not null) return Conflict(new { error = "personal_pass_receipt_inconsistent" });
 
+        if (commercial is not null && license is not null &&
+            !await CommercialEvidenceStore.OwnsAsync(_db, license, commercial.CommercialSubjectId, cancellationToken))
+            return Conflict(new { error = "commercial_evidence_subject_conflict" });
+        var newlyCreated = license is null;
         var type = await _db.LicenseTypes.Include(t => t.CustomParams).SingleOrDefaultAsync(t =>
             t.Id == request.LicenseTypeId && t.ProductId == request.ProductId, cancellationToken);
         if (type is null)
@@ -164,22 +250,21 @@ public partial class AdminController
             return Conflict(new { error = "personal_pass_version_authority_conflict" });
         var pendingFirstActivation = pass is not null && license is not null
             && await PersonalDayPassActivationService.IsPendingAsync(_db, pass, license, cancellationToken);
+        // TKT-003260: an owned key is extended whatever its own licence type (a configurator key has a per-customer type)
+        // and its type is never changed here; its stored customer name and e-mail are history, not identity, so they are
+        // no longer compared (ownership plus the CAS triple are the authority). Product, owner, CAS and revocation stay.
         if (pass is not null && license is not null && (license.Id != request.ExpectedLicenseId
-            || license.LicenseTypeId != request.LicenseTypeId
             || license.AuthorityVersion != request.ExpectedAuthorityVersion || owners.Count != 1
             || owners[0].Id != request.ExpectedOwnershipId || owners[0].OwnerSubjectId != request.CommercialSubjectId
             || !license.IsActive || license.RevokedAt.HasValue || license.RevocationReason is not null
-            || !string.Equals(license.CustomerEmail, request.CustomerEmail, StringComparison.Ordinal)
-            || !string.Equals(license.CustomerName, request.CustomerName, StringComparison.Ordinal)
-            || !pendingFirstActivation && license.ExpirationDate != pass!.PaidThroughUtc))
+            // TKT-002331 : la date de la clé peut différer du registre ; seule une clé démarrée sans date de fin
+            // reste incohérente (fausse attente de première activation).
+            || !pendingFirstActivation && !license.ExpirationDate.HasValue))
             return Conflict(new { error = "personal_pass_authority_conflict" });
         if (pass is null && license is not null && (request.ExpectedLicenseId.HasValue
             || request.ExpectedOwnershipId.HasValue || request.ExpectedAuthorityVersion.HasValue
             || owners.Count != 1 || owners[0].OwnerSubjectId != request.CommercialSubjectId
-            || license.LicenseTypeId != request.LicenseTypeId
-            || !license.IsActive || license.RevokedAt.HasValue || license.RevocationReason is not null
-            || !string.Equals(license.CustomerEmail, request.CustomerEmail, StringComparison.Ordinal)
-            || !string.Equals(license.CustomerName, request.CustomerName, StringComparison.Ordinal)))
+            || !license.IsActive || license.RevokedAt.HasValue || license.RevocationReason is not null))
             return Conflict(new { error = "personal_pass_existing_authority_conflict" });
         if (license is null && (request.ExpectedLicenseId.HasValue || request.ExpectedOwnershipId.HasValue
             || request.ExpectedAuthorityVersion.HasValue))
@@ -283,6 +368,11 @@ public partial class AdminController
             }
             else pass.PaidThroughUtc = horizon;
         }
+        if (commercial is not null)
+            await CommercialEvidenceStore.RecordAsync(_db, license, commercial, "payments", commercialReceiptKey,
+                attributionDigest, digest, newlyCreated, cancellationToken);
+        else
+            CommercialEvidenceStore.RecordUnqualifiedAcquisition(license);
         await _db.SaveChangesAsync(cancellationToken);
         payment = new PersonalDayPassPayment { PassId = pass!.Id, Provider = request.Provider,
             ProviderAccount = request.ProviderAccount, Environment = request.Environment, PaymentId = request.PaymentId,

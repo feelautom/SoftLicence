@@ -4,6 +4,7 @@
 @inject SoftLicence.Server.Services.ToastService Toast
 @inject SoftLicence.Server.Services.TimeZoneService TZ
 @inject IJSRuntime JS
+@inject ILogger<GlobalAnalyticsKeys> Logger
 @using Microsoft.EntityFrameworkCore
 @using SoftLicence.Server.Data
 
@@ -105,6 +106,18 @@
                                     }
                                 </td>
                                 <td class="text-end">
+                                    @{ var canWriteTypes = SoftLicence.Server.Services.AnalyticsApiKeyAuthService.HasScope(key.Scopes, AnalyticsApiKeyScopes.LicenseTypesWrite); }
+                                    <button class="btn btn-sm @(canWriteTypes ? "btn-outline-warning" : "btn-outline-info") me-1"
+                                            @onclick="() => SetLicenseTypesWrite(key, !canWriteTypes)" disabled="@(!key.IsActive)"
+                                            title="Droit license-types:write : créer et modifier les types de licence, leurs paramètres et les plugins par le MCP (aperçu puis application, journal).">
+                                        @(canWriteTypes ? "Retirer l'écriture des types" : "Autoriser l'écriture des types")
+                                    </button>
+                                    @{ var canShareTips = SoftLicence.Server.Services.AnalyticsApiKeyAuthService.HasScope(key.Scopes, AnalyticsApiKeyScopes.LlmTipsShare); }
+                                    <button class="btn btn-sm @(canShareTips ? "btn-outline-warning" : "btn-outline-info") me-1"
+                                            @onclick="() => SetLlmTipsShare(key, !canShareTips)" disabled="@(!key.IsActive)"
+                                            title="Droit llm-tips:share : partager une astuce LLM avec tous les clients ou la retirer, par l'API ou le MCP (journal).">
+                                        @(canShareTips ? "Retirer le partage des astuces" : "Autoriser le partage des astuces")
+                                    </button>
                                     <button class="btn btn-sm btn-outline-danger" @onclick="() => RevokeAnalyticsApiKey(key)" disabled="@(!key.IsActive)">
                                         Révoquer
                                     </button>
@@ -194,6 +207,53 @@
         dbKey.IsActive = false;
         await db.SaveChangesAsync();
         Toast.ShowSuccess("Clé analytics globale révoquée.");
+        await LoadKeys();
+    }
+
+    /// <summary>
+    /// Adds or removes the licence-type write scope on an existing key (TKT-002781), after a confirmation. A new key never
+    /// receives it by default: an administrator decides key by key. The change is traced in the application journal.
+    /// </summary>
+    private async Task SetLicenseTypesWrite(AnalyticsApiKey key, bool enabled)
+    {
+        var question = enabled
+            ? $"Autoriser la clé « {key.Name} » à créer et modifier les types de licence, leurs paramètres et les plugins ?"
+            : $"Retirer à la clé « {key.Name} » le droit d'écrire les types de licence ?";
+        if (!await JS.InvokeAsync<bool>("confirm", question)) return;
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var dbKey = await db.AnalyticsApiKeys.FindAsync(key.Id);
+        if (dbKey == null) return;
+        dbKey.Scopes = AnalyticsApiKeyScopes.WithScope(dbKey.Scopes, AnalyticsApiKeyScopes.LicenseTypesWrite, enabled);
+        await db.SaveChangesAsync();
+        Logger.LogWarning("[ANALYTICS_KEYS] Scope {Scope} {Action} on key {Prefix} ({KeyId}).",
+            AnalyticsApiKeyScopes.LicenseTypesWrite, enabled ? "granted" : "removed", dbKey.Prefix, dbKey.Id);
+        Toast.ShowSuccess(enabled ? "Écriture des types autorisée pour cette clé." : "Écriture des types retirée.");
+        await LoadKeys();
+    }
+
+    /// <summary>
+    /// Adds or removes the LLM tip sharing scope <c>llm-tips:share</c> on an existing key (TKT-003574), after a
+    /// confirmation. A new key never receives it by default. The change is traced in the application journal; the
+    /// sharing decisions themselves are journaled per tip by the server.
+    /// </summary>
+    /// <param name="key">Key shown in the list; reloaded from the database before the change.</param>
+    /// <param name="enabled">True to grant the scope, false to remove it.</param>
+    private async Task SetLlmTipsShare(AnalyticsApiKey key, bool enabled)
+    {
+        var question = enabled
+            ? $"Autoriser la clé « {key.Name} » à partager des astuces LLM avec tous les clients et à les retirer ?"
+            : $"Retirer à la clé « {key.Name} » le droit de partager des astuces LLM ?";
+        if (!await JS.InvokeAsync<bool>("confirm", question)) return;
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var dbKey = await db.AnalyticsApiKeys.FindAsync(key.Id);
+        if (dbKey == null) return;
+        dbKey.Scopes = AnalyticsApiKeyScopes.WithScope(dbKey.Scopes, AnalyticsApiKeyScopes.LlmTipsShare, enabled);
+        await db.SaveChangesAsync();
+        Logger.LogWarning("[ANALYTICS_KEYS] Scope {Scope} {Action} on key {Prefix} ({KeyId}).",
+            AnalyticsApiKeyScopes.LlmTipsShare, enabled ? "granted" : "removed", dbKey.Prefix, dbKey.Id);
+        Toast.ShowSuccess(enabled ? "Partage des astuces autorisé pour cette clé." : "Partage des astuces retiré.");
         await LoadKeys();
     }
 

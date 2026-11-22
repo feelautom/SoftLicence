@@ -14,7 +14,7 @@ public sealed record LicenseDecisionSeat(Guid SeatId, string HardwareId, DateTim
 /// <param name="AuthorityEpoch">Runtime database epoch observed under existing locks; detects state cycles, including seat deletion/recreation. Unrelated authority changes may also distinguish observations.</param>
 /// <param name="ActiveSeats">Occupied seats before business effects, or null when unobserved.</param>
 /// <param name="SeatLimit">Commercial seat limit at observation, or null when unobserved.</param>
-/// <param name="ActivationsToday">Seats first activated since UTC midnight, using the existing quota predicate; null when unobserved.</param>
+/// <param name="ActivationsToday">Daily activation count observed by the deciding path: distinct identifiers activated since UTC midnight where the path applies the TKT-003751 hardware quota, seats first activated since UTC midnight in the generic observation; null when unobserved.</param>
 /// <param name="DailyActivationLimit">Existing daily limit; zero means unlimited, null means unobserved.</param>
 /// <param name="SeatStateDigest">Lowercase SHA-256 of the ordered observed set: complete loaded seats for Finalize, active predicate rows for legacy quota. Not a hardware authority proof.</param>
 /// <param name="ActiveSeatDetails">At most 64 active seats ordered by UUID; null means unobserved, empty means observed empty.</param>

@@ -833,30 +833,18 @@ public sealed class LicenseReactivationPostgreSqlTests
             await db.SaveChangesAsync(); await transaction.CommitAsync();
         }
 
-        /// <summary>Creates and migrates only a generated database on an explicit loopback test server.</summary>
+        /// <summary>Clones only a generated current-schema database on the loopback test server.</summary>
         public static async Task<Fixture> CreateAsync()
         {
-            var configured = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES")
-                ?? throw new InvalidOperationException("SOFTLICENCE_RUNTIME_TEST_POSTGRES must identify a local test server.");
-            var settings = new NpgsqlConnectionStringBuilder(configured);
-            if (settings.Host is not ("localhost" or "127.0.0.1" or "::1"))
-                throw new InvalidOperationException("TKT939 tests require a loopback PostgreSQL host.");
-            var database = "tkt939_" + Guid.NewGuid().ToString("N");
-            settings.Database = "postgres";
-            var maintenance = settings.ConnectionString;
-            await using (var admin = new NpgsqlConnection(maintenance))
-            {
-                await admin.OpenAsync();
-                await using var command = new NpgsqlCommand($"CREATE DATABASE \"{database}\"", admin);
-                await command.ExecuteNonQueryAsync();
-            }
-            settings.Database = database;
-            var fixture = new Fixture(maintenance, database, settings.ConnectionString);
+            var clone = await PostgreSqlModelDatabase.CloneAsync("reactivation");
+            var fixture = new Fixture(
+                clone.MaintenanceConnectionString,
+                clone.DatabaseName,
+                clone.ConnectionString);
             try
             {
                 await using var db = fixture.Db();
-                await db.Database.MigrateAsync();
-                var product = new Product { Name = database, ApiSecret = "tkt939-product-fixture" };
+                var product = new Product { Name = clone.DatabaseName, ApiSecret = "tkt939-product-fixture" };
                 var type = new LicenseType { Product = product, Name = "Fixture Pro", Slug = "TKT939-PRO" };
                 db.AddRange(product, type);
                 await db.SaveChangesAsync();
@@ -892,11 +880,7 @@ public sealed class LicenseReactivationPostgreSqlTests
         {
             Client.Dispose();
             await host.DisposeAsync();
-            NpgsqlConnection.ClearAllPools();
-            await using var admin = new NpgsqlConnection(maintenance);
-            await admin.OpenAsync();
-            await using var command = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)", admin);
-            await command.ExecuteNonQueryAsync();
+            await PostgreSqlModelDatabase.DropAsync(maintenance, database);
         }
     }
 }

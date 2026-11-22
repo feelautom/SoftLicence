@@ -33,7 +33,8 @@ internal static class AutomaticSeatSwitch
     /// The caller must already hold the exclusive Runtime and commercial barriers. PrepareAsync
     /// adds the losing hardware and row locks, then reads PostgreSQL time after all waits.
     /// Exact canonical hardware strings come from the authenticated entry point, not an inferred
-    /// alias pair. The quota is event-based; activation/creation alone never consumes it.
+    /// alias pair. The quota counts distinct identifiers activated per UTC day (TKT-003751): the switch is refused only
+    /// when the target identifier would exceed it; the release itself is never counted.
     /// </remarks>
     /// <param name="db">Tracked context in the activation transaction.</param>
     /// <param name="license">Authenticated licence with type and seats loaded.</param>
@@ -65,15 +66,16 @@ internal static class AutomaticSeatSwitch
             await db.Entry(license.Type).ReloadAsync(cancellationToken);
         if (license.Type?.DisableNewActivations == true)
             throw new DistributionOperationException("new_activations_disabled", 422);
-        var quota = await SeatChangeQuota.GetStatusAsync(db, license, scope.ObservedAtUtc, cancellationToken);
-        if (quota.IsExhausted)
+        // TKT-003751: the switch is an activation on another identifier; it is refused here, before
+        // the losing seat is touched, so a refusal leaves the current machine usable.
+        if (await SeatChangeQuota.IsActivationRefusedAsync(db, license, hardwareId, scope.ObservedAtUtc, cancellationToken))
             throw new DistributionOperationException("activation_rate_limited", 422, "seat_change_quota_exhausted");
         return new Plan(active[0], scope);
     }
 
     /// <summary>
     /// Releases the captured seat through the existing assignment authority and records exactly
-    /// one counted unlink. It never commits, deletes historical rows, or changes Runtime identity.
+    /// one uncounted <c>UNLINKED_API</c> history row. It never commits, deletes historical rows, or changes Runtime identity.
     /// </summary>
     /// <param name="db">The same transaction/context used to prepare the plan.</param>
     /// <param name="license">Licence receiving the new machine in this transaction.</param>
@@ -99,8 +101,8 @@ internal static class AutomaticSeatSwitch
                 + (transport == null ? string.Empty
                     : $"; transport=s2s; remote_address={transport.RemoteAddress ?? "unavailable"}"),
             DecisionCorrelationId = transport?.CorrelationId,
-            // Portal's S2S prefix is excluded from this counter because it has a separate
-            // operation ledger. Automatic replacement has no such ledger and must count once.
+            // History attribution only: since TKT-003751 no release row is counted by the quota,
+            // which counts the identifiers the key is activated on.
             PerformedBy = Source
         });
         await SeatRuntimeReleaseAuthority.CompleteAsync(db, plan.Scope, [plan.Seat], cancellationToken);

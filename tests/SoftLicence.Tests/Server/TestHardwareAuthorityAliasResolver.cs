@@ -47,6 +47,26 @@ internal sealed class TestHardwareAuthorityAliasResolver :
     }
 
     /// <inheritdoc />
+    public Task<IReadOnlyList<string>> ResolveStoredSeatHardwareIdsByCanonicalAsync(
+        LicenseDbContext authorityDb,
+        Guid productId,
+        Guid licenseId,
+        string submittedCanonicalHardwareId,
+        CancellationToken cancellationToken = default)
+    {
+        var resolver = new HardwareAuthorityAliasResolver(
+            authorityDb,
+            Options.Create(new HardwareAuthorityAliasOptions { DefaultMode = "enabled" }),
+            NullLogger<HardwareAuthorityAliasResolver>.Instance);
+        return resolver.ResolveStoredSeatHardwareIdsByCanonicalAsync(
+            authorityDb,
+            productId,
+            licenseId,
+            submittedCanonicalHardwareId,
+            cancellationToken);
+    }
+
+    /// <inheritdoc />
     public Task<HardwareAuthorityResolution> ResolveFinalizeSourceByCanonicalAsync(
         LicenseDbContext authorityDb,
         Guid productId,

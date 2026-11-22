@@ -260,6 +260,10 @@ services:
       - DistributionS2S__Clients__0__AllowedCidrs__0=${DistributionS2S__Clients__0__AllowedCidrs__0:-}
       - DistributionS2S__Clients__0__AllowedCidrs__1=${DistributionS2S__Clients__0__AllowedCidrs__1:-}
       - CanaryAck__PrivateKeyPem=${CanaryAck__PrivateKeyPem:-}
+      # TKT-004061 (owner decision, 20/11/2026): assignment controls stay in record-only mode ("open") in production until every
+      # refusal returns a named, customer-readable error. The server defaults to "closed" when the variable is missing, so
+      # the compose sets "open" explicitly; set SOFTLICENCE_ASSIGNMENT_ENFORCEMENT=closed in Docker to block for real.
+      - SOFTLICENCE_ASSIGNMENT_ENFORCEMENT=${SOFTLICENCE_ASSIGNMENT_ENFORCEMENT:-open}
       - RetentionSettings__CleanupEnabled=true
       - RetentionSettings__AuditLogsDays=${RetentionSettings__AuditLogsDays:-30}
       - RetentionSettings__TelemetryDays=${RetentionSettings__TelemetryDays:-0}
@@ -290,10 +294,15 @@ services:
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
       - BUGTRACE_BASE_URL=${BUGTRACE_BASE_URL:-}
       - BUGTRACE_PROJECT_TOKEN=${BUGTRACE_PROJECT_TOKEN:-}
+      # Dedicated Desktop Ticket authority; provider identity is verified before use.
+      - BUGTRACE_TIA_PROJECT_TOKEN=${BUGTRACE_TIA_PROJECT_TOKEN:-}
       - BUGTRACE_PROJECT_ID=${BUGTRACE_PROJECT_ID:-}
       # Dedicated Desktop support relay: public TIAConnect product identity, not a credential.
       - BUGTRACE_SUPPORT_PRODUCT_ID=808648bc-a4b9-4f71-bcb1-b7c7e67ca98e
       - BUGTRACE_SUPPORT_PROJECT_TOKEN=${BUGTRACE_SUPPORT_PROJECT_TOKEN:-}
+      # LLM tip conversion (TKT-003093): products whose tips become tickets in the T-IA-Connect project
+      # through the T-IA authority above. Public product identities, not credentials; any other product is refused.
+      - BUGTRACE_LLM_TIP_TIA_PRODUCT_IDS=808648bc-a4b9-4f71-bcb1-b7c7e67ca98e
       - FORCE_DB_RESET=false
     restart: unless-stopped
     deploy:

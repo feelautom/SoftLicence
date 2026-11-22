@@ -177,7 +177,12 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
 
                     var replayAuthority = await RevalidateAuthorizedReplayAsync(
                         db, replay, parsed.Request, cancellationToken);
-                    await transaction.RollbackAsync(cancellationToken);
+                    // A successful replay may restore only current commercial authority. Commit that
+                    // repair before returning the frozen terminal; every refusal remains inert.
+                    if (replayAuthority.Outcome == PreviousAuthorityOutcome.Eligible)
+                        await transaction.CommitAsync(cancellationToken);
+                    else
+                        await transaction.RollbackAsync(cancellationToken);
                     return replayAuthority.Outcome switch
                     {
                         PreviousAuthorityOutcome.Eligible =>
@@ -298,7 +303,13 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         var observed = await ReadDatabaseClockAsync(db, cancellationToken);
         previousResolution = await ReassessResolvedCommercialAuthorityAsync(
             db, previousResolution, reservation.LicenseId, reservation.LicenseSeatId,
-            authority.ReleaseVersion, observed, cancellationToken);
+            authority.ReleaseVersion, observed, MissingAssignmentPolicy.Relink,
+            SubjectDigest(owner.OwnerSubjectId),
+            RuntimeCommercialAssignmentResolver.AuthorityProof.Recovery(
+                grant.AuthenticatedClientId,
+                grant.ProviderGrantRefDigestSha256,
+                owner.OwnerSubjectId),
+            cancellationToken);
         if (previousResolution.Outcome == PreviousAuthorityOutcome.Unavailable)
         {
             await transaction.RollbackAsync(cancellationToken);
@@ -1009,9 +1020,60 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
                 request.Release.Version, decisionNow, cancellationToken))
             return await FreezeRefusalAsync(db, clientId, parsed, "recovery_not_authorized",
                 StatusCodes.Status403Forbidden, decisionNow, cancellationToken);
+
+        const string commercialRelinkSavepoint = "runtime_recovery_commercial_relink";
+        var requiresCommercialRelink = previousResolution.Authority?.SourceAssignmentId == Guid.Empty;
+        var relinkTransaction = requiresCommercialRelink
+            ? db.Database.CurrentTransaction
+                ?? throw new InvalidOperationException("Recovery relink requires the ambient provider transaction.")
+            : null;
+        if (relinkTransaction is not null)
+        {
+            await relinkTransaction.CreateSavepointAsync(commercialRelinkSavepoint, cancellationToken);
+            if (grant is null)
+            {
+                grant = new RuntimeRecoveryGrantOwnership
+                {
+                    ProductId = productId,
+                    ProviderGrantRefDigestSha256 = grantDigest,
+                    AuthenticatedClientId = clientId,
+                    LicenseId = licenseId,
+                    CommercialOwnershipId = owner!.Id,
+                    OwnerSubjectId = owner.OwnerSubjectId,
+                    RecoveryOperationRef = recoveryRef,
+                    RecoveryDigestSha256 = request.RecoveryDigestSha256,
+                    RequestId = requestId,
+                    CreatedAtUtc = decisionNow
+                };
+                db.RuntimeRecoveryGrantOwnerships.Add(grant);
+                await db.SaveChangesAsync(cancellationToken);
+            }
+        }
+        previousResolution = await ReassessResolvedCommercialAuthorityAsync(
+            db, previousResolution, licenseId, seat.Id, request.Release.Version,
+            decisionNow, MissingAssignmentPolicy.Relink,
+            SubjectDigest(owner!.OwnerSubjectId),
+            RuntimeCommercialAssignmentResolver.AuthorityProof.Recovery(
+                clientId,
+                grantDigest,
+                owner.OwnerSubjectId),
+            cancellationToken);
+        if (previousResolution.Outcome == PreviousAuthorityOutcome.Unavailable)
+        {
+            await RollbackCommercialRelinkAsync();
+            return Transport(StatusCodes.Status503ServiceUnavailable, "provider_unavailable");
+        }
+        if (previousResolution.Outcome == PreviousAuthorityOutcome.Denied)
+        {
+            await RollbackCommercialRelinkAsync();
+            return CommercialAuthorityDenial();
+        }
         if (previousResolution.Authority is null)
+        {
+            await RollbackCommercialRelinkAsync();
             return await FreezeRefusalAsync(db, clientId, parsed, "authority_state_conflict",
                 StatusCodes.Status409Conflict, decisionNow, cancellationToken);
+        }
         var previousAuthority = previousResolution.Authority;
 
         var reservationRef = Guid.NewGuid();
@@ -1052,8 +1114,11 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         var persistence = await authorityPersistence.PersistRecoveryGenesisInAmbientTransactionAsync(
             db, candidate, cancellationToken);
         if (persistence.Status == RuntimeEnrollmentAuthorityPersistenceStatus.StructuralConflict)
+        {
+            await RollbackCommercialRelinkAsync();
             return await FreezeRefusalAsync(db, clientId, parsed, "authority_state_conflict",
                 StatusCodes.Status409Conflict, decisionNow, cancellationToken);
+        }
 
         db.RuntimeSeatRecoveryAuthorizations.Add(new RuntimeSeatRecoveryAuthorization
         {
@@ -1121,7 +1186,17 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
                 CreatedAtUtc = decisionNow
             });
         await db.SaveChangesAsync(cancellationToken);
+        if (relinkTransaction is not null)
+            await relinkTransaction.ReleaseSavepointAsync(commercialRelinkSavepoint, cancellationToken);
         return new(StatusCodes.Status200OK, ContentType, response);
+
+        async Task RollbackCommercialRelinkAsync()
+        {
+            if (relinkTransaction is null)
+                return;
+            await relinkTransaction.RollbackToSavepointAsync(commercialRelinkSavepoint, cancellationToken);
+            db.ChangeTracker.Clear();
+        }
     }
 
     /// <summary>
@@ -1420,13 +1495,13 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         var now = await ReadDatabaseClockAsync(db, cancellationToken);
         var commercial = await AssessSourceCommercialAuthorityAsync(
             db, enrollment, licenseId, seatId, targetReleaseVersion, now,
-            lockForCutover, expectedSourceAssignmentId: null, cancellationToken);
+            lockForCutover, MissingAssignmentPolicy.Defer, null, null, cancellationToken);
         if (commercial.Outcome != PreviousAuthorityOutcome.Eligible)
             return new(commercial.Outcome, null, commercial.DiagnosticCode);
 
         return PreviousAuthorityResolution.Eligible(new(
             lineage.AuthorityLineageId, lineage.HeadGenerationId, binding.Id, enrollment.Id,
-            commercial.SourceAssignmentId!.Value));
+            commercial.SourceAssignmentId ?? Guid.Empty));
     }
 
     /// <summary>
@@ -1500,6 +1575,15 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         Unavailable
     }
 
+    /// <summary>Controls how a proved source without a current assignment is handled at one validation phase.</summary>
+    private enum MissingAssignmentPolicy
+    {
+        /// <summary>Preserves immutable source proof until current grant ownership is validated.</summary>
+        Defer,
+        /// <summary>Creates the current assignment after current grant ownership has been validated.</summary>
+        Relink
+    }
+
     /// <summary>Returns the exact previous authority together with a bounded failure classification.</summary>
     /// <param name="Outcome">Identity, proof and current commercial classification.</param>
     /// <param name="Authority">Exact previous authority only when every layer is eligible.</param>
@@ -1538,12 +1622,16 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
     /// </summary>
     /// <param name="db">Context holding the caller's shared or exclusive commercial barrier.</param>
     /// <param name="sourceEnrollment">Cryptographically proved and row-locked source enrollment.</param>
-    /// <param name="expectedLicenseId">Historical request scope that the current assignment must retain.</param>
-    /// <param name="expectedSeatId">Historical request scope that the current assignment must retain.</param>
+    /// <param name="expectedLicenseId">Historical request scope retained only by signed recovery evidence.</param>
+    /// <param name="expectedSeatId">Historical request scope retained only by signed recovery evidence.</param>
     /// <param name="targetReleaseVersion">Target release checked against licence and product policy.</param>
     /// <param name="now">Database time read after the commercial barrier.</param>
     /// <param name="lockForCutover">Takes an update lock when the caller is preparing the atomic cutover.</param>
-    /// <param name="expectedSourceAssignmentId">Previously derived assignment that must remain uniquely ACTIVE.</param>
+    /// <param name="missingAssignmentPolicy">Defers or repairs an absent current assignment.</param>
+    /// <param name="provedSubjectRefDigestSha256">
+    /// Server-derived digest of the current owner proven by the caller; required for repair.
+    /// </param>
+    /// <param name="authorityProof">Exact current Recovery grant and owner; required for repair.</param>
     /// <param name="cancellationToken">Cancels the assessment and lock acquisition.</param>
     /// <returns>A business denial or eligible result carrying the exact locked source assignment.</returns>
     private static async Task<CommercialAuthorityAssessment> AssessSourceCommercialAuthorityAsync(
@@ -1554,7 +1642,9 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         string targetReleaseVersion,
         DateTimeOffset now,
         bool lockForCutover,
-        Guid? expectedSourceAssignmentId,
+        MissingAssignmentPolicy missingAssignmentPolicy,
+        string? provedSubjectRefDigestSha256,
+        RuntimeCommercialAssignmentResolver.AuthorityProof? authorityProof,
         CancellationToken cancellationToken)
     {
         var assignments = lockForCutover
@@ -1572,16 +1662,87 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
             return new(PreviousAuthorityOutcome.Unavailable, "assignment_duplicate_active");
         if (assignments.Count == 0)
         {
-            var quarantined = await db.EnrollmentLicenseAssignmentQuarantines.AsNoTracking()
-                .AnyAsync(row => row.EnrollmentId == sourceEnrollment.Id, cancellationToken);
-            return new(PreviousAuthorityOutcome.Denied,
-                quarantined ? "assignment_quarantined" : "assignment_missing");
+            var latestEndReason = await db.EnrollmentLicenseAssignments.AsNoTracking()
+                .Where(row => row.EnrollmentId == sourceEnrollment.Id && row.State == "ENDED")
+                .OrderByDescending(row => row.Revision)
+                .ThenByDescending(row => row.Id)
+                .Select(row => row.EndReason)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (string.Equals(latestEndReason, "commercial_revoked", StringComparison.Ordinal))
+                return new(PreviousAuthorityOutcome.Denied, "commercial_authority_ineligible");
+
+            var targetLicense = await db.Licenses
+                .Include(row => row.Product)
+                .Include(row => row.Type)
+                .Include(row => row.Seats)
+                .SingleOrDefaultAsync(row => row.Id == expectedLicenseId, cancellationToken);
+            var targetSeat = targetLicense?.Seats.SingleOrDefault(row => row.Id == expectedSeatId);
+            if (targetLicense is null || targetSeat is null
+                || sourceEnrollment.SubjectRefDigestSha256 is not { Length: 64 }
+                || string.IsNullOrWhiteSpace(targetSeat.HardwareId))
+                return new(PreviousAuthorityOutcome.Unavailable, "assignment_relation_missing");
+            if (targetLicense.ProductId != sourceEnrollment.ProductId
+                || !targetLicense.IsActive
+                || targetLicense.RevokedAt is not null
+                || targetLicense.ExpirationDate is { } targetExpiry && targetExpiry <= now.UtcDateTime
+                || targetLicense.MaxSeats < 1
+                || targetSeat.LicenseId != targetLicense.Id
+                || !RuntimeEnrollmentService.IsVersionAllowed(targetReleaseVersion, targetLicense.AllowedVersions)
+                || RuntimeEnrollmentService.IsVersionBelow(
+                    targetReleaseVersion, targetLicense.Product?.MinimumAllowedVersion))
+                return new(PreviousAuthorityOutcome.Denied, "commercial_authority_ineligible");
+            var targetActiveSeatCount = targetLicense.Seats.Count(row => row.IsActive);
+            if (targetActiveSeatCount > targetLicense.MaxSeats)
+                return new(PreviousAuthorityOutcome.Denied, "seat_capacity_exceeded");
+            if (await HasActiveSecurityBanAsync(
+                    db, sourceEnrollment.ProductId, targetSeat.HardwareId,
+                    targetReleaseVersion, now, cancellationToken))
+                return new(PreviousAuthorityOutcome.Denied, "security_policy_banned");
+            if (missingAssignmentPolicy == MissingAssignmentPolicy.Defer)
+                return new(PreviousAuthorityOutcome.Eligible, "assignment_relink_deferred");
+            if (provedSubjectRefDigestSha256 is not { Length: 64 }
+                || authorityProof is null
+                || !string.Equals(
+                    sourceEnrollment.SubjectRefDigestSha256,
+                    provedSubjectRefDigestSha256,
+                    StringComparison.Ordinal))
+                return new(PreviousAuthorityOutcome.Denied, "commercial_authority_ineligible");
+            try
+            {
+                _ = await RuntimeCommercialAssignmentResolver.ResolveOrRelinkAsync(
+                    db,
+                    sourceEnrollment,
+                    targetLicense,
+                    provedSubjectRefDigestSha256,
+                    targetSeat.HardwareId,
+                    targetReleaseVersion,
+                    sourceEnrollment.ClientId,
+                    authorityProof,
+                    now,
+                    cancellationToken);
+                await db.SaveChangesAsync(cancellationToken);
+                assignments = await db.EnrollmentLicenseAssignments.AsNoTracking()
+                    .Where(row => row.EnrollmentId == sourceEnrollment.Id && row.State == "ACTIVE")
+                    .Take(2)
+                    .ToListAsync(cancellationToken);
+            }
+            catch (RuntimeEnrollmentException exception) when (
+                exception.StatusCode == StatusCodes.Status422UnprocessableEntity)
+            {
+                return new(PreviousAuthorityOutcome.Denied,
+                    exception.DiagnosticCode ?? "commercial_authority_ineligible");
+            }
+            catch (RuntimeEnrollmentException exception) when (
+                exception.StatusCode == StatusCodes.Status503ServiceUnavailable)
+            {
+                return new(PreviousAuthorityOutcome.Unavailable,
+                    exception.DiagnosticCode ?? "commercial_authority_unavailable");
+            }
+            if (assignments.Count != 1)
+                return new(PreviousAuthorityOutcome.Unavailable, "assignment_relation_missing");
         }
 
         var assignment = assignments[0];
-        if (expectedSourceAssignmentId is { } expectedAssignmentId && assignment.Id != expectedAssignmentId
-            || assignment.LicenseId != expectedLicenseId || assignment.LicenseSeatId != expectedSeatId)
-            return new(PreviousAuthorityOutcome.Denied, "assignment_scope_mismatch");
 
         var license = await db.Licenses.AsNoTracking()
             .Include(row => row.Product)
@@ -1614,17 +1775,20 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
     }
 
     /// <summary>
-    /// Reassesses only current commercial authority at a database instant sampled after every later
-    /// mutable-row wait. The caller uses ReadCommitted so these reads also receive a statement snapshot
-    /// created after the barrier wait. Historical identity and signed proof remain the previously resolved authority.
+    /// Reassesses current commercial authority at a database instant sampled after every later
+    /// mutable-row wait. A missing assignment is restored through the same resolver, while historical
+    /// identity and signed proof remain the previously resolved authority.
     /// </summary>
     /// <param name="db">Context holding the same commercial barrier and provider transaction.</param>
     /// <param name="resolution">Previously resolved A/P authority and initial commercial verdict.</param>
-    /// <param name="expectedLicenseId">Exact historical licence scope retained by the assignment.</param>
-    /// <param name="expectedSeatId">Exact historical seat scope retained by the assignment.</param>
+    /// <param name="expectedLicenseId">Historical licence scope retained by the signed recovery proof.</param>
+    /// <param name="expectedSeatId">Historical seat scope retained by the signed recovery proof.</param>
     /// <param name="targetReleaseVersion">Target release checked against current commercial policy.</param>
     /// <param name="decisionNow">Fresh PostgreSQL wall clock read after all decisive lock waits.</param>
-    /// <param name="cancellationToken">Cancels the final read-only assessment.</param>
+    /// <param name="missingAssignmentPolicy">Whether this proved phase may append the missing assignment.</param>
+    /// <param name="provedSubjectRefDigestSha256">Server-derived digest of the currently proved owner.</param>
+    /// <param name="authorityProof">Exact current Recovery grant and owner proven by the caller.</param>
+    /// <param name="cancellationToken">Cancels the final assessment and any atomic relink.</param>
     /// <returns>The preserved A/P authority with the final current commercial outcome.</returns>
     private static async Task<PreviousAuthorityResolution> ReassessResolvedCommercialAuthorityAsync(
         LicenseDbContext db,
@@ -1633,13 +1797,17 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         Guid expectedSeatId,
         string targetReleaseVersion,
         DateTime decisionNow,
+        MissingAssignmentPolicy missingAssignmentPolicy,
+        string provedSubjectRefDigestSha256,
+        RuntimeCommercialAssignmentResolver.AuthorityProof authorityProof,
         CancellationToken cancellationToken)
     {
         if (resolution.Outcome != PreviousAuthorityOutcome.Eligible || resolution.Authority is null)
             return resolution;
 
+        var authority = resolution.Authority;
         var enrollments = await db.RuntimeEnrollments.AsNoTracking()
-            .Where(row => row.Id == resolution.Authority.EnrollmentId)
+            .Where(row => row.Id == authority.EnrollmentId)
             .Take(2)
             .ToListAsync(cancellationToken);
         if (enrollments.Count != 1)
@@ -1647,9 +1815,19 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
 
         var commercial = await AssessSourceCommercialAuthorityAsync(
             db, enrollments[0], expectedLicenseId, expectedSeatId, targetReleaseVersion,
-            decisionNow, lockForCutover: false, resolution.Authority.SourceAssignmentId, cancellationToken);
+            decisionNow, lockForCutover: false, missingAssignmentPolicy,
+            provedSubjectRefDigestSha256, authorityProof, cancellationToken);
+        if (commercial.Outcome == PreviousAuthorityOutcome.Eligible
+            && commercial.SourceAssignmentId is null)
+            return PreviousAuthorityResolution.Unavailable("assignment_relation_missing");
         return commercial.Outcome == PreviousAuthorityOutcome.Eligible
-            ? resolution
+            ? resolution with
+            {
+                Authority = authority with
+                {
+                    SourceAssignmentId = commercial.SourceAssignmentId.GetValueOrDefault()
+                }
+            }
             : new(commercial.Outcome, null, commercial.DiagnosticCode);
     }
 
@@ -1898,6 +2076,8 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
     /// <summary>
     /// Revalidates A, immutable proof and current assignment authority before replaying a successful
     /// recovery authorization. The newly generated enrollment identifier is never used as the source grant.
+    /// An absent assignment is repaired only after the existing owner and exact grant are revalidated;
+    /// the caller commits an eligible repair without regenerating the frozen cryptographic response.
     /// </summary>
     /// <param name="db">The context enlisted in the caller's replay transaction.</param>
     /// <param name="ledger">The locked successful authorization terminal.</param>
@@ -1935,14 +2115,43 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
 
         var resolution = await ResolvePreviousActiveAuthorityAsync(
             db, reservation.ProductId, reservation.LicenseId, reservation.LicenseSeatId,
-            authority.ReleaseVersion, authority.ArtifactSetDigestSha256, cancellationToken);
+            authority.ReleaseVersion, authority.ArtifactSetDigestSha256, cancellationToken,
+            lockForCutover: true);
         if (resolution.Authority is not { } previous
             || previous.HeadLineageId != authority.PreviousAuthorityLineageId
             || previous.HeadGenerationId != authority.PreviousAuthorityGenerationId)
             return resolution.Outcome == PreviousAuthorityOutcome.Eligible
                 ? PreviousAuthorityResolution.Invalid("authorization_replay_previous_authority_changed")
                 : resolution;
-        return resolution;
+        // Existing current authority preserves the frozen replay contract. Only an absent assignment
+        // requires the current ownership/grant proof that authorizes a new commercial write.
+        if (previous.SourceAssignmentId != Guid.Empty)
+            return resolution;
+
+        try
+        {
+            var scope = await LockAndValidateKeyScopeAsync(
+                db, ledger.AuthenticatedClientId, request.ProductId, request.RequestId,
+                ledger.RequestDigestSha256, request.RecoveryOperationRef,
+                reservation.ReservationRef.ToString("D"), authority.EnrollmentId.ToString("D"),
+                authority.AuthorityGenerationId.ToString("D"), authority.PublicKeySpkiSha256,
+                authority.KeyThumbprint, cancellationToken, lockForCommercialRelink: true);
+            return scope is null
+                ? PreviousAuthorityResolution.Invalid("authorization_replay_scope_invalid")
+                : PreviousAuthorityResolution.Eligible(scope.PreviousAuthority);
+        }
+        catch (RuntimeEnrollmentException exception) when (
+            exception.StatusCode == StatusCodes.Status422UnprocessableEntity)
+        {
+            return PreviousAuthorityResolution.Denied(
+                exception.DiagnosticCode ?? "commercial_authority_ineligible");
+        }
+        catch (RuntimeEnrollmentException exception) when (
+            exception.StatusCode == StatusCodes.Status503ServiceUnavailable)
+        {
+            return PreviousAuthorityResolution.Unavailable(
+                exception.DiagnosticCode ?? "commercial_authority_unavailable");
+        }
     }
 
     /// <summary>
@@ -2162,25 +2371,15 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
             WHERE "AuthorityLineageId" = {authority.AuthorityLineageId}
             FOR UPDATE
             """).AsNoTracking().SingleOrDefaultAsync(cancellationToken);
-        var decisionNow = await ReadDatabaseClockAsync(db, cancellationToken);
-        previousResolution = await ReassessResolvedCommercialAuthorityAsync(
-            db, previousResolution, reservation.LicenseId, reservation.LicenseSeatId,
-            authority.ReleaseVersion, decisionNow, cancellationToken);
-        if (previousResolution.Outcome == PreviousAuthorityOutcome.Unavailable)
-            throw new RuntimeEnrollmentException(
-                "provider_unavailable", StatusCodes.Status503ServiceUnavailable,
-                previousResolution.DiagnosticCode);
-        if (previousResolution.Outcome == PreviousAuthorityOutcome.Denied)
-            throw CommercialAuthorityDenialException(previousResolution.DiagnosticCode);
         var previous = previousResolution.Authority;
-
+        var ownerSubjectDigest = owner is null ? null : SubjectDigest(owner.OwnerSubjectId);
         providerCompatible = providerCompatible && license is not null && license.IsActive && license.RevokedAt is null
             && previousResolution.Outcome == PreviousAuthorityOutcome.Eligible
             && owner is not null && grant is not null
             && grant.AuthenticatedClientId == clientId && grant.LicenseId == reservation.LicenseId
             && grant.CommercialOwnershipId == owner.Id && grant.OwnerSubjectId == owner.OwnerSubjectId
             && grant.RecoveryOperationRef == recoveryRef && grant.RecoveryDigestSha256 == ledger.RecoveryDigestSha256
-            && grant.RequestId == requestId && authority.SubjectRefDigestSha256 == SubjectDigest(owner.OwnerSubjectId)
+            && grant.RequestId == requestId && authority.SubjectRefDigestSha256 == ownerSubjectDigest
             && activeRecoveryAuthorities.Count == 0
             && newLineage is not null && generation is not null
             && newLineage.Provider == "softlicence" && newLineage.ProductId == productId
@@ -2191,6 +2390,29 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
             && generation.PreviousGenerationId is null
             && previous is not null && previous.HeadLineageId == authority.PreviousAuthorityLineageId
             && previous.HeadGenerationId == authority.PreviousAuthorityGenerationId;
+        if (providerCompatible)
+        {
+            var decisionNow = await ReadDatabaseClockAsync(db, cancellationToken);
+            previousResolution = await ReassessResolvedCommercialAuthorityAsync(
+                db, previousResolution, reservation.LicenseId, reservation.LicenseSeatId,
+                authority.ReleaseVersion, decisionNow, MissingAssignmentPolicy.Relink,
+                ownerSubjectDigest!,
+                RuntimeCommercialAssignmentResolver.AuthorityProof.Recovery(
+                    grant!.AuthenticatedClientId,
+                    grant.ProviderGrantRefDigestSha256,
+                    owner!.OwnerSubjectId),
+                cancellationToken);
+            if (previousResolution.Outcome == PreviousAuthorityOutcome.Unavailable)
+                throw new RuntimeEnrollmentException(
+                    "provider_unavailable", StatusCodes.Status503ServiceUnavailable,
+                    previousResolution.DiagnosticCode);
+            if (previousResolution.Outcome == PreviousAuthorityOutcome.Denied)
+                throw CommercialAuthorityDenialException(previousResolution.DiagnosticCode);
+            previous = previousResolution.Authority;
+            providerCompatible = previous is not null
+                && previous.HeadLineageId == authority.PreviousAuthorityLineageId
+                && previous.HeadGenerationId == authority.PreviousAuthorityGenerationId;
+        }
         var lockedPrevious = previous ?? new(
             authority.PreviousAuthorityLineageId,
             authority.PreviousAuthorityGenerationId,
@@ -2217,6 +2439,9 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
     /// <param name="publicKeySpkiSha256">The exact lowercase target public-key digest.</param>
     /// <param name="keyThumbprint">The optional exact base64url key thumbprint checked during preparation.</param>
     /// <param name="cancellationToken">Caller cancellation propagated through every provider lock.</param>
+    /// <param name="lockForCommercialRelink">
+    /// Takes the exclusive commercial barrier before owner locks for a replay that can persist a repair.
+    /// </param>
     /// <returns>The locked proof scope, or null when historical identity or proof is invalid.</returns>
     /// <exception cref="RuntimeEnrollmentException">
     /// Thrown with 422 for a known current commercial denial or 503 for unavailable provider state, before
@@ -2234,7 +2459,8 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
         string authorityGenerationIdText,
         string publicKeySpkiSha256,
         string? keyThumbprint,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool lockForCommercialRelink = false)
     {
         var productId = Guid.Parse(productIdText);
         var requestId = Guid.Parse(requestIdText);
@@ -2280,7 +2506,8 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
 
         var previousResolution = await ResolvePreviousActiveAuthorityAsync(
             db, productId, reservation.LicenseId, reservation.LicenseSeatId,
-            authority.ReleaseVersion, authority.ArtifactSetDigestSha256, cancellationToken);
+            authority.ReleaseVersion, authority.ArtifactSetDigestSha256, cancellationToken,
+            lockForCutover: lockForCommercialRelink);
         if (previousResolution.Outcome == PreviousAuthorityOutcome.Unavailable)
             throw new RuntimeEnrollmentException(
                 "provider_unavailable", StatusCodes.Status503ServiceUnavailable,
@@ -2315,23 +2542,29 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
             WHERE "ProductId" = {productId} AND "ProviderGrantRefDigestSha256" = {grantDigest}
             FOR UPDATE
             """).AsNoTracking().SingleOrDefaultAsync(cancellationToken);
-        var decisionNow = await ReadDatabaseClockAsync(db, cancellationToken);
-        previousResolution = await ReassessResolvedCommercialAuthorityAsync(
-            db, previousResolution, reservation.LicenseId, reservation.LicenseSeatId,
-            authority.ReleaseVersion, decisionNow, cancellationToken);
-        if (previousResolution.Outcome == PreviousAuthorityOutcome.Unavailable)
-            throw new RuntimeEnrollmentException(
-                "provider_unavailable", StatusCodes.Status503ServiceUnavailable,
-                previousResolution.DiagnosticCode);
-        if (previousResolution.Outcome == PreviousAuthorityOutcome.Denied)
-            throw CommercialAuthorityDenialException(previousResolution.DiagnosticCode);
         if (license is null || !license.IsActive || license.RevokedAt is not null
             || grant is null || owner is null || grant.AuthenticatedClientId != clientId
             || grant.LicenseId != reservation.LicenseId || grant.CommercialOwnershipId != owner.Id
             || grant.OwnerSubjectId != owner.OwnerSubjectId || grant.RecoveryOperationRef != recoveryRef
             || grant.RecoveryDigestSha256 != ledger.RecoveryDigestSha256 || grant.RequestId != requestId
             || authority.SubjectRefDigestSha256 != SubjectDigest(owner.OwnerSubjectId)) return null;
-        return new(reservation, authority, securityEpoch);
+        var decisionNow = await ReadDatabaseClockAsync(db, cancellationToken);
+        previousResolution = await ReassessResolvedCommercialAuthorityAsync(
+            db, previousResolution, reservation.LicenseId, reservation.LicenseSeatId,
+            authority.ReleaseVersion, decisionNow, MissingAssignmentPolicy.Relink,
+            SubjectDigest(owner.OwnerSubjectId),
+            RuntimeCommercialAssignmentResolver.AuthorityProof.Recovery(
+                grant.AuthenticatedClientId,
+                grant.ProviderGrantRefDigestSha256,
+                owner.OwnerSubjectId),
+            cancellationToken);
+        if (previousResolution.Outcome == PreviousAuthorityOutcome.Unavailable)
+            throw new RuntimeEnrollmentException(
+                "provider_unavailable", StatusCodes.Status503ServiceUnavailable,
+                previousResolution.DiagnosticCode);
+        if (previousResolution.Outcome == PreviousAuthorityOutcome.Denied)
+            throw CommercialAuthorityDenialException(previousResolution.DiagnosticCode);
+        return new(reservation, authority, securityEpoch, previousResolution.Authority!);
     }
 
     /// <summary>
@@ -2846,10 +3079,12 @@ public sealed class RuntimeSeatRecoveryAuthorizationService : IRuntimeSeatRecove
     /// <param name="Reservation">The locked RESERVED provider reservation.</param>
     /// <param name="Authority">The locked PREPARED recovery authority.</param>
     /// <param name="SecurityEpoch">The positive Int32 epoch read from the matching signed generation.</param>
+    /// <param name="PreviousAuthority">The proved source and its coherent current commercial assignment.</param>
     private sealed record KeyProofScope(
         RuntimeSeatRecoveryReservation Reservation,
         RuntimeSeatRecoveryAuthority Authority,
-        int SecurityEpoch);
+        int SecurityEpoch,
+        PreviousActiveAuthority PreviousAuthority);
 
     /// <summary>Holds the locked activation aggregate and its closed non-commercial compatibility verdict.</summary>
     /// <param name="Proof">The exact durable proof-of-possession receipt.</param>

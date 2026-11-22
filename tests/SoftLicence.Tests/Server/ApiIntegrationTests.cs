@@ -39,6 +39,18 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
     private static string NewCanonicalHardwareId() =>
         Guid.NewGuid().ToString("N")[..16].ToUpperInvariant();
 
+    /// <summary>
+    /// Returns a UTC instant with the given month, day and time-of-day in the year after next, so a seeded licence
+    /// expiry is always in the future when the test runs.
+    /// </summary>
+    /// <remarks>
+    /// Renewal starts from max(current expiry, now) and refuses a target at or before that start, so a fixed calendar
+    /// year turns these renewal tests red once the date passes (TKT-004122). Month, day and time are kept because some
+    /// cases prove calendar-boundary arithmetic; only the year moves.
+    /// </remarks>
+    private static DateTime FutureUtc(int month, int day, int hour, int minute, int second) =>
+        new(DateTime.UtcNow.Year + 2, month, day, hour, minute, second, DateTimeKind.Utc);
+
     private async Task SeedDataAsync(IServiceProvider services)
     {
         var db = services.GetRequiredService<LicenseDbContext>();
@@ -64,6 +76,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             Slug = "TRIAL",
             DefaultDurationDays = 7,
             IsRecurring = true,
+            AllowPublicTrial = true,
             DefaultMaxSeats = 1,
             ProductId = product.Id
         };
@@ -112,9 +125,14 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    /// <summary>
+    /// Verifies that piracy-ban evidence remains internal while the public activation response exposes
+    /// only the stable opaque denial and a support correlation reference.
+    /// </summary>
     [Fact]
     public async Task PostActivation_WithBannedHardware_ShouldKeepLegacyErrorMessageAliasInStructuredPayload()
     {
+        const string internalReasonSentinel = "INTERNAL-PIRACY-DETAIL-TKT-001758";
         var client = _factory.CreateClient();
         using (var scope = _factory.Services.CreateScope())
         {
@@ -123,7 +141,8 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             db.BannedHardwareIds.Add(new BannedHardwareId
             {
                 HardwareId = "D000000000000002",
-                Reason = "Compatibility test",
+                Reason = internalReasonSentinel,
+                BanCategory = BannedHardwareId.Categories.Piracy,
                 BannedAt = DateTime.UtcNow,
                 IsActive = true
             });
@@ -139,7 +158,12 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("BANNED", response.Headers.GetValues("X-SoftLicence-Error-Code").Single());
-        var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
+        var responseBody = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(internalReasonSentinel, responseBody, StringComparison.Ordinal);
+        Assert.DoesNotContain(BannedHardwareId.Categories.Piracy, responseBody, StringComparison.OrdinalIgnoreCase);
+        using var responseJson = JsonDocument.Parse(responseBody);
+        var payload = responseJson.RootElement;
+        Assert.Equal("Access denied by server", payload.GetProperty("message").GetString());
         Assert.Equal(payload.GetProperty("message").GetString(), payload.GetProperty("errorMessage").GetString());
         Assert.Equal(1, payload.GetProperty("contractVersion").GetInt32());
         Assert.False(string.IsNullOrWhiteSpace(payload.GetProperty("correlationId").GetString()));
@@ -399,6 +423,9 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.True(result.TryGetProperty("licenseFile", out _));
     }
 
+    /// <summary>
+    /// Verifies automatic free-trial creation when the activation request supplies one consistent synthetic identity and deterministic physical-machine evidence required by the fail-closed policies.
+    /// </summary>
     [Fact]
     public async Task PostActivation_WithAutoTrial_ShouldGenerateNewLicense()
     {
@@ -408,7 +435,14 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
             await SeedDataAsync(scope.ServiceProvider);
         }
 
-        var request = new { LicenseKey = "YOUR_APP_NAME-FREE-TRIAL", HardwareId = "D000000000000006", AppName = "YOUR_APP_NAME" };
+        var request = new
+        {
+            LicenseKey = "YOUR_APP_NAME-FREE-TRIAL",
+            HardwareId = PersonalDayPassPostgreSqlTests.VmPolicyHardware,
+            AppName = "YOUR_APP_NAME",
+            SystemUuid = PersonalDayPassPostgreSqlTests.VmPolicyUuid,
+            MachineEvidence = PersonalDayPassPostgreSqlTests.VmPolicyEvidence("Dell Inc.", "Precision 7680")
+        };
         var response = await client.PostAsJsonAsync("/api/activation", request);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -1375,7 +1409,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
     {
         var productName = $"ExactRenewal-{Guid.NewGuid():N}";
         var licenseKey = $"EXACT-{Guid.NewGuid():N}".ToUpperInvariant();
-        var initialExpiration = new DateTime(2027, 1, 1, 10, 40, 18, DateTimeKind.Utc);
+        var initialExpiration = FutureUtc(1, 1, 10, 40, 18);
         var targetExpiration = initialExpiration.AddDays(periodDays);
         using (var scope = _factory.Services.CreateScope())
         {
@@ -1427,7 +1461,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
     {
         var productName = $"ExactRenewalConflict-{Guid.NewGuid():N}";
         var licenseKey = $"EXACT-CONFLICT-{Guid.NewGuid():N}".ToUpperInvariant();
-        var initialExpiration = new DateTime(2027, 1, 1, 10, 40, 18, DateTimeKind.Utc);
+        var initialExpiration = FutureUtc(1, 1, 10, 40, 18);
         using (var scope = _factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
@@ -1475,7 +1509,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
     {
         var productName = $"RenewalFingerprint-{Guid.NewGuid():N}";
         var licenseKey = $"FINGERPRINT-{Guid.NewGuid():N}".ToUpperInvariant();
-        var initialExpiration = new DateTime(2027, 2, 1, 8, 30, 0, DateTimeKind.Utc);
+        var initialExpiration = FutureUtc(2, 1, 8, 30, 0);
         using (var scope = _factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
@@ -1583,7 +1617,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
     {
         var productName = $"LegacyRenewal-{Guid.NewGuid():N}";
         var licenseKey = $"LEGACY-{Guid.NewGuid():N}".ToUpperInvariant();
-        var expiration = new DateTime(2027, 4, 1, 9, 0, 0, DateTimeKind.Utc);
+        var expiration = FutureUtc(4, 1, 9, 0, 0);
         using (var scope = _factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
@@ -1637,7 +1671,7 @@ public class ApiIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
     {
         var productName = $"InvalidExactRenewal-{Guid.NewGuid():N}";
         var licenseKey = $"INVALID-EXACT-{Guid.NewGuid():N}".ToUpperInvariant();
-        var initialExpiration = new DateTime(2027, 1, 1, 10, 40, 18, DateTimeKind.Utc);
+        var initialExpiration = FutureUtc(1, 1, 10, 40, 18);
         using (var scope = _factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();

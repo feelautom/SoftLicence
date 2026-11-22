@@ -9,7 +9,7 @@ using Npgsql;
 
 namespace SoftLicence.Server.Services;
 
-public class SecurityService
+public partial class SecurityService
 {
     private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
     private readonly ILogger<SecurityService> _logger;
@@ -137,9 +137,25 @@ public class SecurityService
         return ban?.BanCount ?? 0;
     }
 
-    public async Task ReportThreatAsync(string ip, int points, string reason)
+    /// <summary>
+    /// Adds threat points to one client IP. The database row is the source of truth: the increment is
+    /// atomic on PostgreSQL, the in-memory score mirrors the returned total, and a crossing of an alert
+    /// threshold sends one notification (TKT-002685). A score of 200 or more bans the IP, except when the
+    /// IP serves an active licence (<see cref="IsActiveClientIpAsync"/>, TKT-003189): the score is kept,
+    /// no ban is written, and the crossing of 200 sends one alert so an operator decides.
+    /// </summary>
+    /// <param name="ip">Client IP exactly as resolved by the forwarded-headers middleware.</param>
+    /// <param name="points">Positive number of points to add.</param>
+    /// <param name="reason">Operator-readable reason, reused for the ban and the alert.</param>
+    /// <param name="context">
+    /// Optional request facts used to enrich the threshold alert. Category
+    /// <see cref="ThreatScoreCategory.AdminLoginFailure"/> also excludes the event from the active-client
+    /// protection.
+    /// </param>
+    public async Task ReportThreatAsync(string ip, int points, string reason, ThreatScoreContext? context = null)
     {
         if (ip == "127.0.0.1" || ip == "::1" || ip == "Unknown") return;
+        if (points <= 0) return;
 
         // Immunité : les IPs whitelisted ne sont jamais scorées.
         if (IsWhitelisted(ip)) return;
@@ -157,52 +173,32 @@ public class SecurityService
         }
 
         var now = DateTime.UtcNow;
+        var (previousScore, currentScore) = await IncrementThreatScoreAsync(ip, points, now);
 
-        // Restauration depuis la BDD si absent de la mémoire (ex : redémarrage serveur)
-        if (!_threatScores.ContainsKey(ip))
+        // TKT-003189: below 100 nothing is enforced, so the active-client lookup is skipped. A failed
+        // admin login never earns the protection: brute force on the admin page stays banned even from
+        // a customer's address.
+        var activeClient = currentScore >= 100
+            && context?.Category != ThreatScoreCategory.AdminLoginFailure
+            && await IsActiveClientIpAsync(ip);
+
+        if (currentScore >= 200 && !activeClient)
         {
-            using var dbRestore = await _dbFactory.CreateDbContextAsync();
-            var dbScore = await dbRestore.IpThreatScores.FindAsync(ip);
-            if (dbScore != null)
-                _threatScores.TryAdd(ip, (dbScore.Score, dbScore.LastHit));
-        }
-
-        // Accumulation permanente — plus de décroissance 1h (score persisté)
-        var entry = _threatScores.AddOrUpdate(ip,
-            (points, now),
-            (key, old) => (old.Score + points, now));
-
-        // Persistance en BDD (fire-and-forget, best effort)
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                using var db = await _dbFactory.CreateDbContextAsync();
-                var existing = await db.IpThreatScores.FindAsync(ip);
-                if (existing != null)
-                {
-                    existing.Score = entry.Score;
-                    existing.LastHit = entry.LastHit;
-                }
-                else
-                {
-                    db.IpThreatScores.Add(new Data.IpThreatScore
-                    {
-                        IpAddress = ip,
-                        Score = entry.Score,
-                        LastHit = entry.LastHit
-                    });
-                }
-                await db.SaveChangesAsync();
-            }
-            catch { /* Best effort */ }
-        });
-
-        if (entry.Score >= 200)
-        {
-            await BanIpAsync(ip, reason + $" (Score: {entry.Score})");
+            await BanIpAsync(ip, reason + $" (Score: {currentScore})");
             _threatScores.TryRemove(ip, out _);
+            return;
         }
+
+        if (currentScore >= 200)
+        {
+            // The score is kept so the operator sees it on the Audit page; the 200 alert below is the
+            // only notice, later events stay silent until a reset or a manual ban.
+            _logger.LogWarning(
+                "Automatic IP ban suppressed for {IP}: the IP serves an active licence (TKT-003189), score {Score}, reason {Reason}.",
+                ip, currentScore, reason);
+        }
+
+        await NotifyThreatThresholdCrossingAsync(ip, previousScore, currentScore, points, reason, context, activeClient);
     }
 
     /// <summary>Purge le cache mémoire de ban pour cette IP (à appeler après un unban en BDD).</summary>
@@ -212,16 +208,36 @@ public class SecurityService
         _threatScores.TryRemove(ip, out _);
     }
 
+    /// <summary>
+    /// Returns the in-memory threat score. Call <see cref="EnsureThreatScoresLoadedAsync"/> first in
+    /// request paths so scores persisted before a restart are visible instead of reading as zero.
+    /// </summary>
+    /// <param name="ip">Client IP key.</param>
+    /// <returns>The current score, or zero for whitelisted and protected addresses.</returns>
     public int GetThreatScore(string ip)
     {
         if (IsWhitelisted(ip) || IsProtectedInfrastructureIp(ip))
             return 0;
 
-        if (_threatScores.TryGetValue(ip, out var entry))
+        // A score idle for 30 days is erased by the decay sweep; hide it at once in the meantime.
+        if (_threatScores.TryGetValue(ip, out var entry)
+            && !IsThreatScoreDecayed(entry.Score, entry.LastHit, DateTime.UtcNow))
             return entry.Score;
         return 0;
     }
 
+    /// <summary>
+    /// Bans an IP automatically once its threat score reaches the ban zone (first ban 1 day, escalated for repeat
+    /// offenders), updates the ban cache, notifies <see cref="NotificationService.Triggers.SecurityIpAutoBanned"/> and
+    /// clears the persisted score. Whitelisted and protected infrastructure addresses are never banned; an already
+    /// active ban is left untouched and not notified again.
+    /// </summary>
+    /// <remarks>
+    /// The notification uses the routine-noise trigger since TKT-003668: these bans are overwhelmingly web scanners and
+    /// must not share the topic of real alerts. Threat-score alerts about IPs of real clients keep their own trigger.
+    /// </remarks>
+    /// <param name="ip">Client IP key.</param>
+    /// <param name="reason">Audit reason, including the score that triggered the ban.</param>
     public async Task BanIpAsync(string ip, string reason)
     {
         if (IsWhitelisted(ip)) return;
@@ -250,7 +266,7 @@ public class SecurityService
 
             _logger.LogCritical("IP BANNIE (Récidive x{Count}) : {IP} pour {Reason} — Durée escaladée", existing.BanCount, ip, reason);
 
-            _notifier.Notify(NotificationService.Triggers.SecurityIpBanned,
+            _notifier.Notify(NotificationService.Triggers.SecurityIpAutoBanned,
                 $"🚫 IP BANNIE (x{existing.BanCount})",
                 $"IP: {ip}\nRaison: {reason}\nRécidive #{existing.BanCount}");
         }
@@ -291,11 +307,11 @@ public class SecurityService
 
                 _logger.LogCritical("IP BANNIE (Récidive x{Count}) : {IP} pour {Reason} — Durée escaladée après conflit concurrent", existing.BanCount, ip, reason);
 
-                _notifier.Notify(NotificationService.Triggers.SecurityIpBanned,
+                _notifier.Notify(NotificationService.Triggers.SecurityIpAutoBanned,
                     $"🚫 IP BANNIE (x{existing.BanCount})",
                     $"IP: {ip}\nRaison: {reason}\nRécidive #{existing.BanCount}");
 
-                _ = ClearThreatScoreAsync(ip);
+                await ClearThreatScoreAsync(ip);
                 return;
             }
 
@@ -303,13 +319,14 @@ public class SecurityService
 
             _logger.LogCritical("IP BANNIE AUTOMATIQUEMENT : {IP} pour {Reason}", ip, reason);
 
-            _notifier.Notify(NotificationService.Triggers.SecurityIpBanned,
+            _notifier.Notify(NotificationService.Triggers.SecurityIpAutoBanned,
                 "🚫 IP BANNIE",
                 $"IP: {ip}\nRaison: {reason}\nScore dépassé.");
         }
 
-        // Remettre le score à zéro en BDD après le ban — l'IP repart de 0 après sa peine
-        _ = ClearThreatScoreAsync(ip);
+        // Remettre le score à zéro en BDD après le ban : l'IP repart de 0 après sa peine.
+        // Awaited so a later increment cannot be overwritten by a delayed delete (TKT-002685).
+        await ClearThreatScoreAsync(ip);
     }
 
     private static void ReactivateExistingIpBan(BannedIp ban, string reason)
@@ -420,6 +437,21 @@ public class SecurityService
         return null;
     }
 
+    /// <summary>
+    /// Bans a canonicalized hardware identity under an exact known category, inside the hardware-ban mutation
+    /// transaction, then notifies unless <paramref name="silent"/> is set or the identity is protected (whitelist or
+    /// greylist: the row is saved inactive and nothing is notified). An outdated-version ban is notified with the
+    /// routine-noise trigger <see cref="NotificationService.Triggers.SecurityOutdatedVersionBanned"/>; every other
+    /// category keeps <see cref="NotificationService.Triggers.SecurityIpBanned"/> (TKT-003668).
+    /// </summary>
+    /// <param name="hardwareId">Raw hardware identity; empty values are ignored.</param>
+    /// <param name="reason">Audit reason.</param>
+    /// <param name="productId">Product scope, or <see langword="null"/> for every product.</param>
+    /// <param name="expiresAt">Expiry, or <see langword="null"/> for the category default.</param>
+    /// <param name="piracySuspectId">Optional piracy suspect at the origin of the ban.</param>
+    /// <param name="banCategory">Exact category identifier; <see langword="null"/> means manual.</param>
+    /// <param name="silent">Suppresses the notification (logs only).</param>
+    /// <exception cref="ArgumentException">The category is not an exact known identifier (<c>ban_category_invalid</c>).</exception>
     public async Task BanHardwareIdAsync(string hardwareId, string reason, Guid? productId = null, DateTime? expiresAt = null, Guid? piracySuspectId = null, string? banCategory = null, bool silent = false)
     {
         if (string.IsNullOrEmpty(hardwareId)) return;
@@ -486,8 +518,12 @@ public class SecurityService
 
         _logger.LogCritical("HARDWARE ID BANNI{Silent} : {HardwareId} pour {Reason}",
             silent ? " [SILENT]" : "", hardwareId, reason);
+        // Outdated-version bans are routine noise (TKT-003668); every other category is a real alert.
         if (!silent)
-            _notifier.Notify(NotificationService.Triggers.SecurityIpBanned,
+            _notifier.Notify(
+                string.Equals(banCategory, Data.BannedHardwareId.Categories.OutdatedVersion, StringComparison.Ordinal)
+                    ? NotificationService.Triggers.SecurityOutdatedVersionBanned
+                    : NotificationService.Triggers.SecurityIpBanned,
                 "HARDWARE ID BANNI",
                 $"HWID: {hardwareId}\nRaison: {reason}");
     }
@@ -523,6 +559,7 @@ public class SecurityService
     /// Auto-unban a HWID that was auto-banned for version violation, if they updated.
     /// Only unbans version-enforcement entries with the exact outdated_version category
     /// and the automatic-ban reason marker. Any other applicable active ban fails closed.
+    /// A successful lift is notified as routine noise (<see cref="NotificationService.Triggers.SecurityOutdatedVersionBanned"/>, TKT-003668).
     /// </summary>
     public async Task<bool> AutoUnbanByHwidAsync(string hardwareId, Guid productId)
     {
@@ -561,7 +598,7 @@ public class SecurityService
         _logger.LogWarning("AUTO-UNBAN: {HardwareId} (updated to compliant version). {BanCount} hardware ban(s) lifted.",
             hardwareId, bans.Count);
 
-        _notifier.Notify(NotificationService.Triggers.SecurityIpBanned,
+        _notifier.Notify(NotificationService.Triggers.SecurityOutdatedVersionBanned,
             "AUTO-UNBAN VERSION",
             $"HWID: {hardwareId}\nMis à jour vers version conforme.\n{bans.Count} ban(s) HWID levé(s). Les bans composants restent sous autorité opérateur.");
 
@@ -602,6 +639,8 @@ public class SecurityService
     /// callers must acquire the exclusive global authority lock before any product, seat, licence or
     /// hardware advisory lock; this method then takes the canonical hardware locks and rechecks every
     /// ban inside that same transaction.
+    /// The deferred notification uses the routine-noise trigger when only outdated-version bans are lifted, and
+    /// <see cref="NotificationService.Triggers.SecurityIpBanned"/> otherwise (TKT-003668).
     /// </summary>
     public async Task<PaidAutoUnbanDecision> TryAutoUnbanForPaidLicenseAsync(
         LicenseDbContext db,
@@ -658,8 +697,11 @@ public class SecurityService
             ? "Déblocage d'un ban version obsolète sur licence payante valide."
             : "Activation licence payante valide.";
 
+        // Lifting only outdated-version bans is routine noise (TKT-003668); lifting any other category stays an alert.
         var notification = new DeferredNotification(
-            NotificationService.Triggers.SecurityIpBanned,
+            isOutdatedOnly
+                ? NotificationService.Triggers.SecurityOutdatedVersionBanned
+                : NotificationService.Triggers.SecurityIpBanned,
             title,
             $"HWID: {hardwareId}\n{reason}\n{activeBans.Count} ban(s) levé(s) (catégories: {string.Join(", ", categories)}).");
 

@@ -43,7 +43,11 @@ public sealed record PortalDeactivationResult(
 /// <param name="ResetAtUtc">Next UTC midnight for the existing inactive-seat counting window.</param>
 public sealed record PortalDeactivationQuotaRefusal(string Schema, string RequestId, string Code, int Limit, DateTime ResetAtUtc);
 
-/// <summary>Signals a pre-mutation quota refusal; transaction disposal rolls back before HTTP serialization.</summary>
+/// <summary>
+/// Signals a pre-mutation quota refusal; transaction disposal rolls back before HTTP serialization. No longer thrown
+/// since TKT-003751 (a deactivation is never refused by the quota); kept with its HTTP mapping so the
+/// <c>portal-deactivation-refusal-v1</c> contract stays readable by older Website builds.
+/// </summary>
 /// <param name="Refusal">Bounded provider-owned retry information.</param>
 public sealed class PortalDeactivationQuotaException(PortalDeactivationQuotaRefusal refusal) : Exception(refusal.Code)
 {

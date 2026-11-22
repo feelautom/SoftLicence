@@ -10,51 +10,15 @@ using Xunit;
 
 namespace SoftLicence.Tests.Server;
 
-public sealed partial class RuntimeEnrollmentPostgreSqlTests
+public abstract partial class RuntimeEnrollmentPostgreSqlTestBase
 {
-    /// <summary>
-    /// Exercises two real installations against PostgreSQL authority triggers. Finishing either
-    /// installation must not expire the other's reservation or reject its signed upgrade.
-    /// </summary>
-    [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    public async Task WebSetupConcurrency_IndependentUpgradePreservesPendingTransition(
-        bool reverseOrder, bool replayIssue)
-    {
-        await ExerciseWebSetupConcurrencyAsync(reverseOrder, replayIssue, null);
-    }
-
-    /// <summary>
-    /// Authority changes belonging to the pending installation remain terminal even when
-    /// an unrelated installation has advanced the global authority epoch first.
-    /// </summary>
-    [Theory]
-    [InlineData("license", false)]
-    [InlineData("license_wait", false)]
-    [InlineData("expiry_wait", false)]
-    [InlineData("seat", false)]
-    [InlineData("source", false)]
-    [InlineData("security_epoch", false)]
-    [InlineData("target_baseline", false)]
-    [InlineData("installation", false)]
-    [InlineData("future_epoch", false)]
-    [InlineData("future_epoch", true)]
-    [InlineData("expired", true)]
-    [InlineData("license", true)]
-    [InlineData("seat", true)]
-    public async Task WebSetupConcurrency_RevalidatesRelevantAuthority(string mutation, bool replayIssue)
-    {
-        await ExerciseWebSetupConcurrencyAsync(false, replayIssue, mutation);
-    }
 
     /// <summary>
     /// Seeds two licenses and installations for one product, issues both reservations before
     /// either is consumed, then optionally changes the remaining installation's authority.
     /// Uses the application database role and actual signed requests, never a mocked epoch.
     /// </summary>
-    private static async Task ExerciseWebSetupConcurrencyAsync(
+    protected static async Task ExerciseWebSetupConcurrencyAsync(
         bool reverseOrder, bool replayIssue, string? mutation)
     {
         await using var connections = await ProvisionCleanedIsolatedAsync();
@@ -407,5 +371,47 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             Assert.Equal(target, enrollment.ReleaseVersion);
             Assert.Equal(2, enrollment.SecurityEpoch);
         }
+    }
+}
+
+/// <summary>Runs the tests from RuntimeWebSetupConcurrencyPostgreSqlTests as an independently schedulable PostgreSQL class.</summary>
+/// <param name="classDatabase">The xUnit-owned PostgreSQL clone fixture for this exact test class.</param>
+public sealed partial class RuntimeWebSetupConcurrencyPostgreSqlTests(RuntimeEnrollmentPostgreSqlClassDatabase classDatabase)
+    : RuntimeEnrollmentPostgreSqlTestBase(classDatabase)
+{
+    /// <summary>
+    /// Exercises two real installations against PostgreSQL authority triggers. Finishing either
+    /// installation must not expire the other's reservation or reject its signed upgrade.
+    /// </summary>
+    [Theory(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.WebSetupConcurrency_IndependentUpgradePreservesPendingTransition")]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task WebSetupConcurrency_IndependentUpgradePreservesPendingTransition(bool reverseOrder, bool replayIssue)
+    {
+        await ExerciseWebSetupConcurrencyAsync(reverseOrder, replayIssue, null);
+    }
+
+    /// <summary>
+    /// Authority changes belonging to the pending installation remain terminal even when
+    /// an unrelated installation has advanced the global authority epoch first.
+    /// </summary>
+    [Theory(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.WebSetupConcurrency_RevalidatesRelevantAuthority")]
+    [InlineData("license", false)]
+    [InlineData("license_wait", false)]
+    [InlineData("expiry_wait", false)]
+    [InlineData("seat", false)]
+    [InlineData("source", false)]
+    [InlineData("security_epoch", false)]
+    [InlineData("target_baseline", false)]
+    [InlineData("installation", false)]
+    [InlineData("future_epoch", false)]
+    [InlineData("future_epoch", true)]
+    [InlineData("expired", true)]
+    [InlineData("license", true)]
+    [InlineData("seat", true)]
+    public async Task WebSetupConcurrency_RevalidatesRelevantAuthority(string mutation, bool replayIssue)
+    {
+        await ExerciseWebSetupConcurrencyAsync(false, replayIssue, mutation);
     }
 }

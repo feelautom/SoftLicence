@@ -11,7 +11,7 @@ namespace SoftLicence.SDK
         AppNotFound,
         ServerError,
         NetworkError,
-        /// <summary>The machine has no acceptable system UUID (device refused, support code in the message).</summary>
+        /// <summary>The server refused machine identity or a virtual machine; the exact server code distinguishes these causes.</summary>
         DeviceRefused
     }
 

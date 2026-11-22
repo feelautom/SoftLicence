@@ -20,6 +20,7 @@ public sealed partial class HardwareIdSwitchPostgreSqlTests
 {
     private const string AutoUuidA = "11111111-2222-4333-8444-555555555555";
     private const string AutoUuidB = "22222222-3333-4444-8555-666666666666";
+    private const string AutoUuidC = "44444444-5555-4666-8777-888888888888";
 
     /// <summary>The authority reload must not discard the customer identity already validated by reseller activation.</summary>
     [Fact]
@@ -51,9 +52,13 @@ public sealed partial class HardwareIdSwitchPostgreSqlTests
         Assert.Single(await db.LicenseHistories.Where(row => row.Action == HistoryActions.UnlinkedApi).ToListAsync());
     }
 
-    /// <summary>Reactivating the same historical seat does not charge a second change after its public deactivation exhausted quota.</summary>
+    /// <summary>
+    /// TKT-003751: with N = 1 the seeded seat already uses today's only identifier. A public deactivation is never
+    /// counted nor refused, and reactivating the same identifier is always accepted at the exhausted quota: it reuses
+    /// the historical seat row and the day's distinct count stays at one.
+    /// </summary>
     [Fact]
-    public async Task AutoSeatSwitch_Classic_SameMachineReactivationAtExhaustedQuotaCostsZero()
+    public async Task AutoSeatSwitch_Classic_SameMachineReactivationAtExhaustedQuotaIsAccepted()
     {
         await using var provision = await Provision.CreateAsync();
         using var host = CreateHost(provision.ConnectionString);
@@ -80,21 +85,27 @@ public sealed partial class HardwareIdSwitchPostgreSqlTests
         Assert.Equal(original.Id, seat.Id);
         Assert.Equal(original.FirstActivatedAt, seat.FirstActivatedAt);
         Assert.True(seat.IsActive);
+        Assert.NotNull(seat.LastActivatedAt);
         var license = await db.Licenses.Include(row => row.Type).SingleAsync();
         var quota = await SeatChangeQuota.GetStatusAsync(db, license,
             (await RuntimeEnrollmentService.DatabaseNowAsync(db, default)).UtcDateTime);
+        // Same identifier activated twice in the day: still one distinct identifier.
         Assert.Equal(1, quota.UsedToday);
         Assert.True(quota.IsExhausted);
         Assert.Equal(1, await db.LicenseHistories.CountAsync(row => row.Action == HistoryActions.UnlinkedApi));
     }
 
-    /// <summary>Two HTTP activations actually wait together on the common barrier; only one can spend the final change.</summary>
+    /// <summary>
+    /// TKT-003751: with N = 2 and the seeded seat already counted today, exactly one new identifier remains. Two HTTP
+    /// activations on two new identifiers wait together on the common barrier; one switches the seat, the other is
+    /// refused with <c>MAX_DAILY_ACTIVATIONS_REACHED</c> and leaves the winner and its single history row intact.
+    /// </summary>
     [Fact]
     public async Task AutoSeatSwitch_ClassicConcurrent_LastQuotaSlotHasOneWinner()
     {
         await using var provision = await Provision.CreateAsync();
         using var host = CreateHost(provision.ConnectionString);
-        var key = await SeedAsync(host, 1, DateTime.UtcNow.AddDays(-10));
+        var key = await SeedAsync(host, 2, DateTime.UtcNow.AddDays(-10));
         using var client = host.CreateClient();
         HttpResponseMessage? first = null;
         HttpResponseMessage? second = null;
@@ -109,15 +120,21 @@ public sealed partial class HardwareIdSwitchPostgreSqlTests
         {
             Assert.Single(new[] { first, second }, response => response.StatusCode == HttpStatusCode.OK);
             var refused = Assert.Single(new[] { first, second }, response => response.StatusCode == HttpStatusCode.BadRequest);
-            Assert.Equal("MAX_DAILY_DEACTIVATIONS_REACHED", refused.Headers.GetValues("X-SoftLicence-Error-Code").Single());
+            Assert.Equal("MAX_DAILY_ACTIVATIONS_REACHED", refused.Headers.GetValues("X-SoftLicence-Error-Code").Single());
             await using var db = CreateDb(provision.ConnectionString);
+            await db.Database.OpenConnectionAsync();
             var active = await db.LicenseSeats.SingleAsync(row => row.IsActive);
+            var loserHardware = MachineIdentity.FromUuid(first.StatusCode == HttpStatusCode.OK ? AutoUuidB : AutoUuidA).HardwareId;
             Assert.Equal(MachineIdentity.FromUuid(first.StatusCode == HttpStatusCode.OK ? AutoUuidA : AutoUuidB).HardwareId, active.HardwareId);
+            Assert.False(await db.LicenseSeats.AnyAsync(row => row.HardwareId == loserHardware));
             Assert.Equal(1, await db.LicenseHistories.CountAsync(row => row.Action == HistoryActions.UnlinkedApi));
+            var license = await db.Licenses.Include(row => row.Type).SingleAsync();
+            Assert.Equal(2, (await SeatChangeQuota.GetStatusAsync(db, license,
+                (await RuntimeEnrollmentService.DatabaseNowAsync(db, default)).UtcDateTime)).UsedToday);
         }
     }
 
-    /// <summary>A signer failure after release and persistence must roll back both seats and the counted event.</summary>
+    /// <summary>A signer failure after release and persistence must roll back both seats and the switch history row.</summary>
     [Fact]
     public async Task AutoSeatSwitch_Classic_SigningFailureRollsBackReleaseAndQuota()
     {
@@ -154,13 +171,19 @@ public sealed partial class HardwareIdSwitchPostgreSqlTests
         }
     }
 
-    /// <summary>Exercises the real HTTP signer and event quota across A-B-A-B and the refused fourth switch.</summary>
+    /// <summary>
+    /// TKT-003751: exercises the real HTTP signer with N = 2 on an unused licence across A, A, B, A, B. The day's
+    /// distinct identifiers go 1, 1, 2, 2, 2 and no step is refused, because A and B were already activated today;
+    /// each automatic switch still writes one audit-only <c>UNLINKED_API</c> row (0, 0, 1, 2, 3). A third new
+    /// identifier C is then refused with <c>MAX_DAILY_ACTIVATIONS_REACHED</c> before anything is released, leaving
+    /// B active and the seat rows, history and distinct count unchanged.
+    /// </summary>
     [Fact]
     public async Task AutoSeatSwitch_Classic_ABAB_QuotaAndHistoryAreAtomic()
     {
         await using var provision = await Provision.CreateAsync();
         using var host = CreateHost(provision.ConnectionString);
-        var key = await SeedAsync(host, 3, DateTime.UtcNow.AddDays(-10));
+        var key = await SeedAsync(host, 2, DateTime.UtcNow.AddDays(-10));
         // Remove only synthetic setup before the first request: this licence starts unused.
         await using (var setup = CreateDb(provision.ConnectionString))
         {
@@ -172,7 +195,8 @@ public sealed partial class HardwareIdSwitchPostgreSqlTests
         }
         using var client = host.CreateClient();
         var sequence = new[] { AutoUuidA, AutoUuidA, AutoUuidB, AutoUuidA, AutoUuidB };
-        var expectedChanges = new[] { 0, 0, 1, 2, 3 };
+        var expectedDistinct = new[] { 1, 1, 2, 2, 2 };
+        var expectedHistory = new[] { 0, 0, 1, 2, 3 };
         var originalTimes = new Dictionary<Guid, DateTime>();
         for (var index = 0; index < sequence.Length; index++)
         {
@@ -185,9 +209,9 @@ public sealed partial class HardwareIdSwitchPostgreSqlTests
             var license = await db.Licenses.Include(row => row.Type).SingleAsync();
             var seats = await db.LicenseSeats.AsNoTracking().ToListAsync();
             Assert.Equal(MachineIdentity.FromUuid(sequence[index]).HardwareId, Assert.Single(seats, row => row.IsActive).HardwareId);
-            Assert.Equal(expectedChanges[index], (await SeatChangeQuota.GetStatusAsync(db, license,
+            Assert.Equal(expectedDistinct[index], (await SeatChangeQuota.GetStatusAsync(db, license,
                 (await RuntimeEnrollmentService.DatabaseNowAsync(db, default)).UtcDateTime)).UsedToday);
-            Assert.Equal(expectedChanges[index], await db.LicenseHistories.CountAsync(row => row.Action == HistoryActions.UnlinkedApi));
+            Assert.Equal(expectedHistory[index], await db.LicenseHistories.CountAsync(row => row.Action == HistoryActions.UnlinkedApi));
             if (index >= 2)
             {
                 var previousHardware = MachineIdentity.FromUuid(sequence[index - 1]).HardwareId;
@@ -206,16 +230,22 @@ public sealed partial class HardwareIdSwitchPostgreSqlTests
                 if (!seat.IsActive) Assert.NotNull(seat.UnlinkedAt);
             }
         }
-        using var refused = await client.PostAsJsonAsync("/api/activation", AutoRequest(key, AutoUuidA));
+        using var refused = await client.PostAsJsonAsync("/api/activation", AutoRequest(key, AutoUuidC));
         Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
-        Assert.Equal("MAX_DAILY_DEACTIVATIONS_REACHED", refused.Headers.GetValues("X-SoftLicence-Error-Code").Single());
+        Assert.Equal("MAX_DAILY_ACTIVATIONS_REACHED", refused.Headers.GetValues("X-SoftLicence-Error-Code").Single());
         await using var observed = CreateDb(provision.ConnectionString);
-        Assert.Equal(MachineIdentity.FromUuid(AutoUuidB).HardwareId,
-            (await observed.LicenseSeats.SingleAsync(row => row.IsActive)).HardwareId);
+        await observed.Database.OpenConnectionAsync();
+        var winner = await observed.LicenseSeats.SingleAsync(row => row.IsActive);
+        Assert.Equal(MachineIdentity.FromUuid(AutoUuidB).HardwareId, winner.HardwareId);
+        Assert.Null(winner.UnlinkedAt);
         Assert.Equal(2, await observed.LicenseSeats.CountAsync());
+        Assert.False(await observed.LicenseSeats.AnyAsync(row => row.HardwareId == MachineIdentity.FromUuid(AutoUuidC).HardwareId));
         var history = await observed.LicenseHistories.Where(row => row.Action == HistoryActions.UnlinkedApi).ToListAsync();
         Assert.Equal(3, history.Count);
         Assert.All(history, row => Assert.Contains(AutomaticSeatSwitch.Source, row.Details));
+        var finalLicense = await observed.Licenses.Include(row => row.Type).SingleAsync();
+        Assert.Equal(2, (await SeatChangeQuota.GetStatusAsync(observed, finalLicense,
+            (await RuntimeEnrollmentService.DatabaseNowAsync(observed, default)).UtcDateTime)).UsedToday);
     }
 
     /// <summary>Proves licence/type/ban refusals and multi-seat limits leave the old seat and counter untouched.</summary>
@@ -281,109 +311,11 @@ public sealed partial class HardwareIdSwitchPostgreSqlTests
     };
 }
 
-public sealed partial class RuntimeEnrollmentPostgreSqlTests
+public abstract partial class RuntimeEnrollmentPostgreSqlTestBase
 {
-    /// <summary>Real application DI records only the observed S2S transport; headers cannot supply address or correlation.</summary>
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task AutoSeatSwitch_RuntimeInitial_RecordsObservedTransportThroughApplicationDi(bool withHttpContext)
-    {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        using var host = CreateAliasWebFactory(scenario, new RecordingLogger<HardwareAuthorityAliasResolver>());
-        using var scope = host.Services.CreateScope();
-        var accessor = scope.ServiceProvider.GetRequiredService<IHttpContextAccessor>();
-        var context = new DefaultHttpContext { TraceIdentifier = "synthetic-runtime-initial-trace" };
-        context.Connection.RemoteIpAddress = IPAddress.Parse("192.0.2.41");
-        context.Request.Headers["X-Forwarded-For"] = "198.51.100.99";
-        context.Request.Headers["X-Correlation-ID"] = "forged-client-correlation";
-        accessor.HttpContext = withHttpContext ? context : null;
-        try
-        {
-            var service = Assert.IsType<DistributionInstallationBindingService>(
-                scope.ServiceProvider.GetRequiredService<IDistributionInstallationBindingService>());
-            await using var db = await scenario.Factory.CreateDbContextAsync();
-            var licenseId = await db.Licenses.Select(row => row.Id).SingleAsync();
-            var prepared = await PrepareAutoFinalizeForLicenseAsync(scenario, licenseId, "ABCDEF0123456789", service);
-            await service.FinalizeAsync("website-step1", Sha256("transport-initial"), prepared.Request);
-            var change = await db.LicenseHistories.SingleAsync(row => row.LicenseId == licenseId
-                && row.Action == HistoryActions.UnlinkedApi);
-            Assert.EndsWith("; transport=s2s; remote_address=" + (withHttpContext ? "192.0.2.41" : "unavailable"), change.Details);
-            Assert.Equal(withHttpContext ? context.TraceIdentifier : null, change.DecisionCorrelationId);
-            Assert.DoesNotContain("198.51.100.99", change.Details);
-            Assert.DoesNotContain("forged-client-correlation", change.Details);
-        }
-        finally
-        {
-            accessor.HttpContext = null;
-        }
-    }
-
-    /// <summary>A virgin licence costs zero; public release then same-machine reactivation adds no change even at its limit.</summary>
-    [Fact]
-    public async Task AutoSeatSwitch_RuntimeInitial_NewAndSameMachineAtExhaustedQuotaCostZero()
-    {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        var licenseId = Guid.NewGuid();
-        var licenseKey = "AUTO-NEW-" + Guid.NewGuid().ToString("N");
-        string productName;
-        await using (var setup = await scenario.Factory.CreateDbContextAsync())
-        {
-            var original = await setup.Licenses.Include(row => row.Type).Include(row => row.Product).SingleAsync();
-            original.Type!.MaxActivationsPerDay = 1;
-            productName = original.Product!.Name;
-            setup.Licenses.Add(new License
-            {
-                Id = licenseId, ProductId = original.ProductId, LicenseTypeId = original.LicenseTypeId,
-                LicenseKey = licenseKey, IsActive = true, MaxSeats = 1, AllowedVersions = "2.2.*",
-                ExpirationDate = DateTime.UtcNow.AddDays(1)
-            });
-            await setup.SaveChangesAsync();
-        }
-        var first = await PrepareAutoFinalizeForLicenseAsync(scenario, licenseId, "ABCDEF0123456789");
-        var firstResult = await first.Service.FinalizeAsync("website-step1", Sha256("auto-new-first"), first.Request);
-        await ActivateAutoRuntimeAsync(scenario, first.Request, firstResult.Response.BindingId);
-        Guid originalSeatId;
-        DateTime originalFirstAt;
-        await using (var check = await scenario.Factory.CreateDbContextAsync())
-        {
-            await check.Database.OpenConnectionAsync();
-            var license = await check.Licenses.Include(row => row.Type).SingleAsync(row => row.Id == licenseId);
-            Assert.Equal(0, (await SeatChangeQuota.GetStatusAsync(check, license,
-                (await RuntimeEnrollmentService.DatabaseNowAsync(check, default)).UtcDateTime)).UsedToday);
-            var seat = await check.LicenseSeats.SingleAsync(row => row.LicenseId == licenseId);
-            originalSeatId = seat.Id;
-            originalFirstAt = seat.FirstActivatedAt;
-        }
-        using var host = CreateAliasWebFactory(scenario, new RecordingLogger<HardwareAuthorityAliasResolver>());
-        using var client = host.CreateClient();
-        using var release = await client.PostAsJsonAsync("/api/activation/deactivate", new
-        {
-            LicenseKey = licenseKey, HardwareId = "ABCDEF0123456789", AppName = productName,
-            Source = "settings_button"
-        });
-        Assert.Equal(HttpStatusCode.OK, release.StatusCode);
-        await using (var check = await scenario.Factory.CreateDbContextAsync())
-            Assert.False((await check.LicenseSeats.SingleAsync(row => row.Id == originalSeatId)).IsActive);
-        var again = await PrepareAutoFinalizeForLicenseAsync(scenario, licenseId, "ABCDEF0123456789");
-        var restored = await again.Service.FinalizeAsync("website-step1", Sha256("auto-new-again"), again.Request);
-        await ActivateAutoRuntimeAsync(scenario, again.Request, restored.Response.BindingId);
-        await using var final = await scenario.Factory.CreateDbContextAsync();
-        await final.Database.OpenConnectionAsync();
-        var retained = await final.LicenseSeats.SingleAsync(row => row.LicenseId == licenseId);
-        Assert.Equal(originalSeatId, retained.Id);
-        Assert.Equal(originalFirstAt, retained.FirstActivatedAt);
-        Assert.True(retained.IsActive);
-        var finalLicense = await final.Licenses.Include(row => row.Type).SingleAsync(row => row.Id == licenseId);
-        var quota = await SeatChangeQuota.GetStatusAsync(final, finalLicense,
-            (await RuntimeEnrollmentService.DatabaseNowAsync(final, default)).UtcDateTime);
-        Assert.Equal(1, quota.UsedToday);
-        Assert.True(quota.IsExhausted);
-        Assert.Equal(1, await final.LicenseHistories.CountAsync(row => row.LicenseId == licenseId && row.Action == HistoryActions.UnlinkedApi));
-    }
 
     /// <summary>Issues a fresh modern grant for one explicitly selected synthetic licence without rewriting previous authority.</summary>
-    private static async Task<(DistributionInstallationBindingService Service, DistributionInstallationFinalizeRequest Request)>
+    protected static async Task<(DistributionInstallationBindingService Service, DistributionInstallationFinalizeRequest Request)>
         PrepareAutoFinalizeForLicenseAsync(PreparedBootstrapScenario scenario, Guid licenseId, string hardwareId,
             DistributionInstallationBindingService? serviceOverride = null)
     {
@@ -418,252 +350,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         });
     }
 
-    /// <summary>HTTP activation and Runtime Finalize compete under the same PostgreSQL barrier and daily quota.</summary>
-    [Fact]
-    public async Task AutoSeatSwitch_MixedConcurrent_LastQuotaSlotHasOneWinner()
-    {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        string licenseKey;
-        string productName;
-        await using (var db = await scenario.Factory.CreateDbContextAsync())
-        {
-            var license = await db.Licenses.Include(row => row.Type).Include(row => row.Product).SingleAsync();
-            license.Type!.MaxActivationsPerDay = 1;
-            licenseKey = license.LicenseKey;
-            productName = license.Product!.Name;
-            await db.SaveChangesAsync();
-        }
-        var runtime = await PrepareDistributionFinalizeAsync(scenario,
-            Base64Url(SHA256.HashData("auto-seat-subject"u8.ToArray())), "AUTO-RUNTIME-MACHINE");
-        using var host = CreateAliasWebFactory(scenario, new RecordingLogger<HardwareAuthorityAliasResolver>());
-        using var client = host.CreateClient();
-        const string uuid = "33333333-4444-4555-8666-777777777777";
-        var classicHardware = MachineIdentity.FromUuid(uuid).HardwareId;
-        HttpResponseMessage? response = null;
-        var errors = await AutomaticSeatSwitchConcurrencyProof.RunAsync(scenario.AppConnectionString,
-            async () => response = await client.PostAsJsonAsync("/api/activation", new
-            {
-                LicenseKey = licenseKey, HardwareId = classicHardware, SystemUuid = uuid,
-                AppName = productName, AppVersion = scenario.Fixture.Version, SdkVersion = "2.0.0"
-            }),
-            async () => await runtime.Service.FinalizeAsync("website-step1", Sha256("mixed-runtime-finalize"), runtime.Request));
-        Assert.Null(errors[0]);
-        Assert.NotNull(response);
-        using (response)
-        {
-            if (response.StatusCode == HttpStatusCode.OK)
-            {
-                using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-                Assert.False(string.IsNullOrEmpty(body.RootElement.GetProperty("licenseFile").GetString()));
-                Assert.Equal("seat_change_quota_exhausted", Assert.IsType<DistributionOperationException>(errors[1]).ReasonCode);
-            }
-            else
-            {
-                Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-                Assert.Equal("MAX_DAILY_DEACTIVATIONS_REACHED", response.Headers.GetValues("X-SoftLicence-Error-Code").Single());
-                Assert.Null(errors[1]);
-            }
-            await using var observed = await scenario.Factory.CreateDbContextAsync();
-            Assert.Equal(response.StatusCode == HttpStatusCode.OK ? classicHardware : "AUTO-RUNTIME-MACHINE",
-                (await observed.LicenseSeats.SingleAsync(row => row.IsActive)).HardwareId);
-            Assert.Equal(1, await observed.LicenseHistories.CountAsync(row => row.Action == HistoryActions.UnlinkedApi));
-        }
-    }
-
-    /// <summary>Finalization refuses each live policy before releasing the previous machine or charging its change quota.</summary>
-    [Theory]
-    [InlineData("revoked")]
-    [InlineData("inactive")]
-    [InlineData("expired")]
-    [InlineData("type-disabled")]
-    [InlineData("permanent-ban")]
-    [InlineData("multi-full")]
-    [InlineData("single-use")]
-    public async Task AutoSeatSwitch_RuntimeInitial_RefusalPreservesOldSeat(string refusal)
-    {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        var attempt = await PrepareDistributionFinalizeAsync(scenario,
-            Base64Url(SHA256.HashData("auto-seat-subject"u8.ToArray())), "AUTO-MACHINE-B");
-        Guid originalSeat;
-        await using (var db = await scenario.Factory.CreateDbContextAsync())
-        {
-            var license = await db.Licenses.Include(row => row.Type).SingleAsync();
-            originalSeat = (await db.LicenseSeats.SingleAsync(row => row.IsActive)).Id;
-            if (refusal == "revoked") license.RevokedAt = DateTime.UtcNow.AddMinutes(-1);
-            if (refusal == "inactive") license.IsActive = false;
-            if (refusal == "expired") license.ExpirationDate = DateTime.UtcNow.AddMinutes(-1);
-            if (refusal == "type-disabled") license.Type!.DisableNewActivations = true;
-            if (refusal == "single-use")
-            {
-                license.Type!.EnforceSingleUsePerHardwareId = true;
-                db.Licenses.Add(new License
-                {
-                    ProductId = license.ProductId, LicenseTypeId = license.LicenseTypeId,
-                    LicenseKey = "CONSUMED-" + Guid.NewGuid().ToString("N"), IsActive = false,
-                    HardwareId = "AUTO-MACHINE-B"
-                });
-            }
-            if (refusal == "permanent-ban") db.BannedHardwareIds.Add(new BannedHardwareId
-            {
-                ProductId = license.ProductId, HardwareId = "AUTO-MACHINE-B", IsActive = true,
-                Reason = "synthetic permanent ban", BanCategory = BannedHardwareId.Categories.Debugger
-            });
-            if (refusal == "multi-full")
-            {
-                license.MaxSeats = 2;
-                db.LicenseSeats.Add(new LicenseSeat { LicenseId = license.Id, HardwareId = "AUTO-MULTI-OTHER", IsActive = true });
-            }
-            await db.SaveChangesAsync();
-        }
-        var error = await Assert.ThrowsAsync<DistributionOperationException>(() => attempt.Service.FinalizeAsync(
-            "website-step1", Sha256(Guid.NewGuid().ToString("D")), attempt.Request));
-        Assert.Equal(refusal switch
-        {
-            "type-disabled" => "new_activations_disabled",
-            "multi-full" => "seat_limit_reached",
-            "single-use" => "hardware_already_consumed",
-            _ => "entitlement_ineligible"
-        }, error.ErrorCode);
-        await using var observed = await scenario.Factory.CreateDbContextAsync();
-        var retained = await observed.LicenseSeats.SingleAsync(row => row.Id == originalSeat);
-        Assert.True(retained.IsActive);
-        Assert.Null(retained.UnlinkedAt);
-        Assert.False(await observed.LicenseHistories.AnyAsync(row => row.Action == HistoryActions.UnlinkedApi));
-        Assert.False(await observed.LicenseSeats.AnyAsync(row => row.HardwareId == "AUTO-MACHINE-B"));
-    }
-
-    /// <summary>Two distinct grants serialize at the same server barrier and cannot both spend one remaining change.</summary>
-    [Fact]
-    public async Task AutoSeatSwitch_RuntimeConcurrent_LastQuotaSlotHasOneWinner()
-    {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        await using (var db = await scenario.Factory.CreateDbContextAsync())
-        {
-            var license = await db.Licenses.Include(row => row.Type).SingleAsync();
-            license.Type!.MaxActivationsPerDay = 1;
-            await db.SaveChangesAsync();
-        }
-        var subject = Base64Url(SHA256.HashData("auto-seat-subject"u8.ToArray()));
-        var first = await PrepareDistributionFinalizeAsync(scenario, subject, "AUTO-MACHINE-B");
-        var second = await PrepareDistributionFinalizeAsync(scenario, subject, "AUTO-MACHINE-C");
-        var errors = await AutomaticSeatSwitchConcurrencyProof.RunAsync(scenario.AppConnectionString,
-            async () => await first.Service.FinalizeAsync("website-step1", Sha256("auto-race-b"), first.Request),
-            async () => await second.Service.FinalizeAsync("website-step1", Sha256("auto-race-c"), second.Request));
-        Assert.Single(errors, error => error == null);
-        var refusal = Assert.IsType<DistributionOperationException>(Assert.Single(errors, error => error != null));
-        Assert.Equal("activation_rate_limited", refusal.ErrorCode);
-        Assert.Equal("seat_change_quota_exhausted", refusal.ReasonCode);
-        await using var observed = await scenario.Factory.CreateDbContextAsync();
-        Assert.Equal(errors[0] == null ? "AUTO-MACHINE-B" : "AUTO-MACHINE-C",
-            (await observed.LicenseSeats.SingleAsync(row => row.IsActive)).HardwareId);
-        Assert.Equal(1, await observed.LicenseHistories.CountAsync(row => row.Action == HistoryActions.UnlinkedApi));
-    }
-    /// <summary>Returns to retained machines through fresh grants and real possession proofs, counting changes only.</summary>
-    [Fact]
-    public async Task AutoSeatSwitch_RuntimeInitial_ABAB_RefusesFourthChangeWithoutLosingWinner()
-    {
-        var subject = Base64Url(SHA256.HashData("auto-seat-subject"u8.ToArray()));
-        using var scenario = await CreatePreparedBootstrapScenarioAsync(
-            initialHardwareId: "AUTO-MACHINE-A", initialSubjectRef: subject);
-        var initialConfirm = new RuntimeEnrollmentConfirmRequest
-        {
-            Schema = RuntimeEnrollmentService.ConfirmSchema,
-            ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion,
-            EnrollmentId = scenario.EnrollmentId.ToString("D"), Epoch = 1
-        };
-        var initialDigest = Sha256(JsonSerializer.Serialize(initialConfirm));
-        await scenario.Runtime.ConfirmAsync(scenario.EnrollmentId, initialDigest, initialConfirm,
-            Proof(scenario.EnrollmentKey, "confirm", scenario.EnrollmentId, scenario.Options.ConfirmAudience,
-                scenario.Prepared.Challenge, initialDigest), IPAddress.Loopback);
-        string hardwareA;
-        await using (var setup = await scenario.Factory.CreateDbContextAsync())
-        {
-            var license = await setup.Licenses.Include(row => row.Type).SingleAsync();
-            license.Type!.MaxActivationsPerDay = 3;
-            hardwareA = (await setup.LicenseSeats.SingleAsync(row => row.IsActive)).HardwareId;
-            await setup.SaveChangesAsync();
-        }
-        var firstActivation = new Dictionary<Guid, DateTime>();
-        var sequence = new[] { "AUTO-MACHINE-B", hardwareA, "AUTO-MACHINE-B" };
-        for (var index = 0; index < sequence.Length; index++)
-        {
-            var attempt = await PrepareDistributionFinalizeAsync(scenario,
-                subject, sequence[index]);
-            // The next download occurs after the previous handoff, without altering its history.
-            var downloadedAt = DateTimeOffset.UtcNow;
-            attempt.Request.HandoffIssuedAtUtc = FormatUtc(downloadedAt);
-            attempt.Request.DownloadCompletedAtUtc = FormatUtc(downloadedAt);
-            var result = await attempt.Service.FinalizeAsync("website-step1",
-                Sha256(Guid.NewGuid().ToString("D")), attempt.Request);
-            await ActivateAutoRuntimeAsync(scenario, attempt.Request, result.Response.BindingId);
-            await using var observed = await scenario.Factory.CreateDbContextAsync();
-            await observed.Database.OpenConnectionAsync();
-            var license = await observed.Licenses.Include(row => row.Type).SingleAsync();
-            var seats = await observed.LicenseSeats.AsNoTracking().ToListAsync();
-            Assert.Equal(sequence[index], Assert.Single(seats, row => row.IsActive).HardwareId);
-            Assert.Equal(index + 1, (await SeatChangeQuota.GetStatusAsync(observed, license,
-                (await RuntimeEnrollmentService.DatabaseNowAsync(observed, default)).UtcDateTime)).UsedToday);
-            var previousHardware = index == 0 ? hardwareA : sequence[index - 1];
-            var released = Assert.Single(seats, row => row.HardwareId == previousHardware);
-            var lastChange = await observed.LicenseHistories.Where(row => row.Action == HistoryActions.UnlinkedApi)
-                .OrderByDescending(row => row.Timestamp).FirstAsync();
-            Assert.Equal(released.UnlinkedAt, lastChange.Timestamp);
-            Assert.Equal(AutomaticSeatSwitch.Source, lastChange.PerformedBy);
-            Assert.Equal($"{AutomaticSeatSwitch.Source}: {previousHardware} -> {sequence[index]}; actor=website-step1; transport=s2s; remote_address=unavailable", lastChange.Details);
-            Assert.Null(lastChange.DecisionCorrelationId);
-            foreach (var seat in seats)
-            {
-                if (firstActivation.TryGetValue(seat.Id, out var first)) Assert.Equal(first, seat.FirstActivatedAt);
-                else firstActivation.Add(seat.Id, seat.FirstActivatedAt);
-            }
-        }
-        var fourth = await PrepareDistributionFinalizeAsync(scenario,
-            Base64Url(SHA256.HashData("auto-seat-subject"u8.ToArray())), hardwareA);
-        var refused = await Assert.ThrowsAsync<DistributionOperationException>(() => fourth.Service.FinalizeAsync(
-            "website-step1", Sha256(Guid.NewGuid().ToString("D")), fourth.Request));
-        Assert.Equal("activation_rate_limited", refused.ErrorCode);
-        Assert.Equal("seat_change_quota_exhausted", refused.ReasonCode);
-        await using var final = await scenario.Factory.CreateDbContextAsync();
-        Assert.Equal("AUTO-MACHINE-B", (await final.LicenseSeats.SingleAsync(row => row.IsActive)).HardwareId);
-        Assert.Equal(3, await final.LicenseHistories.CountAsync(row => row.Action == HistoryActions.UnlinkedApi));
-        Assert.Equal(2, await final.LicenseSeats.CountAsync());
-    }
-
-    /// <summary>Runs initial Runtime Finalize through a new entitlement, then proves exact replay cannot evict its later winner.</summary>
-    [Fact]
-    public async Task AutoSeatSwitch_RuntimeInitial_ChangesOnceAndReplayPreservesLaterWinner()
-    {
-        using var scenario = await CreatePreparedBootstrapScenarioAsync();
-        await using (var setup = await scenario.Factory.CreateDbContextAsync())
-        {
-            var license = await setup.Licenses.Include(row => row.Type).SingleAsync();
-            license.Type!.MaxActivationsPerDay = 3;
-            await setup.SaveChangesAsync();
-        }
-        var first = await PrepareDistributionFinalizeAsync(scenario, Base64Url(SHA256.HashData("auto-seat-subject"u8.ToArray())), "AUTO-MACHINE-B");
-        var digest = Sha256("auto-seat-switch-first");
-        var result = await first.Service.FinalizeAsync("website-step1", digest, first.Request);
-        Assert.False(result.Idempotent);
-        await ActivateAutoRuntimeAsync(scenario, first.Request, result.Response.BindingId);
-        var second = await PrepareDistributionFinalizeAsync(scenario, Base64Url(SHA256.HashData("auto-seat-subject"u8.ToArray())), "AUTO-MACHINE-C");
-        Assert.False((await second.Service.FinalizeAsync("website-step1", Sha256("auto-seat-switch-second"), second.Request)).Idempotent);
-        Assert.True((await first.Service.FinalizeAsync("website-step1", digest, first.Request)).Idempotent);
-        // A new request identifier cannot turn the consumed entitlement into a new switch.
-        first.Request.RequestId = Guid.NewGuid().ToString("D");
-        var consumed = await Assert.ThrowsAsync<DistributionOperationException>(() => first.Service.FinalizeAsync(
-            "website-step1", Sha256("consumed-entitlement-new-request"), first.Request));
-        Assert.Equal("entitlement_ineligible", consumed.ErrorCode);
-        await using var observed = await scenario.Factory.CreateDbContextAsync();
-        Assert.Equal("AUTO-MACHINE-C", (await observed.LicenseSeats.SingleAsync(row => row.IsActive)).HardwareId);
-        Assert.Equal(2, await observed.LicenseHistories.CountAsync(row => row.Action == HistoryActions.UnlinkedApi));
-        await observed.Database.OpenConnectionAsync();
-        var licence = await observed.Licenses.Include(row => row.Type).SingleAsync();
-        Assert.Equal(2, (await SeatChangeQuota.GetStatusAsync(observed, licence,
-            (await RuntimeEnrollmentService.DatabaseNowAsync(observed, default)).UtcDateTime)).UsedToday);
-    }
-
     /// <summary>Completes real Runtime possession proof after Finalize, preserving its binding and enrollment history.</summary>
-    private static async Task ActivateAutoRuntimeAsync(
+    protected static async Task ActivateAutoRuntimeAsync(
         PreparedBootstrapScenario scenario, DistributionInstallationFinalizeRequest finalized, string bindingId)
     {
         using var key = RSA.Create(3072);
@@ -682,6 +370,366 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         await scenario.Runtime.ConfirmAsync(enrollmentId, digest, request,
             Proof(key, "confirm", enrollmentId, scenario.Options.ConfirmAudience,
                 prepared.Response.Challenge, digest), IPAddress.Loopback);
+    }
+}
+
+/// <summary>Runs the tests from AutomaticSeatSwitchPostgreSqlTests as an independently schedulable PostgreSQL class.</summary>
+/// <param name="classDatabase">The xUnit-owned PostgreSQL clone fixture for this exact test class.</param>
+public sealed partial class AutomaticSeatSwitchPostgreSqlTests(RuntimeEnrollmentPostgreSqlClassDatabase classDatabase)
+    : RuntimeEnrollmentPostgreSqlTestBase(classDatabase)
+{
+    /// <summary>Real application DI records only the observed S2S transport; headers cannot supply address or correlation.</summary>
+    [Theory(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.AutoSeatSwitch_RuntimeInitial_RecordsObservedTransportThroughApplicationDi")]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AutoSeatSwitch_RuntimeInitial_RecordsObservedTransportThroughApplicationDi(bool withHttpContext)
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        using var host = CreateAliasWebFactory(scenario, new RecordingLogger<HardwareAuthorityAliasResolver>());
+        using var scope = host.Services.CreateScope();
+        var accessor = scope.ServiceProvider.GetRequiredService<IHttpContextAccessor>();
+        var context = new DefaultHttpContext
+        {
+            TraceIdentifier = "synthetic-runtime-initial-trace"
+        };
+        context.Connection.RemoteIpAddress = IPAddress.Parse("192.0.2.41");
+        context.Request.Headers["X-Forwarded-For"] = "198.51.100.99";
+        context.Request.Headers["X-Correlation-ID"] = "forged-client-correlation";
+        accessor.HttpContext = withHttpContext ? context : null;
+        try
+        {
+            var service = Assert.IsType<DistributionInstallationBindingService>(scope.ServiceProvider.GetRequiredService<IDistributionInstallationBindingService>());
+            await using var db = await scenario.Factory.CreateDbContextAsync();
+            var licenseId = await db.Licenses.Select(row => row.Id).SingleAsync();
+            var prepared = await PrepareAutoFinalizeForLicenseAsync(scenario, licenseId, "ABCDEF0123456789", service);
+            await service.FinalizeAsync("website-step1", Sha256("transport-initial"), prepared.Request);
+            var change = await db.LicenseHistories.SingleAsync(row => row.LicenseId == licenseId && row.Action == HistoryActions.UnlinkedApi);
+            Assert.EndsWith("; transport=s2s; remote_address=" + (withHttpContext ? "192.0.2.41" : "unavailable"), change.Details);
+            Assert.Equal(withHttpContext ? context.TraceIdentifier : null, change.DecisionCorrelationId);
+            Assert.DoesNotContain("198.51.100.99", change.Details);
+            Assert.DoesNotContain("forged-client-correlation", change.Details);
+        }
+        finally
+        {
+            accessor.HttpContext = null;
+        }
+    }
+
+    /// <summary>
+    /// TKT-003751: with N = 1, the first Runtime installation of a virgin licence counts its identifier once and
+    /// exhausts the day. A public release is never counted nor refused, and reinstalling the same identifier is
+    /// accepted at the exhausted quota, reuses the historical seat row and keeps the distinct count at one.
+    /// </summary>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.AutoSeatSwitch_RuntimeInitial_FirstInstallCountsOneAndSameMachineReturnIsAccepted")]
+    public async Task AutoSeatSwitch_RuntimeInitial_FirstInstallCountsOneAndSameMachineReturnIsAccepted()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        var licenseId = Guid.NewGuid();
+        var licenseKey = "AUTO-NEW-" + Guid.NewGuid().ToString("N");
+        string productName;
+        await using (var setup = await scenario.Factory.CreateDbContextAsync())
+        {
+            var original = await setup.Licenses.Include(row => row.Type).Include(row => row.Product).SingleAsync();
+            original.Type!.MaxActivationsPerDay = 1;
+            productName = original.Product!.Name;
+            setup.Licenses.Add(new License { Id = licenseId, ProductId = original.ProductId, LicenseTypeId = original.LicenseTypeId, LicenseKey = licenseKey, IsActive = true, MaxSeats = 1, AllowedVersions = "2.2.*", ExpirationDate = DateTime.UtcNow.AddDays(1) });
+            await setup.SaveChangesAsync();
+        }
+
+        var first = await PrepareAutoFinalizeForLicenseAsync(scenario, licenseId, "ABCDEF0123456789");
+        var firstResult = await first.Service.FinalizeAsync("website-step1", Sha256("auto-new-first"), first.Request);
+        await ActivateAutoRuntimeAsync(scenario, first.Request, firstResult.Response.BindingId);
+        Guid originalSeatId;
+        DateTime originalFirstAt;
+        await using (var check = await scenario.Factory.CreateDbContextAsync())
+        {
+            await check.Database.OpenConnectionAsync();
+            var license = await check.Licenses.Include(row => row.Type).SingleAsync(row => row.Id == licenseId);
+            var firstQuota = await SeatChangeQuota.GetStatusAsync(check, license, (await RuntimeEnrollmentService.DatabaseNowAsync(check, default)).UtcDateTime);
+            Assert.Equal(1, firstQuota.UsedToday);
+            Assert.True(firstQuota.IsExhausted);
+            var seat = await check.LicenseSeats.SingleAsync(row => row.LicenseId == licenseId);
+            originalSeatId = seat.Id;
+            originalFirstAt = seat.FirstActivatedAt;
+        }
+
+        using var host = CreateAliasWebFactory(scenario, new RecordingLogger<HardwareAuthorityAliasResolver>());
+        using var client = host.CreateClient();
+        using var release = await client.PostAsJsonAsync("/api/activation/deactivate", new { LicenseKey = licenseKey, HardwareId = "ABCDEF0123456789", AppName = productName, Source = "settings_button" });
+        Assert.Equal(HttpStatusCode.OK, release.StatusCode);
+        await using (var check = await scenario.Factory.CreateDbContextAsync())
+            Assert.False((await check.LicenseSeats.SingleAsync(row => row.Id == originalSeatId)).IsActive);
+        var again = await PrepareAutoFinalizeForLicenseAsync(scenario, licenseId, "ABCDEF0123456789");
+        var restored = await again.Service.FinalizeAsync("website-step1", Sha256("auto-new-again"), again.Request);
+        await ActivateAutoRuntimeAsync(scenario, again.Request, restored.Response.BindingId);
+        await using var final = await scenario.Factory.CreateDbContextAsync();
+        await final.Database.OpenConnectionAsync();
+        var retained = await final.LicenseSeats.SingleAsync(row => row.LicenseId == licenseId);
+        Assert.Equal(originalSeatId, retained.Id);
+        Assert.Equal(originalFirstAt, retained.FirstActivatedAt);
+        Assert.True(retained.IsActive);
+        var finalLicense = await final.Licenses.Include(row => row.Type).SingleAsync(row => row.Id == licenseId);
+        var quota = await SeatChangeQuota.GetStatusAsync(final, finalLicense, (await RuntimeEnrollmentService.DatabaseNowAsync(final, default)).UtcDateTime);
+        Assert.Equal(1, quota.UsedToday);
+        Assert.True(quota.IsExhausted);
+        Assert.Equal(1, await final.LicenseHistories.CountAsync(row => row.LicenseId == licenseId && row.Action == HistoryActions.UnlinkedApi));
+    }
+
+    /// <summary>
+    /// TKT-003751: with N = 2 and the seeded seat already counted today, exactly one new identifier remains. HTTP
+    /// activation and Runtime Finalize on two new identifiers compete under the same PostgreSQL barrier; one wins and
+    /// the other is refused (<c>MAX_DAILY_ACTIVATIONS_REACHED</c> or <c>seat_change_quota_exhausted</c>) without
+    /// touching the winner or adding a second switch history row.
+    /// </summary>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.AutoSeatSwitch_MixedConcurrent_LastQuotaSlotHasOneWinner")]
+    public async Task AutoSeatSwitch_MixedConcurrent_LastQuotaSlotHasOneWinner()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        string licenseKey;
+        string productName;
+        await using (var db = await scenario.Factory.CreateDbContextAsync())
+        {
+            var license = await db.Licenses.Include(row => row.Type).Include(row => row.Product).SingleAsync();
+            license.Type!.MaxActivationsPerDay = 2;
+            licenseKey = license.LicenseKey;
+            productName = license.Product!.Name;
+            await db.SaveChangesAsync();
+        }
+
+        var runtime = await PrepareDistributionFinalizeAsync(scenario, Base64Url(SHA256.HashData("auto-seat-subject"u8.ToArray())), "AUTO-RUNTIME-MACHINE");
+        using var host = CreateAliasWebFactory(scenario, new RecordingLogger<HardwareAuthorityAliasResolver>());
+        using var client = host.CreateClient();
+        const string uuid = "33333333-4444-4555-8666-777777777777";
+        var classicHardware = MachineIdentity.FromUuid(uuid).HardwareId;
+        HttpResponseMessage? response = null;
+        var errors = await AutomaticSeatSwitchConcurrencyProof.RunAsync(scenario.AppConnectionString, async () => response = await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = classicHardware, SystemUuid = uuid, AppName = productName, AppVersion = scenario.Fixture.Version, SdkVersion = "2.0.0" }), async () => await runtime.Service.FinalizeAsync("website-step1", Sha256("mixed-runtime-finalize"), runtime.Request));
+        Assert.Null(errors[0]);
+        Assert.NotNull(response);
+        using (response)
+        {
+            if (response.StatusCode == HttpStatusCode.OK)
+            {
+                using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+                Assert.False(string.IsNullOrEmpty(body.RootElement.GetProperty("licenseFile").GetString()));
+                Assert.Equal("seat_change_quota_exhausted", Assert.IsType<DistributionOperationException>(errors[1]).ReasonCode);
+            }
+            else
+            {
+                Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+                Assert.Equal("MAX_DAILY_ACTIVATIONS_REACHED", response.Headers.GetValues("X-SoftLicence-Error-Code").Single());
+                Assert.Null(errors[1]);
+            }
+
+            await using var observed = await scenario.Factory.CreateDbContextAsync();
+            Assert.Equal(response.StatusCode == HttpStatusCode.OK ? classicHardware : "AUTO-RUNTIME-MACHINE", (await observed.LicenseSeats.SingleAsync(row => row.IsActive)).HardwareId);
+            Assert.Equal(1, await observed.LicenseHistories.CountAsync(row => row.Action == HistoryActions.UnlinkedApi));
+        }
+    }
+
+    /// <summary>Finalization refuses each live policy before releasing the previous machine or writing any switch history.</summary>
+    [Theory(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.AutoSeatSwitch_RuntimeInitial_RefusalPreservesOldSeat")]
+    [InlineData("revoked")]
+    [InlineData("inactive")]
+    [InlineData("expired")]
+    [InlineData("type-disabled")]
+    [InlineData("permanent-ban")]
+    [InlineData("multi-full")]
+    [InlineData("single-use")]
+    public async Task AutoSeatSwitch_RuntimeInitial_RefusalPreservesOldSeat(string refusal)
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        var attempt = await PrepareDistributionFinalizeAsync(scenario, Base64Url(SHA256.HashData("auto-seat-subject"u8.ToArray())), "AUTO-MACHINE-B");
+        Guid originalSeat;
+        await using (var db = await scenario.Factory.CreateDbContextAsync())
+        {
+            var license = await db.Licenses.Include(row => row.Type).SingleAsync();
+            originalSeat = (await db.LicenseSeats.SingleAsync(row => row.IsActive)).Id;
+            if (refusal == "revoked")
+                license.RevokedAt = DateTime.UtcNow.AddMinutes(-1);
+            if (refusal == "inactive")
+                license.IsActive = false;
+            if (refusal == "expired")
+                license.ExpirationDate = DateTime.UtcNow.AddMinutes(-1);
+            if (refusal == "type-disabled")
+                license.Type!.DisableNewActivations = true;
+            if (refusal == "single-use")
+            {
+                license.Type!.EnforceSingleUsePerHardwareId = true;
+                db.Licenses.Add(new License { ProductId = license.ProductId, LicenseTypeId = license.LicenseTypeId, LicenseKey = "CONSUMED-" + Guid.NewGuid().ToString("N"), IsActive = false, HardwareId = "AUTO-MACHINE-B" });
+            }
+
+            if (refusal == "permanent-ban")
+                db.BannedHardwareIds.Add(new BannedHardwareId { ProductId = license.ProductId, HardwareId = "AUTO-MACHINE-B", IsActive = true, Reason = "synthetic permanent ban", BanCategory = BannedHardwareId.Categories.Debugger });
+            if (refusal == "multi-full")
+            {
+                license.MaxSeats = 2;
+                db.LicenseSeats.Add(new LicenseSeat { LicenseId = license.Id, HardwareId = "AUTO-MULTI-OTHER", IsActive = true });
+            }
+
+            await db.SaveChangesAsync();
+        }
+
+        var error = await Assert.ThrowsAsync<DistributionOperationException>(() => attempt.Service.FinalizeAsync("website-step1", Sha256(Guid.NewGuid().ToString("D")), attempt.Request));
+        Assert.Equal(refusal switch
+        {
+            "type-disabled" => "new_activations_disabled",
+            "multi-full" => "seat_limit_reached",
+            "single-use" => "hardware_already_consumed",
+            _ => "entitlement_ineligible"
+        }, error.ErrorCode);
+        await using var observed = await scenario.Factory.CreateDbContextAsync();
+        var retained = await observed.LicenseSeats.SingleAsync(row => row.Id == originalSeat);
+        Assert.True(retained.IsActive);
+        Assert.Null(retained.UnlinkedAt);
+        Assert.False(await observed.LicenseHistories.AnyAsync(row => row.Action == HistoryActions.UnlinkedApi));
+        Assert.False(await observed.LicenseSeats.AnyAsync(row => row.HardwareId == "AUTO-MACHINE-B"));
+    }
+
+    /// <summary>
+    /// TKT-003751: with N = 2 and the seeded seat already counted today, exactly one new identifier remains. Two
+    /// distinct grants for two new identifiers serialize at the same server barrier; one wins and the other is refused
+    /// with <c>activation_rate_limited</c> / <c>seat_change_quota_exhausted</c>, leaving one switch history row.
+    /// </summary>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.AutoSeatSwitch_RuntimeConcurrent_LastQuotaSlotHasOneWinner")]
+    public async Task AutoSeatSwitch_RuntimeConcurrent_LastQuotaSlotHasOneWinner()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await using (var db = await scenario.Factory.CreateDbContextAsync())
+        {
+            var license = await db.Licenses.Include(row => row.Type).SingleAsync();
+            license.Type!.MaxActivationsPerDay = 2;
+            await db.SaveChangesAsync();
+        }
+
+        var subject = Base64Url(SHA256.HashData("auto-seat-subject"u8.ToArray()));
+        var first = await PrepareDistributionFinalizeAsync(scenario, subject, "AUTO-MACHINE-B");
+        var second = await PrepareDistributionFinalizeAsync(scenario, subject, "AUTO-MACHINE-C");
+        var errors = await AutomaticSeatSwitchConcurrencyProof.RunAsync(scenario.AppConnectionString, async () => await first.Service.FinalizeAsync("website-step1", Sha256("auto-race-b"), first.Request), async () => await second.Service.FinalizeAsync("website-step1", Sha256("auto-race-c"), second.Request));
+        Assert.Single(errors, error => error == null);
+        var refusal = Assert.IsType<DistributionOperationException>(Assert.Single(errors, error => error != null));
+        Assert.Equal("activation_rate_limited", refusal.ErrorCode);
+        Assert.Equal("seat_change_quota_exhausted", refusal.ReasonCode);
+        await using var observed = await scenario.Factory.CreateDbContextAsync();
+        Assert.Equal(errors[0] == null ? "AUTO-MACHINE-B" : "AUTO-MACHINE-C", (await observed.LicenseSeats.SingleAsync(row => row.IsActive)).HardwareId);
+        Assert.Equal(1, await observed.LicenseHistories.CountAsync(row => row.Action == HistoryActions.UnlinkedApi));
+    }
+
+    /// <summary>
+    /// TKT-003751: with N = 2, alternates A (initial, counted today), B, A, B through fresh grants and real possession
+    /// proofs. The day's distinct count stays at two and no return to A or B is refused, while each switch writes one
+    /// audit-only history row and reuses the retained seat rows. A third new identifier C is then refused with
+    /// <c>activation_rate_limited</c> / <c>seat_change_quota_exhausted</c> before B is released.
+    /// </summary>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.AutoSeatSwitch_RuntimeInitial_ABAB_RefusesThirdIdentifierWithoutLosingWinner")]
+    public async Task AutoSeatSwitch_RuntimeInitial_ABAB_RefusesThirdIdentifierWithoutLosingWinner()
+    {
+        var subject = Base64Url(SHA256.HashData("auto-seat-subject"u8.ToArray()));
+        using var scenario = await CreatePreparedBootstrapScenarioAsync(initialHardwareId: "AUTO-MACHINE-A", initialSubjectRef: subject);
+        var initialConfirm = new RuntimeEnrollmentConfirmRequest
+        {
+            Schema = RuntimeEnrollmentService.ConfirmSchema,
+            ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion,
+            EnrollmentId = scenario.EnrollmentId.ToString("D"),
+            Epoch = 1
+        };
+        var initialDigest = Sha256(JsonSerializer.Serialize(initialConfirm));
+        await scenario.Runtime.ConfirmAsync(scenario.EnrollmentId, initialDigest, initialConfirm, Proof(scenario.EnrollmentKey, "confirm", scenario.EnrollmentId, scenario.Options.ConfirmAudience, scenario.Prepared.Challenge, initialDigest), IPAddress.Loopback);
+        string hardwareA;
+        await using (var setup = await scenario.Factory.CreateDbContextAsync())
+        {
+            var license = await setup.Licenses.Include(row => row.Type).SingleAsync();
+            license.Type!.MaxActivationsPerDay = 2;
+            hardwareA = (await setup.LicenseSeats.SingleAsync(row => row.IsActive)).HardwareId;
+            await setup.SaveChangesAsync();
+        }
+
+        var firstActivation = new Dictionary<Guid, DateTime>();
+        var sequence = new[]
+        {
+            "AUTO-MACHINE-B",
+            hardwareA,
+            "AUTO-MACHINE-B"
+        };
+        for (var index = 0; index < sequence.Length; index++)
+        {
+            var attempt = await PrepareDistributionFinalizeAsync(scenario, subject, sequence[index]);
+            // The next download occurs after the previous handoff, without altering its history.
+            var downloadedAt = DateTimeOffset.UtcNow;
+            attempt.Request.HandoffIssuedAtUtc = FormatUtc(downloadedAt);
+            attempt.Request.DownloadCompletedAtUtc = FormatUtc(downloadedAt);
+            var result = await attempt.Service.FinalizeAsync("website-step1", Sha256(Guid.NewGuid().ToString("D")), attempt.Request);
+            await ActivateAutoRuntimeAsync(scenario, attempt.Request, result.Response.BindingId);
+            await using var observed = await scenario.Factory.CreateDbContextAsync();
+            await observed.Database.OpenConnectionAsync();
+            var license = await observed.Licenses.Include(row => row.Type).SingleAsync();
+            var seats = await observed.LicenseSeats.AsNoTracking().ToListAsync();
+            Assert.Equal(sequence[index], Assert.Single(seats, row => row.IsActive).HardwareId);
+            // A and B are the only identifiers of the day: the distinct count never exceeds two.
+            Assert.Equal(2, (await SeatChangeQuota.GetStatusAsync(observed, license, (await RuntimeEnrollmentService.DatabaseNowAsync(observed, default)).UtcDateTime)).UsedToday);
+            Assert.Equal(index + 1, await observed.LicenseHistories.CountAsync(row => row.Action == HistoryActions.UnlinkedApi));
+            var previousHardware = index == 0 ? hardwareA : sequence[index - 1];
+            var released = Assert.Single(seats, row => row.HardwareId == previousHardware);
+            var lastChange = await observed.LicenseHistories.Where(row => row.Action == HistoryActions.UnlinkedApi).OrderByDescending(row => row.Timestamp).FirstAsync();
+            Assert.Equal(released.UnlinkedAt, lastChange.Timestamp);
+            Assert.Equal(AutomaticSeatSwitch.Source, lastChange.PerformedBy);
+            Assert.Equal($"{AutomaticSeatSwitch.Source}: {previousHardware} -> {sequence[index]}; actor=website-step1; transport=s2s; remote_address=unavailable", lastChange.Details);
+            Assert.Null(lastChange.DecisionCorrelationId);
+            foreach (var seat in seats)
+            {
+                if (firstActivation.TryGetValue(seat.Id, out var first))
+                    Assert.Equal(first, seat.FirstActivatedAt);
+                else
+                    firstActivation.Add(seat.Id, seat.FirstActivatedAt);
+            }
+        }
+
+        var third = await PrepareDistributionFinalizeAsync(scenario, subject, "AUTO-MACHINE-C");
+        var refused = await Assert.ThrowsAsync<DistributionOperationException>(() => third.Service.FinalizeAsync("website-step1", Sha256(Guid.NewGuid().ToString("D")), third.Request));
+        Assert.Equal("activation_rate_limited", refused.ErrorCode);
+        Assert.Equal("seat_change_quota_exhausted", refused.ReasonCode);
+        await using var final = await scenario.Factory.CreateDbContextAsync();
+        var winner = await final.LicenseSeats.SingleAsync(row => row.IsActive);
+        Assert.Equal("AUTO-MACHINE-B", winner.HardwareId);
+        Assert.Null(winner.UnlinkedAt);
+        Assert.Equal(3, await final.LicenseHistories.CountAsync(row => row.Action == HistoryActions.UnlinkedApi));
+        Assert.Equal(2, await final.LicenseSeats.CountAsync());
+        Assert.False(await final.LicenseSeats.AnyAsync(row => row.HardwareId == "AUTO-MACHINE-C"));
+    }
+
+    /// <summary>
+    /// TKT-003751: with N = 3, runs initial Runtime Finalize to B through a new entitlement, then to C, and proves that
+    /// an exact replay of the first request cannot evict its later winner and that a new request identifier cannot
+    /// reuse the consumed entitlement. The day counts three distinct identifiers (initial, B, C) and two switch rows.
+    /// </summary>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.AutoSeatSwitch_RuntimeInitial_ChangesOnceAndReplayPreservesLaterWinner")]
+    public async Task AutoSeatSwitch_RuntimeInitial_ChangesOnceAndReplayPreservesLaterWinner()
+    {
+        using var scenario = await CreatePreparedBootstrapScenarioAsync();
+        await using (var setup = await scenario.Factory.CreateDbContextAsync())
+        {
+            var license = await setup.Licenses.Include(row => row.Type).SingleAsync();
+            license.Type!.MaxActivationsPerDay = 3;
+            await setup.SaveChangesAsync();
+        }
+
+        var first = await PrepareDistributionFinalizeAsync(scenario, Base64Url(SHA256.HashData("auto-seat-subject"u8.ToArray())), "AUTO-MACHINE-B");
+        var digest = Sha256("auto-seat-switch-first");
+        var result = await first.Service.FinalizeAsync("website-step1", digest, first.Request);
+        Assert.False(result.Idempotent);
+        await ActivateAutoRuntimeAsync(scenario, first.Request, result.Response.BindingId);
+        var second = await PrepareDistributionFinalizeAsync(scenario, Base64Url(SHA256.HashData("auto-seat-subject"u8.ToArray())), "AUTO-MACHINE-C");
+        Assert.False((await second.Service.FinalizeAsync("website-step1", Sha256("auto-seat-switch-second"), second.Request)).Idempotent);
+        Assert.True((await first.Service.FinalizeAsync("website-step1", digest, first.Request)).Idempotent);
+        // A new request identifier cannot turn the consumed entitlement into a new switch.
+        first.Request.RequestId = Guid.NewGuid().ToString("D");
+        var consumed = await Assert.ThrowsAsync<DistributionOperationException>(() => first.Service.FinalizeAsync("website-step1", Sha256("consumed-entitlement-new-request"), first.Request));
+        Assert.Equal("entitlement_ineligible", consumed.ErrorCode);
+        await using var observed = await scenario.Factory.CreateDbContextAsync();
+        Assert.Equal("AUTO-MACHINE-C", (await observed.LicenseSeats.SingleAsync(row => row.IsActive)).HardwareId);
+        Assert.Equal(2, await observed.LicenseHistories.CountAsync(row => row.Action == HistoryActions.UnlinkedApi));
+        await observed.Database.OpenConnectionAsync();
+        var licence = await observed.Licenses.Include(row => row.Type).SingleAsync();
+        Assert.Equal(3, (await SeatChangeQuota.GetStatusAsync(observed, licence, (await RuntimeEnrollmentService.DatabaseNowAsync(observed, default)).UtcDateTime)).UsedToday);
     }
 }
 

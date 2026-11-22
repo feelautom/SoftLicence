@@ -409,6 +409,7 @@ public class DocumentationService
         | `IsRecurring` | bool | If true, license can be renewed via API (subscription model) |
         | `DefaultAllowedVersions` | string | Version mask (default: "*") |
         | `DefaultMaxSeats` | int | Max concurrent devices (default: 1) |
+        | `AllowPublicTrial` | bool | Opt-in for the anonymous public trial routes (default: false). Without it, `POST /api/activation/trial` and the `FREE-TRIAL` interception refuse to create or auto-renew this type |
 
         ### Multi-Seat Licensing
 
@@ -437,9 +438,10 @@ public class DocumentationService
         ### Auto-Trial
 
         `POST /api/activation/trial` with `TypeSlug` (e.g., "TRIAL"):
+        - The type must have `AllowPublicTrial = true`; otherwise creation and auto-renewal are refused with `LICENSE_TYPE_PUBLIC_TRIAL_NOT_ALLOWED`
         - If no existing license for HardwareId + Product: creates a new trial license
         - If existing unexpired license: returns it
-        - If existing expired + IsRecurring (community): auto-renews
+        - If existing expired + IsRecurring (community) + `AllowPublicTrial`: auto-renews
         - License key format: `FREE-TRIAL` suffix
 
         ### Self-Service Reset
@@ -474,8 +476,14 @@ public class DocumentationService
         ### Threat Scoring (Persistent)
 
         Scores accumulate permanently per IP address and are stored in the `IpThreatScores` table
-        (survive server restarts). In-memory cache (`ConcurrentDictionary`) for fast lookups.
-        Score resets to 0 only after the IP serves its ban period.
+        (survive server restarts). The database is the source of truth: each event is an atomic
+        increment, and persisted scores are loaded into the in-memory cache on the first request.
+        Score resets to 0 after the IP is banned, automatically when a score below 200 has had no
+        event for 30 days (journaled with reason `inactif 30 j`), or when an operator resets it (Audit page, admin API
+        `POST /api/admin/threat-scores/reset`, MCP `reset_ip_threat_score`; journaled in
+        `IpThreatScoreResets`). Crossing 50, then 100, sends one `Security.ThreatScoreRaised` alert.
+        Refusals on public Runtime routes and on `/api/security/lock-report` are not scored when the
+        server classified a client clock skew or when they name an existing Runtime enrollment.
 
         | Zone | Score Range | Effect |
         |------|-------------|--------|
@@ -637,6 +645,7 @@ public class DocumentationService
         | IsRecurring | bool | No | false | Subscription model |
         | DefaultAllowedVersions | string | No | "*" | |
         | DefaultMaxSeats | int | No | 1 | |
+        | AllowPublicTrial | bool | No | false | Public trial opt-in |
         | ProductId | Guid | No | — | FK → Product.Id (Cascade) |
 
         **Unique index**: `(ProductId, Slug)`
@@ -885,7 +894,7 @@ public class DocumentationService
         - `500` — Server-side decryption or signing error
 
         **Behavior:**
-        - If `licenseKey` contains "FREE-TRIAL": redirects to auto-trial flow
+        - If `licenseKey` contains "FREE-TRIAL": redirects to auto-trial flow, which requires `AllowPublicTrial` on the resolved type to create or auto-renew a license and honours `DisableNewActivations`
         - First activation: creates LicenseSeat, sets ActivationDate, records ACTIVATED history
         - Re-activation (same HardwareId): updates LastCheckInAt, increments RecoveryCount
         - New device: checks MaxSeats limit, creates new seat if under limit
@@ -954,8 +963,8 @@ public class DocumentationService
         - Finds product by AppId (Guid) or AppName (case-insensitive)
         - Finds LicenseType by Slug within that product
         - If existing unexpired license for HardwareId: returns it (updates customer info if provided)
-        - If expired + IsRecurring: auto-renews and returns
-        - Otherwise: creates new license using provided customer info or defaults
+        - If expired + IsRecurring + `AllowPublicTrial`: auto-renews and returns
+        - Otherwise: creates a new license only when the type has `AllowPublicTrial = true`; else answers 200 with `isSuccess: false` and `errorCode: "LICENSE_TYPE_PUBLIC_TRIAL_NOT_ALLOWED"`
 
         ---
 
@@ -1648,11 +1657,19 @@ public class DocumentationService
 
         | Trigger | Description |
         |---------|-------------|
-        | `Security.IpBanned` | An IP address has been banned |
+        | `Security.LockReported` | **Critical.** New security lock of level 3 to 5 (debugger, tampering), with the full dossier; also emailed |
+        | `Security.LockBanned` | **Critical.** Hardware ban issued by the security-lock system; also emailed |
+        | `Security.LicenseServerSpoofed` | **Critical.** A successful activation reported a local or private licence server (`FailureHost`) |
+        | `Security.IpBanned` | Serious hardware or component ban (piracy, debugger, quota abuse, manual); no longer IP scans nor outdated versions |
+        | `Security.ThreatScoreRaised` | An IP threat score crossed 50, then 100 |
         | `Security.ZombieDetected` | Zombie license detected (>5 IPs/24h) |
         | `Security.HwidReuseDetected` | Same hardware ID reused across multiple accounts/licenses |
         | `Security.AuthFailure` | Authentication failure on admin endpoints |
-        | `Security.EvidenceObserved` | Non-authoritative public ApprovedBinaries evidence observed; no automatic ApprovedBinaries sanction |
+        | `Security.EvidenceObserved` | Public, identity-less ApprovedBinaries aggregate: fingerprint mismatch without a usable hardware id, missing, invalid or uncapturable evidence, or missing baseline (operational); no automatic sanction |
+        | `Security.IpAutoBanned` | **Noise.** Automatic IP ban by the threat score (web scanners) |
+        | `Security.OutdatedVersionBanned` | **Noise.** Hardware ban below the minimum version, and its automatic lift |
+        | `Security.BinaryTampered` | **Critical.** A machine ran, on 3 distinct starts within 24 h, an EXE/DLL/Core fingerprint belonging to no approved build of the product; one alert per machine with customer, masked licence, HWID and IP (TKT-003674); no automatic sanction |
+        | `Security.CloneSuspected` | A copied or restored installation was detected by the single-use control token: 2 collisions or 2 guided reactivations of one seat within 24 h, a collision from another network than the live copy, or a reactivation refused by the daily quota (TKT-003615); at most one alert per seat and 24 h per cause; no automatic sanction |
         | `License.Created` | A new license has been created |
         | `License.Activated` | A license has been activated on a device |
         | `System.Startup` | Server has started |
@@ -1714,8 +1731,14 @@ public class DocumentationService
 
         If the webhook URL contains "ntfy", the service uses ntfy-specific formatting:
         - Body: plain text message
-        - Query parameters: `title`, `tags` (mapped to trigger emoji), `priority` (3)
+        - Query parameters: `title`, `tags` (mapped to trigger emoji), `priority`
+        - Priority: 5 (max) for critical triggers and for level-5 locks or lock bans, 4 for other security,
+          activation, telemetry and update events and for level-3/4 locks, 2 for noise, ntfy default otherwise
         - This provides native push notifications on mobile devices
+
+        **One topic for alerts, another for noise (TKT-003668).** The admin page refuses a webhook that lists a noise
+        trigger together with any other trigger: noise goes to its own webhook and ntfy topic. The full map of
+        channels, topics and roles is `docs/schema/canaux-alertes.md` in the repository.
 
         ### Error Handling
 
@@ -1902,7 +1925,8 @@ public class DocumentationService
         2. Direct DB: Delete from `BannedIps` where `IpAddress = '{ip}'`
 
         **Reduce threat score:**
-        Threat scores reset to 0 after a ban expires. There is no manual score reduction.
+        Audit page (Threat scores section, reason required), admin API `POST /api/admin/threat-scores/reset`
+        or MCP tool `reset_ip_threat_score`. The reset is immediate (database and memory) and journaled.
 
         ### Common Activation Errors
 

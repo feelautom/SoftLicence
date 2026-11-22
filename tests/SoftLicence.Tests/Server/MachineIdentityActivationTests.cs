@@ -241,7 +241,7 @@ public sealed class MachineIdentityActivationTests : IClassFixture<WebApplicatio
         };
         var trialType = new LicenseType
         {
-            Id = Guid.NewGuid(), ProductId = product.Id, Name = "Trial", Slug = "TRIAL", IsFree = true, DefaultDurationDays = 7
+            Id = Guid.NewGuid(), ProductId = product.Id, Name = "Trial", Slug = "TRIAL", IsFree = true, AllowPublicTrial = true, DefaultDurationDays = 7
         };
         var license = new License
         {

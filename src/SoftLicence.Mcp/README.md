@@ -4,7 +4,7 @@ Serveur MCP stdio pour les analytics SoftLicence et les opérations de sécurit�
 
 Le serveur ne se connecte jamais directement a PostgreSQL. Il appelle uniquement les endpoints HTTP de `SoftLicence.Server`.
 Le traitement lourd, le cache, le scope produit et la redaction globale restent cote serveur.
-Les lectures utilisent `SOFTLICENCE_API_KEY`. Les mutations de blacklist utilisent une
+Les lectures utilisent `SOFTLICENCE_API_KEY`. Les mutations de blacklist et de verrous utilisent une
 credential séparée `SOFTLICENCE_ADMIN_SECRET`, ne sont jamais disponibles avec la seule
 clé analytics et effectuent une lecture de post-vérification.
 Les tools `security/*` exigent en plus le scope `security:read` sur la clé analytics.
@@ -21,7 +21,7 @@ Configuration recommandee avec l'executable publie :
 {
   "mcpServers": {
     "softlicence-analytics": {
-      "command": "D:/Apps/SoftLicence.Mcp/SoftLicence.Mcp.exe",
+      "command": "<install-dir>/SoftLicence.Mcp/SoftLicence.Mcp.exe",
       "env": {
         "SOFTLICENCE_BASE_URL": "https://softlicence.EXAMPLE.COM",
         "SOFTLICENCE_API_KEY": "sla_REPLACE_WITH_ANALYTICS_KEY"
@@ -41,7 +41,7 @@ Ce script est la procédure canonique. Il publie d'abord le single-file win-x64 
 staging, gère la course avec le gestionnaire Codex qui relance automatiquement
 `SoftLicence.Mcp.exe`, remplace le binaire pendant une fenêtre bornée, vérifie le hash,
 supprime les anciens artifacts et exécute un smoke standalone. Le dossier final doit
-contenir uniquement `D:\Apps\SoftLicence.Mcp\SoftLicence.Mcp.exe`.
+contenir uniquement `<install-dir>/SoftLicence.Mcp/SoftLicence.Mcp.exe`.
 
 Ne pas copier seulement l'apphost framework-dependent produit par un build standard :
 ce petit EXE charge les DLL voisines et peut donc continuer à exécuter un ancien code.
@@ -58,7 +58,7 @@ Variables d'environnement requises en mode developpement :
 ```powershell
 $env:SOFTLICENCE_BASE_URL = "https://softlicence.example.com"
 $env:SOFTLICENCE_API_KEY = "sla_xxx"
-# Requis uniquement pour create/unban security tools :
+# Requis uniquement pour les tools security qui modifient un ban ou un verrou :
 $env:SOFTLICENCE_ADMIN_SECRET = "admin-secret"
 dotnet run --project src/SoftLicence.Mcp/SoftLicence.Mcp.csproj
 ```
@@ -79,7 +79,7 @@ La cle globale a `ProductId=null`, `ScopeKind=Global` et les scopes `telemetry:r
 
 Le serveur MCP envoie cette cle dans le header `X-Analytics-Key`.
 
-La configuration client doit pointer vers le dossier stable `D:/Apps/SoftLicence.Mcp/SoftLicence.Mcp.exe`, pas vers un dossier publie versionne comme `SoftLicence.Mcp-<hash>`.
+La configuration client doit pointer vers un dossier d'installation stable (ici `<install-dir>/SoftLicence.Mcp/SoftLicence.Mcp.exe`, `<install-dir>` etant le dossier choisi sur le poste), pas vers un dossier publie versionne comme `SoftLicence.Mcp-<hash>`.
 
 Avec une cle globale, les tools lies a un produit doivent recevoir un `productName`
 exact ou un `productId`. Le MCP accepte explicitement `TIAConnect` et l'alias humain
@@ -88,8 +88,11 @@ autres noms sont seulement trimmes et restent inchanges. Utiliser `list_products
 le nom n'est pas certain. Si un tool recoit une erreur
 de selection produit connue (`PRODUCT_SELECTOR_REQUIRED`, `PRODUCT_NOT_FOUND`,
 `PRODUCT_NAME_AMBIGUOUS`, `PRODUCT_SELECTOR_AMBIGUOUS`), le MCP retourne une reponse
-JSON d'erreur avec `availableProducts` pour permettre de relancer immediatement avec
-le bon selecteur.
+de refus qui conseille `list_products`, puis un nouvel appel avec un `productName`
+exact ou un `productId`. Le message liste tous les noms exacts renvoyes par le serveur,
+y compris au-dela de huit produits, dans leur ordre d'origine. Si la liste ne peut pas
+etre recuperee (notamment si elle depasse la borne de transport), le refus conserve
+le conseil `list_products` sans ajouter de liste.
 
 Exemple de configuration client MCP en mode developpement :
 
@@ -101,7 +104,7 @@ Exemple de configuration client MCP en mode developpement :
       "args": [
         "run",
         "--project",
-        "D:/Labs/SoftLicence/src/SoftLicence.Mcp/SoftLicence.Mcp.csproj"
+        "<path-to-SoftLicence>/src/SoftLicence.Mcp/SoftLicence.Mcp.csproj"
       ],
       "env": {
         "SOFTLICENCE_BASE_URL": "https://softlicence.example.com",
@@ -145,11 +148,19 @@ Le SDK MCP expose les méthodes C# en noms de tools `snake_case` :
 - `get_security_ban_details`
 - `get_security_ban_source_event`
 - `get_security_case_snapshot`
+- `list_security_locks`
+- `get_security_lock`
+- `decide_security_lock`
+- `unban_security_lock`
+- `list_security_lock_release_decisions`
+- `revoke_security_lock_release_decision`
 - `get_security_hardware_ban_categories`
 - `create_security_hardware_ban`
 - `unban_security_hardware_ban`
 - `create_security_component_ban`
 - `unban_security_component_ban`
+- `list_ip_threat_scores`
+- `reset_ip_threat_score`
 
 Toutes les limites sont bornees cote MCP avant l'appel API :
 
@@ -184,6 +195,19 @@ Le diagnostic Runtime exact recroise toutes les identités indexées de la déci
 refuse toute décision disponible sans HWID soumis canonique et valide chaque ligne bans, Canary et
 profil avant de la réduire à son allowlist. Une preuve partielle arrête donc la corrélation
 au lieu de devenir une absence de signal.
+
+Les lectures de verrous acceptent les filtres exacts `state` et `hardwareId`; seul le
+filtre d'affichage `email` est insensible a la casse. Chaque verrou expose aussi
+`hasActiveEnrollment` pour le scope stable produit/binding/installation. `decide_security_lock` accepte
+uniquement `RELEASE` ou `BAN` et exige `reason`, `auditReference` et un opérateur nommé.
+Les refus serveur restent structurés dans `mutation.error` et chaque écriture relit ensuite
+l'état via la clé analytics. La révocation d'une décision RELEASE mémorisée n'altère que
+les futures détections couvertes par cette décision.
+`unban_security_lock` est la seule opération qui inverse explicitement un verrou BANNED :
+elle exige une raison et une référence d'audit nommée, ferme les incidents critiques
+correspondants, désactive les bans matériels applicables et ne crée jamais de RELEASE mémorisée.
+Le diagnostic de succès `release_no_active_enrollment` conserve ce résultat d'administration,
+mais signifie que le client doit réinstaller T-IA Connect avant de pouvoir se réenrôler.
 Les hashes composants ne sont transmis que sous la forme hexadécimale `8...8`, et les dates
 d'activité du profil doivent correspondre aux extrêmes de ses événements complets.
 Le transport analytics applique également un plafond d'octets avant parsing, sur longueur

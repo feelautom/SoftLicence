@@ -17,10 +17,10 @@ public interface IPortalDeactivationService
     /// <param name="cancellationToken">Cancels database work before commit.</param>
     /// <returns>The terminal response and whether it was replayed.</returns>
     /// <exception cref="DistributionOperationException">The request is invalid, conflicting, or cannot safely mutate the exact seat.</exception>
-    /// <exception cref="PortalDeactivationQuotaException">
-    /// A customer reason would exceed the live daily seat-change quota of <see cref="SeatChangeQuota"/>;
-    /// nothing is written and the refusal carries the limit and the next UTC reset.
-    /// </exception>
+    /// <remarks>
+    /// Since TKT-003751 a deactivation is never refused by the daily hardware quota of
+    /// <see cref="SeatChangeQuota"/>; <see cref="PortalDeactivationQuotaException"/> is no longer thrown.
+    /// </remarks>
     Task<PortalDeactivationResult> DeactivateAsync(
         string clientId,
         string exactPayloadDigest,
@@ -53,11 +53,18 @@ public sealed class PortalDeactivationService : IPortalDeactivationService
         "^[a-z0-9][a-z0-9._-]{2,63}$",
         RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
     private static readonly HashSet<string> Reasons = new(
-        ["settings_button", "subscription_termination", "uninstall"],
+        ["settings_button", "subscription_termination", "uninstall", ProviderAuthorityReleaseReason],
         StringComparer.Ordinal);
     private static readonly HashSet<string> GuardBypassReasons = new(
-        ["settings_button", "uninstall"],
+        ["settings_button", "uninstall", ProviderAuthorityReleaseReason],
         StringComparer.Ordinal);
+
+    /// <summary>
+    /// Generic server-to-server release reason reserved for provider-authority callers. It is
+    /// exempt from the five-minute guard (no deactivation is quota-limited since TKT-003751), and it can only
+    /// enter through the signed internal portal-deactivation endpoint, never from browser input.
+    /// </summary>
+    public const string ProviderAuthorityReleaseReason = "provider_authority_release";
 
     private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
     private readonly TimeProvider _timeProvider;
@@ -138,22 +145,9 @@ public sealed class PortalDeactivationService : IPortalDeactivationService
             releaseScope = await SeatRuntimeReleaseAuthority.PrepareAsync(
                 db, license.ProductId, license, [activeSeat], now, cancellationToken);
             now = releaseScope.ObservedAtUtc;
-            // The shared event-based seat-change quota (TKT-001206) replaces the former
-            // inactive-seat count, which forgot a seat once it was reactivated. The limit is read
-            // live from the licence type; non-positive limits are unlimited. Exact successful
-            // replays above and already-inactive targets consume no additional quota.
-            // Subscription termination is authenticated server-owned cleanup, not a user unlink.
-            // Its existing caller revokes first and must release every seat even at quota.
-            // The dashboard fixes settings_button server-side; this exception cannot be selected
-            // through browser input. Other reasons and the five-minute guard remain unchanged.
-            if (!string.Equals(request.Reason, SeatChangeQuota.SubscriptionTerminationReason, StringComparison.Ordinal))
-            {
-                var quota = await SeatChangeQuota.GetStatusAsync(db, license, now, cancellationToken);
-                if (quota.IsExhausted)
-                    throw new PortalDeactivationQuotaException(new PortalDeactivationQuotaRefusal(
-                        "portal-deactivation-refusal-v1", request.RequestId!,
-                        "deactivation_quota_exceeded", quota.Limit, quota.ResetAtUtc));
-            }
+            // TKT-003751 (owner rule): unlinking from the dashboard is never counted nor refused
+            // by the daily hardware quota, which limits only activations on new identifiers. The
+            // five-minute guard below is unchanged.
 
             var seatAge = now - DateTime.SpecifyKind(activeSeat.FirstActivatedAt, DateTimeKind.Utc);
             if (seatAge < TimeSpan.Zero)
@@ -259,7 +253,7 @@ public sealed class PortalDeactivationService : IPortalDeactivationService
         }
     }
 
-    private static void SyncLegacyHardwareStateFromSeats(License license)
+    internal static void SyncLegacyHardwareStateFromSeats(License license)
     {
         var activeSeat = license.Seats
             .Where(candidate => candidate.IsActive)

@@ -52,4 +52,14 @@ public sealed class RuntimeDistributionHardwareDecision
     public DateTime CreatedAtUtc { get; set; }
     /// <summary>Gets or sets the provider UTC timestamp of the latest exact replay.</summary>
     public DateTime LastSeenAtUtc { get; set; }
+    /// <summary>Gets or sets the classifier version; null denotes a historical decision without machine proof.</summary>
+    public int? MachineClassifierVersion { get; set; }
+    /// <summary>Gets or sets the immutable full-request source; reused proof never becomes a newer observation.</summary>
+    public Guid? MachineEvidenceSourceDecisionId { get; set; }
+    /// <summary>Gets or sets physical, virtual, or unknown, derived only from authenticated request evidence.</summary>
+    [MaxLength(16)] public string? MachineClassification { get; set; }
+    /// <summary>Gets or sets the bounded diagnostic explaining classification without retaining raw indicators.</summary>
+    [MaxLength(64)] public string? MachineClassificationReason { get; set; }
+    /// <summary>Gets or sets the digest of the exact classification evidence; never an identity or an attestation.</summary>
+    [MaxLength(64)] public string? MachineEvidenceDigestSha256 { get; set; }
 }

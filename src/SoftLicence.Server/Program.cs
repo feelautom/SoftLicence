@@ -57,6 +57,7 @@ builder.Services.AddRateLimiter(options =>
         if (context.HttpContext.Request.Path.StartsWithSegments("/api/v1/runtime-enrollments")
             || context.HttpContext.Request.Path.StartsWithSegments("/api/internal/v1/runtime-enrollments")
             || context.HttpContext.Request.Path.StartsWithSegments("/api/internal/v1/runtime-seat-recovery-authorizations")
+            || context.HttpContext.Request.Path.StartsWithSegments("/api/internal/v1/runtime-account-relinks")
             || context.HttpContext.Request.Path.StartsWithSegments("/api/internal/v2/runtime-enrollment-authority"))
         {
             context.HttpContext.Response.Headers.CacheControl = "no-store, max-age=0";
@@ -69,7 +70,7 @@ builder.Services.AddRateLimiter(options =>
         await context.HttpContext.Response.WriteAsJsonAsync(response, cancellationToken);
     };
 
-    // Politique pour l'activation client (Stricte) — IPs privées exemptées
+    // Politique pour l'activation client (Stricte), IPs privées exemptées
     options.AddPolicy("PublicAPI", ctx =>
         RateLimitPartition.GetFixedWindowLimiter(GetRateLimitPartition(ctx), key =>
             new FixedWindowRateLimiterOptions
@@ -80,7 +81,7 @@ builder.Services.AddRateLimiter(options =>
                 QueueProcessingOrder = QueueProcessingOrder.OldestFirst
             }));
 
-    // Politique pour l'administration (Plus souple) — IPs privées exemptées
+    // Politique pour l'administration (Plus souple), IPs privées exemptées
     options.AddPolicy("AdminAPI", ctx =>
         RateLimitPartition.GetFixedWindowLimiter(GetRateLimitPartition(ctx), key =>
             new FixedWindowRateLimiterOptions
@@ -115,7 +116,7 @@ builder.Services.AddRateLimiter(options =>
                 QueueProcessingOrder = QueueProcessingOrder.OldestFirst
             }));
 
-    // Politique pour la documentation LLM (Modérée) — IPs privées exemptées
+    // Politique pour la documentation LLM (Modérée), IPs privées exemptées
     options.AddPolicy("DocsAPI", ctx =>
         RateLimitPartition.GetFixedWindowLimiter(GetRateLimitPartition(ctx), key =>
             new FixedWindowRateLimiterOptions
@@ -126,7 +127,7 @@ builder.Services.AddRateLimiter(options =>
                 QueueProcessingOrder = QueueProcessingOrder.OldestFirst
             }));
 
-    // Politique pour la télémétrie (Souple) — les clients envoient en rafale
+    // Politique pour la télémétrie (Souple), les clients envoient en rafale
     options.AddPolicy("TelemetryAPI", ctx =>
         RateLimitPartition.GetFixedWindowLimiter(GetRateLimitPartition(ctx), key =>
             new FixedWindowRateLimiterOptions
@@ -272,6 +273,10 @@ builder.Services.AddScoped<SoftLicence.Server.Services.IFinalizeAuthorityPairRes
     SoftLicence.Server.Services.FinalizeAuthorityPairResolver>();
 builder.Services.AddScoped<SoftLicence.Server.Services.IPortalDeactivationService,
     SoftLicence.Server.Services.PortalDeactivationService>();
+builder.Services.AddScoped<SoftLicence.Server.Services.ILicenseKeyActivationSettingService,
+    SoftLicence.Server.Services.LicenseKeyActivationSettingService>();
+builder.Services.AddScoped<SoftLicence.Server.Services.ILicenseHardwareExclusionService,
+    SoftLicence.Server.Services.LicenseHardwareExclusionService>();
 builder.Services.AddSingleton<Microsoft.Extensions.Options.IValidateOptions<SoftLicence.Server.Services.RuntimeEnrollmentOptions>,
     SoftLicence.Server.Services.RuntimeEnrollmentOptionsValidator>();
 builder.Services.AddOptions<SoftLicence.Server.Services.RuntimeEnrollmentOptions>()
@@ -355,6 +360,7 @@ builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryRawSampleAnal
 builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryInsightsAnalyticsService>(); // Telemetry insights analytics
 builder.Services.AddTransient<SoftLicence.Server.Services.LicenseDurationMigrationImpactAnalyticsService>(); // License duration migration impact analytics
 builder.Services.AddTransient<SoftLicence.Server.Services.FreemiumActivityRankingAnalyticsService>(); // Freemium activity and conversion ranking analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.PaidWeeklyActivityAnalyticsService>(); // Paid license ISO-week usage aggregates over up to 52 weeks (TKT-003652)
 builder.Services.AddTransient<SoftLicence.Server.Services.RecentLicenseOnboardingMetricsAnalyticsService>(); // Recent license onboarding Time-To-Value analytics
 builder.Services.AddTransient<SoftLicence.Server.Services.LicenseUsageScoringAnalyticsService>(); // License usage conversion and retention scoring analytics
 builder.Services.AddTransient<SoftLicence.Server.Services.TelemetryLicenseHardwareAuditAnalyticsService>(); // Telemetry/license/HWID audit analytics
@@ -363,8 +369,13 @@ builder.Services.AddTransient<SoftLicence.Server.Services.LicenseHardwareVerifie
 builder.Services.AddTransient<SoftLicence.Server.Services.FreemiumAbuseRiskAnalyticsService>(); // Freemium group abuse risk analytics
 builder.Services.AddTransient<SoftLicence.Server.Services.AnalyticsApiKeyAuthService>(); // Analytics/MCP API key auth
 builder.Services.AddTransient<SoftLicence.Server.Services.RecoveryTelemetryAnalyticsService>(); // Product-scoped Recovery support analytics
+builder.Services.AddSingleton<SoftLicence.Server.Services.LlmTipProductIdCache>(); // Shared appName -> product memory of the LLM tips ingestion (TKT-003573)
+// Product -> BugTrace project mapping for LLM tip conversion, read once from BUGTRACE_LLM_TIP_TIA_PRODUCT_IDS (TKT-003093).
+// Explicit factory: the type also has a raw-string constructor for tests, which DI must never try to use.
+builder.Services.AddSingleton(sp => new SoftLicence.Server.Services.LlmTipBugTraceRouting(sp.GetRequiredService<IConfiguration>()));
 builder.Services.AddTransient<SoftLicence.Server.Services.LlmTipFeedbackService>(); // LLM tips feedback dedicated ingestion
 builder.Services.AddTransient<SoftLicence.Server.Services.SecurityBanAuditAnalyticsService>(); // Security ban read-only audit analytics
+builder.Services.AddTransient<SoftLicence.Server.Services.LicenseTypeChanges.LicenseTypeChangeService>(); // Licence-type writes with preview and journal (TKT-002781)
 builder.Services.AddTransient<SoftLicence.Server.Services.SecurityCanaryAnalyticsService>(); // Canary security analytics
 builder.Services.AddScoped<SoftLicence.Server.Services.SecurityIncidentService>(); // Aggregated server-side security incidents
 builder.Services.AddTransient<SoftLicence.Server.Services.SecurityCaseContextService>(); // Shared securityCaseId and redacted enrichment context
@@ -378,6 +389,7 @@ builder.Services.AddScoped<SoftLicence.Server.Services.RecoveryTelemetryService>
 builder.Services.AddScoped<SoftLicence.Server.Services.ActivationIncidentService>();
 builder.Services.AddScoped<SoftLicence.Server.Services.FingerprintService>(); // Hardware Fingerprints
 builder.Services.AddScoped<SoftLicence.Server.Services.MachineIdentityObservationService>(); // TKT-001277 UUID identity
+builder.Services.AddScoped<SoftLicence.Server.Services.CloneGuard.SeatCloneGuardService>(); // TKT-003615 single-use control token, shares the request DbContext
 builder.Services.AddScoped<SoftLicence.Server.Services.SeatCleanupService>(); // Enforcement un HWID par produit
 builder.Services.AddTransient<SoftLicence.Server.Services.PiracyDetectionService>(); // Détection piratage
 // One process-wide quota ledger makes concurrent SUP reservations atomic; restart clears the
@@ -392,6 +404,7 @@ builder.Services.AddSingleton<SoftLicence.Server.Services.IBugTraceAutoReportSer
 builder.Services.AddHostedService<SoftLicence.Server.Services.BugTraceAutoReportOutboxWorker>();
 builder.Services.AddTransient<SoftLicence.Server.Services.AiAnalysisService>(); // Analyse IA télémétrie
 builder.Services.AddHostedService<SoftLicence.Server.Services.CleanupService>(); // Nettoyage Automatique
+builder.Services.AddHostedService<SoftLicence.Server.Services.ThreatScoreDecayService>(); // TKT-002685 score inactif 30 j effacé
 builder.Services.AddHostedService<SoftLicence.Server.Services.AssignmentEnforcementModeSynchronizer>(); // TKT-001277 interrupteur open/closed
 builder.Services.AddHostedService<SoftLicence.Server.Services.AssignmentEnforcementAlertWorker>(); // TKT-001277 alertes groupées
 builder.Services.Configure<SoftLicence.Server.Services.SmtpSettings>(builder.Configuration.GetSection("SmtpSettings"));
@@ -425,6 +438,7 @@ app.Use(async (context, next) =>
     if (context.Request.Path.StartsWithSegments("/api/v1/runtime-enrollments")
         || context.Request.Path.StartsWithSegments("/api/internal/v1/runtime-enrollments")
         || context.Request.Path.StartsWithSegments("/api/internal/v1/runtime-seat-recovery-authorizations")
+        || context.Request.Path.StartsWithSegments("/api/internal/v1/runtime-account-relinks")
         || context.Request.Path.StartsWithSegments("/api/internal/v2/runtime-enrollment-authority"))
     {
         context.Response.Headers.CacheControl = "no-store, max-age=0";
@@ -459,6 +473,10 @@ app.UseMiddleware<SoftLicence.Server.Middlewares.TelemetryRejectionCaptureMiddle
 
 // 2. LOGGING D'AUDIT GLOBAL (Placé AVANT l'autorisation pour capturer les accès refusés)
 app.UseMiddleware<SoftLicence.Server.Middlewares.AuditMiddleware>();
+
+// TKT-004085: an exception escaping an /api action becomes a bounded JSON error with a correlation reference (a named
+// 409 for an assignment-trigger refusal) instead of an empty 500. Inside the audit so it records the final status.
+app.UseMiddleware<SoftLicence.Server.Middlewares.ApiExceptionSafetyNetMiddleware>();
 
 app.UseAuthorization();
 

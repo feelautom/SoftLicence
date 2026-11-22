@@ -1,0 +1,164 @@
+@* TKT-001837: use the established TKT-001480 modal shell for one captured security-lock action. *@
+<div class="modal fade show d-block" tabindex="-1" role="dialog" aria-modal="true"
+     aria-labelledby="security-lock-decision-title" style="background: rgba(0,0,0,0.6)" data-testid="security-lock-dialog">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content bg-dark text-white border-secondary">
+            <div class="modal-header">
+                <h5 id="security-lock-decision-title" class="modal-title">@Title</h5>
+            </div>
+            <div class="modal-body">
+                <p>@Explanation</p>
+                @if (Request.Action == ReleaseAction)
+                {
+                    <div class="alert alert-info">
+                        @if (Request.RememberRelease)
+                        {
+                            <span>La décision sera mémorisée pour ce poste et cette cause. Les prochaines détections resteront visibles sans bloquer jusqu’à révocation.</span>
+                        }
+                        else
+                        {
+                            <span>Le matériel n’est pas vérifié : aucune décision de relâchement ne sera mémorisée.</span>
+                        }
+                    </div>
+                }
+                else if (Request.Action == UnbanAction)
+                {
+                    <div class="alert alert-warning">
+                        Cette opération explicite ne mémorise aucun relâchement. Un nouveau ban matériel restera prioritaire.
+                    </div>
+                    <div class="alert @(Request.HasActiveEnrollment ? "alert-info" : "alert-danger")">
+                        @if (Request.HasActiveEnrollment)
+                        {
+                            <span>Un enrôlement actif existe pour cette installation. Le client installé pourra récupérer la levée et repartir.</span>
+                        }
+                        else
+                        {
+                            <span>Aucun enrôlement actif n’existe pour cette installation. Après le débannissement, le client doit réinstaller T-IA Connect pour repartir.</span>
+                        }
+                    </div>
+                    <label for="security-lock-unban-reason" class="form-label">Motif obligatoire</label>
+                    <input id="security-lock-unban-reason" class="form-control bg-dark text-white mb-2" maxlength="500"
+                           autocomplete="off" @bind="reason" @bind:event="oninput" />
+                    <label for="security-lock-unban-audit" class="form-label">Référence d’audit nominative</label>
+                    <input id="security-lock-unban-audit" class="form-control bg-dark text-white" maxlength="100"
+                           autocomplete="off" @bind="auditReference" @bind:event="oninput" />
+                }
+                <dl class="row small mb-0 mt-3">
+                    <dt class="col-4">Identifiant</dt>
+                    <dd class="col-8 text-break"><code>@Request.Identifier</code></dd>
+                    @if (!string.IsNullOrEmpty(Request.HardwareId))
+                    {
+                        <dt class="col-4">HWID</dt>
+                        <dd class="col-8 text-break"><code>@Request.HardwareId</code></dd>
+                    }
+                    @if (!string.IsNullOrEmpty(Request.Cause))
+                    {
+                        <dt class="col-4">Cause</dt>
+                        <dd class="col-8 text-break">@Request.Cause</dd>
+                    }
+                    @if (!string.IsNullOrEmpty(Request.EvidenceDigest))
+                    {
+                        <dt class="col-4">Preuve</dt>
+                        <dd class="col-8 text-break"><code>@Request.EvidenceDigest</code></dd>
+                    }
+                </dl>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline-secondary" disabled="@(busy || terminal)" @onclick="CancelAsync">Annuler</button>
+                <button class="btn @ConfirmButtonClass" disabled="@(!CanConfirm)" @onclick="ConfirmAsync">Confirmer</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    /// <summary>Administrative RELEASE action code.</summary>
+    public const string ReleaseAction = "RELEASE";
+    /// <summary>Administrative BAN action code.</summary>
+    public const string BanAction = "BAN";
+    /// <summary>Explicit administrative UNBAN action code.</summary>
+    public const string UnbanAction = "UNBAN";
+    /// <summary>Remembered-release revocation action code.</summary>
+    public const string RevokeAction = "REVOKE";
+
+    /// <summary>
+    /// Immutable display and authority target captured when the operator opens the modal. Active-enrollment state is
+    /// explanatory only and tells the operator whether the client can recover in place or must reinstall after UNBAN.
+    /// </summary>
+    public sealed record DialogRequest(
+        Guid TargetId,
+        string Action,
+        string Identifier,
+        string? HardwareId,
+        string? Cause,
+        string? EvidenceDigest,
+        int OpenIncidentCount,
+        bool RememberRelease,
+        bool HasActiveEnrollment);
+
+    /// <summary>Confirmation payload bound to the immutable request and optional explicit-unban audit fields.</summary>
+    public sealed record Confirmation(DialogRequest Request, string? Reason, string? AuditReference);
+
+    /// <summary>Exact action captured by the parent; changing it requires replacing the dialog instance.</summary>
+    [Parameter, EditorRequired] public DialogRequest Request { get; set; } = default!;
+    /// <summary>Executes the captured action once after confirmation.</summary>
+    [Parameter] public EventCallback<Confirmation> Confirmed { get; set; }
+    /// <summary>Closes the modal without executing an action.</summary>
+    [Parameter] public EventCallback Canceled { get; set; }
+
+    /// <summary>Required explicit-unban reason supplied only inside the modal.</summary>
+    private string reason = "";
+    /// <summary>Required named audit reference supplied only inside the modal.</summary>
+    private string auditReference = "";
+    /// <summary>Suppresses concurrent callbacks while the parent awaits the administrative service.</summary>
+    private bool busy;
+    /// <summary>Prevents a second callback after a completed confirmation or cancellation.</summary>
+    private bool terminal;
+
+    private string Title => Request.Action switch
+    {
+        ReleaseAction => "Confirmer le relâchement",
+        BanAction => "Confirmer le bannissement",
+        UnbanAction => "Confirmer le débannissement",
+        RevokeAction => "Confirmer la révocation",
+        _ => "Confirmer l’action"
+    };
+
+    private string Explanation => Request.Action switch
+    {
+        ReleaseAction => $"Le verrou sera relâché et {Request.OpenIncidentCount} incident(s) critique(s) ouvert(s) seront clos.",
+        BanAction => "Le matériel sera banni et ce verrou passera à l’état BANNED.",
+        UnbanAction => $"Le verrou sera débanni, {Request.OpenIncidentCount} incident(s) critique(s) ouvert(s) seront clos et les bans matériels actifs applicables seront levés.",
+        RevokeAction => "La décision Relâcher mémorisée sera révoquée. Les prochaines détections pourront de nouveau bloquer.",
+        _ => "Cette action administrative sera exécutée."
+    };
+
+    private string ConfirmButtonClass => Request.Action == ReleaseAction ? "btn-success" : "btn-danger";
+
+    private bool CanConfirm => !busy && !terminal && (Request.Action != UnbanAction
+        || (!string.IsNullOrWhiteSpace(reason) && !string.IsNullOrWhiteSpace(auditReference)));
+
+    /// <summary>Cancels the captured action without invoking the administrative callback.</summary>
+    private async Task CancelAsync()
+    {
+        if (busy || terminal) return;
+        terminal = true;
+        await Canceled.InvokeAsync();
+    }
+
+    /// <summary>Invokes one captured action at most once, including under a rapid double click.</summary>
+    private async Task ConfirmAsync()
+    {
+        if (!CanConfirm) return;
+        busy = true;
+        terminal = true;
+        try
+        {
+            await Confirmed.InvokeAsync(new Confirmation(Request, reason, auditReference));
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+}

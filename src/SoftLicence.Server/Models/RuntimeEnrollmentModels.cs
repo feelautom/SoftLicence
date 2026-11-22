@@ -638,6 +638,55 @@ public sealed record RuntimeReinstallSourceAuthorityProvenance(
     string AuthorityGenerationId,
     string SignedStatementBase64Url);
 
+/// <summary>
+/// TKT-003647: asks which licence is attached today to one installed Runtime enrollment, so the Website
+/// approval page can keep that licence instead of offering every licence of the account. Every field is
+/// required and compared exactly with the stored enrollment: UUIDs in canonical lowercase "D" form and the
+/// key thumbprint as an exact 43-character Base64Url value. Unknown members are refused.
+/// </summary>
+public sealed class RuntimeCurrentAssignmentRequest
+{
+    /// <summary>Exact schema <c>runtime-current-assignment-request-v1</c>.</summary>
+    public string? Schema { get; set; }
+    /// <summary>Caller correlation identifier echoed in the response; no replay ledger is kept for it.</summary>
+    public string? RequestId { get; set; }
+    /// <summary>Product of the enrollment; also the S2S product scope of the signed request.</summary>
+    public string? ProductId { get; set; }
+    /// <summary>Runtime enrollment to read.</summary>
+    public string? EnrollmentId { get; set; }
+    /// <summary>Historical distribution binding of that enrollment, which must match exactly.</summary>
+    public string? BindingId { get; set; }
+    /// <summary>Installation identifier of that enrollment, which must match exactly.</summary>
+    public string? InstallationId { get; set; }
+    /// <summary>Thumbprint of the enrolled installation key, which must match exactly (case-sensitive).</summary>
+    public string? KeyThumbprint { get; set; }
+
+    /// <summary>Collects unknown members so the service can refuse them as <c>invalid_request</c>.</summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? ExtensionData { get; set; }
+}
+
+/// <summary>
+/// TKT-003647: closed answer of the current-assignment read. <see cref="Outcome"/> is one of
+/// <c>assigned</c>, <c>unassigned</c>, <c>quarantined</c> or <c>none</c>. Only <c>assigned</c> carries
+/// <see cref="LicenseId"/> and <see cref="Eligible"/>; absent members are omitted from the JSON.
+/// The licence is identified only by its opaque SoftLicence UUID: never by its type, name, key or any
+/// fragment of the key (owner decision, 12/11/2026). Nothing commercial (price, offer, account right) is returned.
+/// </summary>
+/// <param name="Schema">Exact schema <c>runtime-current-assignment-result-v1</c>.</param>
+/// <param name="Outcome">Closed outcome code.</param>
+/// <param name="RequestId">Echo of the caller correlation identifier.</param>
+/// <param name="LicenseId">Opaque SoftLicence UUID of the licence of the ACTIVE assignment, for <c>assigned</c> only.</param>
+/// <param name="Eligible">Whether that licence and its seat are usable today (key and seat state only), for <c>assigned</c> only.</param>
+/// <param name="IneligibleReason">Closed reason when <see cref="Eligible"/> is false, otherwise absent.</param>
+public sealed record RuntimeCurrentAssignmentResponse(
+    string Schema,
+    string Outcome,
+    string RequestId,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? LicenseId,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? Eligible,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? IneligibleReason);
+
 public sealed class RuntimeWebSetupUpgradeRelayRequest
 {
     public string? Schema { get; set; }
@@ -820,6 +869,16 @@ public sealed record RuntimeCriticalRecoveryResponse
 }
 
 public sealed record RuntimeEnrollmentOperationResult<T>(T Response, bool Idempotent, byte[] ExactResponseBody);
-public sealed record RuntimeEnrollmentApiError(string Error);
+/// <summary>
+/// Error body of the Runtime enrollment routes: <c>{"error":"code"}</c>, plus <c>reasonCode</c> only when
+/// <see cref="SoftLicence.Server.Services.AssignmentRefusals"/> allows it (named assignment codes of TKT-004085 and
+/// assignment-state reasons of TKT-004106); the website's parser accepts exactly these two shapes. A null reason is
+/// omitted, so every other refusal keeps its exact one-property body.
+/// </summary>
+/// <param name="Error">Stable public error code.</param>
+/// <param name="ReasonCode">Bounded public reason, written only when not null.</param>
+public sealed record RuntimeEnrollmentApiError(
+    string Error,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ReasonCode = null);
 
 public sealed record RuntimeProofHeaders(string Timestamp, string Jti, string Signature);

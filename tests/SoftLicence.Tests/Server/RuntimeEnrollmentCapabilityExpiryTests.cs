@@ -65,14 +65,21 @@ public sealed class RuntimeEnrollmentCapabilityExpiryTests
 }
 
 /// <summary>Reuses the real authority fixture to qualify paid expiry through the service and PG lease, not only the signer.</summary>
-public sealed partial class RuntimeEnrollmentPostgreSqlTests
+public abstract partial class RuntimeEnrollmentPostgreSqlTestBase
+{
+}
+
+/// <summary>Runs the tests from RuntimeEnrollmentCapabilityExpiryPostgreSqlTests as an independently schedulable PostgreSQL class.</summary>
+/// <param name="classDatabase">The xUnit-owned PostgreSQL clone fixture for this exact test class.</param>
+public sealed partial class RuntimeEnrollmentCapabilityExpiryPostgreSqlTests(RuntimeEnrollmentPostgreSqlClassDatabase classDatabase)
+    : RuntimeEnrollmentPostgreSqlTestBase(classDatabase)
 {
     /// <summary>
     /// Current paid time bounds token/JSON identically. After frozen replay succeeds, a real committed
     /// expiry, revocation or still-future shortening must reject that same receipt without a new token.
     /// The shortening case proves denial is not merely caused by passage of the original deadline.
     /// </summary>
-    [Theory]
+    [Theory(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.PersonalDayPassCapability_TransactionBoundsExpiryAndRejectsStaleReplay")]
     [InlineData("expired")]
     [InlineData("revoked")]
     [InlineData("shortened")]
@@ -94,11 +101,15 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         prepare.Schema = RuntimeEnrollmentService.PrepareV2Schema;
         var prepared = await service.PrepareAsync("website-step1", Sha256("tkt991-prepare"), prepare);
         var enrollmentId = Guid.Parse(prepared.Response.EnrollmentId);
-        var confirm = new RuntimeEnrollmentConfirmRequest { Schema = RuntimeEnrollmentService.ConfirmSchema,
-            ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion, EnrollmentId = enrollmentId.ToString("D"), Epoch = 1 };
+        var confirm = new RuntimeEnrollmentConfirmRequest
+        {
+            Schema = RuntimeEnrollmentService.ConfirmSchema,
+            ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion,
+            EnrollmentId = enrollmentId.ToString("D"),
+            Epoch = 1
+        };
         var confirmDigest = Sha256("tkt991-confirm");
-        await service.ConfirmAsync(enrollmentId, confirmDigest, confirm,
-            Proof(enrollmentKey, "confirm", enrollmentId, options.ConfirmAudience, prepared.Response.Challenge, confirmDigest), IPAddress.Loopback);
+        await service.ConfirmAsync(enrollmentId, confirmDigest, confirm, Proof(enrollmentKey, "confirm", enrollmentId, options.ConfirmAudience, prepared.Response.Challenge, confirmDigest), IPAddress.Loopback);
         DateTime expiry;
         Guid licenseId;
         await using (var db = await factory.CreateDbContextAsync())
@@ -119,10 +130,21 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             db.Add(new PersonalDayPass { ProductId = fixture.ProductId, CommercialSubjectId = subject, LicenseId = licenseId, PaidThroughUtc = expiry });
             await db.SaveChangesAsync();
         }
-        var capability = new RuntimeEnrollmentCapabilityRequest { Schema = RuntimeEnrollmentService.CapabilitySchema,
-            ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion, EnrollmentId = enrollmentId.ToString("D"), Epoch = 1,
-            SecurityEpoch = 1, InstallationId = fixture.InstallationId, ReleaseVersion = fixture.Version,
-            SessionId = Guid.NewGuid().ToString("D"), Audience = "https://broker.example.test", Scope = ["runtime.execute"], Binaries = CapabilityBinaries() };
+
+        var capability = new RuntimeEnrollmentCapabilityRequest
+        {
+            Schema = RuntimeEnrollmentService.CapabilitySchema,
+            ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion,
+            EnrollmentId = enrollmentId.ToString("D"),
+            Epoch = 1,
+            SecurityEpoch = 1,
+            InstallationId = fixture.InstallationId,
+            ReleaseVersion = fixture.Version,
+            SessionId = Guid.NewGuid().ToString("D"),
+            Audience = "https://broker.example.test",
+            Scope = ["runtime.execute"],
+            Binaries = CapabilityBinaries()
+        };
         var digest = Sha256("tkt991-capability");
         var proof = Proof(enrollmentKey, "capability", enrollmentId, capability.Audience, "-", digest);
         var issued = await service.CreateCapabilityAsync(enrollmentId, digest, capability, proof, IPAddress.Loopback);
@@ -151,8 +173,8 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             else
                 await db.Database.ExecuteSqlInterpolatedAsync($"UPDATE \"Licenses\" SET \"ExpirationDate\" = now() - interval '1 second' WHERE \"Id\" = {licenseId}");
         }
-        var rejected = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() =>
-            service.CreateCapabilityAsync(enrollmentId, digest, capability, proof, IPAddress.Loopback));
+
+        var rejected = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => service.CreateCapabilityAsync(enrollmentId, digest, capability, proof, IPAddress.Loopback));
         Assert.Equal(mutation == "shortened" ? "capability_expired" : "authority_ineligible", rejected.ErrorCode);
     }
 }

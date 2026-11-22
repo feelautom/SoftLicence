@@ -113,7 +113,7 @@ public class BugTraceController : ControllerBase
     [HttpPost("submit")]
     public async Task<IActionResult> Submit([FromBody] BugTraceSubmitRequest payload, CancellationToken ct)
     {
-        if (!_bugTrace.IsConfigured)
+        if (!_bugTrace.IsTiaConfigured)
             return StatusCode(503, new { error = "BugTrace proxy is not configured" });
 
         if (!ValidateProjectId(payload.ProjectId, out var projectIdError))
@@ -144,9 +144,14 @@ public class BugTraceController : ControllerBase
 
         try
         {
-            var result = await _bugTrace.SubmitTicketAsync(payload.Ticket, ct);
+            var result = await _bugTrace.SubmitTiaTicketAsync(payload.Ticket, ct);
             // Retourner uniquement les champs utiles au client (ticketNumber + id minimum)
             return Ok(result);
+        }
+        catch (BugTraceTiaAuthorityException ex)
+        {
+            _logger.LogWarning("BugTrace T-IA submit authority unavailable: reason={Reason}", ex.Reason);
+            return StatusCode(503, new { error = "BugTrace T-IA authority is unavailable" });
         }
         catch (HttpRequestException ex)
         {
@@ -161,7 +166,7 @@ public class BugTraceController : ControllerBase
     [HttpPost("comment")]
     public async Task<IActionResult> Comment([FromBody] BugTraceCommentRequest payload, CancellationToken ct)
     {
-        if (!_bugTrace.IsConfigured)
+        if (!_bugTrace.IsTiaConfigured)
             return StatusCode(503, new { error = "BugTrace proxy is not configured" });
 
         if (!ValidateProjectId(payload.ProjectId, out var projectIdError))
@@ -198,8 +203,16 @@ public class BugTraceController : ControllerBase
                 authorName = string.IsNullOrWhiteSpace(payload.AuthorName) ? license!.CustomerName : payload.AuthorName,
                 authorEmail = license!.CustomerEmail
             };
-            var result = await _bugTrace.AddCommentAsync(payload.TicketNumber, commentBody, ct);
+            var result = await _bugTrace.AddTiaCommentAsync(payload.TicketNumber, commentBody, ct);
             return Ok(result);
+        }
+        catch (BugTraceTiaAuthorityException ex)
+        {
+            _logger.LogWarning(
+                "BugTrace T-IA comment authority unavailable for ticket {TicketNumber}: reason={Reason}",
+                payload.TicketNumber,
+                ex.Reason);
+            return StatusCode(503, new { error = "BugTrace T-IA authority is unavailable" });
         }
         catch (HttpRequestException ex)
         {
@@ -247,7 +260,7 @@ public class BugTraceController : ControllerBase
         string projectId,
         CancellationToken ct)
     {
-        if (!_bugTrace.IsConfigured)
+        if (!_bugTrace.IsTiaConfigured)
             return StatusCode(503, new { error = "BugTrace proxy is not configured" });
 
         if (!ValidateProjectId(projectId, out var projectIdError))
@@ -270,8 +283,13 @@ public class BugTraceController : ControllerBase
 
         try
         {
-            var result = await _bugTrace.GetTicketsByEmailAsync(email, ct);
+            var result = await _bugTrace.GetTiaTicketsByEmailAsync(email, ct);
             return Ok(result);
+        }
+        catch (BugTraceTiaAuthorityException ex)
+        {
+            _logger.LogWarning("BugTrace T-IA list authority unavailable: reason={Reason}", ex.Reason);
+            return StatusCode(503, new { error = "BugTrace T-IA authority is unavailable" });
         }
         catch (HttpRequestException ex)
         {
@@ -292,7 +310,7 @@ public class BugTraceController : ControllerBase
         [FromQuery] string projectId,
         CancellationToken ct)
     {
-        if (!_bugTrace.IsConfigured)
+        if (!_bugTrace.IsTiaConfigured)
             return StatusCode(503, new { error = "BugTrace proxy is not configured" });
 
         if (!ValidateProjectId(projectId, out var projectIdError))
@@ -317,8 +335,16 @@ public class BugTraceController : ControllerBase
             if (!ownsTicket)
                 return StatusCode(403, new { error = ownershipError });
 
-            var result = await _bugTrace.GetTicketCommentsAsync(ticketNumber, ct);
+            var result = await _bugTrace.GetTiaTicketCommentsAsync(ticketNumber, ct);
             return Ok(result);
+        }
+        catch (BugTraceTiaAuthorityException ex)
+        {
+            _logger.LogWarning(
+                "BugTrace T-IA comment-list authority unavailable for ticket {TicketNumber}: reason={Reason}",
+                ticketNumber,
+                ex.Reason);
+            return StatusCode(503, new { error = "BugTrace T-IA authority is unavailable" });
         }
         catch (HttpRequestException ex)
         {
@@ -737,6 +763,31 @@ public class BugTraceController : ControllerBase
             && string.Equals(license.HardwareId, hardwareId, StringComparison.OrdinalIgnoreCase))
             return (true, string.Empty);
 
+        return await IsActiveSeatOfLicenseAsync(db, license, hardwareId, cancellationToken)
+            ? (true, string.Empty)
+            : (false, "Hardware ID mismatch");
+    }
+
+    /// <summary>
+    /// Tells whether a hardware identifier that is not the licence's primary identifier owns exactly one
+    /// active seat of that same licence, directly or through an authenticated alias resolving to an
+    /// active same-licence seat. Shared by the report route and the read/comment routes (TKT-003490),
+    /// so a secondary PC of a multi-seat licence is accepted the same way everywhere.
+    /// </summary>
+    /// <param name="db">Open context; only read.</param>
+    /// <param name="license">Active licence already selected by key or encrypted context.</param>
+    /// <param name="hardwareId">Concrete client identifier, already checked as neither empty nor <c>unknown</c>.</param>
+    /// <param name="cancellationToken">Cancels the seat and alias reads.</param>
+    /// <returns>
+    /// <see langword="false"/> for no seat, an unlinked seat, a seat of another licence, an ambiguous
+    /// duplicate seat, or an alias that does not re-prove an active same-licence seat.
+    /// </returns>
+    private async Task<bool> IsActiveSeatOfLicenseAsync(
+        LicenseDbContext db,
+        Data.License license,
+        string hardwareId,
+        CancellationToken cancellationToken)
+    {
         // Exact persisted HWIDs are canonical machine identifiers. Keeping the indexed equality
         // avoids culture-dependent rewrites and proves that only one same-license seat authorizes relay.
         var activeSeatMatches = await db.LicenseSeats
@@ -748,9 +799,9 @@ public class BugTraceController : ControllerBase
             .Select(seat => seat.Id)
             .ToListAsync(cancellationToken);
         if (activeSeatMatches.Count == 1)
-            return (true, string.Empty);
+            return true;
         if (activeSeatMatches.Count > 1)
-            return (false, "Hardware ID mismatch");
+            return false;
 
         var resolution = await _hardwareAuthorityAliases.ResolveAsync(
             db,
@@ -761,21 +812,17 @@ public class BugTraceController : ControllerBase
             cancellationToken);
         if (resolution.Status != HardwareAuthorityResolutionStatus.Resolved
             || !resolution.LicenseSeatId.HasValue)
-            return (false, "Hardware ID mismatch");
+            return false;
 
         // Treat resolver output as evidence, not authorization by itself. The consuming boundary
         // re-proves ownership and active state so stale or adversarial results fail closed.
-        var resolvedSeatIsActive = await db.LicenseSeats
+        return await db.LicenseSeats
             .AsNoTracking()
             .AnyAsync(seat => seat.Id == resolution.LicenseSeatId.Value
                 && seat.LicenseId == license.Id
                 && seat.IsActive
                 && seat.HardwareId == resolution.EffectiveHardwareId,
                 cancellationToken);
-        if (!resolvedSeatIsActive)
-            return (false, "Hardware ID mismatch");
-
-        return (true, string.Empty);
     }
 
     /// <summary>
@@ -801,11 +848,29 @@ public class BugTraceController : ControllerBase
     }
 
     /// <summary>
-    /// Valide une licence obligatoire. Les endpoints de lecture/commentaires ne
-    /// peuvent pas utiliser le mode degrade hardwareId seul.
+    /// Validates the mandatory licence of the read and comment routes (customer ticket list, ticket
+    /// comments, new comment); unlike the report route these never accept a hardware identifier alone.
+    /// The licence is selected by plain key or by the encrypted client context (email plus hardware),
+    /// must be active, and a supplied hardware identifier must be the licence's primary identifier or
+    /// an active seat of that same licence (TKT-003490: a secondary PC of a multi-seat licence was
+    /// refused "Hardware ID mismatch" because only the primary identifier was compared).
     /// </summary>
+    /// <remarks>
+    /// Historical leniency kept on purpose: an empty or <c>unknown</c> hardware identifier, or a
+    /// licence without primary identifier, skips the hardware comparison; callers still bind the
+    /// result to the licence's customer email and ticket ownership.
+    /// </remarks>
+    /// <param name="licenseKey">Plain licence key (trimmed, upper-cased) or encrypted key marker.</param>
+    /// <param name="hardwareId">Client hardware identifier, possibly empty or <c>unknown</c>.</param>
+    /// <param name="email">Customer email, used only to resolve an encrypted key context.</param>
+    /// <param name="cancellationToken">Cancels the seat and alias reads.</param>
+    /// <returns>
+    /// The selected licence when valid; otherwise an error among "licenseKey is required for this
+    /// operation", "Invalid encrypted license context", "Invalid license", "License is revoked" and
+    /// "Hardware ID mismatch".
+    /// </returns>
     private async Task<(bool valid, string error, Data.License? license)> ValidateRequiredLicenseAsync(
-        string? licenseKey, string? hardwareId, string? email = null)
+        string? licenseKey, string? hardwareId, string? email = null, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(licenseKey))
             return (false, "licenseKey is required for this operation", null);
@@ -830,11 +895,13 @@ public class BugTraceController : ControllerBase
         if (!license.IsActive)
             return (false, "License is revoked", null);
 
-        // Verification coherence HWID
+        // Hardware coherence: the primary identifier first, then an active seat of the same licence,
+        // exactly as the report route decides.
         if (!string.IsNullOrEmpty(license.HardwareId)
             && !string.IsNullOrEmpty(hardwareId)
             && !string.Equals(hardwareId, "unknown", StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(license.HardwareId, hardwareId, StringComparison.OrdinalIgnoreCase))
+            && !string.Equals(license.HardwareId, hardwareId, StringComparison.OrdinalIgnoreCase)
+            && !await IsActiveSeatOfLicenseAsync(db, license, hardwareId, cancellationToken))
         {
             return (false, "Hardware ID mismatch", null);
         }
@@ -874,7 +941,7 @@ public class BugTraceController : ControllerBase
         if (string.IsNullOrWhiteSpace(license.CustomerEmail))
             return (false, "License has no customer email");
 
-        var tickets = await _bugTrace.GetTicketsByEmailAsync(license.CustomerEmail, ct);
+        var tickets = await _bugTrace.GetTiaTicketsByEmailAsync(license.CustomerEmail, ct);
         if (!ContainsTicketNumber(tickets, ticketNumber))
             return (false, "Ticket does not belong to the license customer");
 

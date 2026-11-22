@@ -3,7 +3,7 @@ using System.Collections.Frozen;
 namespace SoftLicence.Server.Services.SecurityLocks;
 
 /// <summary>
-/// Server mirror of the Desktop closed cause catalogue (TKT-001177, DevBrain #1330 §1). Codes are canonical
+/// Server mirror of the Desktop closed cause catalogue (TKT-001177, internal design note #1330 §1). Codes are canonical
 /// upper-case ASCII compared ordinally; the level is fixed by the catalogue and a client claiming another
 /// level is rejected. Must stay identical to SecurityLockCatalog in TiaPortalApi.
 /// </summary>

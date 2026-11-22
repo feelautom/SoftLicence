@@ -78,12 +78,28 @@ public interface IDistributionInstallationBindingService
         CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Represents a stable public distribution or seat-authority refusal: the public code and HTTP status a controller
+/// returns, an optional bounded reason, and an optional hardware-authority refusal event.
+/// </summary>
+/// <param name="errorCode">Stable public API error code.</param>
+/// <param name="statusCode">HTTP status associated with the public error.</param>
+/// <param name="reasonCode">
+/// Optional bounded reason; published by the controllers that use <see cref="AssignmentRefusals.PublicReasonCode"/>
+/// only for the named assignment codes (TKT-004085) and the assignment-state reasons (TKT-004106).
+/// </param>
+/// <param name="hardwareAuthorityRefusal">Optional hardware-authority refusal event to persist.</param>
+/// <param name="innerException">
+/// Optional original cause (for example the PostgreSQL trigger refusal it translates), kept for logs and diagnostics
+/// only; it is never written to a response.
+/// </param>
 public sealed class DistributionOperationException(
     string errorCode,
     int statusCode,
     string? reasonCode = null,
-    HardwareAuthorityRefusalEvent? hardwareAuthorityRefusal = null)
-    : Exception(errorCode)
+    HardwareAuthorityRefusalEvent? hardwareAuthorityRefusal = null,
+    Exception? innerException = null)
+    : Exception(errorCode, innerException)
 {
     public string ErrorCode { get; } = errorCode;
     public int StatusCode { get; } = statusCode;
@@ -153,6 +169,8 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
     private readonly CancellationToken _applicationStopping;
     /// <summary>Supplies observation-only request transport metadata; non-HTTP callers may omit it.</summary>
     private readonly IHttpContextAccessor? _httpContextAccessor;
+    /// <summary>Authenticates server migration receipts for a migrated source seat; absence fails closed.</summary>
+    private readonly IRuntimeEnrollmentCryptoService? _migrationCrypto;
 
     /// <summary>
     /// Creates the production distribution binding service with authenticated hardware authority resolution.
@@ -164,6 +182,7 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
     /// <param name="logger">Writes the bounded provider event before the HTTP response is attempted.</param>
     /// <param name="applicationLifetime">Production host shutdown signal; isolated tests may omit the host.</param>
     /// <param name="httpContextAccessor">Optional server request metadata for observation-only S2S seat-change history.</param>
+    /// <param name="migrationCrypto">Server receipt authenticator for a seat transition whose source seat was migrated; omitted means no receipt is accepted.</param>
     public DistributionInstallationBindingService(
         IDbContextFactory<LicenseDbContext> dbFactory,
         IDataProtectionProvider dataProtectionProvider,
@@ -171,10 +190,12 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
         IHardwareAuthorityAliasResolver hardwareAuthorityAliases,
         ILogger<DistributionInstallationBindingService>? logger = null,
         IHostApplicationLifetime? applicationLifetime = null,
-        IHttpContextAccessor? httpContextAccessor = null)
+        IHttpContextAccessor? httpContextAccessor = null,
+        IRuntimeEnrollmentCryptoService? migrationCrypto = null)
     {
         _dbFactory = dbFactory;
         _httpContextAccessor = httpContextAccessor;
+        _migrationCrypto = migrationCrypto;
         _entitlementProtector = dataProtectionProvider.CreateProtector(EntitlementPurpose);
         _timeProvider = timeProvider;
         _hardwareAuthorityAliases = hardwareAuthorityAliases;
@@ -472,8 +493,12 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
     /// Finalize v5 accepts a signed source and target licence pair only as Website's same-owner assertion, then
     /// derives the unique grantless binding, seat, hardware and Runtime authority from locked server rows. Any
     /// modern relational contract-v3 or contract-v4 entitlement authority, or any modern grant ownership
-    /// evidence, disables v5 instead of permitting a legacy fallback. See DevBrain DOC-324, DOC-327,
+    /// evidence, disables v5 instead of permitting a legacy fallback. See internal design note DOC-324, DOC-327,
     /// DOC-475 and DOC-493.
+    /// Finalize v3/v4 also replaces a still-eligible source licence when the Website proof names exactly the single
+    /// active, non-alias binding of this exact PC (TKT-003973, owner decision 15/11/2026): the source licence is locked with
+    /// the target licence, its seat on this hardware is retired and flushed before the target seat is reserved, and
+    /// any later refusal rolls the retirement and its history row back with the transaction.
     /// </remarks>
     public async Task<DistributionOperationResult<DistributionInstallationBindingResponse>> FinalizeAsync(
         string clientId,
@@ -628,12 +653,18 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
         }
         // Direct and alias paths now share the same hardware-then-license lock order. Taking
         // the licence lock earlier would deadlock an alias request against a direct V2 request.
-        var lockedLicenseIds = validated.LegacyLicenseReplacement == null
-            ? [entitlement.LicenseId]
-            : new[]
+        // TKT-003973: an active binding of this PC that the Website proof names is replaced on the
+        // Website's decision; its licence is locked with the target licence (same sorted order) so
+        // its seat can be retired before the target seat is reserved.
+        var provenActiveReplacementSource = authority.UsedAlias || requiresAliasSeatReconciliation
+            ? null
+            : await FindProvenActiveReplacementSourceAsync(
+                db, validated, entitlement.LicenseId, Sha256(authority.EffectiveHardwareId), cancellationToken);
+        var lockedLicenseIds = new[]
             {
                 entitlement.LicenseId,
-                validated.LegacyLicenseReplacement.SourceLicenseId
+                validated.LegacyLicenseReplacement?.SourceLicenseId ?? entitlement.LicenseId,
+                provenActiveReplacementSource?.LicenseId ?? entitlement.LicenseId
             }.Distinct().Order().ToArray();
         foreach (var licenseId in lockedLicenseIds)
             await AcquireLicenseSeatLockAsync(db, licenseId, cancellationToken);
@@ -660,6 +691,10 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
             await transaction.CreateSavepointAsync(FinalizeHistorySavepoint, cancellationToken);
         try
         {
+        // TKT-002041: refuse a licence-excluded machine before any seat mutation, legacy
+        // retirement or quota consumption. Both identities are checked exactly.
+        await LicenseHardwareExclusionChecker.EnsureNotExcludedAsync(
+            db, entitlement.LicenseId, submittedHardwareId, validated.HardwareId, cancellationToken);
         if (automaticReplacement)
         {
             ValidateHandoffWindow(validated, now);
@@ -668,6 +703,19 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
         }
         if (!IsEligibleLicense(license, now))
             throw Reject("entitlement_ineligible");
+        if (VirtualMachinePolicy.IsRestricted(license!.CommercialNature))
+        {
+            var machineProof = await RuntimeMachineEvidenceAuthority.ForFinalizeAsync(db, clientId,
+                validated.ProductId, license.Id, grantRefDigest, validated.InstallationId,
+                Sha256(validated.InstallationId), Sha256(validated.HardwareId), cancellationToken);
+            // Proof serialization may wait across grant activity; resample time without weakening commercial expiry.
+            now = db.Database.IsNpgsql() ? await RuntimeEnrollmentService.DatabaseNowAsync(db, cancellationToken) : _timeProvider.GetUtcNow();
+            ValidateHandoffWindow(validated, now);
+            entitlement = await ReadEntitlementAsync(db, validated.EntitlementRef, clientId, validated.ProductId, now, cancellationToken);
+            if (!IsEligibleLicense(license, now)) throw Reject("entitlement_ineligible");
+            var machineRefusal = VirtualMachinePolicy.Refusal(license.CommercialNature, machineProof);
+            if (machineRefusal is not null) throw VirtualMachinePolicy.DistributionRefusal(machineRefusal);
+        }
         if (!IsVersionAllowed(validated.Version, license!.AllowedVersions)
             || IsVersionBelow(validated.Version, license.Product?.MinimumAllowedVersion))
         {
@@ -767,6 +815,12 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
                 cancellationToken);
         }
 
+        if (provenActiveReplacementSource != null)
+        {
+            await RetireProvenReplacementSourceSeatAsync(
+                db, clientId, provenActiveReplacementSource, validated.HardwareId, now, cancellationToken);
+        }
+
         // A used entitlement cannot become a new switch instruction after another machine
         // wins the seat. Exact request replays already returned before entering this mutation.
         if (license!.MaxSeats == 1
@@ -832,6 +886,56 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
         IReadOnlyList<RuntimeEnrollment> supersededEnrollments = [];
         if (existingInstallation != null)
         {
+            if (await IsRelinkedExistingInstallationAsync(
+                    db, clientId, validated, entitlement, grantRefDigest, existingInstallation,
+                    seat, cancellationToken))
+            {
+                replacementCandidateDecisions = DiagnoseReplacementCandidates(
+                    validated.LicenseReplacementCandidates,
+                    [existingInstallation],
+                    new HashSet<Guid>(),
+                    existingInstallation);
+                replacementSelectionOutcome = "selected";
+                var historicalResponse = ToResponse(existingInstallation);
+                var entitlementRow = await db.DistributionEntitlements.SingleAsync(
+                    row => row.Id == entitlement.EntitlementId,
+                    cancellationToken);
+                entitlementRow.State = "finalized";
+                entitlementRow.FinalizedAtUtc = now.UtcDateTime;
+                db.DistributionBindingRequests.Add(new DistributionBindingRequest
+                {
+                    ClientId = clientId,
+                    RequestId = validated.RequestId,
+                    Operation = FinalizeOperation,
+                    PayloadDigest = exactPayloadDigest,
+                    BindingId = existingInstallation.Id,
+                    ResponseJson = JsonSerializer.Serialize(historicalResponse, JsonOptions),
+                    CreatedAtUtc = now.UtcDateTime
+                });
+                try
+                {
+                    if (decisionSnapshot != null)
+                        await AddFinalizeDecisionAsync(db, decisionSnapshot, clientId, exactPayloadDigest,
+                            validated, submittedHardwareId, authority, now, "accepted", "accepted", null, 200,
+                            replacementCandidateDecisions, replacementSelectionOutcome, cancellationToken);
+                    await db.SaveChangesAsync(cancellationToken);
+                    decisionTransactionEnded = true;
+                    if (transaction != null)
+                        await transaction.CommitAsync(cancellationToken);
+                    return new(historicalResponse, false);
+                }
+                catch (Exception exception) when (
+                    IsRetryableWriteFailure(exception, db) && !IsHistoryWriteFailure(exception))
+                {
+                    decisionTransactionEnded = true;
+                    await TryRollbackAsync(transaction, cancellationToken);
+                    return new(
+                        await ReloadConcurrentAsync<DistributionInstallationBindingResponse>(
+                            clientId, validated.RequestId, FinalizeOperation, exactPayloadDigest,
+                            cancellationToken),
+                        true);
+                }
+            }
             if (validated.LicenseReplacement != null
                 || validated.LicenseReplacementCandidates.Count > 0
                 || validated.LegacyLicenseReplacement != null)
@@ -1042,7 +1146,7 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
                     // TEMP-FAIL-OPEN(TKT-001221): TEMPORARY, never leave as is. A terminal
                     // same-license source that fails the exact same-authority proof should be
                     // resolved correctly; the proof is currently known to refuse legitimate
-                    // histories (for example an orphan superseded leaf), so Franck's policy
+                    // histories (for example an orphan superseded leaf), so the owner's policy
                     // (2026-09-21) asks for logging only. The refusal happens before any write
                     // (reads and row locks only), so the initial path below stays consistent.
                     // A live source keeps its refusal. Fix the logged cases, restore the refusal
@@ -1076,7 +1180,7 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
                 {
                     // TEMP-FAIL-OPEN(TKT-001221): TEMPORARY, never leave as is. The history rules
                     // below are the intended behavior, but the current graph data and code are known
-                    // to be buggy, so Franck's policy (2026-09-21) asks for logging only: a doubtful
+                    // to be buggy, so the owner's policy (2026-09-21) asks for logging only: a doubtful
                     // history never blocks a client on its own licence. Each logged divergence must
                     // be analysed and fixed, then this branch must go back to a correct decision and
                     // this marker be removed. Active bans stay enforced by the dedicated ban checks of
@@ -2306,19 +2410,15 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
             now = new DateTimeOffset(automaticSwitch.Scope.ObservedAtUtc);
         }
         var activeSeatCount = license.Seats.Count(candidate => candidate.IsActive);
-        if (activeSeatCount >= license.MaxSeats)
-            throw Reject("seat_limit_reached");
+        if (InitialSeatAdmission.IsCapacityExhausted(license.MaxSeats, activeSeatCount))
+            throw Reject(InitialSeatAdmission.PublicErrorCode);
 
-        var maxActivationsPerDay = license.Type?.MaxActivationsPerDay ?? 0;
-        if (maxActivationsPerDay > 0 && license.MaxSeats != 1)
-        {
-            var dayStart = now.UtcDateTime.Date;
-            var activationsToday = await db.LicenseSeats.AsNoTracking().CountAsync(candidate =>
-                candidate.LicenseId == license.Id && candidate.FirstActivatedAt >= dayStart,
-                cancellationToken);
-            if (activationsToday >= maxActivationsPerDay)
-                throw Reject("activation_rate_limited");
-        }
+        // TKT-003751 (owner rule): a key may not be activated on more than N different identifiers in one
+        // UTC day (N = MaxActivationsPerDay x seats, read live). Every seat count; an identifier already activated
+        // today and the last PC of the key are always accepted. The automatic switch above ran the same check
+        // before releasing the previous machine.
+        if (await SeatChangeQuota.IsActivationRefusedAsync(db, license, hardwareId, now.UtcDateTime, cancellationToken))
+            throw Reject("activation_rate_limited");
 
         await PersonalDayPassActivationService.StartPendingAsync(
             db, license, now.UtcDateTime, clientId, cancellationToken);
@@ -2409,6 +2509,110 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
         && binding.ExecutableSha256 == request.Binaries.Single(binary => binary.Key == "FP_EXE").Sha256
         && binding.NativeDllSha256 == request.Binaries.Single(binary => binary.Key == "FP_DLL").Sha256
         && binding.CoreSha256 == request.Binaries.Single(binary => binary.Key == "FP_CORE").Sha256;
+
+    /// <summary>
+    /// Recognizes the one immutable-binding case created by a successful TKT-001617 commercial relink.
+    /// The current grant, subject, preflight receipt, Runtime enrollment, assignment and target seat must
+    /// all agree. The historical binding is returned as lineage and is never rewritten.
+    /// A migration quarantine can explain an absent initial assignment, but never supplies current authority.
+    /// </summary>
+    /// <param name="db">Finalize transaction holding the existing Runtime, commercial and seat barriers.</param>
+    /// <param name="clientId">Authenticated Distribution service principal.</param>
+    /// <param name="request">Validated current Finalize request.</param>
+    /// <param name="entitlement">Authenticated current target entitlement.</param>
+    /// <param name="grantRefDigestSha256">Digest of the current grant carried by the Finalize request.</param>
+    /// <param name="binding">Existing historical installation binding.</param>
+    /// <param name="seat">Current target seat selected under the target licence lock.</param>
+    /// <param name="cancellationToken">Cancels relational reads without accepting partial evidence.</param>
+    /// <returns>True only for one server-preflighted same-subject relink to the exact target seat.</returns>
+    private static async Task<bool> IsRelinkedExistingInstallationAsync(
+        LicenseDbContext db,
+        string clientId,
+        FinalizeValidated request,
+        EntitlementIdentity entitlement,
+        string grantRefDigestSha256,
+        DistributionInstallationBinding binding,
+        LicenseSeat seat,
+        CancellationToken cancellationToken)
+    {
+        if (!request.AllowSameAuthorityRecovery
+            || request.LicenseReplacement is not null
+            || request.LegacyLicenseReplacement is not null
+            || request.LicenseReplacementCandidates.Count != 1
+            || entitlement.ContractVersion is not (3 or 4)
+            || entitlement.SubjectRefDigestSha256 is not { Length: 64 } subjectRefDigestSha256
+            || !string.Equals(binding.State, "active", StringComparison.Ordinal)
+            || binding.ProductId != request.ProductId
+            || !string.Equals(binding.InstallationId, request.InstallationId, StringComparison.Ordinal)
+            || !string.Equals(binding.SubjectRefDigestSha256, subjectRefDigestSha256, StringComparison.Ordinal)
+            || seat.LicenseId != entitlement.LicenseId
+            || !seat.IsActive
+            || !string.Equals(seat.HardwareId, request.HardwareId, StringComparison.Ordinal))
+            return false;
+
+        var source = request.LicenseReplacementCandidates[0];
+        if (source.SourceBindingId != binding.Id
+            || source.SourceLicenseId != binding.LicenseId
+            || !string.Equals(
+                source.SourceSubjectRefDigestSha256,
+                binding.SubjectRefDigestSha256,
+                StringComparison.Ordinal))
+            return false;
+
+        var enrollments = await db.RuntimeEnrollments.AsNoTracking()
+            .Where(row => row.BindingId == binding.Id && row.State == "ACTIVE")
+            .Take(2)
+            .ToListAsync(cancellationToken);
+        if (enrollments.Count != 1)
+            return false;
+        var enrollment = enrollments[0];
+        if (enrollment.ClientId != clientId
+            || enrollment.ProductId != request.ProductId
+            || !string.Equals(enrollment.InstallationId, request.InstallationId, StringComparison.Ordinal)
+            || !string.Equals(enrollment.SubjectRefDigestSha256, subjectRefDigestSha256, StringComparison.Ordinal))
+            return false;
+
+        var assignments = await db.EnrollmentLicenseAssignments.AsNoTracking()
+            .Where(row => row.EnrollmentId == enrollment.Id)
+            .OrderBy(row => row.Revision)
+            .ToListAsync(cancellationToken);
+        var activeAssignments = assignments.Where(row => row.State == "ACTIVE").ToArray();
+        if (activeAssignments.Length != 1
+            || activeAssignments[0].LicenseId != entitlement.LicenseId
+            || activeAssignments[0].LicenseSeatId != seat.Id)
+            return false;
+
+        var currentAssignment = activeAssignments[0];
+        var hasEndedPredecessor = currentAssignment.Revision > 1
+            && assignments.Any(row => row.State == "ENDED" && row.Revision < currentAssignment.Revision);
+        // A backfill live-state mismatch produces a quarantine instead of revision 1. The first
+        // proved relink therefore has no ENDED predecessor; retain that exact historical explanation.
+        var hasQuarantinedPredecessor = assignments.Count == 1 && currentAssignment.Revision == 1
+            && await db.EnrollmentLicenseAssignmentQuarantines.AsNoTracking().AnyAsync(row =>
+                row.EnrollmentId == enrollment.Id
+                && row.BindingId == binding.Id
+                && row.LicenseId == binding.LicenseId
+                && row.LicenseSeatId == binding.LicenseSeatId
+                && row.Reason == "live_state_mismatch"
+                && row.ObservedAtUtc <= currentAssignment.ActivatedAtUtc,
+                cancellationToken);
+        if (!hasEndedPredecessor && !hasQuarantinedPredecessor)
+            return false;
+
+        var installationIdHash = Sha256(request.InstallationId);
+        var hardwareIdHash = Sha256(request.HardwareId);
+        return await db.RuntimeDistributionHardwareDecisions.AsNoTracking().AnyAsync(row =>
+            row.ClientId == clientId
+            && row.ProductId == request.ProductId
+            && row.LicenseId == entitlement.LicenseId
+            && row.GrantRefDigestSha256 == grantRefDigestSha256
+            && row.InstallationIdHash == installationIdHash
+            && row.HardwareIdHash == hardwareIdHash
+            && row.KeyThumbprint == enrollment.KeyThumbprint
+            && row.AuthorityMode == "known-enrollment"
+            && (row.Outcome == "accepted" || row.Outcome == "auto-unbanned"),
+            cancellationToken);
+    }
 
     private static async Task<CrossGenerationRotation> RotateCrossGenerationBindingAsync(
         LicenseDbContext db,
@@ -2805,7 +3009,7 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
     /// eligibility can hide an edge. A successor only vetoes an obsolete source; it grants no rights.
     /// An absent source returns null for the guarded hardware fallback; competing sources still throw.
     /// The selected rows are revalidated under authority and row locks before mutation.
-    /// See DevBrain DOC-324 and DOC-930 (TKT-001078).
+    /// See internal design note DOC-324 and DOC-930 (TKT-001078).
     /// </summary>
     private static async Task<DistributionInstallationBinding?> ResolveSameLicenseSeatTransitionSourceAsync(
         LicenseDbContext db,
@@ -2869,7 +3073,11 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
     /// reached Runtime enrollment. Every binding, entitlement, ownership, seat, release and
     /// incident predicate remains mandatory; a bare historical binding cannot enable this path.
     /// </param>
-    /// <param name="replacement">The optional exact cross-license replacement proof.</param>
+    /// <param name="replacement">
+    /// The optional exact cross-license replacement proof. The source licence must be ineligible, except for the
+    /// single active, non-alias binding of this exact PC, which the Website may replace while its licence is still
+    /// eligible (TKT-003973).
+    /// </param>
     /// <param name="legacyReplacement">
     /// The optional Website licence-pair assertion for a server-derived grantless legacy source.
     /// </param>
@@ -2887,7 +3095,8 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
     /// not yet persisted is resolved only by its exact ID and Added state in this transaction's
     /// context; it still undergoes every authority check below. An authenticated alias may also
     /// advance its active successor when that successor has no Runtime enrollment; this preserves
-    /// the unique chain after a client disappears between Finalize and Prepare. No early save is introduced.
+    /// the unique chain after a client disappears between Finalize and Prepare. This method introduces no early save;
+    /// the caller may already have flushed a proven source seat retirement (TKT-003973) inside the same transaction.
     /// </remarks>
     /// <exception cref="DistributionOperationException">
     /// Thrown when ownership, history, security, freshness or exact-authority checks fail closed.
@@ -2966,6 +3175,32 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
         var exactSameLicenseAuthority = source.LicenseId == entitlement.LicenseId
             && source.LicenseSeatId == seatId
             && source.SubjectRefDigestSha256 == entitlement.SubjectRefDigestSha256;
+        // TKT-001719: a signed, server-accepted migration rewrites the seat identity while the
+        // binding digest stays immutable. A released source seat therefore still belongs to this
+        // binding when its current digest is either the frozen one or the authenticated end of that
+        // binding's own migration receipt. A client value, an alias alone or a missing receipt never
+        // establishes this continuity, and an unreadable receipt stays unavailable, not a refusal.
+        var sourceSeatHardwareMatches = false;
+        if (sourceSeat != null)
+        {
+            var sourceSeatDigest = Sha256(sourceSeat.HardwareId);
+            sourceSeatHardwareMatches = sourceSeatDigest == source.HardwareIdHash;
+            if (!sourceSeatHardwareMatches && replacement == null && legacyReplacement == null
+                && sourceSeat.LicenseId == source.LicenseId && !sourceSeat.IsActive
+                && sourceSeat.UnlinkedAt != null)
+            {
+                try
+                {
+                    sourceSeatHardwareMatches = await RuntimeEnrollmentService.HasAcceptedBindingHardwareAsync(
+                        db, source, sourceSeatDigest, _migrationCrypto, cancellationToken);
+                }
+                catch (RuntimeEnrollmentException)
+                {
+                    throw new DistributionOperationException(
+                        "authority_unavailable", StatusCodes.Status503ServiceUnavailable);
+                }
+            }
+        }
         var exactSameLicenseSeatTransition = replacement == null
             && source.LicenseId == entitlement.LicenseId
             && source.LicenseSeatId != seatId
@@ -2975,7 +3210,7 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
             && sourceSeat.LicenseId == source.LicenseId
             && !sourceSeat.IsActive
             && sourceSeat.UnlinkedAt != null
-            && Sha256(sourceSeat.HardwareId) == source.HardwareIdHash
+            && sourceSeatHardwareMatches
             && targetSeat != null
             && targetSeat.LicenseId == entitlement.LicenseId
             && targetSeat.IsActive
@@ -2988,7 +3223,15 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
             && source.LicenseId != entitlement.LicenseId
             && source.LicenseSeatId != seatId
             && sourceLicense != null
-            && IsReplacementSourceIneligible(sourceLicense, now);
+            // TKT-003973 (owner decision 15/11/2026): the Website decides whether a new key replaces this PC's
+            // installation; a still-eligible source is accepted only for the active binding of this
+            // exact PC (never through an alias or for another PC), as classic activation already does.
+            && (IsReplacementSourceIneligible(sourceLicense, now)
+                || (source.State == "active"
+                    && source.InvalidatedAtUtc == null
+                    && source.InvalidationReason == null
+                    && !authenticatedAliasSource
+                    && string.Equals(source.HardwareIdHash, hardwareIdHash, StringComparison.Ordinal)));
         var exactLegacyRenewalAuthority = legacyReplacement != null
             && legacyReplacement.SourceLicenseId == source.LicenseId
             && legacyReplacement.TargetLicenseId == entitlement.LicenseId
@@ -3060,7 +3303,7 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
             WriteSameAuthorityRefusalDiagnostics(
                 clientId, source, replacement, legacyReplacement, request, entitlement, seatId,
                 grantRefDigestSha256, hardwareIdHash, previousEntitlement, previousGrantOwner,
-                sourceLicense, sourceSeat, targetSeat, finalizeOwners, now);
+                sourceLicense, sourceSeat, targetSeat, finalizeOwners, now, sourceSeatHardwareMatches);
             throw Conflict("binding_conflict", replacement == null && legacyReplacement == null
                 ? "same_authority_mismatch"
                 : "replacement_source_authority_mismatch");
@@ -3149,6 +3392,106 @@ public sealed partial class DistributionInstallationBindingService : IDistributi
             source.Id, initialSecurityEpoch);
         db.DistributionInstallationBindings.Add(successor);
         return new CrossGenerationRotation(successor, enrollmentsToInvalidate);
+    }
+
+    /// <summary>
+    /// Finds the single active binding of this PC that a Website replacement proof names exactly
+    /// (binding, licence and subject digest) for another licence than the target (TKT-003973).
+    /// </summary>
+    /// <remarks>
+    /// Read under the product hardware lock already held by Finalize, before the licence locks, so the
+    /// source licence can join the sorted licence lock set. It grants nothing by itself: the later
+    /// exact-authority checks of the rotation still decide, and any refusal rolls the transaction back.
+    /// </remarks>
+    /// <param name="db">The Finalize transaction context.</param>
+    /// <param name="request">The validated request carrying the v3 proof or the v4 candidate set.</param>
+    /// <param name="targetLicenseId">The authenticated target licence.</param>
+    /// <param name="hardwareIdHash">SHA-256 of the effective hardware identifier.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>
+    /// The proven source binding, or <see langword="null"/> when there is no proof, a legacy v5 assertion, no or
+    /// several active bindings on this PC, a binding of the target licence itself, or no single exact proof.
+    /// </returns>
+    private static async Task<DistributionInstallationBinding?> FindProvenActiveReplacementSourceAsync(
+        LicenseDbContext db,
+        FinalizeValidated request,
+        Guid targetLicenseId,
+        string hardwareIdHash,
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<LicenseReplacementValidated> proofs = request.LicenseReplacementCandidates.Count > 0
+            ? request.LicenseReplacementCandidates
+            : request.LicenseReplacement is { } single ? [single] : [];
+        if (proofs.Count == 0 || request.LegacyLicenseReplacement != null)
+            return null;
+        var activeBindings = await db.DistributionInstallationBindings.AsNoTracking()
+            .Where(candidate => candidate.ProductId == request.ProductId
+                && candidate.HardwareIdHash == hardwareIdHash
+                && candidate.State == "active"
+                && candidate.InvalidatedAtUtc == null
+                && candidate.InvalidationReason == null)
+            .OrderBy(candidate => candidate.Id)
+            .Take(2)
+            .ToListAsync(cancellationToken);
+        if (activeBindings.Count != 1 || activeBindings[0].LicenseId == targetLicenseId)
+            return null;
+        var source = activeBindings[0];
+        return proofs.Count(proof => proof.SourceBindingId == source.Id
+                && proof.SourceLicenseId == source.LicenseId
+                && string.Equals(proof.SourceSubjectRefDigestSha256, source.SubjectRefDigestSha256, StringComparison.Ordinal)) == 1
+            ? source
+            : null;
+    }
+
+    /// <summary>
+    /// Retires the seat of a proven replacement source on this exact PC so the target seat can be
+    /// reserved without <c>hardware_already_bound</c>, as classic activation does (TKT-003973).
+    /// </summary>
+    /// <remarks>
+    /// Runs under the hardware and both licence locks. Only the source binding's own seat, active, of
+    /// the source licence and of this exact hardware identifier is retired; anything else is left
+    /// untouched and the normal seat checks decide. The change belongs to the Finalize transaction and
+    /// rolls back with any later refusal.
+    /// </remarks>
+    /// <param name="db">The Finalize transaction context.</param>
+    /// <param name="clientId">The S2S client recorded in the licence history.</param>
+    /// <param name="source">The proven active source binding.</param>
+    /// <param name="hardwareId">The effective hardware identifier of the request.</param>
+    /// <param name="now">The authoritative operation time.</param>
+    /// <param name="cancellationToken">Cancels the operation before commit.</param>
+    private static async Task RetireProvenReplacementSourceSeatAsync(
+        LicenseDbContext db,
+        string clientId,
+        DistributionInstallationBinding source,
+        string hardwareId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var sourceSeat = db.Database.IsNpgsql()
+            ? await db.LicenseSeats.FromSqlInterpolated($"""
+                SELECT * FROM public."LicenseSeats"
+                WHERE "Id" = {source.LicenseSeatId}
+                FOR UPDATE
+                """).SingleOrDefaultAsync(cancellationToken)
+            : await db.LicenseSeats.SingleOrDefaultAsync(candidate =>
+                candidate.Id == source.LicenseSeatId, cancellationToken);
+        if (sourceSeat is not { IsActive: true }
+            || sourceSeat.LicenseId != source.LicenseId
+            || !string.Equals(sourceSeat.HardwareId, hardwareId, StringComparison.Ordinal))
+            return;
+        sourceSeat.IsActive = false;
+        sourceSeat.UnlinkedAt = now.UtcDateTime;
+        db.LicenseHistories.Add(new LicenseHistory
+        {
+            LicenseId = source.LicenseId,
+            Timestamp = now.UtcDateTime,
+            Action = "RUNTIME_LICENSE_REPLACED",
+            Details = "Authenticated Website replacement proof moved this PC to another licence.",
+            PerformedBy = clientId
+        });
+        // Same flush as the legacy path: the product-wide seat query of EnsureInitialSeatAsync reads
+        // without tracking, so the retirement must reach the open transaction first.
+        await db.SaveChangesAsync(cancellationToken);
     }
 
     private static bool IsReplacementSourceIneligible(License license, DateTimeOffset now) =>

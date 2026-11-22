@@ -14,6 +14,7 @@ using Npgsql;
 using SoftLicence.SDK;
 using SoftLicence.Server.Data;
 using SoftLicence.Server.Models;
+using SoftLicence.Server.Services.SecurityLocks;
 
 namespace SoftLicence.Server.Services;
 
@@ -24,10 +25,15 @@ namespace SoftLicence.Server.Services;
 /// <param name="errorCode">Stable public API error code.</param>
 /// <param name="statusCode">HTTP status associated with the public error.</param>
 /// <param name="diagnosticCode">Optional allowlisted server-only diagnostic code.</param>
+/// <param name="innerException">
+/// Optional original cause (for example the PostgreSQL trigger refusal it translates), kept for logs and diagnostics
+/// only; it is never written to a response.
+/// </param>
 public sealed class RuntimeEnrollmentException(
     string errorCode,
     int statusCode,
-    string? diagnosticCode = null) : Exception(errorCode)
+    string? diagnosticCode = null,
+    Exception? innerException = null) : Exception(errorCode, innerException)
 {
     /// <summary>Gets the stable error code returned by the public API.</summary>
     public string ErrorCode { get; } = errorCode;
@@ -36,14 +42,28 @@ public sealed class RuntimeEnrollmentException(
     public int StatusCode { get; } = statusCode;
 
     /// <summary>
-    /// Gets an optional allowlisted server-only diagnostic code. Controllers may log it,
-    /// but response contracts must expose only <see cref="ErrorCode"/>.
+    /// Gets an optional allowlisted server-only diagnostic code. Controllers may log it, but response contracts must
+    /// expose only <see cref="ErrorCode"/>, except where <see cref="AssignmentRefusals.PublicReasonCode"/> allows the
+    /// bounded diagnostic as <c>reasonCode</c>: the named assignment codes of TKT-004085
+    /// (<c>assignment_reconciliation_required</c>, <c>seat_assignment_busy</c>) and the assignment-state reasons of
+    /// TKT-004106 (for example <c>assignment_quarantined</c>) under any code.
     /// </summary>
     public string? DiagnosticCode { get; } = diagnosticCode;
 }
 
 public interface IRuntimeEnrollmentService
 {
+    /// <summary>
+    /// TKT-002919: relinks the seat and assignment of an installation whose seat was released, for the account
+    /// signed in inside the application, or returns the frozen response of an identical earlier request.
+    /// </summary>
+    /// <param name="principal">Authenticated dedicated relink identity.</param>
+    /// <param name="command">Strictly parsed request.</param>
+    /// <param name="cancellationToken">Cancels without committing a partial relink.</param>
+    /// <returns>The exact 200 body and whether it was replayed.</returns>
+    Task<RuntimeAccountRelinkResult> RelinkAccountAsync(
+        DistributionS2SPrincipal principal, RuntimeAccountRelinkCommand command,
+        CancellationToken cancellationToken = default);
     /// <summary>Prepares exact server-owned recovery payload bytes under the current authority head lock.</summary>
     Task<RuntimeEnrollmentAuthorityRecoveryPreparationResult> PrepareAuthorityRecoveryV2Async(
         string clientId, string transportKeyId, Guid attemptId, ReadOnlyMemory<byte> exactBody,
@@ -200,6 +220,7 @@ public interface IRuntimeEnrollmentService
 
     /// <summary>
     /// Issues or exactly replays a Website transition after current binding and assignment checks.
+    /// TKT-004062: the source release is not judged (it is being replaced); the target release is.
     /// The retained Runtime HWID column is compatibility data and does not identify the enrollment.
     /// </summary>
     /// <param name="clientId">Authenticated S2S owner of the transition.</param>
@@ -213,6 +234,20 @@ public interface IRuntimeEnrollmentService
         RuntimeWebSetupTransitionIssueRequest request,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Applies one issued WebSetup transition after the target installation proves the signed relay, moving the
+    /// binding and enrollment from the transition source release to its target release, or replays it exactly.
+    /// TKT-004062: the source release is not judged against the licence mask or product minimum because it is
+    /// being replaced; the target release was judged when the transition was issued and is judged again here.
+    /// A replay of a consumed transition judges the release the enrollment now runs (the target).
+    /// </summary>
+    /// <param name="clientId">Authenticated S2S owner of the transition.</param>
+    /// <param name="keyId">Authenticated S2S key identifier.</param>
+    /// <param name="exactBodyDigest">Lowercase SHA-256 of the exact relay bytes.</param>
+    /// <param name="request">Relay carrying the signed Runtime proof of the target installation.</param>
+    /// <param name="cancellationToken">Cancels before the transaction commits.</param>
+    /// <returns>The applied transition response and exact replay classification.</returns>
+    /// <exception cref="RuntimeEnrollmentException">The transition is expired, divergent, ineligible or unavailable.</exception>
     Task<RuntimeEnrollmentOperationResult<RuntimeWebSetupUpgradeResponse>> UpgradeFromWebSetupAsync(
         string clientId,
         string keyId,
@@ -239,6 +274,21 @@ public interface IRuntimeEnrollmentService
     Task<RuntimeReinstallSourceResolutionResponse> ResolveReinstallSourceAuthorityAsync(
         string clientId,
         RuntimeReinstallSourceResolutionRequest request,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// TKT-003647: read-only answer naming, by opaque UUID only, the licence of the ACTIVE assignment of one
+    /// enrollment owned by <paramref name="clientId"/>, with its key and seat usability; see
+    /// <see cref="RuntimeEnrollmentService.ResolveCurrentAssignmentAsync"/> for the full contract.
+    /// </summary>
+    /// <param name="clientId">Authenticated Distribution client identifier.</param>
+    /// <param name="request">Closed current-assignment request.</param>
+    /// <param name="cancellationToken">Cancels the database work.</param>
+    /// <returns><c>assigned</c>, <c>unassigned</c>, <c>quarantined</c> or <c>none</c>.</returns>
+    /// <exception cref="RuntimeEnrollmentException">400 for a malformed request, 503 when disabled or corrupt.</exception>
+    Task<RuntimeCurrentAssignmentResponse> ResolveCurrentAssignmentAsync(
+        string clientId,
+        RuntimeCurrentAssignmentRequest request,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -661,7 +711,7 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
             if (enrollment.AuthorityEpoch != lease.AuthorityEpoch)
                 throw ReinstallAuthorityIneligible("v2_legacy_repair_epoch_mismatch");
             await ValidateReinstallSourceCommercialAsync(
-                db, enrollment, binding, approved.Binaries, now, cancellationToken);
+                db, enrollment, approved.Binaries, now, cancellationToken);
             binding.SubjectRefDigestSha256 = validated.SubjectRefDigestSha256;
             enrollment.SubjectRefDigestSha256 = validated.SubjectRefDigestSha256;
             await db.SaveChangesAsync(cancellationToken);
@@ -701,7 +751,22 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
     /// verifies the exact WebSetup discovery proof before returning bounded lineage identifiers.
     /// The operation is read-only and deliberately permits an ineligible modern source licence:
     /// replacement eligibility remains governed by the later target-finalization authority.
+    /// <para>
+    /// TKT-001651: the "none" outcome means only that this installation is no longer a usable
+    /// source (unknown, inactive, changed or ineligible enrollment). WebSetup answers it by
+    /// starting again as a fresh installation, so two security refusals are reported as their
+    /// own errors, which Website turns into a blocking refusal. An unresolved critical incident
+    /// of the named installation is refused whatever the enrollment state. An invalid discovery
+    /// proof is refused when the enrollment is active and matches the request; for an unknown,
+    /// inactive or changed enrollment no key possession can be established, and that request
+    /// stays "none" like any other source that no longer exists.
+    /// </para>
     /// </summary>
+    /// <exception cref="RuntimeEnrollmentException">
+    /// <c>reinstall_signature_invalid</c> (403) when the discovery proof does not verify against the
+    /// enrolled key; <c>critical_incident_unresolved</c> (423) when an incident is open for this
+    /// installation; unavailable infrastructure keeps its existing errors.
+    /// </exception>
     public async Task<RuntimeReinstallSourceResolutionResponse> ResolveReinstallSourceAuthorityAsync(
         string clientId,
         RuntimeReinstallSourceResolutionRequest request,
@@ -722,6 +787,19 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
         await using var lease = await _authority.AcquireAsync(db, preflightBindingId, cancellationToken);
         await _keyRegistry.ValidateConfiguredKeysAsync(db, cancellationToken);
         enrollment = await LoadEnrollmentForUpdateAsync(db, validated.EnrollmentId, cancellationToken);
+        // TKT-001651: an open critical incident blocks before the "none" preconditions below. A
+        // released seat invalidates the enrollment, and an invalidated enrollment would otherwise
+        // answer "none" and let WebSetup leave the incident behind with a fresh installation. The
+        // check is limited to the caller's own client, product and installation, so the refusal
+        // discloses nothing about another tenant's enrollment identifier.
+        if (enrollment.ClientId == clientId
+            && enrollment.ProductId == validated.ProductId
+            && enrollment.InstallationId == validated.InstallationId
+            && await HasOpenCriticalIncidentAsync(
+                db, enrollment.BindingId, enrollment.InstallationId, cancellationToken))
+            throw new RuntimeEnrollmentException(
+                "critical_incident_unresolved", StatusCodes.Status423Locked,
+                "critical_incident_unresolved");
         if (enrollment.State != "ACTIVE"
             || enrollment.BindingId != preflightBindingId
             || enrollment.ClientId != clientId
@@ -756,12 +834,15 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
                 await RuntimeCommercialEligibilityValidator.AcquireReadBarrierAsync(db, cancellationToken);
                 now = await DatabaseNowAsync(db, cancellationToken);
                 await ValidateReinstallSourceCommercialAsync(
-                    db, enrollment, binding, approved.Binaries, now, cancellationToken);
+                    db, enrollment, approved.Binaries, now, cancellationToken);
             }
         }
         catch (RuntimeEnrollmentException exception) when (
-            exception.ErrorCode is "reinstall_authority_ineligible" or "reinstall_signature_invalid"
-                or "authority_ineligible" or "enrollment_inactive" or "critical_incident_unresolved")
+            // TKT-001651: "reinstall_signature_invalid" and "critical_incident_unresolved" are
+            // deliberately absent. They are security refusals and must stay distinguishable
+            // from a source that simply no longer exists.
+            exception.ErrorCode is "reinstall_authority_ineligible"
+                or "authority_ineligible" or "enrollment_inactive")
         {
             return NoReinstallSource(validated.RequestId, responseSchema);
         }
@@ -1015,33 +1096,31 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
     /// Requires one current source assignment only for legacy fallback or its one-time repair.
     /// The caller already holds the shared or exclusive commercial barrier and a fresh DB time.
     /// A denied graph remains a bounded source refusal; storage failures still propagate.
+    /// TKT-004062: the source release is the one being replaced, so it is not judged against the licence mask
+    /// or the product minimum; licence, seat, quota, ban and component policy still apply.
     /// </summary>
     /// <param name="db">Authority transaction holding the commercial barrier.</param>
     /// <param name="enrollment">Proved Runtime credential used to find its assignment.</param>
-    /// <param name="binding">Historical source scope that the assignment must still match.</param>
     /// <param name="approvedBinaries">A-validated release hashes for current ban checks.</param>
     /// <param name="now">Database time sampled after the barrier wait.</param>
     /// <param name="cancellationToken">Cancels read-only current-policy checks.</param>
     private static async Task ValidateReinstallSourceCommercialAsync(
         LicenseDbContext db, RuntimeEnrollment enrollment,
-        DistributionInstallationBinding binding,
         IReadOnlyDictionary<string, string> approvedBinaries,
         DateTimeOffset now, CancellationToken cancellationToken)
     {
-        RuntimeCommercialEligibilityValidator.EligibleAssignment assignment;
         try
         {
-            assignment = await RuntimeCommercialEligibilityValidator.ValidateAsync(
-                db, enrollment, approvedBinaries, now, cancellationToken);
+            // TKT-004062: a reinstallation source is the release being replaced, so only its own version is not judged.
+            _ = await RuntimeCommercialEligibilityValidator.ValidateAsync(
+                db, enrollment, approvedBinaries, now,
+                RuntimeCommercialEligibilityValidator.SourceReleaseVersionPolicy.NotJudged, cancellationToken);
         }
         catch (RuntimeEnrollmentException exception) when (
             exception.StatusCode == StatusCodes.Status422UnprocessableEntity)
         {
             throw ReinstallAuthorityIneligible("v2_binding_rows_ineligible");
         }
-        if (assignment.LicenseId != binding.LicenseId
-            || assignment.SeatId != binding.LicenseSeatId)
-            throw ReinstallAuthorityIneligible("v2_binding_rows_ineligible");
     }
 
     /// <summary>
@@ -1321,8 +1400,6 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
             || authorization.ExpiresAtUtc <= now.UtcDateTime
             || authorization.ClientId != enrollment.ClientId
             || authorization.ProductId != enrollment.ProductId
-            || authorization.LicenseId != binding.LicenseId
-            || authorization.LicenseSeatId != binding.LicenseSeatId
             || authorization.EntitlementId != entitlement.Id
             || authorization.BindingId != enrollment.BindingId
             || authorization.RuntimeEnrollmentId != enrollment.Id
@@ -1355,11 +1432,11 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
             throw new RuntimeEnrollmentException("bootstrap_ineligible",
                 StatusCodes.Status422UnprocessableEntity, exception.DiagnosticCode);
         }
-        // A commercial transfer changes the scope of the old capability. A change to the
-        // hardware value on the SAME seat does not: the file will use that seat's live value.
         if (assignment.LicenseId != authorization.LicenseId
             || assignment.SeatId != authorization.LicenseSeatId)
             throw Reject("bootstrap_ineligible");
+        // The binding preserves the original distribution lineage. The authorization stores the
+        // independently validated assignment that supplied the exact signed licence generation.
         return assignment;
     }
 
@@ -1514,9 +1591,15 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
             }
             catch (PostgresException exception) when (exception.SqlState == PostgresErrorCodes.CheckViolation)
             {
+                // TKT-004106: the public code stays binding_ineligible (the website turns it into a definitive
+                // finalize_rejected). A reviewed trigger message becomes its bounded reason, published as reasonCode;
+                // any other check violation keeps the generic server-only assignment_trigger_refused. The PostgreSQL
+                // refusal stays the inner cause for logs.
+                var reason = AssignmentRefusals.TryTranslate(exception, out var translated)
+                    ? translated.ReasonCode ?? "assignment_trigger_refused"
+                    : "assignment_trigger_refused";
                 throw new RuntimeEnrollmentException(
-                    "binding_ineligible", StatusCodes.Status422UnprocessableEntity,
-                    "assignment_trigger_refused");
+                    "binding_ineligible", StatusCodes.Status422UnprocessableEntity, reason, exception);
             }
 
             var approved = await RuntimeEnrollmentIdentityValidator.ValidateBootstrapAsync(
@@ -1771,8 +1854,10 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
                 // before returning an older reservation, including a completed v2 transfer.
                 var replayApproved = await ValidateWebSetupIssueIdentityAsync(
                     db, enrollment, binding, clientId, cancellationToken);
+                // TKT-004062: the replayed reservation replaces the source release; its target was judged when issued.
                 await RuntimeCommercialEligibilityValidator.ValidateAsync(
-                    db, enrollment, replayApproved.Binaries, now, cancellationToken);
+                    db, enrollment, replayApproved.Binaries, now,
+                    RuntimeCommercialEligibilityValidator.SourceReleaseVersionPolicy.NotJudged, cancellationToken);
                 var bytes = OpenWebSetupTransitionIssueResponse(replay);
                 try
                 {
@@ -1803,8 +1888,10 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
             }
             else
             {
+                // TKT-004062: the source release is being replaced; the requested target is judged below (version_not_allowed).
                 await RuntimeCommercialEligibilityValidator.ValidateAsync(
-                    db, enrollment, approved.Binaries, now, cancellationToken);
+                    db, enrollment, approved.Binaries, now,
+                    RuntimeCommercialEligibilityValidator.SourceReleaseVersionPolicy.NotJudged, cancellationToken);
             }
 
             var activeExists = await db.RuntimeEnrollmentWebSetupTransitions.AsNoTracking().AnyAsync(row =>
@@ -2058,8 +2145,15 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
                 throw Gone("websetup_transition_expired");
             var approved = await ValidateWebSetupIssueIdentityAsync(
                 db, enrollment, binding, clientId, cancellationToken);
+            // TKT-004062: while the enrollment is still at the transition source, that release is being replaced and
+            // is not judged (the target is judged below). Once a consumed transition is replayed, the enrollment runs
+            // the target release, which must stay judged so a replay never re-authorizes a release now refused.
             var assignment = await RuntimeCommercialEligibilityValidator.ValidateAsync(
-                db, enrollment, approved.Binaries, now, cancellationToken);
+                db, enrollment, approved.Binaries, now,
+                enrollment.ReleaseVersion == transition.SourceVersion
+                    ? RuntimeCommercialEligibilityValidator.SourceReleaseVersionPolicy.NotJudged
+                    : RuntimeCommercialEligibilityValidator.SourceReleaseVersionPolicy.Judged,
+                cancellationToken);
 
             if (transition.State == "CONSUMED")
             {
@@ -2258,6 +2352,9 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
     /// within their signed lifetime. Commercial denial never invalidates the enrollment.
     /// A v1 signed recovery HWID is preserved as immutable historical evidence and never replaces
     /// the current locked assignment as the authorization source.
+    /// TKT-004062: the source release is not judged against the licence mask or product minimum because it is
+    /// being replaced; the target release is judged (version_not_allowed) before any change.
+    /// An exact replay runs after the enrollment moved to the target, so that running release stays judged.
     /// </summary>
     /// <param name="clientId">Authenticated S2S caller used to scope the receipt idempotency key.</param>
     /// <param name="keyId">Authenticated S2S key identifier retained for the route contract.</param>
@@ -2300,8 +2397,15 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
             ValidateProofTime(validated.Proof.SentAtUtc, now);
             var approved = await ValidateReleaseTransitionIdentityAsync(
                 db, enrollment, binding, cancellationToken);
+            // TKT-004062: a fresh transition replaces the source release, which is not judged (the target is judged
+            // below, version_not_allowed). An exact replay runs after the enrollment moved to the target release, so
+            // that running release stays judged and a replay never re-delivers a release the licence now refuses.
             var assignment = await RuntimeCommercialEligibilityValidator.ValidateAsync(
-                db, enrollment, approved.Binaries, now, cancellationToken);
+                db, enrollment, approved.Binaries, now,
+                replay is null
+                    ? RuntimeCommercialEligibilityValidator.SourceReleaseVersionPolicy.NotJudged
+                    : RuntimeCommercialEligibilityValidator.SourceReleaseVersionPolicy.Judged,
+                cancellationToken);
             // The v1 recovery HWID remains immutable signed historical evidence. It does not
             // participate in current Runtime authority, which is derived from the locked assignment.
             if (replay != null)
@@ -2628,9 +2732,7 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
             if (license == null || seat == null
                 || assignment.AssignmentId != activeAssignments[0].Id
                 || assignment.Revision != activeAssignments[0].Revision
-                || assignment.LicenseId != license.Id || assignment.SeatId != seat.Id
-                || binding.LicenseId != assignment.LicenseId
-                || binding.LicenseSeatId != assignment.SeatId)
+                || assignment.LicenseId != license.Id || assignment.SeatId != seat.Id)
                 throw Reject("hardware_authority_migration_ineligible");
 
             if (existing != null)
@@ -2704,12 +2806,13 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
             var committedAuthorityEpoch = enrollment.AuthorityEpoch;
             if (migrated)
             {
-                // TKT-001277 (Franck): moving a seat to another identifier consumes the customer's daily seat
-                // change and is refused when the quota is exhausted, exactly like the activation switch. A replay
-                // returned above and an already_current request never reach this point, so nothing is charged twice.
-                var seatChangeQuota = await SeatChangeQuota.GetStatusAsync(
-                    db, license, now.UtcDateTime, cancellationToken);
-                if (seatChangeQuota.IsExhausted)
+                // TKT-001277, revised by TKT-003751 (owner rule): the migration activates the new identifier
+                // (the context stamps it, so it counts as one identifier of the day). It is refused only when the
+                // migrated seat's machine could not itself be activated today: the same PC moving to its new
+                // identifier is never blocked when it is the key's last PC or was already activated today. A
+                // replay and an already_current request never reach this point, so nothing is counted twice.
+                if (await SeatChangeQuota.IsActivationRefusedAsync(
+                        db, license, seat.HardwareId, now.UtcDateTime, cancellationToken))
                     throw Reject("max_daily_deactivations_reached");
             }
             // LEGACY-EXPIRY(TKT-001430, 2026-12-31): the alias links the pre-UUID identifier to the migrated seat so the
@@ -2775,7 +2878,7 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
                 // TEMP-FAIL-OPEN(TKT-001262) ALIAS-REPOINT: the strict rule is that an alias must
                 // already identify the current binding and enrollment. Finalize is known to rotate
                 // those rows without moving the alias, which made valid clients fail later with
-                // hardware_authority_rejected (SUP-000040). Franck requested that this known data/code
+                // hardware_authority_rejected (SUP-000040). The product owner requested that this known data/code
                 // defect no longer block customers: the signed migration transaction repoints the same
                 // product/license/seat/machine alias and logs every repair. Analyse every occurrence,
                 // correct the producer, restore the strict decision, then remove this marker. Alias
@@ -2977,7 +3080,9 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
             ValidateProofTime(validated.Proof.SentAtUtc, now);
             var identity = await ValidateCapabilityIdentityAsync(
                 db, enrollment, validated, cancellationToken);
-            var assignment = await RuntimeCommercialEligibilityValidator.ValidateAsync(
+            // TKT-002904: a released seat answers a non-terminal 409, or reattaches a same-owner seat already
+            // active on this machine inside this issuing transaction; every other denial keeps its 422.
+            var assignment = await RuntimeCapabilityReattachment.ValidateOrReattachAsync(
                 db, enrollment, identity.Binaries, now, cancellationToken);
             var licenseExpiry = await LoadCapabilityPaidExpiryAsync(
                 db, enrollment, assignment.LicenseId, cancellationToken);
@@ -3053,9 +3158,10 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
         // Once a ledger exists, every authority field must agree before paid time is issued.
         if (!PersonalDayPassPolicy.IsPassType(type.Slug) || type.ProductId != enrollment.ProductId
             || type.IsFree || !type.IsRecurring || type.AllowAnonymous || type.EnforceSingleUsePerHardwareId
-            || !license.ExpirationDate.HasValue || license.ExpirationDate.Value != pass.PaidThroughUtc)
+            || !license.ExpirationDate.HasValue)
             throw Reject("authority_ineligible");
-        return new DateTimeOffset(pass.PaidThroughUtc);
+        // TKT-002331 : la durée accordée suit la date de fin de la clé, jamais la période payée du registre.
+        return new DateTimeOffset(license.ExpirationDate.Value);
     }
 
     /// <summary>
@@ -3080,8 +3186,10 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
     /// Enrollment and session rows are locked before the shared item-2 barrier. PostgreSQL time is
     /// sampled after those waits, and exact replay rechecks identity, proof signature, session state
     /// and commercial eligibility before returning frozen bytes. Proof time applies only when a new
-    /// ACK is created. The global lease epoch remains nonce and milestone audit data and is not copied
-    /// into the enrollment's historical lineage.
+    /// ACK is created. An event outside the retained past window is terminal with HTTP 410 so released
+    /// clients can discard the stale session, while future timestamps remain invalid requests. The global
+    /// lease epoch remains nonce and milestone audit data and is not copied into the enrollment's
+    /// historical lineage.
     /// </remarks>
     /// <param name="routeEnrollmentId">Enrollment identifier fixed by the public route.</param>
     /// <param name="exactBodyDigest">SHA-256 digest of the exact request bytes.</param>
@@ -3146,8 +3254,10 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
                  ("milestone-ip", PseudonymizeAddress(clientAddress), 120),
                  ("milestone-global", "all", 960)], cancellationToken);
             var oldestAccepted = now.AddHours(-_options.ProofNonceRetentionHours);
-            if (validated.OccurredAtUtc < oldestAccepted
-                || validated.OccurredAtUtc > validated.Proof.SentAtUtc.AddSeconds(_options.ProofClockSkewSeconds))
+            if (validated.OccurredAtUtc < oldestAccepted)
+                // Released clients already treat HTTP 410 as terminal and can advance past a stale journal.
+                throw Gone("milestone_event_expired");
+            if (validated.OccurredAtUtc > validated.Proof.SentAtUtc.AddSeconds(_options.ProofClockSkewSeconds))
                 throw Invalid();
 
             if (session == null)
@@ -3366,6 +3476,45 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
                 throw Reject("canary_binding_mismatch");
             var commercial = await RuntimeCommercialEligibilityValidator.AssessAsync(
                 db, enrollment, approved.Binaries, now, canary.HardwareId, cancellationToken);
+            SecurityLockReleaseDecision? rememberedRelease = null;
+            var mappedCause = string.Empty;
+            var mappedLevel = 0;
+            var hasMappedCause = SecurityLockRememberedReleaseStore.TryMapCanaryTrigger(
+                canary.Trigger, out mappedCause)
+                && SecurityLockCauseCatalog.TryGetLevel(mappedCause, out mappedLevel);
+            if (!commercial.ActiveBanDetected
+                && commercial.IsEligible
+                && commercial.ReportHardwareLinked
+                && commercial.Assignment is not null
+                && hasMappedCause)
+            {
+                rememberedRelease = await SecurityLockRememberedReleaseStore.FindActiveAsync(
+                    db, enrollment.ProductId, commercial.Assignment.LicenseId,
+                    commercial.Assignment.HardwareId, mappedCause, cancellationToken);
+            }
+            string? configuredMode = null;
+            if (hasMappedCause)
+            {
+                configuredMode = await db.SecurityLockEnforcementPolicies.AsNoTracking()
+                    .Where(policy => policy.ProductId == enrollment.ProductId && policy.Cause == mappedCause)
+                    .Select(policy => policy.Mode)
+                    .SingleOrDefaultAsync(cancellationToken);
+            }
+            var effectiveMode = hasMappedCause
+                ? SecurityLockVerdictPolicy.ResolveEffectiveMode(mappedLevel, configuredMode)
+                : null;
+            var isShadowMode = string.Equals(
+                effectiveMode, SecurityLockCauseCatalog.ModeShadow, StringComparison.Ordinal);
+            var shadowNonBlocking = rememberedRelease is null
+                && hasMappedCause
+                && !commercial.ActiveBanDetected
+                && isShadowMode;
+            var nonBlockingReason = rememberedRelease is not null
+                ? "REMEMBERED_RELEASE"
+                : shadowNonBlocking ? "MODE_SHADOW" : null;
+            // The independent ban signal exists only to protect SHADOW precedence. REVIEW and ENFORCE retain
+            // their established commercial-denial or unlinked-hardware detail even when another ban is active.
+            var showBlockingBanDetail = commercial.ActiveBanDetected && isShadowMode;
             await ReserveQuotasAsync(db, now,
                 [("canary-binding", preflight.BindingId.ToString("D"), 60),
                  ("canary-credential", preflight.EnrollmentId.ToString("D"), 30),
@@ -3424,11 +3573,15 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
                 InstallationId = enrollment.InstallationId,
                 EventId = canary.EventId,
                 Trigger = canary.Trigger,
-                State = "OPEN",
+                State = nonBlockingReason is null ? "OPEN" : "WAIVED",
                 OpenedSecurityEpoch = enrollment.SecurityEpoch,
                 OpenedAuthorityEpoch = lease.AuthorityEpoch,
-                OpenedAtUtc = now.UtcDateTime
+                OpenedAtUtc = now.UtcDateTime,
+                NonBlockingReason = nonBlockingReason,
+                RememberedReleaseDecisionId = rememberedRelease?.Id
             });
+            if (rememberedRelease is not null)
+                SecurityLockRememberedReleaseStore.RecordCoverage(rememberedRelease, now.UtcDateTime);
             db.CanaryAlerts.Add(new CanaryAlert
             {
                 HardwareId = canary.HardwareId,
@@ -3437,7 +3590,15 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
                 Severity = canary.Severity,
                 ProductId = enrollment.ProductId,
                 ServerAction = "authenticated_evidence",
-                Details = !commercial.IsEligible
+                Details = rememberedRelease is not null
+                    ? "remembered_release:non_blocking"
+                    : shadowNonBlocking
+                    ? "mode_shadow:non_blocking"
+                    : showBlockingBanDetail
+                    ? (string.Equals(commercial.ActiveBanReason, "component_banned", StringComparison.Ordinal)
+                        ? "component_banned:blocking"
+                        : "hardware_banned:blocking")
+                    : !commercial.IsEligible
                     ? "commercial_denial:" + commercial.DenialReason
                     : commercial.ReportHardwareLinked ? null : "report_hardware_unlinked"
             });
@@ -3519,36 +3680,22 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
                 throw Conflict("recovery_binding_conflict");
             }
 
-            var incidents = await db.RuntimeCriticalIncidents.FromSqlInterpolated($"""
-                SELECT * FROM public."RuntimeCriticalIncidents"
-                WHERE "BindingId" = {enrollment.BindingId}
-                  AND "InstallationId" = {enrollment.InstallationId}
-                  AND "State" = 'OPEN'
-                ORDER BY "EventId" FOR UPDATE
-                """).ToListAsync(cancellationToken);
-            if (incidents.Count == 0
-                || incidents.Any(incident => incident.OpenedSecurityEpoch > validated.OldSecurityEpoch)
-                || !incidents.Any(incident => incident.EventId == validated.EventId))
+            RuntimeCriticalRecoveryTransitionResult transition;
+            try
+            {
+                transition = await RuntimeCriticalRecoveryTransition.StageAsync(
+                    db, enrollment, lease.AuthorityEpoch, now.UtcDateTime, clientId, keyId,
+                    RuntimeCriticalRecoverySources.S2S, validated.EventId, null, null,
+                    cancellationToken);
+            }
+            catch (InvalidOperationException exception)
+                when (exception.Message == "critical_recovery_generation_conflict")
             {
                 throw Conflict("recovery_generation_conflict");
             }
-
-            var recovery = new RuntimeCriticalRecovery
-            {
-                EnrollmentId = enrollment.Id,
-                BindingId = enrollment.BindingId,
-                ProductId = enrollment.ProductId,
-                InstallationId = enrollment.InstallationId,
-                RequestedEventId = validated.EventId,
-                OldSecurityEpoch = validated.OldSecurityEpoch,
-                NewSecurityEpoch = validated.NewSecurityEpoch,
-                ResolvedIncidentCount = incidents.Count,
-                AuthorityEpoch = lease.AuthorityEpoch,
-                RecoveredByClientId = clientId,
-                RecoveredByKeyId = keyId,
-                RecoveredAtUtc = now.UtcDateTime
-            };
-            db.RuntimeCriticalRecoveries.Add(recovery);
+            if (transition.Recovery is null)
+                throw Conflict("recovery_generation_conflict");
+            var recovery = transition.Recovery;
 
             var response = CreateCriticalRecoveryResponse(
                 recovery.Id, validated.RequestId, recovery, now);
@@ -3565,15 +3712,6 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
                 ExactResponseBody = responseBytes
             });
 
-            foreach (var incident in incidents)
-            {
-                incident.State = "RESOLVED";
-                incident.RecoveryId = recovery.Id;
-                incident.RecoveredSecurityEpoch = validated.NewSecurityEpoch;
-                incident.RecoveredAuthorityEpoch = lease.AuthorityEpoch;
-                incident.RecoveredAtUtc = now.UtcDateTime;
-            }
-            enrollment.SecurityEpoch = validated.NewSecurityEpoch;
             try
             {
                 await db.SaveChangesAsync(cancellationToken);
@@ -4306,6 +4444,16 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
             return;
 
         var predecessor = await LoadBindingForUpdateAsync(db, predecessorId, cancellationToken);
+        // TKT-001719: a same-licence seat transition supersedes a released seat's binding with a
+        // successor on another seat and another machine. Its aliases name the released machine,
+        // never the successor, so there is nothing to advance; they stay with the superseded row.
+        if (successor.LicenseSeatId != predecessor.LicenseSeatId)
+        {
+            _historyLogger?.LogInformation(
+                "Runtime Confirm alias repoint skipped seat_transition: predecessor binding {PredecessorId} seat differs from successor binding {SuccessorId}; aliases remain on the superseded binding.",
+                predecessor.Id, successor.Id);
+            return;
+        }
         var predecessorEnrollments = db.Database.IsNpgsql()
             ? await db.RuntimeEnrollments.FromSqlInterpolated($"""
                 SELECT * FROM public."RuntimeEnrollments"
@@ -4645,6 +4793,18 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
                 StringComparison.OrdinalIgnoreCase)))
             throw Reject("component_banned");
 
+        // TKT-002041: an excluded machine cannot be admitted to this target licence, even when
+        // an active target seat already exists. Checked before any seat or quota mutation.
+        try
+        {
+            await LicenseHardwareExclusionChecker.EnsureNotExcludedAsync(
+                db, targetLicense.Id, currentHardwareId, currentHardwareId, cancellationToken);
+        }
+        catch (DistributionOperationException exception)
+        {
+            throw new RuntimeEnrollmentException(exception.ErrorCode, exception.StatusCode, exception.ReasonCode);
+        }
+
         var activeSeatCount = targetLicense.Seats.Count(candidate => candidate.IsActive);
         if (activeSeatCount > targetLicense.MaxSeats)
             throw Reject("seat_limit_reached");
@@ -4685,16 +4845,11 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
         }
         if (activeSeatCount >= targetLicense.MaxSeats && targetLicense.MaxSeats != 1)
             throw Reject("seat_limit_reached");
-        var maxActivationsPerDay = targetLicense.Type?.MaxActivationsPerDay ?? 0;
-        if (maxActivationsPerDay > 0 && targetLicense.MaxSeats != 1)
-        {
-            var dayStart = now.UtcDateTime.Date;
-            var activationsToday = await db.LicenseSeats.AsNoTracking().CountAsync(candidate =>
-                candidate.LicenseId == targetLicense.Id && candidate.FirstActivatedAt >= dayStart,
-                cancellationToken);
-            if (activationsToday >= maxActivationsPerDay)
-                throw Reject("activation_rate_limited");
-        }
+        // TKT-003751 (owner rule): at most N different identifiers per key and UTC day, N read live from the
+        // type; an identifier already activated today and the last PC of the key are always accepted.
+        if (await SeatChangeQuota.IsActivationRefusedAsync(
+                db, targetLicense, currentHardwareId, now.UtcDateTime, cancellationToken))
+            throw Reject("activation_rate_limited");
     }
 
     /// <summary>
@@ -4714,6 +4869,18 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
         RuntimeTransferHistoryObservation? historyObservation = null,
         AutomaticSeatSwitch.TransportObservation? transport = null)
     {
+        // TKT-002041: refuse a licence-excluded machine before any seat reactivation, switch
+        // preparation or quota consumption on the WebSetup transfer path.
+        try
+        {
+            await LicenseHardwareExclusionChecker.EnsureNotExcludedAsync(
+                db, targetLicense.Id, hardwareId, hardwareId, cancellationToken);
+        }
+        catch (DistributionOperationException exception)
+        {
+            throw new RuntimeEnrollmentException(exception.ErrorCode, exception.StatusCode, exception.ReasonCode);
+        }
+
         var activeSeat = targetLicense.Seats.SingleOrDefault(candidate =>
             candidate.IsActive && string.Equals(candidate.HardwareId, hardwareId, StringComparison.Ordinal));
         if (activeSeat != null)
@@ -4762,16 +4929,18 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
         }
         if (activeSeatCount >= targetLicense.MaxSeats)
             throw Reject("seat_limit_reached");
-        var maxActivationsPerDay = targetLicense.Type?.MaxActivationsPerDay ?? 0;
-        if (maxActivationsPerDay > 0 && targetLicense.MaxSeats != 1)
+        // TKT-003751 (owner rule): at most N different identifiers per key and UTC day, N read live from the
+        // type; an identifier already activated today and the last PC of the key are always accepted. The
+        // automatic switch above ran the same check before releasing the previous machine.
+        if (SeatChangeQuota.GetDailyLimit(targetLicense) > 0)
         {
-            var dayStart = now.UtcDateTime.Date;
-            var activationsToday = await db.LicenseSeats.AsNoTracking().CountAsync(candidate =>
-                candidate.LicenseId == targetLicense.Id && candidate.FirstActivatedAt >= dayStart,
-                cancellationToken);
             if (historyObservation != null)
-                historyObservation.Snapshot = historyObservation.Snapshot with { ActivationsToday = activationsToday };
-            if (activationsToday >= maxActivationsPerDay)
+            {
+                var dailyQuota = await SeatChangeQuota.GetStatusAsync(db, targetLicense, now.UtcDateTime, cancellationToken);
+                historyObservation.Snapshot = historyObservation.Snapshot with { ActivationsToday = dailyQuota.UsedToday };
+            }
+            if (await SeatChangeQuota.IsActivationRefusedAsync(
+                    db, targetLicense, hardwareId, now.UtcDateTime, cancellationToken))
                 throw Reject("activation_rate_limited");
         }
         var seat = targetLicense.Seats
@@ -5064,6 +5233,21 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
         }
     }
 
+    /// <summary>
+    /// Runs one Runtime transaction, retrying it on serialization failure, deadlock or lock timeout (40001, 40P01,
+    /// 55P03) and the reviewed authority unique violations, up to <c>MaximumTransactionAttempts</c> with a short
+    /// growing random delay. Each attempt must be a complete transaction that leaves nothing behind when it throws.
+    /// </summary>
+    /// <param name="action">The whole transaction; it is executed again from scratch on each retryable failure.</param>
+    /// <param name="cancellationToken">Cancels the delay between attempts.</param>
+    /// <param name="exhaustionCode">Public 503 code returned when every attempt failed with a retryable error.</param>
+    /// <returns>The result of the first successful attempt.</returns>
+    /// <exception cref="RuntimeEnrollmentException">
+    /// 503 <paramref name="exhaustionCode"/> after the last retryable failure; since TKT-004085 a refusal of the
+    /// assignment trigger is named instead (409 <c>assignment_reconciliation_required</c> at once for a non-retryable
+    /// refusal, 409 <c>seat_assignment_busy</c> or <c>assignment_reconciliation_required</c> once the retries of a
+    /// retryable trigger refusal are exhausted). Every other exception propagates unchanged.
+    /// </exception>
     private async Task<T> ExecuteWithRetriesAsync<T>(
         Func<Task<T>> action, CancellationToken cancellationToken,
         string exhaustionCode = "authority_unavailable")
@@ -5077,16 +5261,40 @@ public sealed partial class RuntimeEnrollmentService : IRuntimeEnrollmentService
             catch (Exception exception) when (IsRetryable(exception))
             {
                 if (attempt + 1 >= _options.MaximumTransactionAttempts)
+                {
+                    // TKT-004085: the trigger raises its competing-claimant and unresolved-seat refusals as 40001 so
+                    // that callers retry; once retrying has not helped, the client learns the licence state rather than
+                    // a fake outage.
+                    if (AssignmentRefusals.TryTranslateRuntime(exception, out var named))
+                        throw named;
                     throw new RuntimeEnrollmentException(
                         exhaustionCode, StatusCodes.Status503ServiceUnavailable);
+                }
                 await Task.Delay(Random.Shared.Next(20, 80) * (attempt + 1), cancellationToken);
+            }
+            catch (Exception exception) when (AssignmentRefusals.TryTranslateRuntime(exception, out var named))
+            {
+                // TKT-004085: a non-retryable trigger refusal (23514, quarantine or unresolved graph) used to reach the
+                // controller catch-all as 500 internal_error; it is a licence state that needs a support reconciliation.
+                throw named;
             }
         }
         throw new RuntimeEnrollmentException(exhaustionCode, StatusCodes.Status503ServiceUnavailable);
     }
 
+    /// <summary>
+    /// Returns whether a failed Runtime transaction may be replayed from scratch: a PostgreSQL serialization failure,
+    /// deadlock or lock timeout (40001, 40P01, 55P03) or a reviewed authority unique violation, found in the exception
+    /// chain. An exception that is already a public refusal (<see cref="RuntimeEnrollmentException"/> or
+    /// <see cref="DistributionOperationException"/>) is never retried, even when it keeps such a PostgreSQL error as
+    /// inner cause (TKT-004085 keeps causes for logs): its code was decided on purpose, for example 409
+    /// <c>seat_assignment_busy</c> that tells the client itself to retry.
+    /// </summary>
+    /// <param name="exception">The exception thrown by one attempt.</param>
     private static bool IsRetryable(Exception exception)
     {
+        if (exception is RuntimeEnrollmentException or DistributionOperationException)
+            return false;
         for (Exception? current = exception; current != null; current = current.InnerException)
             if (current is PostgresException postgres)
             {

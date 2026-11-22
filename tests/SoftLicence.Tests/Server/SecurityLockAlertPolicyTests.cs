@@ -44,7 +44,7 @@ public sealed class SecurityLockAlertPolicyTests
         })
             Assert.Contains(expected, text, StringComparison.Ordinal);
         Assert.DoesNotContain("ABCD-EFGH", text, StringComparison.Ordinal);
-        // Franck, 19/09/2026: never an em dash anywhere.
+        // Owner rule, 19/09/2026: never an em dash anywhere.
         Assert.DoesNotContain("\u2014", text, StringComparison.Ordinal);
     }
 

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "set": {
+    "DistributionS2S__Clients__3__ClientId": "website-account-relink",
+    "DistributionS2S__Clients__3__KeyId": "account-relink-2026-11",
+    "DistributionS2S__Clients__3__PublicKeyPem": "-----BEGIN PUBLIC KEY-----\nMIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEArT5okyX11XNRRA4a4wa/\nWbjbIB+eadPs+RhiUTJxwTHRmwGSe9SCvalkqA29mN7jTTaGjcmrLNVcpWNOKIci\nNZSn/1/fWPhg2MNcp3QCqUHcTKfZnXi7SV9zOaSzfWjlZkhb1T6Q4ZvBguWVWrG3\ngEu6SnZEP4nbpWs0epSk+2ZTza5QHI+HeM46B2cU6seq1uQ1ACPmxkNor3oqkXp7\nA2UtGEGglw02FmhyEMHHE3WnBT05x/BKjDzsTCubN6+9bsxUG/zK35aCYHcIlifx\n9toG9sJumesJ1Si83LLoqEKHbb7aZ4NcjT6u/j/7nmPza1NnisSB6Y0045KhWzrD\n0njpV0/4Mzes7k+XJex6bwb1B67SSbWs5FOTFLGQiDKRCKoyesoI3XI5WtLupKMf\nx/GwpCzTZmCCTcQL7K6WZZpXZ9Scz06nmuL/NsLlVHnI+Y/g1k8xbIKRChVapXFn\ne5LEjd0l245c/tidaG0ylCC2s+PPFM4DvaY2wsNLVPYnAgMBAAE=\n-----END PUBLIC KEY-----\n",
+    "DistributionS2S__Clients__3__Enabled": "true",
+    "DistributionS2S__Clients__3__AllowRuntimeAccountRelink": "true",
+    "DistributionS2S__Clients__3__AccountRelinkForClientIds__0": "tia-connect-website",
+    "DistributionS2S__Clients__3__ProductIds__0": "808648bc-a4b9-4f71-bcb1-b7c7e67ca98e",
+    "DistributionS2S__Clients__3__AllowedCidrs__0": "172.17.0.1/32"
+  },
+  "copy": []
+}

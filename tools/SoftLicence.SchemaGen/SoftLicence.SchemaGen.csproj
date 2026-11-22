@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Générateur de docs/schema (TKT-002339, sur le modèle du pilote YOUR_APP_NAMECloud TKT-002279) :
+    lit le modèle EF et les routes déclarées de SoftLicence.Server par réflexion, sans base de
+    données, sans secret et sans démarrer l'application. Il n'est jamais déployé.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SoftLicence.Server\SoftLicence.Server.csproj" />
+  </ItemGroup>
+
+</Project>

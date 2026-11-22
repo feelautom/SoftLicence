@@ -95,14 +95,18 @@ public class TelemetryService
     /// Public telemetry remains untrusted. Enforcement-neutral lifecycle events only suppress the
     /// outdated-version ban and unban decision for that event; they grant no licence or feature authority.
     /// Best-effort observation failures are logged and do not roll back an already persisted event.
+    /// An ApprovedBinaries fingerprint mismatch on a <c>Startup_*</c> event is attached to the incident of its machine
+    /// and may send the single modified-binary alert of that machine (TKT-003674); it never sanctions.
     /// </remarks>
     public async Task SaveEventAsync(TelemetryEventRequest req, string? ip = null)
     {
+        req = ResolveCompatibilityEnvelope(req);
         using var db = await _dbFactory.CreateDbContextAsync();
         var productId = await GetProductIdAsync(db, req.AppName);
         var geo = ip != null ? await _geoIp.GetGeoInfoAsync(ip) : null;
         var propertiesJson = SerializeTelemetryProperties(req.Properties);
         var receivedAtUtc = DateTime.UtcNow;
+        var resolvedType = ResolveEventTelemetryType(req);
 
         if (!await ShouldStoreTelemetryAsync(
             db,
@@ -111,7 +115,8 @@ public class TelemetryService
             req.HardwareId,
             req.EventName,
             req.Version,
-            TelemetryType.Event,
+            resolvedType,
+            TelemetryPayloadBacking.EventData,
             ip,
             geo?.Isp,
             propertiesJson))
@@ -128,7 +133,7 @@ public class TelemetryService
             AppName = req.AppName,
             Version = req.Version,
             EventName = req.EventName,
-            Type = TelemetryType.Event,
+            Type = resolvedType,
             ProductId = productId
         };
 
@@ -214,11 +219,60 @@ public class TelemetryService
                         var mismatchDetail = $"{key}: got={ShortHash(reportedHash)}";
                         mismatchDetails.Add(mismatchDetail);
                     }
-                    _logger.LogWarning(
-                        "Public ApprovedBinaries mismatch observed for product {ProductId} version {Version}: {Detail}; no automatic sanction",
-                        productId.Value,
-                        req.Version,
-                        string.Join("; ", mismatchDetails));
+
+                    // TKT-003674: a mismatch is attached to the incident of its machine (HWID, licence, IP,
+                    // version in the database) and alerts once per machine after repeated starts. The log only
+                    // carries the incident id and a 16-character HWID prefix (#1360), never a full fingerprint.
+                    // When the HWID is unusable or the per-hardware write fails, the public product aggregate
+                    // below still keeps the evidence.
+                    HardwareBinaryMismatchOutcome? hardwareOutcome = null;
+                    if (_securityIncidents != null)
+                    {
+                        try
+                        {
+                            hardwareOutcome = await _securityIncidents.RecordHardwareBinaryMismatchAsync(
+                                productId.Value,
+                                req.HardwareId,
+                                req.Version,
+                                ip,
+                                geo?.CountryCode,
+                                geo?.Isp,
+                                verdict.Mismatches);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex,
+                                "Per-hardware ApprovedBinaries incident failed for product {ProductId} version {Version}; falling back to the public aggregate, no sanction was applied",
+                                productId.Value,
+                                req.Version);
+                        }
+                    }
+
+                    if (hardwareOutcome != null)
+                    {
+                        observationKind = null;
+                        _logger.LogWarning(
+                            "Public ApprovedBinaries mismatch observed for product {ProductId} version {Version}: incident={IncidentId} hwid16={HardwareIdPrefix} licence={LicenseId} ip={ClientIp} unapproved={UnapprovedCount} newStart={CountedStart} starts24h={StartsInWindow} alertSent={AlertSent}: {Detail}; no automatic sanction",
+                            productId.Value,
+                            req.Version,
+                            hardwareOutcome.IncidentId,
+                            hardwareOutcome.HardwareIdPrefix,
+                            hardwareOutcome.LicenseId,
+                            ip,
+                            hardwareOutcome.UnapprovedComponentCount,
+                            hardwareOutcome.CountedStart,
+                            hardwareOutcome.StartsInWindow,
+                            hardwareOutcome.AlertSent,
+                            string.Join("; ", mismatchDetails));
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "Public ApprovedBinaries mismatch observed for product {ProductId} version {Version} not attached to a hardware incident (unusable HWID or incident failure): {Detail}; no automatic sanction",
+                            productId.Value,
+                            req.Version,
+                            string.Join("; ", mismatchDetails));
+                    }
                 }
                 else if (verdict.Verdict == ApprovedBinaryVerdict.BaselineMissing)
                 {
@@ -386,6 +440,7 @@ public class TelemetryService
             req.EventName,
             req.Version,
             TelemetryType.Diagnostic,
+            TelemetryPayloadBacking.DiagnosticData,
             ip,
             geo?.Isp,
             payloadJson))
@@ -456,6 +511,7 @@ public class TelemetryService
             req.EventName,
             req.Version,
             TelemetryType.Error,
+            TelemetryPayloadBacking.ErrorData,
             ip,
             geo?.Isp,
             payloadJson))
@@ -495,6 +551,20 @@ public class TelemetryService
         }
     }
 
+    /// <summary>
+    /// Reads product telemetry while preserving the persisted specialized payload shape.
+    /// </summary>
+    /// <param name="apiSecret">The product-scoped read key.</param>
+    /// <param name="page">The one-based page number.</param>
+    /// <param name="pageSize">The maximum number of rows returned.</param>
+    /// <param name="type">An optional persisted telemetry-type filter.</param>
+    /// <param name="excludeHwids">Optional hardware identifiers excluded from the result.</param>
+    /// <returns>The requested telemetry rows, or an empty list when the product key is unknown.</returns>
+    /// <remarks>
+    /// An error ingested through the event endpoint remains <c>Type=Error</c>, retains its event name,
+    /// and exposes its event properties as the <c>Data</c> dictionary. Classic error-endpoint rows keep
+    /// their existing error-data response. This compatibility contract does not reshape either payload.
+    /// </remarks>
     public async Task<List<TelemetryResponse>> GetTelemetryForProductAsync(string apiSecret, int page = 1, int pageSize = 50, TelemetryType? type = null, List<string>? excludeHwids = null)
     {
         using var db = await _dbFactory.CreateDbContextAsync();
@@ -871,6 +941,13 @@ public class TelemetryService
     private static string TrimForAlert(string value, int maxLength) =>
         value.Length <= maxLength ? value : value[..maxLength] + "...";
 
+    /// <summary>
+    /// Builds the public read-model payload from the specialized row that actually owns the data.
+    /// Error-classified events deliberately retain <see cref="TelemetryRecord.EventData"/>, while
+    /// classic <c>/error</c> records continue to expose <see cref="TelemetryRecord.ErrorData"/>.
+    /// </summary>
+    /// <param name="r">The record loaded with all specialized navigation properties.</param>
+    /// <returns>The compatible payload for the record type, or <see langword="null"/> when absent.</returns>
     private object? GetSpecializedData(TelemetryRecord r)
     {
         return r.Type switch
@@ -881,12 +958,60 @@ public class TelemetryService
                 Results = r.DiagnosticData.Results.Select(res => new { res.ModuleName, res.Success, res.Severity, res.Message }),
                 Ports = r.DiagnosticData.Ports.Select(p => new { p.Name, p.ExternalPort, p.Protocol })
             } : null,
-            TelemetryType.Error => r.ErrorData != null ? new {
-                r.ErrorData.ErrorType,
-                r.ErrorData.Message,
-                r.ErrorData.StackTrace
-            } : null,
+            TelemetryType.Error => r.ErrorData != null
+                ? new {
+                    r.ErrorData.ErrorType,
+                    r.ErrorData.Message,
+                    r.ErrorData.StackTrace
+                }
+                : r.EventData != null
+                    ? JsonSerializer.Deserialize<Dictionary<string, string>>(r.EventData.PropertiesJson ?? "{}")
+                    : null,
             _ => null
+        };
+    }
+
+    /// <summary>
+    /// Resolves the event endpoint classification without trimming, case folding, normalization, or
+    /// broad prefix matching. This keeps the two deployed legacy names compatible while preventing
+    /// lookalikes from inflating operational error counts.
+    /// </summary>
+    /// <param name="request">The effective event request whose protocol values are untrusted.</param>
+    /// <returns><see cref="TelemetryType.Error"/> only for the exact explicit or legacy contract.</returns>
+    private static TelemetryType ResolveEventTelemetryType(TelemetryEventRequest request)
+    {
+        if (string.Equals(request.Type, nameof(TelemetryType.Error), StringComparison.Ordinal)
+            || string.Equals(request.Req?.Type, nameof(TelemetryType.Error), StringComparison.Ordinal)
+            || string.Equals(request.EventName, "LicenseActivation_Failed", StringComparison.Ordinal)
+            || string.Equals(request.EventName, "LicenseActivation_ApiError", StringComparison.Ordinal))
+        {
+            return TelemetryType.Error;
+        }
+
+        return TelemetryType.Event;
+    }
+
+    /// <summary>
+    /// Recovers properties from the compatibility <c>req</c> envelope without allowing it to replace
+    /// the outer app, hardware, version, event name, or timestamp used for routing and authorization.
+    /// </summary>
+    /// <param name="request">The deserialized outer request.</param>
+    /// <returns>The original request when no recovery is needed; otherwise a shallow effective copy.</returns>
+    private static TelemetryEventRequest ResolveCompatibilityEnvelope(TelemetryEventRequest request)
+    {
+        if (request.Properties is not null || request.Req?.Properties is null)
+            return request;
+
+        return new TelemetryEventRequest
+        {
+            Timestamp = request.Timestamp,
+            HardwareId = request.HardwareId,
+            AppName = request.AppName,
+            Version = request.Version,
+            EventName = request.EventName,
+            Type = request.Type,
+            Properties = request.Req.Properties,
+            Req = request.Req
         };
     }
 
@@ -896,6 +1021,22 @@ public class TelemetryService
         return product?.Id;
     }
 
+    /// <summary>
+    /// Applies the shared flood threshold while preserving payload-specific exemptions. Error-typed
+    /// event data remains suppressible; classic error data is retained in full for crash diagnostics.
+    /// </summary>
+    /// <param name="db">The context that owns the candidate record and suppression counter.</param>
+    /// <param name="productId">The resolved product, when the app name is known.</param>
+    /// <param name="appName">The canonical or submitted application name.</param>
+    /// <param name="hardwareId">The submitted hardware identifier.</param>
+    /// <param name="eventName">The exact event protocol identifier.</param>
+    /// <param name="version">The submitted client version.</param>
+    /// <param name="type">The resolved persisted telemetry type.</param>
+    /// <param name="payloadBacking">The specialized relational payload that will back the record.</param>
+    /// <param name="ip">The server-observed client address, when available.</param>
+    /// <param name="isp">The server-resolved network provider, when available.</param>
+    /// <param name="payloadJson">The bounded payload used only for the suppression receipt hash.</param>
+    /// <returns><see langword="true"/> when the raw record should be stored.</returns>
     private async Task<bool> ShouldStoreTelemetryAsync(
         LicenseDbContext db,
         Guid? productId,
@@ -904,11 +1045,12 @@ public class TelemetryService
         string eventName,
         string? version,
         TelemetryType type,
+        TelemetryPayloadBacking payloadBacking,
         string? ip,
         string? isp,
         string? payloadJson)
     {
-        if (IsFloodSuppressionExempt(eventName, type))
+        if (IsFloodSuppressionExempt(eventName, type, payloadBacking))
             return true;
 
         if (_settings is null)
@@ -924,7 +1066,7 @@ public class TelemetryService
         var windowStart = FloorToWindow(now, windowMinutes);
         var windowEnd = windowStart.AddMinutes(windowMinutes);
 
-        var rawStoredCount = await db.TelemetryRecords.AsNoTracking().CountAsync(t =>
+        var matchingRecords = db.TelemetryRecords.AsNoTracking().Where(t =>
             t.ProductId == productId
             && t.HardwareId == hardwareId
             && t.EventName == eventName
@@ -932,6 +1074,14 @@ public class TelemetryService
             && t.Type == type
             && t.Timestamp >= windowStart
             && t.Timestamp < windowEnd);
+        matchingRecords = payloadBacking switch
+        {
+            TelemetryPayloadBacking.EventData => matchingRecords.Where(t => t.EventData != null),
+            TelemetryPayloadBacking.DiagnosticData => matchingRecords.Where(t => t.DiagnosticData != null),
+            TelemetryPayloadBacking.ErrorData => matchingRecords.Where(t => t.ErrorData != null),
+            _ => matchingRecords.Where(_ => false)
+        };
+        var rawStoredCount = await matchingRecords.CountAsync();
 
         if (rawStoredCount < threshold)
             return true;
@@ -998,9 +1148,16 @@ public class TelemetryService
         return int.TryParse(raw, out var parsed) ? Math.Clamp(parsed, min, max) : defaultValue;
     }
 
-    private static bool IsFloodSuppressionExempt(string eventName, TelemetryType type)
+    /// <summary>
+    /// Identifies records that must bypass flood suppression. The backing payload distinguishes classic
+    /// errors from event-endpoint rows that resolved to the same persisted type.
+    /// </summary>
+    private static bool IsFloodSuppressionExempt(
+        string eventName,
+        TelemetryType type,
+        TelemetryPayloadBacking payloadBacking)
     {
-        if (type == TelemetryType.Error)
+        if (type == TelemetryType.Error && payloadBacking == TelemetryPayloadBacking.ErrorData)
             return true;
 
         return eventName.Contains("Security", StringComparison.OrdinalIgnoreCase)
@@ -1008,6 +1165,16 @@ public class TelemetryService
             || string.Equals(eventName, "CertPinningFailed", StringComparison.OrdinalIgnoreCase)
             || string.Equals(eventName, "CertPinningRecovered", StringComparison.OrdinalIgnoreCase)
             || string.Equals(eventName, UpdatePreflightFailureAlertService.EventName, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Identifies the specialized relational payload created after the flood decision.
+    /// </summary>
+    private enum TelemetryPayloadBacking
+    {
+        EventData,
+        DiagnosticData,
+        ErrorData
     }
 
     private static DateTime FloorToWindow(DateTime utc, int windowMinutes)

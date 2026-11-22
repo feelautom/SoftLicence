@@ -21,8 +21,7 @@ public sealed class Tkt000217DuplicateBindingReconciliationPostgreSqlTests
         try
         {
             var capturePath = Path.Combine(temporaryDirectory.FullName, "psql-arguments.txt");
-            var fakePsqlPath = Path.Combine(temporaryDirectory.FullName, "psql.cmd");
-            await File.WriteAllTextAsync(fakePsqlPath, "@echo off\r\necho %* > \"%TKT000217_CAPTURE%\"\r\nexit /b 0\r\n");
+            var fakePsqlPath = await CreateFakePsqlAsync(temporaryDirectory.FullName);
 
             var artifactBytes = "real-standard-backup-shape"u8.ToArray();
             var dumpName = $"softlicence_{DateTimeOffset.UtcNow:yyyy-MM-dd_HH-mm-ss-fff}_{Guid.NewGuid():N}.dump";
@@ -52,7 +51,7 @@ public sealed class Tkt000217DuplicateBindingReconciliationPostgreSqlTests
                     "-VerifiedBackupManifestPath", manifestPath,
                     "-VerifiedBackupArtifactPath", artifactPath
                 ],
-                "pwsh.exe");
+                GetPowerShellCoreExecutable());
 
             Assert.True(result.ExitCode == 0,
                 $"pwsh rejected a real standard backup manifest shape. stdout={result.StandardOutput} stderr={result.StandardError}");
@@ -81,6 +80,9 @@ public sealed class Tkt000217DuplicateBindingReconciliationPostgreSqlTests
             System.Text.Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
     }
 
+    /// <summary>
+    /// Verifies dry-run and apply argument forwarding through a platform-native fake psql executable.
+    /// </summary>
     [Fact]
     public async Task PowerShellWrapper_DefaultsToDryRun_AndApplyRequiresCanonicalBackupManifest()
     {
@@ -88,8 +90,7 @@ public sealed class Tkt000217DuplicateBindingReconciliationPostgreSqlTests
         try
         {
             var capturePath = Path.Combine(temporaryDirectory.FullName, "psql-arguments.txt");
-            var fakePsqlPath = Path.Combine(temporaryDirectory.FullName, "psql.cmd");
-            await File.WriteAllTextAsync(fakePsqlPath, "@echo off\r\necho %* > \"%TKT000217_CAPTURE%\"\r\nexit /b 0\r\n");
+            var fakePsqlPath = await CreateFakePsqlAsync(temporaryDirectory.FullName);
 
             var dryRun = await RunWrapperAsync(fakePsqlPath, capturePath);
             Assert.Equal(0, dryRun.ExitCode);
@@ -466,6 +467,9 @@ public sealed class Tkt000217DuplicateBindingReconciliationPostgreSqlTests
         throw new TimeoutException("Expected the reconciliation transaction to wait on the global advisory lock.");
     }
 
+    /// <summary>
+    /// Runs the reconciliation wrapper against the supplied fake psql executable and capture file.
+    /// </summary>
     private static async Task<(int ExitCode, string StandardOutput, string StandardError)> RunWrapperAsync(
         string fakePsqlPath,
         string capturePath,
@@ -483,15 +487,18 @@ public sealed class Tkt000217DuplicateBindingReconciliationPostgreSqlTests
         return await RunWrapperCoreAsync(fakePsqlPath, environment, additionalArguments);
     }
 
+    /// <summary>
+    /// Runs the production wrapper through the requested PowerShell host while preserving exact arguments.
+    /// </summary>
     private static async Task<(int ExitCode, string StandardOutput, string StandardError)> RunWrapperCoreAsync(
         string psqlPath,
         IReadOnlyDictionary<string, string> environment,
         IReadOnlyList<string> additionalArguments,
-        string powerShellExecutable = "powershell.exe")
+        string? powerShellExecutable = null)
     {
         var start = new ProcessStartInfo
         {
-            FileName = powerShellExecutable,
+            FileName = powerShellExecutable ?? GetDefaultPowerShellExecutable(),
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -518,6 +525,33 @@ public sealed class Tkt000217DuplicateBindingReconciliationPostgreSqlTests
         await process.WaitForExitAsync();
         return (process.ExitCode, output, error);
     }
+
+    /// <summary>
+    /// Creates a fake psql command that records its exact argument text on the current operating system.
+    /// </summary>
+    private static async Task<string> CreateFakePsqlAsync(string directory)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var path = Path.Combine(directory, "psql.cmd");
+            await File.WriteAllTextAsync(path, "@echo off\r\necho %* > \"%TKT000217_CAPTURE%\"\r\nexit /b 0\r\n");
+            return path;
+        }
+
+        var unixPath = Path.Combine(directory, "psql");
+        await File.WriteAllTextAsync(unixPath, "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$TKT000217_CAPTURE\"\nexit 0\n");
+        File.SetUnixFileMode(unixPath,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        return unixPath;
+    }
+
+    /// <summary>Returns the Windows PowerShell host on Windows and PowerShell Core elsewhere.</summary>
+    private static string GetDefaultPowerShellExecutable() =>
+        OperatingSystem.IsWindows() ? "powershell.exe" : "pwsh";
+
+    /// <summary>Returns the platform-specific PowerShell Core executable name.</summary>
+    private static string GetPowerShellCoreExecutable() =>
+        OperatingSystem.IsWindows() ? "pwsh.exe" : "pwsh";
 
     private static async Task RunProcessSuccessfullyAsync(string fileName, IReadOnlyList<string> arguments)
     {
@@ -864,40 +898,36 @@ public sealed class Tkt000217DuplicateBindingReconciliationPostgreSqlTests
 
         public static async Task<TestDatabase> CreateAsync()
         {
-            var configured = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES");
-            if (string.IsNullOrWhiteSpace(configured))
+            const string migration = "20260802185000_PartitionAccessLogs";
+            var clone = await PostgreSqlModelDatabase.CloneAsync("tkt217", migration);
+            try
             {
-                throw new InvalidOperationException("SOFTLICENCE_RUNTIME_TEST_POSTGRES is required for PostgreSQL contract tests.");
-            }
-            var maintenance = new NpgsqlConnectionStringBuilder(configured) { Database = "postgres" }.ConnectionString;
-            var databaseName = $"softlicence_tkt000217_{Guid.NewGuid():N}";
-            await using (var connection = new NpgsqlConnection(maintenance))
-            {
+                await using var connection = new NpgsqlConnection(clone.MaintenanceConnectionString);
                 await connection.OpenAsync();
                 var serverVersion = int.Parse(
                     await ScalarAsync<string>(connection, "SHOW server_version_num;"),
                     System.Globalization.CultureInfo.InvariantCulture);
                 Assert.True(serverVersion >= 170000,
                     "TKT-000217 reconciliation tests require PostgreSQL 17.");
-                await using var create = new NpgsqlCommand($"CREATE DATABASE \"{databaseName}\";", connection);
-                await create.ExecuteNonQueryAsync();
+                return new TestDatabase(
+                    clone.MaintenanceConnectionString,
+                    clone.DatabaseName,
+                    clone.ConnectionString);
             }
-            var target = new NpgsqlConnectionStringBuilder(configured) { Database = databaseName }.ConnectionString;
-            var options = new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(target).Options;
-            await using (var db = new LicenseDbContext(options))
+            catch
             {
-                await db.GetService<IMigrator>().MigrateAsync("20260802185000_PartitionAccessLogs");
+                await PostgreSqlModelDatabase.DropAsync(
+                    clone.MaintenanceConnectionString,
+                    clone.DatabaseName);
+                throw;
             }
-            return new TestDatabase(maintenance, databaseName, target);
         }
 
         public async ValueTask DisposeAsync()
         {
-            NpgsqlConnection.ClearAllPools();
+            await PostgreSqlModelDatabase.DropAsync(_maintenanceConnectionString, _databaseName);
             await using var connection = new NpgsqlConnection(_maintenanceConnectionString);
             await connection.OpenAsync();
-            await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{_databaseName}\" WITH (FORCE);", connection);
-            await drop.ExecuteNonQueryAsync();
             if (_operatorRoleName is not null)
             {
                 await using var dropRole = new NpgsqlCommand($"DROP ROLE IF EXISTS \"{_operatorRoleName}\";", connection);

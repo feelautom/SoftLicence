@@ -7,7 +7,11 @@ namespace SoftLicence.SDK
 {
     public class SoftLicenceClient : ISoftLicenceClient
     {
-        private const string SdkVersion = "2.0.0";
+        /// <summary>
+        /// SDK version announced to the server in every request body (diagnostics only, never an authority). Kept equal to
+        /// the version of the next public package, chosen from NuGet and the GitHub tag (DOC-40), not from the project file.
+        /// </summary>
+        private const string SdkVersion = "3.0.0";
         private const string ErrorCodeHeader = "X-SoftLicence-Error-Code";
         private const string CorrelationIdHeader = "X-SoftLicence-Correlation-Id";
         private const string DeviceRefusedServerCode = "DEVICE_REFUSED";
@@ -177,29 +181,89 @@ namespace SoftLicence.SDK
             return CheckStatusCoreAsync(licenseKey, appName, appId, appVersion, authoritativeHardwareId, SystemUuidDerivingTo(authoritativeHardwareId));
         }
 
+        /// <inheritdoc />
+        public Task<LicenseStatusResult> CheckStatusAsync(string licenseKey, string appName, string? appId, string? appVersion, string authoritativeHardwareId, CloneGuardPresentation cloneGuard)
+        {
+            if (cloneGuard == null)
+                throw new ArgumentNullException(nameof(cloneGuard));
+            ValidateAuthoritativeHardwareId(authoritativeHardwareId);
+            return CheckStatusCoreAsync(licenseKey, appName, appId, appVersion, authoritativeHardwareId, SystemUuidDerivingTo(authoritativeHardwareId), cloneGuard);
+        }
+
+        /// <inheritdoc />
+        public Task<LicenseStatusResult> ReactivateCloneGuardAsync(string licenseKey, string appName, string? appId, string? appVersion, string authoritativeHardwareId, string nextToken, string? vmGenerationId)
+        {
+            ValidateAuthoritativeHardwareId(authoritativeHardwareId);
+            if (!CloneGuardPresentation.IsCanonicalToken(nextToken))
+                throw new ArgumentException("The next token must be 43 base64url characters encoding 32 bytes.", nameof(nextToken));
+            if (vmGenerationId != null && !CloneGuardPresentation.IsVmGenerationId(vmGenerationId))
+                throw new ArgumentException("The VM Generation ID must be 32 hexadecimal characters.", nameof(vmGenerationId));
+            // Same identity members as the check (TKT-003615, review 2439): the server applies exactly the check's
+            // refusals, including the machine-identity rule that needs the system UUID and its evidence.
+            var systemUuid = SystemUuidDerivingTo(authoritativeHardwareId);
+            var payload = new Dictionary<string, object?>
+            {
+                ["LicenseKey"] = licenseKey,
+                ["HardwareId"] = authoritativeHardwareId,
+                ["AppName"] = appName,
+                ["AppId"] = appId,
+                ["AppVersion"] = appVersion,
+                ["SystemUuid"] = systemUuid,
+                ["MachineEvidence"] = systemUuid == null ? null : TryCollectEvidence(),
+                ["SdkVersion"] = SdkVersion,
+                ["NextToken"] = nextToken,
+                ["VmGenerationId"] = vmGenerationId
+            }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
+            return PostStatusAsync("/api/activation/clone-guard/reactivate", payload);
+        }
+
         /// <summary>
         /// Sends a status request with the hardware identifier, the system UUID it must derive from, and the machine
         /// evidence. A refused UUID comes back as the logical status <c>DEVICE_REFUSED</c> with a support code.
         /// A <see langword="null"/> <paramref name="systemUuid"/> sends neither the UUID nor the evidence (pre-UUID identifier).
         /// </summary>
-        private async Task<LicenseStatusResult> CheckStatusCoreAsync(string licenseKey, string appName, string? appId, string? appVersion, string hardwareId, string? systemUuid)
+        /// <param name="cloneGuard">
+        /// Optional token pair (TKT-003615), sent as the <c>CloneGuard</c> member with protocol version 1. When absent
+        /// the request body is exactly the historical one.
+        /// </param>
+        private Task<LicenseStatusResult> CheckStatusCoreAsync(string licenseKey, string appName, string? appId, string? appVersion, string hardwareId, string? systemUuid, CloneGuardPresentation? cloneGuard = null)
+        {
+            var payload = new Dictionary<string, object?>
+            {
+                ["LicenseKey"] = licenseKey,
+                ["HardwareId"] = hardwareId,
+                ["AppName"] = appName,
+                ["AppId"] = appId,
+                ["AppVersion"] = appVersion,
+                ["SystemUuid"] = systemUuid,
+                ["MachineEvidence"] = systemUuid == null ? null : TryCollectEvidence(),
+                ["SdkVersion"] = SdkVersion,
+                ["CloneGuard"] = cloneGuard == null ? null : new Dictionary<string, object?>
+                {
+                    ["ProtocolVersion"] = 1,
+                    ["Token"] = cloneGuard.Token,
+                    ["NextToken"] = cloneGuard.NextToken,
+                    ["VmGenerationId"] = cloneGuard.VmGenerationId
+                }
+            }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
+            return PostStatusAsync("/api/activation/check", payload);
+        }
+
+        /// <summary>
+        /// Posts a status-shaped request (check or clone guard reactivation) and maps the answer: 404 to
+        /// <c>NOT_FOUND</c>, 403 to <c>REVOKED</c>, other non-success codes to a failure carrying the server error code
+        /// and correlation headers, and a 200 body to its <c>status</c>, <c>licenseFile</c>, <c>errorMessage</c> and
+        /// optional <c>cloneGuard</c> members. Network failures and timeouts become <see cref="StatusErrorCode.NetworkError"/>
+        /// with no clone guard member, which tells a guarded caller to resend the same pair.
+        /// </summary>
+        /// <param name="path">Server-relative route.</param>
+        /// <param name="payload">Request members; <see langword="null"/> values were already removed.</param>
+        private async Task<LicenseStatusResult> PostStatusAsync(string path, Dictionary<string, object?> payload)
         {
             try
             {
-                var payload = new Dictionary<string, object?>
-                {
-                    ["LicenseKey"] = licenseKey,
-                    ["HardwareId"] = hardwareId,
-                    ["AppName"] = appName,
-                    ["AppId"] = appId,
-                    ["AppVersion"] = appVersion,
-                    ["SystemUuid"] = systemUuid,
-                    ["MachineEvidence"] = systemUuid == null ? null : TryCollectEvidence(),
-                    ["SdkVersion"] = SdkVersion
-                }.Where(kv => kv.Value != null).ToDictionary(kv => kv.Key, kv => kv.Value);
-
                 var content = new StringContent(JsonSerializer.Serialize(payload, PayloadJsonOptions), Encoding.UTF8, "application/json");
-                var response = await _httpClient.PostAsync($"{_serverUrl}/api/activation/check", content);
+                var response = await _httpClient.PostAsync($"{_serverUrl}{path}", content);
 
                 if (response.StatusCode == HttpStatusCode.NotFound)
                 {
@@ -245,7 +309,8 @@ namespace SoftLicence.SDK
                             errorMessage = emProp.GetString();
                         }
 
-                        return LicenseStatusResult.Ok(status, licenseFile, errorMessage);
+                        return LicenseStatusResult.Ok(status, licenseFile, errorMessage)
+                            .WithCloneGuard(ReadCloneGuard(doc.RootElement));
                     }
                 }
 
@@ -259,6 +324,32 @@ namespace SoftLicence.SDK
             {
                 return LicenseStatusResult.Fail(StatusErrorCode.NetworkError, ex.Message);
             }
+        }
+
+        /// <summary>
+        /// Reads the optional <c>cloneGuard</c> member of a status answer, accepting both casings like the other members.
+        /// </summary>
+        /// <param name="root">Answer root object.</param>
+        /// <returns>
+        /// The parsed outcome, or <see langword="null"/> when the member is absent, not an object, or has no string
+        /// <c>outcome</c>: a guarded caller then treats its pair as not applied and resends it.
+        /// </returns>
+        private static CloneGuardOutcome? ReadCloneGuard(JsonElement root)
+        {
+            if (!(root.TryGetProperty("cloneGuard", out var guard) || root.TryGetProperty("CloneGuard", out guard))
+                || guard.ValueKind != JsonValueKind.Object)
+                return null;
+            if (!(guard.TryGetProperty("outcome", out var outcome) || guard.TryGetProperty("Outcome", out outcome))
+                || outcome.ValueKind != JsonValueKind.String)
+                return null;
+            string? reason = null;
+            if ((guard.TryGetProperty("reason", out var reasonProperty) || guard.TryGetProperty("Reason", out reasonProperty))
+                && reasonProperty.ValueKind == JsonValueKind.String)
+                reason = reasonProperty.GetString();
+            var environmentChanged = (guard.TryGetProperty("environmentChanged", out var changed)
+                    || guard.TryGetProperty("EnvironmentChanged", out changed))
+                && changed.ValueKind == JsonValueKind.True;
+            return new CloneGuardOutcome(outcome.GetString()!, reason, environmentChanged);
         }
 
         public (bool IsValid, LicenseModel? License, string ErrorMessage) ValidateLocal(string licenseString, string hardwareId)
@@ -503,9 +594,9 @@ namespace SoftLicence.SDK
             "LICENSE_DISABLED" or "PARTNER_INVALID" or "BANNED" or "COMPONENT_BANNED" => ActivationErrorCode.LicenseDisabled,
             "LICENSE_EXPIRED" => ActivationErrorCode.LicenseExpired,
             "SEAT_LIMIT" or "MAX_DAILY_ACTIVATIONS_REACHED" or "MAX_DAILY_DEACTIVATIONS_REACHED" => ActivationErrorCode.MaxActivationsReached,
-            "VERSION_NOT_ALLOWED" or "UPDATE_REQUIRED" => ActivationErrorCode.VersionNotAllowed,
+            "VERSION_NOT_ALLOWED" or "UPDATE_REQUIRED" or "MACHINE_EVIDENCE_REQUIRED" => ActivationErrorCode.VersionNotAllowed,
             "APP_UNKNOWN" => ActivationErrorCode.AppNotFound,
-            DeviceRefusedServerCode => ActivationErrorCode.DeviceRefused,
+            DeviceRefusedServerCode or "VIRTUAL_MACHINE_NOT_ALLOWED" => ActivationErrorCode.DeviceRefused,
             _ => ActivationErrorCode.ServerError
         };
 

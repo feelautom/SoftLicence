@@ -156,7 +156,7 @@ public sealed class AuditMiddlewareDistributionRedactionTests
         var authentication = new Mock<IDistributionS2SAuthenticationService>();
         authentication.Setup(service => service.AuthenticateAndReserveNonceAsync(
                 It.IsAny<HttpContext>(), It.IsAny<ReadOnlyMemory<byte>>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new DistributionS2SPrincipal(ClientId, "test-key"));
+            .ReturnsAsync(new DistributionS2SPrincipal(ClientId, "test-key", AllowLicenseBootstrap: true));
 
         return new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {

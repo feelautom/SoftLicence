@@ -143,9 +143,12 @@ public sealed partial class HistoricalCommercialOwnershipExclusionPostgreSqlTest
             string.Concat(Enumerable.Repeat("Aa", 32)), providerSubjectId,
             LicenseProvisioningRequest.ProviderAdminApiProvenance);
 
-        // Keep the exact TKT780 schema: only the later generated AuthorityVersion column is absent.
+        // Keep the exact TKT780 schema: the later AuthorityVersion, CommercialNature, AllowPublicTrial (TKT-002466) and TeamEligible (TKT-002717) columns are absent.
         await using (var db = HistoricalSchemaModel.CreateContext(connectionString,
-            [(typeof(SoftLicence.Server.Data.License), nameof(SoftLicence.Server.Data.License.AuthorityVersion))]))
+            [(typeof(SoftLicence.Server.Data.License), nameof(SoftLicence.Server.Data.License.AuthorityVersion)),
+             (typeof(SoftLicence.Server.Data.License), nameof(SoftLicence.Server.Data.License.CommercialNature)),
+             (typeof(SoftLicence.Server.Data.LicenseType), nameof(SoftLicence.Server.Data.LicenseType.AllowPublicTrial)),
+             (typeof(SoftLicence.Server.Data.LicenseType), nameof(SoftLicence.Server.Data.LicenseType.TeamEligible))]))
         {
             Assert.Equal(Tkt780Migration, (await db.Database.GetAppliedMigrationsAsync()).Last());
             db.AddRange(products);
@@ -401,43 +404,20 @@ public sealed partial class HistoricalCommercialOwnershipExclusionPostgreSqlTest
         /// <summary>Gets the isolated application connection string.</summary>
         public string ConnectionString { get; } = connectionString;
 
-        /// <summary>Creates and migrates one isolated database without observing later migrations.</summary>
+        /// <summary>Clones one isolated database from the exact TKT-000780 schema model.</summary>
         /// <returns>A fixture that owns cleanup of the generated database.</returns>
         /// <exception cref="InvalidOperationException">The bounded PostgreSQL test connection is absent.</exception>
         public static async Task<PostgreSqlProvision> CreateAsync()
         {
-            var configured = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES");
-            if (string.IsNullOrWhiteSpace(configured))
-                throw new InvalidOperationException(
-                    "SOFTLICENCE_RUNTIME_TEST_POSTGRES is required for TKT-000781 PostgreSQL tests.");
-
-            var database = "tkt781_negative_inventory_" + Guid.NewGuid().ToString("N");
-            var maintenance = new NpgsqlConnectionStringBuilder(configured) { Database = "postgres" }
-                .ConnectionString;
-            await using (var connection = new NpgsqlConnection(maintenance))
-            {
-                await connection.OpenAsync();
-                await using var command = connection.CreateCommand();
-                command.CommandText = $"CREATE DATABASE \"{database}\"";
-                await command.ExecuteNonQueryAsync();
-            }
-
-            var target = new NpgsqlConnectionStringBuilder(configured) { Database = database }.ConnectionString;
-            var options = new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(target).Options;
-            await using (var db = new LicenseDbContext(options))
-                await db.GetService<IMigrator>().MigrateAsync(Tkt780Migration);
-            return new PostgreSqlProvision(maintenance, target, database);
+            var clone = await PostgreSqlModelDatabase.CloneAsync("ownership_old", Tkt780Migration);
+            return new PostgreSqlProvision(
+                clone.MaintenanceConnectionString,
+                clone.ConnectionString,
+                clone.DatabaseName);
         }
 
-        /// <summary>Forcibly drops only the database created by this fixture after clearing local pools.</summary>
+        /// <summary>Force-drops only the database created by this fixture through an unpooled maintenance connection.</summary>
         public async ValueTask DisposeAsync()
-        {
-            NpgsqlConnection.ClearAllPools();
-            await using var connection = new NpgsqlConnection(maintenanceConnectionString);
-            await connection.OpenAsync();
-            await using var command = connection.CreateCommand();
-            command.CommandText = $"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)";
-            await command.ExecuteNonQueryAsync();
-        }
+            => await PostgreSqlModelDatabase.DropAsync(maintenanceConnectionString, database);
     }
 }

@@ -152,12 +152,19 @@ public sealed class LlmTipFeedbackIntegrationTests : IClassFixture<WebApplicatio
         Assert.False(await db.TelemetryEvents.AnyAsync());
     }
 
+    /// <summary>
+    /// Proves the API path end to end with the real Program.cs registration: the product is mapped through the
+    /// BUGTRACE_LLM_TIP_TIA_PRODUCT_IDS setting, the ticket goes through the T-IA authority (T-IA-Connect project)
+    /// and never the legacy SoftLicence one, and a second call returns the existing ticket (TKT-003093).
+    /// </summary>
     [Fact]
     public async Task AdminConvertToBugTraceEndpoint_CreatesTicketAndMarksTipConverted()
     {
         _fakeBugTrace.SubmittedTickets.Clear();
-        await SeedProductAndAnalyticsKeyAsync("TIAConnect", "llm-feedback-convert-key");
-        var client = _factory.CreateClient();
+        var productId = await SeedProductAndAnalyticsKeyAsync("TIAConnect", "llm-feedback-convert-key");
+        using var routedFactory = _factory.WithWebHostBuilder(builder =>
+            builder.UseSetting(LlmTipBugTraceRouting.TiaProductIdsKey, productId.ToString("D")));
+        var client = routedFactory.CreateClient();
 
         Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/llm-tips-feedback/tips", new
         {
@@ -195,6 +202,18 @@ public sealed class LlmTipFeedbackIntegrationTests : IClassFixture<WebApplicatio
         Assert.Equal("BT-00042", converted.GetProperty("bugTraceTicketRef").GetString());
         Assert.True(converted.GetProperty("created").GetBoolean());
         Assert.Single(_fakeBugTrace.SubmittedTickets);
+        Assert.Single(_fakeBugTrace.SubmittedTiaTickets);
+        Assert.Empty(_fakeBugTrace.LegacySubmittedTickets);
+
+        var replay = await client.PostAsJsonAsync("/api/llm-tips-feedback/admin/tips/convert-to-bugtrace", new
+        {
+            contentHash = "admin-convert-bugtrace-hash"
+        });
+        Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
+        var replayed = await replay.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.False(replayed.GetProperty("created").GetBoolean());
+        Assert.Equal("BT-00042", replayed.GetProperty("bugTraceTicketRef").GetString());
+        Assert.Single(_fakeBugTrace.SubmittedTickets);
 
         var detailResponse = await client.GetAsync("/api/llm-tips-feedback/admin/tips/admin-convert-bugtrace-hash");
         Assert.Equal(HttpStatusCode.OK, detailResponse.StatusCode);
@@ -206,6 +225,49 @@ public sealed class LlmTipFeedbackIntegrationTests : IClassFixture<WebApplicatio
         var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
         Assert.False(await db.TelemetryRecords.AnyAsync());
         Assert.False(await db.TelemetryEvents.AnyAsync());
+    }
+
+    /// <summary>
+    /// TKT-003093: without a configured BugTrace project for the product, the API refuses with 409 and the
+    /// stable code LLM_TIP_BUGTRACE_PROJECT_NOT_CONFIGURED, makes no provider call (no fallback to the legacy
+    /// SoftLicence project) and leaves the tip unconverted.
+    /// </summary>
+    [Fact]
+    public async Task AdminConvertToBugTraceEndpoint_WhenProductHasNoProject_ReturnsConflictWithoutProviderCall()
+    {
+        _fakeBugTrace.SubmittedTickets.Clear();
+        await SeedProductAndAnalyticsKeyAsync("TIAConnect", "llm-feedback-unrouted-key");
+        var client = _factory.CreateClient();
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/api/llm-tips-feedback/tips", new
+        {
+            appName = "TIAConnect",
+            version = "2.2.600",
+            schemaVersion = "1",
+            anonymized = true,
+            contentHash = "admin-unrouted-bugtrace-hash",
+            category = "lad",
+            title = "Unrouted LLM tip",
+            description = "Anonymized product workflow issue.",
+            severity = "warning",
+            confidence = "confirmed",
+            approved = true,
+            upvotes = 1,
+            submittedAt = DateTime.UtcNow.AddMinutes(-1)
+        })).StatusCode);
+
+        client.DefaultRequestHeaders.Add("X-Analytics-Key", "llm-feedback-unrouted-key");
+        var response = await client.PostAsJsonAsync("/api/llm-tips-feedback/admin/tips/convert-to-bugtrace", new
+        {
+            contentHash = "admin-unrouted-bugtrace-hash"
+        });
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("LLM_TIP_BUGTRACE_PROJECT_NOT_CONFIGURED", body.GetProperty("errorCode").GetString());
+        Assert.Empty(_fakeBugTrace.SubmittedTickets);
+        var detail = await (await client.GetAsync("/api/llm-tips-feedback/admin/tips/admin-unrouted-bugtrace-hash"))
+            .Content.ReadFromJsonAsync<JsonElement>();
+        Assert.NotEqual("converted-to-bugtrace", detail.GetProperty("reviewStatus").GetString());
     }
 
     [Fact]

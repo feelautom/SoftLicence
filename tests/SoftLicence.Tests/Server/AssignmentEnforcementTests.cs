@@ -12,27 +12,44 @@ namespace SoftLicence.Tests.Server;
 /// <summary>TKT-001277 lot 2d: environment switch parsing, startup synchronization and grouped alerts.</summary>
 public sealed class AssignmentEnforcementTests
 {
+    /// <summary>
+    /// TKT-001428: closed is the default; only an explicit <c>open</c> opens the switch, and a typo or a
+    /// culture-dependent look-alike (Turkish dotted I) is refused and stays closed.
+    /// </summary>
     [Theory]
-    [InlineData(null, "open", true)]
-    [InlineData("", "open", true)]
-    [InlineData("   ", "open", true)]
+    [InlineData(null, "closed", true)]
+    [InlineData("", "closed", true)]
+    [InlineData("   ", "closed", true)]
     [InlineData("open", "open", true)]
     [InlineData(" OPEN ", "open", true)]
     [InlineData("closed", "closed", true)]
     [InlineData("Closed", "closed", true)]
-    [InlineData("close", "open", false)]
-    [InlineData("true", "open", false)]
-    [InlineData("closİd", "open", false)]
-    public void TryParseMode_AcceptsOnlyOpenAndClosed_DefaultingToOpen(string? raw, string expected, bool valid)
+    [InlineData("close", "closed", false)]
+    [InlineData("true", "closed", false)]
+    [InlineData("opén", "closed", false)]
+    [InlineData("closİd", "closed", false)]
+    public void TryParseMode_AcceptsOnlyOpenAndClosed_DefaultingToClosed(string? raw, string expected, bool valid)
     {
         Assert.Equal(valid, AssignmentEnforcement.TryParseMode(raw, out var mode));
         Assert.Equal(expected, mode);
     }
 
+    /// <summary>
+    /// Proves the startup contract of <see cref="AssignmentEnforcementModeSynchronizer"/> (TKT-001428): it persists
+    /// exactly the canonical mode parsed from <c>SOFTLICENCE_ASSIGNMENT_ENFORCEMENT</c>, stamps the row
+    /// <c>startup:env</c>, and <see cref="AssignmentEnforcement.IsOpenAsync"/> then reads the same position. Only an
+    /// explicit <c>open</c> opens the switch; an absent variable and an invalid value are both written
+    /// <c>closed</c>, so a deployment without the variable or with a typo fails closed and never silently disables
+    /// the controls. The in-memory provider is enough here: no relational semantics are involved, the string is
+    /// parsed in C# and stored as the lowercase constant.
+    /// </summary>
+    /// <param name="raw">Raw environment value, <see langword="null"/> when the variable is absent.</param>
+    /// <param name="expected">Canonical mode that must be persisted and read back.</param>
     [Theory]
     [InlineData("closed", "closed")]
-    [InlineData(null, "open")]
-    [InlineData("bogus", "open")]
+    [InlineData("open", "open")]
+    [InlineData(null, "closed")]
+    [InlineData("bogus", "closed")]
     public async Task Synchronizer_WritesTheEnvironmentValue(string? raw, string expected)
     {
         var factory = CreateFactory();
@@ -50,15 +67,16 @@ public sealed class AssignmentEnforcementTests
         Assert.Equal(expected == "open", await AssignmentEnforcement.IsOpenAsync(db, default));
     }
 
+    /// <summary>TKT-001428: a lost setting row can never silently disable the controls.</summary>
     [Fact]
-    public async Task IsOpen_DefaultsToOpen_WhenTheRowIsMissing()
+    public async Task IsOpen_DefaultsToClosed_WhenTheRowIsMissing()
     {
         var factory = CreateFactory();
         await using var db = await factory.CreateDbContextAsync();
         db.AssignmentEnforcementSettings.RemoveRange(db.AssignmentEnforcementSettings);
         await db.SaveChangesAsync();
 
-        Assert.True(await AssignmentEnforcement.IsOpenAsync(db, default));
+        Assert.False(await AssignmentEnforcement.IsOpenAsync(db, default));
     }
 
     [Fact]

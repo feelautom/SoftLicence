@@ -53,12 +53,19 @@ public class FingerprintService
         _settings = settings;
     }
 
+    /// <summary>
+    /// Creates or updates the fingerprint row of one hardware identifier. The identifier is compared exactly as
+    /// submitted, like the unique index <c>IX_HardwareFingerprints_HardwareId</c>; it is never trimmed or case-folded.
+    /// On PostgreSQL the row is created or updated by one atomic <c>INSERT ... ON CONFLICT DO UPDATE</c>, so two
+    /// concurrent first reports of a new machine no longer raise a unique violation (TKT-001805) and a failure
+    /// leaves no half-written row.
+    /// </summary>
+    /// <param name="hardwareId">Submitted hardware identifier; a null or empty value is ignored.</param>
+    /// <param name="fingerprints">Component hashes keyed by <c>FP_*</c>; absent components keep their stored value.</param>
+    /// <returns>A task that completes when the row is stored.</returns>
     public async Task UpsertFingerprintAsync(string hardwareId, Dictionary<string, string> fingerprints)
     {
         if (string.IsNullOrEmpty(hardwareId) || fingerprints.Count == 0) return;
-
-        using var db = await _dbFactory.CreateDbContextAsync();
-        var existing = await db.HardwareFingerprints.FirstOrDefaultAsync(f => f.HardwareId == hardwareId);
 
         fingerprints.TryGetValue("FP_CPU", out var cpu);
         fingerprints.TryGetValue("FP_MB", out var mb);
@@ -66,6 +73,28 @@ public class FingerprintService
         fingerprints.TryGetValue("FP_DISK", out var disk);
         fingerprints.TryGetValue("FP_HOST", out var host);
 
+        using var db = await _dbFactory.CreateDbContextAsync();
+        if (db.Database.IsNpgsql())
+        {
+            // Same rule as the tracked path below: a reported component replaces the stored one, an absent one is kept.
+            var now = DateTime.UtcNow;
+            await db.Database.ExecuteSqlInterpolatedAsync($"""
+                INSERT INTO "HardwareFingerprints"
+                    ("Id", "HardwareId", "CpuHash", "MotherboardHash", "BiosHash", "DiskHash", "HostHash", "FirstSeenAt", "LastSeenAt")
+                VALUES ({Guid.NewGuid()}, {hardwareId}, {cpu}, {mb}, {bios}, {disk}, {host}, {now}, {now})
+                ON CONFLICT ("HardwareId") DO UPDATE SET
+                    "LastSeenAt" = EXCLUDED."LastSeenAt",
+                    "CpuHash" = COALESCE(EXCLUDED."CpuHash", "HardwareFingerprints"."CpuHash"),
+                    "MotherboardHash" = COALESCE(EXCLUDED."MotherboardHash", "HardwareFingerprints"."MotherboardHash"),
+                    "BiosHash" = COALESCE(EXCLUDED."BiosHash", "HardwareFingerprints"."BiosHash"),
+                    "DiskHash" = COALESCE(EXCLUDED."DiskHash", "HardwareFingerprints"."DiskHash"),
+                    "HostHash" = COALESCE(EXCLUDED."HostHash", "HardwareFingerprints"."HostHash")
+                """);
+            return;
+        }
+
+        // Other providers (in-memory unit tests) have no concurrent writers and keep the tracked read-then-write.
+        var existing = await db.HardwareFingerprints.FirstOrDefaultAsync(f => f.HardwareId == hardwareId);
         if (existing != null)
         {
             existing.LastSeenAt = DateTime.UtcNow;

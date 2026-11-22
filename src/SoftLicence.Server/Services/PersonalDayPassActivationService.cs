@@ -77,12 +77,10 @@ public static class PersonalDayPassActivationService
         if (pass is null)
             return false;
 
+        // TKT-002331 : la période de la clé et la période payée peuvent différer (règle du responsable produit du
+        // 18/10/2026) ; une clé déjà démarrée s'active sur sa propre date de fin, sans comparer le registre.
         if (license.ExpirationDate.HasValue)
-        {
-            if (license.ExpirationDate.Value != pass.PaidThroughUtc)
-                throw new InvalidOperationException("The paid-pass horizon contradicts licence authority.");
             return false;
-        }
         if (!await IsPendingAsync(db, pass, license, cancellationToken))
         {
             throw new InvalidOperationException("The deferred paid-pass authority is inconsistent.");

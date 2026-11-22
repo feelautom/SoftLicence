@@ -84,6 +84,53 @@ public sealed class TelemetryVersionHealthAnalyticsServiceTests
         Assert.Equal(0, stableVersion.ErrorRate);
     }
 
+    /// <summary>
+    /// Verifies that event-backed errors expose their preserved event name as the error type in both
+    /// the cross-version ranking and the matching version summary.
+    /// </summary>
+    [Fact]
+    public async Task GetVersionHealthForProductKeyAsync_HybridErrorsUseEventNameAsErrorType()
+    {
+        var productId = Guid.NewGuid();
+        const string version = "2.4.402";
+        const string eventName = "LicenseActivation_Failed";
+
+        await using (var db = new LicenseDbContext(_dbOptions))
+        {
+            db.Products.Add(new Product
+            {
+                Id = productId,
+                Name = "TIAConnect",
+                PrivateKeyXml = "k",
+                PublicKeyXml = "k",
+                ApiSecret = "hybrid-secret"
+            });
+            db.TelemetryRecords.Add(new TelemetryRecord
+            {
+                ProductId = productId,
+                Timestamp = DateTime.UtcNow,
+                HardwareId = "HW-HYBRID",
+                AppName = "TIAConnect",
+                Version = version,
+                EventName = eventName,
+                Type = TelemetryType.Error,
+                EventData = new TelemetryEvent { PropertiesJson = """{"FailureReason":"InvalidKey"}""" }
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var service = new TelemetryVersionHealthAnalyticsService(_dbFactoryMock.Object, _cache);
+
+        var summary = await service.GetVersionHealthForProductKeyAsync("hybrid-secret");
+
+        Assert.NotNull(summary);
+        Assert.Contains(summary.TopErrorTypes, item => item.Name == eventName && item.Count == 1);
+        var versionSummary = Assert.Single(summary.Versions, item => item.Version == version);
+        Assert.Contains(versionSummary.ErrorTypes, item => item.Name == eventName && item.Count == 1);
+        Assert.DoesNotContain(summary.TopErrorTypes, item => item.Name == "(unknown)");
+        Assert.DoesNotContain(versionSummary.ErrorTypes, item => item.Name == "(unknown)");
+    }
+
     [Fact]
     public async Task GetVersionHealthForProductKeyAsync_RespectsProductIsolation()
     {

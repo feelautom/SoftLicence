@@ -100,7 +100,7 @@ public sealed class TelemetryVersionHealthAnalyticsService
             UniqueDevices = rows.Select(r => r.HardwareId).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
             Versions = versions,
             TopErrorTypes = ToTopCounts(errorRows
-                .Select(r => string.IsNullOrWhiteSpace(r.ErrorType) ? "(unknown)" : r.ErrorType!.Trim()), top),
+                .Select(ResolveErrorType), top),
             TopErrorEvents = ToTopCounts(errorRows
                 .Select(r => string.IsNullOrWhiteSpace(r.EventName) ? "(unknown)" : r.EventName.Trim()), top),
             DailyErrors = errorRows
@@ -133,7 +133,7 @@ public sealed class TelemetryVersionHealthAnalyticsService
                 .Where(r => !string.IsNullOrWhiteSpace(r.EventName))
                 .Select(r => r.EventName.Trim()), top),
             ErrorTypes = ToTopCounts(errorRows
-                .Select(r => string.IsNullOrWhiteSpace(r.ErrorType) ? "(unknown)" : r.ErrorType!.Trim()), top),
+                .Select(ResolveErrorType), top),
             ErrorEvents = ToTopCounts(errorRows
                 .Select(r => string.IsNullOrWhiteSpace(r.EventName) ? "(unknown)" : r.EventName.Trim()), top)
         };
@@ -142,6 +142,20 @@ public sealed class TelemetryVersionHealthAnalyticsService
     private static string NormalizeVersion(string? version)
     {
         return string.IsNullOrWhiteSpace(version) ? UnknownVersion : version.Trim();
+    }
+
+    /// <summary>
+    /// Resolves the analytics label without changing the stored protocol fields. Classic error data is
+    /// authoritative; event-backed errors use their event name, and only a row lacking both becomes unknown.
+    /// </summary>
+    /// <param name="row">The projected error row.</param>
+    /// <returns>The trimmed error label used by global and per-version rankings.</returns>
+    private static string ResolveErrorType(VersionHealthRow row)
+    {
+        if (!string.IsNullOrWhiteSpace(row.ErrorType))
+            return row.ErrorType.Trim();
+
+        return string.IsNullOrWhiteSpace(row.EventName) ? "(unknown)" : row.EventName.Trim();
     }
 
     private static List<TelemetryToolCount> ToTopCounts(IEnumerable<string> values, int top)

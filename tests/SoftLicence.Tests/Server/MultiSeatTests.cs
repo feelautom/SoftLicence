@@ -89,7 +89,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
             var license = await db.Licenses.Include(row => row.Seats).Include(row => row.Type).SingleAsync(row => row.LicenseKey == licenseKey);
             firstActivatedAt = Assert.Single(license.Seats).FirstActivatedAt;
-            Assert.Equal(0, (await SeatChangeQuota.GetStatusAsync(db, license, DateTime.UtcNow)).UsedToday);
+            Assert.Equal(1, (await SeatChangeQuota.GetStatusAsync(db, license, DateTime.UtcNow)).UsedToday);
         }
 
         using var response = await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = "C000000000000002", AppName = "MultiApp" });
@@ -108,7 +108,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
             Assert.Equal(AutomaticSeatSwitch.Source, history.PerformedBy);
             Assert.Contains("C000000000000001 -> C000000000000002", history.Details);
             Assert.Equal(oldSeat.UnlinkedAt, history.Timestamp);
-            Assert.Equal(1, (await SeatChangeQuota.GetStatusAsync(db, license, history.Timestamp)).UsedToday);
+            Assert.Equal(2, (await SeatChangeQuota.GetStatusAsync(db, license, history.Timestamp)).UsedToday);
         }
         using var oldCheck = await client.PostAsJsonAsync("/api/activation/check", new { LicenseKey = licenseKey, HardwareId = "C000000000000001", AppName = "MultiApp" });
         Assert.Equal(HttpStatusCode.OK, oldCheck.StatusCode);
@@ -122,9 +122,13 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.False(string.IsNullOrWhiteSpace(GetString(currentJson.RootElement, "licenseFile")));
     }
 
-    /// <summary>A real first replacement exhausts the configured quota; another PC cannot evict the winner or alter history.</summary>
+    /// <summary>
+    /// TKT-003751 (owner rule), N = 2 read from the type: two different PCs are accepted, a third different PC is
+    /// refused with MAX_DAILY_ACTIVATIONS_REACHED without evicting the current PC or writing history, and coming back
+    /// to a PC already activated today stays accepted and counts nothing more.
+    /// </summary>
     [Fact]
-    public async Task Activate_ShouldRejectAnotherPc_WhenDailyChangeQuotaIsExhausted()
+    public async Task Activate_ShouldRejectThirdPc_WhenDailyLimitOfDifferentPcsIsReached()
     {
         using var client = _factory.CreateClient();
         string licenseKey;
@@ -133,7 +137,7 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
             var license = await CreateLicenseAsync(scope.ServiceProvider, 1);
             licenseKey = license.LicenseKey;
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
-            (await db.LicenseTypes.SingleAsync(row => row.Id == license.LicenseTypeId)).MaxActivationsPerDay = 1;
+            (await db.LicenseTypes.SingleAsync(row => row.Id == license.LicenseTypeId)).MaxActivationsPerDay = 2;
             await db.SaveChangesAsync();
         }
         foreach (var hardware in new[] { "C000000000000001", "C000000000000002" })
@@ -141,36 +145,38 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
             using var accepted = await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = hardware, AppName = "MultiApp" });
             Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
         }
-        Guid historyId;
-        DateTime historyTime;
-        string? historyDetails;
+        int historyCount;
         using (var scope = _factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
             var license = await db.Licenses.Include(row => row.Type).SingleAsync(row => row.LicenseKey == licenseKey);
-            var history = await db.LicenseHistories.SingleAsync(row => row.LicenseId == license.Id && row.Action == HistoryActions.UnlinkedApi);
-            historyId = history.Id;
-            historyTime = history.Timestamp;
-            historyDetails = history.Details;
-            var quota = await SeatChangeQuota.GetStatusAsync(db, license, historyTime);
-            Assert.Equal(1, quota.UsedToday);
-            Assert.Equal(1, quota.Limit);
+            historyCount = await db.LicenseHistories.CountAsync(row => row.LicenseId == license.Id && row.Action == HistoryActions.UnlinkedApi);
+            var quota = await SeatChangeQuota.GetStatusAsync(db, license, DateTime.UtcNow);
+            Assert.Equal(2, quota.UsedToday);
+            Assert.Equal(2, quota.Limit);
             Assert.True(quota.IsExhausted);
         }
-        using var refused = await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = "C000000000000001", AppName = "MultiApp" });
+
+        using var refused = await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = "C000000000000003", AppName = "MultiApp" });
         Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
-        Assert.Equal("MAX_DAILY_DEACTIVATIONS_REACHED", refused.Headers.GetValues("X-SoftLicence-Error-Code").Single());
+        Assert.Equal("MAX_DAILY_ACTIVATIONS_REACHED", refused.Headers.GetValues("X-SoftLicence-Error-Code").Single());
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
+            var retained = await db.Licenses.Include(row => row.Seats).SingleAsync(row => row.LicenseKey == licenseKey);
+            Assert.Equal(2, retained.Seats.Count);
+            Assert.Equal("C000000000000002", Assert.Single(retained.Seats, row => row.IsActive).HardwareId);
+            Assert.Equal(historyCount, await db.LicenseHistories.CountAsync(row => row.LicenseId == retained.Id
+                && row.Action == HistoryActions.UnlinkedApi));
+        }
+
+        using var back = await client.PostAsJsonAsync("/api/activation", new { LicenseKey = licenseKey, HardwareId = "C000000000000001", AppName = "MultiApp" });
+        Assert.Equal(HttpStatusCode.OK, back.StatusCode);
         using var finalScope = _factory.Services.CreateScope();
         var final = finalScope.ServiceProvider.GetRequiredService<LicenseDbContext>();
-        var retained = await final.Licenses.Include(row => row.Seats).Include(row => row.Type).SingleAsync(row => row.LicenseKey == licenseKey);
-        Assert.Equal(2, retained.Seats.Count);
-        Assert.Equal("C000000000000002", Assert.Single(retained.Seats, row => row.IsActive).HardwareId);
-        Assert.False(Assert.Single(retained.Seats, row => row.HardwareId == "C000000000000001").IsActive);
-        var unchanged = await final.LicenseHistories.SingleAsync(row => row.LicenseId == retained.Id && row.Action == HistoryActions.UnlinkedApi);
-        Assert.Equal(historyId, unchanged.Id);
-        Assert.Equal(historyTime, unchanged.Timestamp);
-        Assert.Equal(historyDetails, unchanged.Details);
-        Assert.Equal(1, (await SeatChangeQuota.GetStatusAsync(final, retained, historyTime)).UsedToday);
+        var reloaded = await final.Licenses.Include(row => row.Seats).Include(row => row.Type).SingleAsync(row => row.LicenseKey == licenseKey);
+        Assert.Equal("C000000000000001", Assert.Single(reloaded.Seats, row => row.IsActive).HardwareId);
+        Assert.Equal(2, (await SeatChangeQuota.GetStatusAsync(final, reloaded, DateTime.UtcNow)).UsedToday);
     }
 
     [Fact]
@@ -572,10 +578,20 @@ public class MultiSeatTests : IClassFixture<WebApplicationFactory<Program>>
             var db = scope.ServiceProvider.GetRequiredService<LicenseDbContext>();
             var license = await db.Licenses.Include(l => l.Type).SingleAsync(l => l.Id == licenseId);
             license.Type!.MaxActivationsPerDay = 1;
+            // The limit applies per seat (TKT-002030): two seats at one per day are exhausted by two releases.
             db.LicenseSeats.Add(new LicenseSeat
             {
                 LicenseId = licenseId,
                 HardwareId = "C000000000000025",
+                FirstActivatedAt = DateTime.UtcNow.AddDays(-1),
+                LastCheckInAt = DateTime.UtcNow.AddDays(-1),
+                IsActive = false,
+                UnlinkedAt = DateTime.UtcNow
+            });
+            db.LicenseSeats.Add(new LicenseSeat
+            {
+                LicenseId = licenseId,
+                HardwareId = "C000000000000026",
                 FirstActivatedAt = DateTime.UtcNow.AddDays(-1),
                 LastCheckInAt = DateTime.UtcNow.AddDays(-1),
                 IsActive = false,

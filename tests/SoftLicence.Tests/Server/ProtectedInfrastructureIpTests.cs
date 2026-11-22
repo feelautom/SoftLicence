@@ -66,7 +66,7 @@ public sealed class ProtectedInfrastructureIpTests
         Assert.Null(await db.IpThreatScores.FindAsync(ip));
         Assert.Null(await db.BannedIps.SingleOrDefaultAsync(row => row.IpAddress == ip));
         fixture.Notifier.Verify(n => n.Notify(
-            NotificationService.Triggers.SecurityIpBanned,
+            NotificationService.Triggers.SecurityIpAutoBanned,
             It.IsAny<string>(),
             It.IsAny<string>(),
             It.IsAny<object>()), Times.Never);
@@ -87,7 +87,7 @@ public sealed class ProtectedInfrastructureIpTests
         Assert.True(ban.IsActive);
         Assert.True(await fixture.Service.IsBannedAsync(ordinaryIp));
         fixture.Notifier.Verify(n => n.Notify(
-            NotificationService.Triggers.SecurityIpBanned,
+            NotificationService.Triggers.SecurityIpAutoBanned,
             It.IsAny<string>(),
             It.IsAny<string>(),
             It.IsAny<object>()), Times.Once);

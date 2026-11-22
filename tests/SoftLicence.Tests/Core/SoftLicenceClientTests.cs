@@ -81,6 +81,11 @@ public class SoftLicenceClientTests : IDisposable
         Assert.Contains("\"AppId\":\"APP-GUID-123\"", capturedPayload);
     }
 
+    /// <summary>
+    /// The activation body carries the identifier derived from the (faked) system UUID, the raw UUID, the machine
+    /// evidence (UUID status, BIOS serial source) and the announced SDK version (3.0.0 since TKT-003615 and TKT-004065), and none of
+    /// the legacy pre-2.0 identity members. The server's UUID rule and minimum-SDK check rely on exactly these members.
+    /// </summary>
     [Fact]
     public async Task ActivateAsync_SendsUuidDerivedIdentifier_SystemUuid_AndEvidence()
     {
@@ -103,7 +108,7 @@ public class SoftLicenceClientTests : IDisposable
         var evidence = root.GetProperty("MachineEvidence");
         Assert.Equal("Present", evidence.GetProperty("SystemUuid").GetProperty("Status").GetString());
         Assert.Equal("Win32_BIOS.SerialNumber", evidence.GetProperty("BiosSerial").GetProperty("Value").GetString());
-        Assert.Equal("2.0.0", root.GetProperty("SdkVersion").GetString());
+        Assert.Equal("3.0.0", root.GetProperty("SdkVersion").GetString());
         Assert.False(root.TryGetProperty("HardwareIdV2", out _));
         Assert.False(root.TryGetProperty("HardwareIdAlgorithm", out _));
         Assert.False(root.TryGetProperty("ComponentFingerprints", out _));
@@ -166,7 +171,7 @@ public class SoftLicenceClientTests : IDisposable
         Assert.Equal("A6D3ABCD1234EF90", document.RootElement.GetProperty("HardwareId").GetString());
         Assert.False(document.RootElement.TryGetProperty("SystemUuid", out _));
         Assert.False(document.RootElement.TryGetProperty("MachineEvidence", out _));
-        Assert.Equal("2.0.0", document.RootElement.GetProperty("SdkVersion").GetString());
+        Assert.Equal("3.0.0", document.RootElement.GetProperty("SdkVersion").GetString());
         Assert.False(document.RootElement.TryGetProperty("ComponentFingerprints", out _));
     }
 
@@ -528,6 +533,11 @@ public class SoftLicenceClientTests : IDisposable
         Assert.Contains("\"AppVersion\":\"1.1.91\"", capturedPayload);
     }
 
+    /// <summary>
+    /// The status check body carries the UUID-derived identifier, the raw UUID, machine evidence and the announced SDK
+    /// version (3.0.0 since TKT-003615 and TKT-004065), without the legacy <c>HardwareIdV2</c>. The historical overload sends no
+    /// <c>CloneGuard</c> member, which keeps the server answer unchanged for installed versions.
+    /// </summary>
     [Fact]
     public async Task CheckStatusAsync_SendsUuidDerivedIdentifier_AndSystemUuid()
     {
@@ -548,8 +558,42 @@ public class SoftLicenceClientTests : IDisposable
         Assert.Equal(MachineIdentity.FromUuid(TestUuid).HardwareId, root.GetProperty("HardwareId").GetString());
         Assert.Equal(TestUuid, root.GetProperty("SystemUuid").GetString());
         Assert.True(root.TryGetProperty("MachineEvidence", out _));
-        Assert.Equal("2.0.0", root.GetProperty("SdkVersion").GetString());
+        Assert.Equal("3.0.0", root.GetProperty("SdkVersion").GetString());
         Assert.False(root.TryGetProperty("HardwareIdV2", out _));
+    }
+
+    /// <summary>
+    /// TKT-003615, review 2439: the clone guard reactivation sends the same identity as the status check (UUID-derived
+    /// identifier, raw UUID, machine evidence, SDK version) so that the server can apply the same machine-identity
+    /// refusal, plus the next token, to the reactivation route.
+    /// </summary>
+    [Fact]
+    public async Task ReactivateCloneGuardAsync_SendsTheCheckIdentity_SystemUuidAndEvidence()
+    {
+        string? capturedPayload = null;
+        string? capturedPath = null;
+        var handler = new MockHttpMessageHandler(request =>
+        {
+            capturedPayload = request.Content?.ReadAsStringAsync().Result;
+            capturedPath = request.RequestUri?.AbsolutePath;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"status\":\"VALID\"}", Encoding.UTF8, "application/json")
+            };
+        });
+        var hardwareId = MachineIdentity.FromUuid(TestUuid).HardwareId!;
+        var next = CloneGuardPresentation.GenerateToken();
+
+        await CreateClient(handler).ReactivateCloneGuardAsync("KEY-123", "TestApp", null, null, hardwareId, next, null);
+
+        using var doc = JsonDocument.Parse(capturedPayload!);
+        var root = doc.RootElement;
+        Assert.Equal("/api/activation/clone-guard/reactivate", capturedPath);
+        Assert.Equal(hardwareId, root.GetProperty("HardwareId").GetString());
+        Assert.Equal(TestUuid, root.GetProperty("SystemUuid").GetString());
+        Assert.True(root.TryGetProperty("MachineEvidence", out _));
+        Assert.Equal("3.0.0", root.GetProperty("SdkVersion").GetString());
+        Assert.Equal(next, root.GetProperty("NextToken").GetString());
     }
 
     [Fact]

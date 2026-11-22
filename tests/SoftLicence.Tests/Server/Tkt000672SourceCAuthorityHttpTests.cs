@@ -22,7 +22,7 @@ namespace SoftLicence.Tests.Server;
 /// <summary>Proves production absence, explicit test registration, gates, and exact safe HTTP serialization.</summary>
 public sealed class Tkt000672SourceCAuthorityHttpTests
 {
-    /// <summary>Preserves production controllers while excluding unrelated historical test controllers.</summary>
+    /// <summary>Preserves production controllers, verifies the retired offline action is absent, and excludes unrelated test controllers.</summary>
     [Fact]
     public void TestApplication_DiscoversProductionAndOnlySourceCTestController()
     {
@@ -31,7 +31,7 @@ public sealed class Tkt000672SourceCAuthorityHttpTests
         var feature = new ControllerFeature();
         manager.PopulateFeature(feature);
         Assert.Contains(typeof(SoftLicence.Server.Controllers.ActivationController).GetTypeInfo(), feature.Controllers);
-        Assert.DoesNotContain(typeof(SoftLicence.Server.Controllers.Tkt976BaselineActivationController).GetTypeInfo(), feature.Controllers);
+        Assert.Null(typeof(SoftLicence.Server.Controllers.ActivationController).GetMethod("ActivateOffline"));
         Assert.Equal(
             [typeof(Tkt000672SourceCAuthorityController).GetTypeInfo()],
             feature.Controllers.Where(type => type.Assembly == typeof(Tkt000672SourceCAuthorityController).Assembly).ToArray());

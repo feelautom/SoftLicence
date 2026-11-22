@@ -114,6 +114,17 @@ public sealed partial class RuntimeEnrollmentService
             var commercial = await RuntimeCommercialEligibilityValidator.AssessAsync(
                 db, enrollment, approved.Binaries, now, report.HardwareId, cancellationToken);
             var hardwareBanned = commercial.ReportHardwareBanned;
+            SecurityLockReleaseDecision? rememberedRelease = null;
+            if (!hardwareBanned
+                && commercial.IsEligible
+                && commercial.ReportHardwareLinked
+                && commercial.Assignment is not null
+                && row?.AdminDecision != SecurityLockAdminDecisions.Ban)
+            {
+                rememberedRelease = await SecurityLockRememberedReleaseStore.FindActiveAsync(
+                    db, enrollment.ProductId, commercial.Assignment.LicenseId,
+                    commercial.Assignment.HardwareId, report.Cause, cancellationToken);
+            }
             var configuredMode = await db.SecurityLockEnforcementPolicies.AsNoTracking()
                 .Where(policy => policy.ProductId == enrollment.ProductId && policy.Cause == report.Cause)
                 .Select(policy => policy.Mode)
@@ -126,10 +137,15 @@ public sealed partial class RuntimeEnrollmentService
                  ("lock-report-credential", preflight.EnrollmentId.ToString("D"), 30),
                  ("lock-report-ip", PseudonymizeAddress(clientAddress), 30),
                  ("lock-report-global", "all", 600)], cancellationToken);
-            var currentDecision = SecurityLockVerdictPolicy.ApplyAuthorityBoundary(
-                SecurityLockVerdictPolicy.Decide(new SecurityLockDecisionInput(
-                    report.Cause, report.Level, effectiveMode, row?.AdminDecision, hardwareBanned, openCriticalIncident)),
-                commercial.IsEligible, commercial.ReportHardwareLinked, hardwareBanned);
+            var explicitUnban = !hardwareBanned
+                && string.Equals(row?.AdminDecision, SecurityLockAdminDecisions.Unban, StringComparison.Ordinal);
+            var currentDecision = rememberedRelease is null && !explicitUnban
+                ? SecurityLockVerdictPolicy.ApplyAuthorityBoundary(
+                    SecurityLockVerdictPolicy.Decide(new SecurityLockDecisionInput(
+                        report.Cause, report.Level, effectiveMode, row?.AdminDecision,
+                        hardwareBanned, openCriticalIncident)),
+                    commercial.IsEligible, commercial.ReportHardwareLinked, hardwareBanned)
+                : new SecurityLockDecision(SecurityLockVerdicts.Release, SecurityLockReportStates.Released);
             if (row is not null && currentDecision.Verdict == SecurityLockVerdicts.Ban && !hardwareBanned
                 && row.LinkStatus is not (SecurityLockReportLinkStatuses.VerifiedSeat
                     or SecurityLockReportLinkStatuses.VerifiedAlias))
@@ -137,7 +153,7 @@ public sealed partial class RuntimeEnrollmentService
                     SecurityLockReportStates.Open);
 
             var jti = validatedProof.Jti.ToString("D");
-            var existingNonce = await db.SecurityLockReportNonces.AsNoTracking()
+            var existingNonce = await db.SecurityLockReportNonces
                 .SingleOrDefaultAsync(nonce => nonce.EnrollmentId == enrollment.Id && nonce.Jti == jti, cancellationToken);
             if (existingNonce != null)
             {
@@ -146,6 +162,17 @@ public sealed partial class RuntimeEnrollmentService
                     throw Conflict("proof_replay");
                 var stored = JsonSerializer.Deserialize<SecurityLockVerdictResponse>(existingNonce.ResponseJson, JsonOptions)
                     ?? throw new RuntimeEnrollmentException("authority_unavailable", StatusCodes.Status503ServiceUnavailable);
+                if (explicitUnban && string.Equals(stored.Verdict, SecurityLockVerdicts.Ban, StringComparison.Ordinal))
+                {
+                    var releasedReplay = _canaryAck.CreateSecurityLockVerdict(
+                        enrollment.Id, report, SecurityLockVerdicts.Release, now);
+                    var releasedJson = JsonSerializer.Serialize(releasedReplay, JsonOptions);
+                    existingNonce.ResponseJson = releasedJson;
+                    await db.SaveChangesAsync(cancellationToken);
+                    await lease.CommitAsync(cancellationToken);
+                    return new RuntimeEnrollmentOperationResult<SecurityLockVerdictResponse>(
+                        releasedReplay, true, Encoding.UTF8.GetBytes(releasedJson));
+                }
                 if (!SecurityLockVerdictPolicy.ReplayRemainsSafe(stored.Verdict, currentDecision.Verdict))
                     throw Conflict("stale_verdict");
                 await lease.CommitAsync(cancellationToken);
@@ -186,11 +213,15 @@ public sealed partial class RuntimeEnrollmentService
                 ? row.LinkStatus is SecurityLockReportLinkStatuses.VerifiedSeat
                     or SecurityLockReportLinkStatuses.VerifiedAlias
                 : commercial.ReportHardwareLinked;
-            var decision = SecurityLockVerdictPolicy.ApplyAuthorityBoundary(
-                SecurityLockVerdictPolicy.Decide(new SecurityLockDecisionInput(
-                    report.Cause, report.Level, effectiveMode, row.AdminDecision,
-                    hardwareBanned, openCriticalIncident)),
-                commercial.IsEligible, linkAtDecision, hardwareBanned);
+            var decision = rememberedRelease is null
+                && !(string.Equals(row.AdminDecision, SecurityLockAdminDecisions.Unban, StringComparison.Ordinal)
+                    && !hardwareBanned)
+                ? SecurityLockVerdictPolicy.ApplyAuthorityBoundary(
+                    SecurityLockVerdictPolicy.Decide(new SecurityLockDecisionInput(
+                        report.Cause, report.Level, effectiveMode, row.AdminDecision,
+                        hardwareBanned, openCriticalIncident)),
+                    commercial.IsEligible, linkAtDecision, hardwareBanned)
+                : new SecurityLockDecision(SecurityLockVerdicts.Release, SecurityLockReportStates.Released);
             // A legacy or originally unlinked lock cannot gain an irreversible ban merely
             // because a mutable seat later acquired the reported identifier.
             if (decision.Verdict == SecurityLockVerdicts.Ban && !hardwareBanned
@@ -203,6 +234,11 @@ public sealed partial class RuntimeEnrollmentService
             row.ReportCount += 1;
             row.State = decision.State;
             row.LastVerdict = decision.Verdict;
+            if (rememberedRelease is not null)
+            {
+                row.RememberedReleaseDecisionId = rememberedRelease.Id;
+                SecurityLockRememberedReleaseStore.RecordCoverage(rememberedRelease, now.UtcDateTime);
+            }
 
             if (string.Equals(decision.Verdict, SecurityLockVerdicts.Ban, StringComparison.Ordinal) && !hardwareBanned)
             {
@@ -223,7 +259,9 @@ public sealed partial class RuntimeEnrollmentService
                 ExpiresAtUtc = now.AddHours(_options.ProofNonceRetentionHours).UtcDateTime
             });
             var newBan = string.Equals(decision.Verdict, SecurityLockVerdicts.Ban, StringComparison.Ordinal) && !hardwareBanned;
-            if (newBan || (isNewLock && SecurityLockAlertPolicy.ShouldAlertNewLock(report.Cause, report.Level, decision.Verdict)))
+            if (rememberedRelease is null
+                && (newBan || (isNewLock
+                    && SecurityLockAlertPolicy.ShouldAlertNewLock(report.Cause, report.Level, decision.Verdict))))
             {
                 await SecurityLockAlertOutboxProcessor.StageAsync(
                     db, row, newBan, clientAddress?.ToString(), now.UtcDateTime, cancellationToken);

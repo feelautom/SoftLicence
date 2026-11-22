@@ -151,6 +151,39 @@ public sealed class SecurityLockAlertOutboxTests : IAsyncDisposable
         Assert.Equal(0, handler.CallCount);
     }
 
+    /// <summary>
+    /// TKT-003668: an ntfy target receives the level-based priority (5 for level 5 or a new ban, 4 for levels 3 and
+    /// 4), and a delivery whose report row is missing is still sent, with the priority given by the ban flag only.
+    /// </summary>
+    /// <param name="reportLevel">Level of the seeded report, or <see langword="null"/> to seed no report.</param>
+    /// <param name="newBan">Ban flag of the delivery.</param>
+    /// <param name="expectedPriority">Priority expected in the ntfy query string.</param>
+    [Theory]
+    [InlineData(5, false, "5")]
+    [InlineData(4, false, "4")]
+    [InlineData(3, false, "4")]
+    [InlineData(3, true, "5")]
+    [InlineData(null, false, "4")]
+    [InlineData(null, true, "5")]
+    public async Task NtfyWebhook_UsesLevelBasedPriority(int? reportLevel, bool newBan, string expectedPriority)
+    {
+        string? priority = null;
+        var handler = new RecordingHandler(request =>
+        {
+            priority = System.Web.HttpUtility.ParseQueryString(request.RequestUri!.Query)["priority"];
+            return new HttpResponseMessage(HttpStatusCode.OK);
+        });
+        var id = await SeedDeliveryAsync("WEBHOOK", "https://ntfy.example.invalid/alerts",
+            reportLevel: reportLevel, newBan: newBan);
+
+        Assert.Equal(1, await CreateProcessor(handler).ProcessPendingAsync());
+
+        await using var db = await _dbFactory.CreateDbContextAsync();
+        Assert.Equal(SecurityLockAlertDeliveryStates.Sent,
+            (await db.SecurityLockAlertDeliveries.SingleAsync(row => row.Id == id)).State);
+        Assert.Equal(expectedPriority, priority);
+    }
+
     private SecurityLockAlertOutboxProcessor CreateProcessor(RecordingHandler handler) => new(
         _dbFactory,
         new TestHttpClientFactory(handler),
@@ -164,15 +197,43 @@ public sealed class SecurityLockAlertOutboxTests : IAsyncDisposable
         string channel,
         string target,
         string state = SecurityLockAlertDeliveryStates.Pending,
-        DateTime? leaseExpiresUtc = null)
+        DateTime? leaseExpiresUtc = null,
+        int? reportLevel = null,
+        bool newBan = false)
     {
         var id = Guid.NewGuid();
+        var reportId = Guid.NewGuid();
         var now = _time.GetUtcNow().UtcDateTime;
         await using var db = await _dbFactory.CreateDbContextAsync();
+        // Most cases need no report row (the dossier is frozen in the delivery); the priority cases seed one level.
+        if (reportLevel is int level)
+            db.SecurityLockReports.Add(new SecurityLockReport
+            {
+                Id = reportId,
+                ProductId = Guid.NewGuid(),
+                EnrollmentId = Guid.NewGuid(),
+                BindingId = Guid.NewGuid(),
+                InstallationId = "installation",
+                HardwareId = "F32ED1455D865823",
+                AppVersion = "2.5.63",
+                LockId = new string('0', 32),
+                Cause = "DEBUGGER_ATTACHED_KERNEL",
+                Level = level,
+                ClientMode = "ENFORCE",
+                EffectiveMode = "ENFORCE",
+                EvidenceDigestSha256 = new string('a', 64),
+                FirstSeenUtc = now,
+                FirstReportedUtc = now,
+                LastReportedUtc = now,
+                ReportCount = 1,
+                State = "OPEN",
+                LastVerdict = "MAINTAIN"
+            });
         db.SecurityLockAlertDeliveries.Add(new SecurityLockAlertDelivery
         {
             Id = id,
-            SecurityLockReportId = Guid.NewGuid(),
+            SecurityLockReportId = reportId,
+            NewBan = newBan,
             Channel = channel,
             Target = target,
             TargetDigestSha256 = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(target))),

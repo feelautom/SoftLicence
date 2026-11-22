@@ -61,6 +61,37 @@ public sealed class SoftLicenceMcpToolCatalogTests
         Assert.Contains(toolMethods, method => ToSnakeCase(method.Name) == "get_security_hardware_ban_categories");
     }
 
+    /// <summary>Ensures the TKT-002685 threat-score tools keep their published MCP names.</summary>
+    [Fact]
+    public void ThreatScoreTools_UseExpectedPublishedNames()
+    {
+        var toolMethods = typeof(SoftLicenceAnalyticsTools)
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+            .Where(method => method.GetCustomAttribute<McpServerToolAttribute>() is not null)
+            .ToArray();
+
+        Assert.Contains(toolMethods, method => ToSnakeCase(method.Name) == "list_ip_threat_scores");
+        Assert.Contains(toolMethods, method => ToSnakeCase(method.Name) == "reset_ip_threat_score");
+    }
+
+    /// <summary>Ensures the five TKT-001838 lot-one tools keep their published MCP names.</summary>
+    [Fact]
+    public void SecurityLockAdministrationTools_UseExpectedPublishedNames()
+    {
+        var publishedNames = typeof(SoftLicenceAnalyticsTools)
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+            .Where(method => method.GetCustomAttribute<McpServerToolAttribute>() is not null)
+            .Select(method => ToSnakeCase(method.Name))
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.Contains("list_security_locks", publishedNames);
+        Assert.Contains("get_security_lock", publishedNames);
+        Assert.Contains("decide_security_lock", publishedNames);
+        Assert.Contains("unban_security_lock", publishedNames);
+        Assert.Contains("list_security_lock_release_decisions", publishedNames);
+        Assert.Contains("revoke_security_lock_release_decision", publishedNames);
+    }
+
     [Fact]
     public void CustomerLicenseTimelineTool_UsesExpectedPublishedName()
     {

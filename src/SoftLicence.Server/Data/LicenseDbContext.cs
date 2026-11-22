@@ -13,6 +13,53 @@ namespace SoftLicence.Server.Data
             _logger = logger;
         }
 
+        /// <inheritdoc/>
+        /// <remarks>Stamps seat activations first (see <see cref="StampSeatActivations"/>).</remarks>
+        public override int SaveChanges(bool acceptAllChangesOnSuccess)
+        {
+            StampSeatActivations();
+            return base.SaveChanges(acceptAllChangesOnSuccess);
+        }
+
+        /// <inheritdoc/>
+        /// <remarks>Stamps seat activations first (see <see cref="StampSeatActivations"/>).</remarks>
+        public override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+        {
+            StampSeatActivations();
+            return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+        }
+
+        /// <summary>
+        /// TKT-003751: sets <see cref="LicenseSeat.LastActivatedAt"/> to the current UTC time on every seat that
+        /// becomes active in this save: added active, changed from inactive to active, or active with a changed
+        /// hardware identifier (in-place migration). Doing it here, not in each admission path, guarantees that no
+        /// path (key, WebSetup, Runtime, transfer, migration, administrator) can forget the stamp the daily hardware
+        /// quota counts. An added seat whose caller already set the column keeps it (fixtures replaying history);
+        /// releases and check-ins of an already active seat leave it unchanged. Every seat write goes through EF:
+        /// no SQL function inserts or reactivates seats.
+        /// </summary>
+        private void StampSeatActivations()
+        {
+            ChangeTracker.DetectChanges();
+            var now = DateTime.UtcNow;
+            foreach (var entry in ChangeTracker.Entries<LicenseSeat>())
+            {
+                var seat = entry.Entity;
+                if (!seat.IsActive)
+                    continue;
+                var becameActive = entry.State switch
+                {
+                    EntityState.Added => seat.LastActivatedAt is null,
+                    EntityState.Modified => !entry.Property(row => row.IsActive).OriginalValue
+                        || entry.Property(row => row.HardwareId).IsModified
+                            && !string.Equals(entry.Property(row => row.HardwareId).OriginalValue, seat.HardwareId, StringComparison.Ordinal),
+                    _ => false
+                };
+                if (becameActive)
+                    seat.LastActivatedAt = now;
+            }
+        }
+
         public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
         {
             try
@@ -30,7 +77,7 @@ namespace SoftLicence.Server.Data
                         .Select(p => $"{p.Metadata.Name}={p.CurrentValue}")
                         .FirstOrDefault() ?? "?";
 
-                    var msg = $"[CONCURRENCY] Entity={entityType} PK={primaryKey} State={state} — row missing or modified";
+                    var msg = $"[CONCURRENCY] Entity={entityType} PK={primaryKey} State={state}: row missing or modified";
                     _logger?.LogError(msg);
                     Console.Error.WriteLine(msg);
                 }
@@ -76,6 +123,10 @@ namespace SoftLicence.Server.Data
         public DbSet<AdminUser> AdminUsers { get; set; }
         public DbSet<LicenseTypeCustomParam> LicenseTypeCustomParams { get; set; }
         public DbSet<IpThreatScore> IpThreatScores { get; set; }
+        /// <summary>Append-only journal of operator threat-score resets (TKT-002685).</summary>
+        public DbSet<IpThreatScoreReset> IpThreatScoreResets { get; set; }
+        /// <summary>Journal of licence-type changes applied through the analytics write route (TKT-002781).</summary>
+        public DbSet<LicenseTypeChangeAudit> LicenseTypeChangeAudits { get; set; }
         public DbSet<ProductWebhook> ProductWebhooks { get; set; }
         public DbSet<PiracySuspect> PiracySuspects { get; set; }
         public DbSet<BannedHardwareId> BannedHardwareIds { get; set; }
@@ -87,11 +138,21 @@ namespace SoftLicence.Server.Data
         public DbSet<CanaryAlert> CanaryAlerts { get; set; }
         public DbSet<SecurityIncident> SecurityIncidents { get; set; }
         public DbSet<SecurityIncidentEvidence> SecurityIncidentEvidence { get; set; }
+        /// <summary>Gets the counted application starts of per-hardware ApprovedBinaries incidents (TKT-003674).</summary>
+        public DbSet<SecurityIncidentObservation> SecurityIncidentObservations { get; set; }
         public DbSet<ApprovedBinary> ApprovedBinaries { get; set; }
         public DbSet<ApprovedBinaryRegistration> ApprovedBinaryRegistrations { get; set; }
         public DbSet<DistributionS2SNonce> DistributionS2SNonces { get; set; }
         /// <summary>Gets provider-owned portal-deactivation idempotency terminals.</summary>
         public DbSet<PortalDeactivationOperation> PortalDeactivationOperations { get; set; }
+        /// <summary>Gets the TKT-002919 account relink ledger: proof row while pending, frozen response once completed.</summary>
+        public DbSet<RuntimeAccountRelinkRequest> RuntimeAccountRelinkRequests { get; set; }
+        /// <summary>Gets optional per-license key-activation settings; absent rows keep the default behavior.</summary>
+        public DbSet<LicenseKeyActivationSetting> LicenseKeyActivationSettings { get; set; }
+        /// <summary>Gets one frozen key-activation-setting terminal per request UUID, for exact replay.</summary>
+        public DbSet<LicenseKeyActivationOperation> LicenseKeyActivationOperations { get; set; }
+        /// <summary>Gets licence-scoped machine exclusions; a commercial admission refusal, never a security ban.</summary>
+        public DbSet<LicenseHardwareExclusion> LicenseHardwareExclusions { get; set; }
         public DbSet<DistributionBindingRequest> DistributionBindingRequests { get; set; }
         public DbSet<DistributionInstallationBinding> DistributionInstallationBindings { get; set; }
         public DbSet<DistributionBindingInvalidation> DistributionBindingInvalidations { get; set; }
@@ -122,6 +183,7 @@ namespace SoftLicence.Server.Data
         public DbSet<SecurityLockReport> SecurityLockReports { get; set; }
         public DbSet<SecurityLockReportNonce> SecurityLockReportNonces { get; set; }
         public DbSet<SecurityLockEnforcementPolicy> SecurityLockEnforcementPolicies { get; set; }
+        public DbSet<SecurityLockReleaseDecision> SecurityLockReleaseDecisions { get; set; }
         /// <summary>Gets durable per-channel security-lock alert deliveries.</summary>
         public DbSet<SecurityLockAlertDelivery> SecurityLockAlertDeliveries { get; set; }
         public DbSet<RuntimeMilestoneSession> RuntimeMilestoneSessions { get; set; }
@@ -171,14 +233,25 @@ namespace SoftLicence.Server.Data
         public DbSet<AnalyticsApiKey> AnalyticsApiKeys { get; set; }
         public DbSet<LlmTipFeedbackEvent> LlmTipFeedbackEvents { get; set; }
         public DbSet<LlmTipFeedbackTip> LlmTipFeedbackTips { get; set; }
+
+        /// <summary>Append-only journal of the decisions publishing or retracting a tip for every client (TKT-003574).</summary>
+        public DbSet<LlmTipFeedbackSharingDecision> LlmTipFeedbackSharingDecisions { get; set; }
         /// <summary>Gets or sets authenticated, license-scoped legacy identity aliases whose live authority graph is revalidated on every use.</summary>
         public DbSet<HardwareAuthorityAlias> HardwareAuthorityAliases { get; set; }
 
+        /// <summary>Gets or sets the single-use control token state of each guarded seat (TKT-003615).</summary>
+        public DbSet<SeatCloneGuard> SeatCloneGuards { get; set; }
+
+        /// <summary>Gets or sets the append-only clone guard journal; its REACTIVATED rows count in the daily quota (TKT-003615).</summary>
+        public DbSet<SeatCloneGuardEvent> SeatCloneGuardEvents { get; set; }
+
         /// <inheritdoc />
         /// <summary>Configures entity ownership and constraints, including additive paid-pass evidence, nullable decision lookup columns and exact-key deduplication; legacy null rows remain independent and no data is backfilled.</summary>
+        /// <summary>Maps existing authority and append-only V2 purchase identity, using PostgreSQL ordinal uniqueness without backfill.</summary>
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
             ConfigurePersonalDayPass(modelBuilder);
+            CommercialEvidenceMapping.Configure(modelBuilder, Database.IsNpgsql());
             // The database trigger rotates this token for all writers, including older deployments.
             // It is not a global EF concurrency token: conditional callers explicitly compare it
             // under a row lock, leaving unrelated legacy update contracts unchanged.
@@ -205,7 +278,7 @@ namespace SoftLicence.Server.Data
                 .HasForeignKey(l => l.ProductId)
                 .OnDelete(DeleteBehavior.Restrict); // Protection : On ne supprime pas un produit s'il a des licences
 
-            // LicenseType appartient à un produit — slug unique par produit
+            // LicenseType appartient à un produit, slug unique par produit
             modelBuilder.Entity<LicenseType>()
                 .HasOne(t => t.Product)
                 .WithMany(p => p.LicenseTypes)
@@ -270,16 +343,170 @@ namespace SoftLicence.Server.Data
                             : "length(\"HardwareId\") BETWEEN 5 AND 200");
                     table.HasCheckConstraint(
                         "CK_PortalDeactivationOperations_Reason",
-                        "\"Reason\" IN ('settings_button', 'subscription_termination', 'uninstall')");
+                        "\"Reason\" IN ('settings_button', 'subscription_termination', 'uninstall', 'provider_authority_release')");
                     table.HasCheckConstraint(
                         "CK_PortalDeactivationOperations_Outcome",
                         "\"Outcome\" IN ('deactivated', 'already_inactive')");
                 });
             });
 
+            // TKT-002919: account relink ledger. The PENDING row is the database-side proof revalidated by the
+            // relink writer; COMPLETED rows freeze the response for idempotent replay and are purged after 30 days.
+            modelBuilder.Entity<RuntimeAccountRelinkRequest>(entity =>
+            {
+                entity.HasKey(row => row.Id);
+                entity.Property(row => row.Id).ValueGeneratedNever();
+                entity.Property(row => row.AuthenticatedClientId).HasMaxLength(64).IsRequired();
+                entity.Property(row => row.EnrollmentClientId).HasMaxLength(64).IsRequired();
+                entity.Property(row => row.BodyDigestSha256).HasMaxLength(64).IsRequired();
+                entity.Property(row => row.SubjectRefDigestSha256).HasMaxLength(64).IsRequired();
+                entity.Property(row => row.State).HasMaxLength(16).IsRequired();
+                entity.Property(row => row.ResponseBody).HasMaxLength(1024);
+                // TKT-003753: closed attestation value, compared ordinally; see RuntimeAccountRelinkRequest.
+                entity.Property(row => row.OwnerAttestation).HasMaxLength(64);
+                entity.HasIndex(row => new { row.AuthenticatedClientId, row.RequestId }).IsUnique();
+                entity.HasIndex(row => row.EnrollmentId);
+                entity.HasIndex(row => row.CompletedAtUtc);
+                entity.HasOne<RuntimeEnrollment>()
+                    .WithMany()
+                    .HasForeignKey(row => row.EnrollmentId)
+                    .OnDelete(DeleteBehavior.Cascade);
+                entity.ToTable(table =>
+                {
+                    // TKT-003753: the attestation is either absent or the single frozen value, and only without an
+                    // owner, so the relink writer can trust the row as the website's statement.
+                    table.HasCheckConstraint("CK_RuntimeAccountRelinkRequests_OwnerAttestation",
+                        "\"OwnerAttestation\" IS NULL OR (\"OwnerAttestation\" = 'website_same_account_v1' AND \"OwnerSubjectId\" IS NULL)");
+                    table.HasCheckConstraint("CK_RuntimeAccountRelinkRequests_State",
+                        "(\"State\" = 'PENDING' AND \"ResponseBody\" IS NULL AND \"CompletedAtUtc\" IS NULL)"
+                        + " OR (\"State\" = 'COMPLETED' AND \"ResponseBody\" IS NOT NULL AND \"CompletedAtUtc\" IS NOT NULL)");
+                    table.HasCheckConstraint("CK_RuntimeAccountRelinkRequests_Digests",
+                        Database.IsNpgsql()
+                            ? "\"BodyDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"SubjectRefDigestSha256\" ~ '^[0-9a-f]{64}$'"
+                            : "length(\"BodyDigestSha256\") = 64 AND length(\"SubjectRefDigestSha256\") = 64");
+                    table.HasCheckConstraint("CK_RuntimeAccountRelinkRequests_ClientIds",
+                        Database.IsNpgsql()
+                            ? "\"AuthenticatedClientId\" ~ '^[a-z0-9][a-z0-9._-]{2,63}$'"
+                              + " AND \"EnrollmentClientId\" ~ '^[a-z0-9][a-z0-9._-]{2,63}$'"
+                              + " AND \"AuthenticatedClientId\" <> \"EnrollmentClientId\""
+                            : "length(\"AuthenticatedClientId\") BETWEEN 3 AND 64 AND length(\"EnrollmentClientId\") BETWEEN 3 AND 64");
+                });
+            });
+
             modelBuilder.Entity<HardwareAuthorityAlias>()
                 .HasIndex(alias => new { alias.LicenseId, alias.LegacyHardwareIdSha256 })
                 .IsUnique();
+            modelBuilder.Entity<LicenseKeyActivationSetting>(entity =>
+            {
+                entity.ToTable("LicenseKeyActivationSettings");
+                entity.HasKey(setting => setting.Id);
+                entity.Property(setting => setting.Id).ValueGeneratedNever();
+                entity.HasIndex(setting => setting.LicenseId).IsUnique();
+                entity.HasIndex(setting => setting.DisabledByRequestId).IsUnique();
+                entity.HasIndex(setting => setting.LiftedByRequestId).IsUnique();
+                entity.Property(setting => setting.DisabledByActor).HasMaxLength(16).IsRequired();
+                entity.Property(setting => setting.LiftedByActor).HasMaxLength(16);
+                entity.Property(setting => setting.DisabledByClientId).HasMaxLength(64).IsRequired();
+                entity.Property(setting => setting.LiftedByClientId).HasMaxLength(64);
+                entity.HasOne<License>()
+                    .WithMany()
+                    .HasForeignKey(setting => new { setting.ProductId, setting.LicenseId })
+                    .HasPrincipalKey(license => new { license.ProductId, license.Id })
+                    .OnDelete(DeleteBehavior.Restrict);
+                entity.ToTable(table =>
+                {
+                    table.HasCheckConstraint(
+                        "CK_LicenseKeyActivationSettings_Actors",
+                        "\"DisabledByActor\" IN ('s2s', 'admin') "
+                        + "AND (\"LiftedByActor\" IS NULL OR \"LiftedByActor\" IN ('s2s', 'admin'))");
+                    table.HasCheckConstraint(
+                        "CK_LicenseKeyActivationSettings_ClientIds",
+                        "(\"DisabledByClientId\" = 'admin' OR \"DisabledByClientId\" ~ '^[a-z0-9][a-z0-9._-]{2,63}$') "
+                        + "AND (\"LiftedByClientId\" IS NULL OR \"LiftedByClientId\" = 'admin' "
+                        + "OR \"LiftedByClientId\" ~ '^[a-z0-9][a-z0-9._-]{2,63}$')");
+                    table.HasCheckConstraint(
+                        "CK_LicenseKeyActivationSettings_Shape",
+                        "(\"Disabled\" = TRUE AND \"LiftedAtUtc\" IS NULL AND \"LiftedByRequestId\" IS NULL "
+                        + "AND \"LiftedByActor\" IS NULL AND \"LiftedByClientId\" IS NULL) "
+                        + "OR (\"Disabled\" = FALSE AND \"LiftedAtUtc\" IS NOT NULL AND \"LiftedByRequestId\" IS NOT NULL "
+                        + "AND \"LiftedByActor\" IS NOT NULL AND \"LiftedByClientId\" IS NOT NULL)");
+                });
+            });
+
+            modelBuilder.Entity<LicenseKeyActivationOperation>(entity =>
+            {
+                entity.ToTable("LicenseKeyActivationOperations");
+                entity.HasKey(operation => operation.RequestId);
+                entity.Property(operation => operation.RequestId).ValueGeneratedNever();
+                entity.Property(operation => operation.Intent).HasMaxLength(16).IsRequired();
+                entity.Property(operation => operation.Outcome).HasMaxLength(32).IsRequired();
+                entity.Property(operation => operation.Actor).HasMaxLength(16).IsRequired();
+                entity.Property(operation => operation.ClientId).HasMaxLength(64).IsRequired();
+                entity.HasIndex(operation => operation.LicenseId);
+                entity.HasOne<License>()
+                    .WithMany()
+                    .HasForeignKey(operation => new { operation.ProductId, operation.LicenseId })
+                    .HasPrincipalKey(license => new { license.ProductId, license.Id })
+                    .OnDelete(DeleteBehavior.Restrict);
+                entity.ToTable(table =>
+                {
+                    table.HasCheckConstraint(
+                        "CK_LicenseKeyActivationOperations_IntentOutcome",
+                        "(\"Intent\" = 'disable' AND \"Outcome\" IN ('disabled', 'already_disabled')) "
+                        + "OR (\"Intent\" = 'lift' AND \"Outcome\" IN ('lifted', 'already_lifted'))");
+                    table.HasCheckConstraint(
+                        "CK_LicenseKeyActivationOperations_Actor",
+                        "\"Actor\" IN ('s2s', 'admin')");
+                });
+            });
+
+            modelBuilder.Entity<LicenseHardwareExclusion>(entity =>
+            {
+                entity.HasKey(exclusion => exclusion.Id);
+                entity.Property(exclusion => exclusion.Id).ValueGeneratedNever();
+                entity.Property(exclusion => exclusion.HardwareId).HasMaxLength(16).IsRequired();
+                entity.Property(exclusion => exclusion.CreatedByClientId).HasMaxLength(64).IsRequired();
+                entity.Property(exclusion => exclusion.CreatedByRequestFingerprintSha256).HasMaxLength(64).IsRequired();
+                entity.Property(exclusion => exclusion.Actor).HasMaxLength(16).IsRequired();
+                entity.Property(exclusion => exclusion.LiftedByClientId).HasMaxLength(64);
+                entity.Property(exclusion => exclusion.LiftedByActor).HasMaxLength(16);
+                entity.Property(exclusion => exclusion.ReleaseOutcome).HasMaxLength(32).IsRequired();
+                entity.HasIndex(exclusion => exclusion.CreatedByRequestId).IsUnique();
+                entity.HasIndex(exclusion => exclusion.LicenseId);
+                entity.HasIndex(exclusion => new { exclusion.LicenseId, exclusion.HardwareId })
+                    .IsUnique()
+                    .HasFilter("\"LiftedAtUtc\" IS NULL");
+                entity.HasIndex(exclusion => exclusion.LiftedByRequestId)
+                    .IsUnique()
+                    .HasFilter("\"LiftedByRequestId\" IS NOT NULL");
+                entity.HasOne<License>()
+                    .WithMany()
+                    .HasForeignKey(exclusion => new { exclusion.ProductId, exclusion.LicenseId })
+                    .HasPrincipalKey(license => new { license.ProductId, license.Id })
+                    .OnDelete(DeleteBehavior.Restrict);
+                entity.ToTable(table =>
+                {
+                    table.HasCheckConstraint(
+                        "CK_LicenseHardwareExclusions_HardwareId",
+                        Database.IsNpgsql()
+                            ? "\"HardwareId\" ~ '^[0-9A-F]{16}$'"
+                            : "length(\"HardwareId\") = 16");
+                    table.HasCheckConstraint(
+                        "CK_LicenseHardwareExclusions_Actor",
+                        "\"Actor\" IN ('s2s', 'admin')");
+                    table.HasCheckConstraint(
+                        "CK_LicenseHardwareExclusions_LiftedByActor",
+                        "\"LiftedByActor\" IS NULL OR \"LiftedByActor\" IN ('s2s', 'admin')");
+                    table.HasCheckConstraint(
+                        "CK_LicenseHardwareExclusions_RequestFingerprintSha256",
+                        Database.IsNpgsql()
+                            ? "length(\"CreatedByRequestFingerprintSha256\") = 64 AND \"CreatedByRequestFingerprintSha256\" ~ '^[0-9a-f]{64}$'"
+                            : "length(\"CreatedByRequestFingerprintSha256\") = 64");
+                    table.HasCheckConstraint(
+                        "CK_LicenseHardwareExclusions_ReleaseOutcome",
+                        "\"ReleaseOutcome\" IN ('deactivated', 'already_inactive', 'none')");
+                });
+            });
             modelBuilder.Entity<HardwareAuthorityAlias>()
                 .HasIndex(alias => new { alias.ProductId, alias.LegacyHardwareIdSha256 });
             modelBuilder.Entity<HardwareAuthorityAlias>()
@@ -351,6 +578,12 @@ namespace SoftLicence.Server.Data
 
             modelBuilder.Entity<AccessLog>()
                 .HasIndex(a => a.ClientIp);
+
+            modelBuilder.Entity<IpThreatScoreReset>()
+                .HasIndex(r => new { r.IpAddress, r.ResetAtUtc });
+
+            modelBuilder.Entity<LicenseTypeChangeAudit>()
+                .HasIndex(r => new { r.ProductId, r.AppliedAtUtc });
 
             modelBuilder.Entity<AccessLog>()
                 .HasIndex(a => a.Timestamp);
@@ -605,7 +838,7 @@ namespace SoftLicence.Server.Data
             modelBuilder.Entity<LicenseHistory>().HasIndex(h => h.DecisionResolvedHardwareId);
             modelBuilder.Entity<LicenseHistory>().HasIndex(h => h.DecisionCorrelatedHardwareId);
 
-            // Paramètres personnalisés par type de licence — clé unique par type
+            // Paramètres personnalisés par type de licence, clé unique par type
             modelBuilder.Entity<LicenseTypeCustomParam>()
                 .HasOne(p => p.LicenseType)
                 .WithMany(t => t.CustomParams)
@@ -694,6 +927,61 @@ namespace SoftLicence.Server.Data
                 .HasForeignKey(e => e.SecurityIncidentId)
                 .OnDelete(DeleteBehavior.Cascade);
 
+            // TKT-003674: security evidence must outlive the licence it was attached to, so deleting the licence
+            // clears the link instead of cascading to the incident.
+            modelBuilder.Entity<SecurityIncident>()
+                .HasOne(i => i.License)
+                .WithMany()
+                .HasForeignKey(i => i.LicenseId)
+                .OnDelete(DeleteBehavior.SetNull);
+
+            // TKT-003615: one guard per seat (the unique index is what makes concurrent arming atomic through
+            // INSERT ... ON CONFLICT), token digests stored as exact 32-byte bytea, and a closed event vocabulary.
+            modelBuilder.Entity<SeatCloneGuard>(entity =>
+            {
+                entity.HasIndex(guard => guard.LicenseSeatId).IsUnique();
+                entity.HasOne(guard => guard.LicenseSeat)
+                    .WithMany()
+                    .HasForeignKey(guard => guard.LicenseSeatId)
+                    .OnDelete(DeleteBehavior.Restrict);
+                entity.ToTable(table =>
+                {
+                    table.HasCheckConstraint(
+                        "CK_SeatCloneGuards_CurrentTokenHash",
+                        Database.IsNpgsql() ? "octet_length(\"CurrentTokenHash\") = 32" : "length(\"CurrentTokenHash\") = 32");
+                    table.HasCheckConstraint(
+                        "CK_SeatCloneGuards_PreviousTokenHash",
+                        Database.IsNpgsql()
+                            ? "\"PreviousTokenHash\" IS NULL OR octet_length(\"PreviousTokenHash\") = 32"
+                            : "\"PreviousTokenHash\" IS NULL OR length(\"PreviousTokenHash\") = 32");
+                });
+            });
+
+            // TKT-003615: the daily quota counts REACTIVATED rows of a licence inside one UTC day, and the alert counts
+            // the events of one seat inside 24 hours; both reads are served by these two indexes.
+            modelBuilder.Entity<SeatCloneGuardEvent>(entity =>
+            {
+                entity.HasIndex(row => new { row.LicenseId, row.Kind, row.OccurredAt });
+                entity.HasIndex(row => new { row.LicenseSeatId, row.OccurredAt });
+                entity.HasOne<LicenseSeat>()
+                    .WithMany()
+                    .HasForeignKey(row => row.LicenseSeatId)
+                    .OnDelete(DeleteBehavior.Restrict);
+                entity.ToTable(table => table.HasCheckConstraint(
+                    "CK_SeatCloneGuardEvents_Kind",
+                    "\"Kind\" IN (" + string.Join(", ", SeatCloneGuardEventKinds.All.Select(kind => "'" + kind + "'")) + ")"));
+            });
+
+            // TKT-003674: the alert threshold counts the starts of one incident inside a time window.
+            modelBuilder.Entity<SecurityIncidentObservation>()
+                .HasIndex(o => new { o.SecurityIncidentId, o.ObservedAtUtc });
+
+            modelBuilder.Entity<SecurityIncidentObservation>()
+                .HasOne(o => o.SecurityIncident)
+                .WithMany(i => i.Observations)
+                .HasForeignKey(o => o.SecurityIncidentId)
+                .OnDelete(DeleteBehavior.Cascade);
+
             // Webhooks télémétrie par produit
             modelBuilder.Entity<ProductWebhook>()
                 .HasOne(w => w.Product)
@@ -701,7 +989,7 @@ namespace SoftLicence.Server.Data
                 .HasForeignKey(w => w.ProductId)
                 .OnDelete(DeleteBehavior.Cascade);
 
-            // Hashes binaires approuvés — clé unique par produit+version+clé
+            // Hashes binaires approuvés, clé unique par produit+version+clé
             modelBuilder.Entity<ApprovedBinary>()
                 .HasIndex(b => new { b.ProductId, b.Version, b.Key })
                 .IsUnique();
@@ -1221,7 +1509,7 @@ namespace SoftLicence.Server.Data
                     table.HasCheckConstraint("CK_RuntimeEnrollmentProofNonces_ResponseKeyPurpose",
                         "\"ResponseKeyPurpose\" = 'encryption'");
                     table.HasCheckConstraint("CK_RuntimeEnrollmentProofNonces_Operation",
-                        "\"Operation\" IN ('confirm', 'capability', 'critical-recovery-refetch', 'milestone', 'upgrade', 'rollback', 'websetup-upgrade', 'hardware-authority-migration')");
+                        "\"Operation\" IN ('confirm', 'capability', 'critical-recovery-refetch', 'milestone', 'upgrade', 'rollback', 'websetup-upgrade', 'hardware-authority-migration', 'account-relink')");
                 });
 
             modelBuilder.Entity<RuntimeEnrollmentProofNonce>()
@@ -1293,6 +1581,8 @@ namespace SoftLicence.Server.Data
                     .HasForeignKey(report => report.LinkLicenseSeatId).OnDelete(DeleteBehavior.Restrict);
                 entity.HasOne<HardwareAuthorityAlias>().WithMany()
                     .HasForeignKey(report => report.LinkAliasId).OnDelete(DeleteBehavior.Restrict);
+                entity.HasOne<SecurityLockReleaseDecision>().WithMany()
+                    .HasForeignKey(report => report.RememberedReleaseDecisionId).OnDelete(DeleteBehavior.Restrict);
                 entity.ToTable(table =>
                 {
                     // PostgreSQL repeats this shape rule in the hand-written trigger migration.
@@ -1303,20 +1593,44 @@ namespace SoftLicence.Server.Data
                         OR ("LinkStatus" = 'VERIFIED_ALIAS' AND "LinkVerifiedAtUtc" IS NOT NULL AND "LinkAssignmentId" IS NOT NULL AND "LinkLicenseSeatId" IS NOT NULL AND "LinkAliasId" IS NOT NULL AND "LinkReasonCode" IS NULL)
                         """.ReplaceLineEndings("\n")); // The migration snapshot stores LF; a CRLF checkout must not change the model.
                     table.HasCheckConstraint("CK_SecurityLockReports_BanDecision",
-                        "\"State\" <> 'BANNED' OR \"AdminDecision\" IS DISTINCT FROM 'RELEASE'");
+                        "\"State\" <> 'BANNED' OR \"AdminDecision\" IS NULL OR \"AdminDecision\" = 'BAN'");
                     table.HasCheckConstraint("CK_SecurityLockReports_Level", "\"Level\" BETWEEN 0 AND 5");
                     table.HasCheckConstraint("CK_SecurityLockReports_State",
                         "\"State\" IN ('OPEN', 'RELEASED', 'BANNED')");
                     table.HasCheckConstraint("CK_SecurityLockReports_LastVerdict",
                         "\"LastVerdict\" IN ('MAINTAIN', 'RELEASE', 'BAN')");
                     table.HasCheckConstraint("CK_SecurityLockReports_AdminDecision",
-                        "\"AdminDecision\" IS NULL OR \"AdminDecision\" IN ('RELEASE', 'BAN')");
+                        "\"AdminDecision\" IS NULL OR \"AdminDecision\" IN ('RELEASE', 'BAN', 'UNBAN')");
                     table.HasCheckConstraint("CK_SecurityLockReports_Modes",
                         "\"ClientMode\" IN ('NOT_APPLICABLE', 'SHADOW', 'REVIEW', 'ENFORCE') AND \"EffectiveMode\" IN ('NOT_APPLICABLE', 'SHADOW', 'REVIEW', 'ENFORCE')");
                     table.HasCheckConstraint("CK_SecurityLockReports_CanonicalIds",
                         Database.IsNpgsql()
                             ? "\"LockId\" ~ '^[0-9a-f]{32}$' AND \"EvidenceDigestSha256\" ~ '^[0-9a-f]{64}$' AND \"Cause\" ~ '^[A-Z][A-Z0-9_]*$' AND \"HardwareId\" ~ '^[A-Z0-9_.-]+$'"
                             : "length(\"LockId\") = 32 AND length(\"EvidenceDigestSha256\") = 64");
+                });
+            });
+
+            modelBuilder.Entity<SecurityLockReleaseDecision>(entity =>
+            {
+                entity.HasIndex(decision => new
+                    { decision.ProductId, decision.LicenseId, decision.HardwareId, decision.Cause })
+                    .IsUnique();
+                entity.HasOne<Product>().WithMany().HasForeignKey(decision => decision.ProductId)
+                    .OnDelete(DeleteBehavior.Restrict);
+                entity.HasOne<License>().WithMany()
+                    .HasForeignKey(decision => new { decision.ProductId, decision.LicenseId })
+                    .HasPrincipalKey(license => new { license.ProductId, license.Id })
+                    .OnDelete(DeleteBehavior.Restrict)
+                    .HasConstraintName("FK_SLRD_Licenses_ProductId_LicenseId");
+                entity.HasOne<SecurityLockReport>().WithMany()
+                    .HasForeignKey(decision => decision.SourceSecurityLockReportId)
+                    .OnDelete(DeleteBehavior.Restrict);
+                entity.ToTable(table =>
+                {
+                    table.HasCheckConstraint("CK_SecurityLockReleaseDecisions_Lifecycle",
+                        "(\"IsActive\" AND \"RevokedAtUtc\" IS NULL AND \"RevokedBy\" IS NULL) OR (NOT \"IsActive\" AND \"RevokedAtUtc\" IS NOT NULL AND \"RevokedBy\" IS NOT NULL)");
+                    table.HasCheckConstraint("CK_SecurityLockReleaseDecisions_Counts",
+                        "\"ActivationCount\" >= 1 AND \"CoveredDetectionCount\" >= 0 AND ((\"CoveredDetectionCount\" = 0 AND \"LastCoveredAtUtc\" IS NULL) OR (\"CoveredDetectionCount\" > 0 AND \"LastCoveredAtUtc\" IS NOT NULL))");
                 });
             });
 
@@ -1436,6 +1750,12 @@ namespace SoftLicence.Server.Data
                 .OnDelete(DeleteBehavior.Restrict);
 
             modelBuilder.Entity<RuntimeCriticalIncident>()
+                .HasOne<SecurityLockReleaseDecision>()
+                .WithMany()
+                .HasForeignKey(incident => incident.RememberedReleaseDecisionId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            modelBuilder.Entity<RuntimeCriticalIncident>()
                 .HasOne<DistributionInstallationBinding>()
                 .WithMany()
                 .HasForeignKey(incident => incident.BindingId)
@@ -1465,11 +1785,11 @@ namespace SoftLicence.Server.Data
                 .ToTable(table =>
                 {
                     table.HasCheckConstraint("CK_RuntimeCriticalIncidents_State",
-                        "\"State\" IN ('OPEN', 'RESOLVED')");
+                        "\"State\" IN ('OPEN', 'RESOLVED', 'WAIVED')");
                     table.HasCheckConstraint("CK_RuntimeCriticalIncidents_Epochs",
                         "\"OpenedSecurityEpoch\" >= 1 AND (\"RecoveredSecurityEpoch\" IS NULL OR \"RecoveredSecurityEpoch\" >= \"OpenedSecurityEpoch\" + 1)");
                     table.HasCheckConstraint("CK_RuntimeCriticalIncidents_Resolution",
-                        "(\"State\" = 'OPEN' AND \"RecoveryId\" IS NULL AND \"RecoveredSecurityEpoch\" IS NULL AND \"RecoveredAuthorityEpoch\" IS NULL AND \"RecoveredAtUtc\" IS NULL) OR (\"State\" = 'RESOLVED' AND \"RecoveryId\" IS NOT NULL AND \"RecoveredSecurityEpoch\" IS NOT NULL AND \"RecoveredAuthorityEpoch\" IS NOT NULL AND \"RecoveredAtUtc\" IS NOT NULL)");
+                        "(\"State\" = 'OPEN' AND \"RecoveryId\" IS NULL AND \"RecoveredSecurityEpoch\" IS NULL AND \"RecoveredAuthorityEpoch\" IS NULL AND \"RecoveredAtUtc\" IS NULL AND \"NonBlockingReason\" IS NULL AND \"RememberedReleaseDecisionId\" IS NULL) OR (\"State\" = 'RESOLVED' AND \"RecoveryId\" IS NOT NULL AND \"RecoveredSecurityEpoch\" IS NOT NULL AND \"RecoveredAuthorityEpoch\" IS NOT NULL AND \"RecoveredAtUtc\" IS NOT NULL AND \"NonBlockingReason\" IS NULL AND \"RememberedReleaseDecisionId\" IS NULL) OR (\"State\" = 'WAIVED' AND \"RecoveryId\" IS NULL AND \"RecoveredSecurityEpoch\" IS NULL AND \"RecoveredAuthorityEpoch\" IS NULL AND \"RecoveredAtUtc\" IS NULL AND ((\"NonBlockingReason\" = 'REMEMBERED_RELEASE' AND \"RememberedReleaseDecisionId\" IS NOT NULL) OR (\"NonBlockingReason\" = 'MODE_SHADOW' AND \"RememberedReleaseDecisionId\" IS NULL)))");
                 });
 
             modelBuilder.Entity<RuntimeCriticalRecovery>()
@@ -1504,6 +1824,12 @@ namespace SoftLicence.Server.Data
                 .OnDelete(DeleteBehavior.Restrict);
 
             modelBuilder.Entity<RuntimeCriticalRecovery>()
+                .HasOne<SecurityLockReport>()
+                .WithMany()
+                .HasForeignKey(recovery => recovery.SecurityLockReportId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            modelBuilder.Entity<RuntimeCriticalRecovery>()
                 .HasIndex(recovery => new
                 {
                     recovery.BindingId,
@@ -1519,6 +1845,8 @@ namespace SoftLicence.Server.Data
                         "\"OldSecurityEpoch\" >= 1 AND \"NewSecurityEpoch\" = \"OldSecurityEpoch\" + 1");
                     table.HasCheckConstraint("CK_RuntimeCriticalRecoveries_IncidentCount",
                         "\"ResolvedIncidentCount\" >= 1");
+                    table.HasCheckConstraint("CK_RuntimeCriticalRecoveries_Source",
+                        "(\"Source\" = 'S2S' AND \"SecurityLockReportId\" IS NULL AND \"RecoveredByAdmin\" IS NULL) OR (\"Source\" IN ('ADMIN_RELEASE', 'ADMIN_UNBAN') AND \"SecurityLockReportId\" IS NOT NULL AND \"RecoveredByAdmin\" IS NOT NULL)");
                 });
 
             modelBuilder.Entity<RuntimeCriticalRecoveryReceipt>()
@@ -2327,6 +2655,33 @@ namespace SoftLicence.Server.Data
                 .WithMany()
                 .HasForeignKey(t => t.ProductId)
                 .OnDelete(DeleteBehavior.SetNull);
+
+            // TKT-003574: the public read route selects the shared tips of one product.
+            modelBuilder.Entity<LlmTipFeedbackTip>()
+                .HasIndex(t => new { t.ProductId, t.SharedWithClients });
+
+            // TKT-003574: append-only sharing journal. RESTRICT keeps the history if someone tries to delete a tip;
+            // the CHECK constraints close the action and channel lists and forbid a retraction without a reason.
+            modelBuilder.Entity<LlmTipFeedbackSharingDecision>(entity =>
+            {
+                entity.HasIndex(d => new { d.TipId, d.DecidedAtUtc });
+                entity.HasOne(d => d.Tip)
+                    .WithMany()
+                    .HasForeignKey(d => d.TipId)
+                    .OnDelete(DeleteBehavior.Restrict);
+                entity.ToTable(table =>
+                {
+                    table.HasCheckConstraint(
+                        "CK_LlmTipFeedbackSharingDecisions_Action",
+                        "\"Action\" IN ('shared', 'retracted')");
+                    table.HasCheckConstraint(
+                        "CK_LlmTipFeedbackSharingDecisions_Channel",
+                        "\"Channel\" IN ('admin-ui', 'api', 'mcp')");
+                    table.HasCheckConstraint(
+                        "CK_LlmTipFeedbackSharingDecisions_RetractionReason",
+                        "\"Action\" <> 'retracted' OR (\"Reason\" IS NOT NULL AND length(trim(\"Reason\")) > 0)");
+                });
+            });
         }
         /// <summary>
         /// Maps additive paid-pass tables with scoped restrictive foreign keys, ordinal provider strings

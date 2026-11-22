@@ -412,6 +412,10 @@
         else selectedTriggers.Remove(trigger);
     }
 
+    /// <summary>
+    /// Creates a webhook from the form. Requires a name, a URL and at least one trigger, and refuses a subscription
+    /// that mixes noise triggers with other triggers (TKT-003668); a refusal is shown as a toast and saves nothing.
+    /// </summary>
     private async Task CreateWebhook()
     {
         if (string.IsNullOrWhiteSpace(newHookName) || string.IsNullOrWhiteSpace(newHookUrl))
@@ -421,6 +425,10 @@
         if (!selectedTriggers.Any())
         {
             Toast.ShowError("Sélectionnez au moins un déclencheur."); return;
+        }
+        if (NotificationService.MixesNoiseWithAlerts(selectedTriggers))
+        {
+            Toast.ShowError(NoiseMixRefusal); return;
         }
 
         var hook = new Webhook 
@@ -449,8 +457,25 @@
         hook.EnabledEvents = string.Join(",", events);
     }
 
+    /// <summary>
+    /// Refusal shown when a webhook would mix routine noise with real alerts (TKT-003668): noise must go to its own
+    /// destination (for ntfy, its own topic) so that it can never bury an alert.
+    /// </summary>
+    private const string NoiseMixRefusal =
+        "Les déclencheurs « Bruit » doivent avoir leur propre webhook (un sujet ntfy séparé), sans aucun autre déclencheur.";
+
+    /// <summary>
+    /// Persists the trigger list edited in place for one webhook and leaves edit mode. Refuses, without saving and
+    /// while staying in edit mode, a list that mixes noise triggers with other triggers (TKT-003668).
+    /// </summary>
+    /// <param name="hook">Webhook whose <see cref="Webhook.EnabledEvents"/> was edited in memory.</param>
     private async Task SaveEditWebhook(Webhook hook)
     {
+        if (NotificationService.MixesNoiseWithAlerts((hook.EnabledEvents ?? "").Split(',')))
+        {
+            Toast.ShowError(NoiseMixRefusal);
+            return;
+        }
         using var db = await DbFactory.CreateDbContextAsync();
         db.Attach(hook);
         db.Entry(hook).State = EntityState.Modified;

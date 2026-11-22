@@ -46,6 +46,23 @@ public interface IHardwareAuthorityAliasResolver
         HardwareAuthorityResolutionIntent intent,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Resolves the persisted seat identities linked to one active canonical alias. The result is
+    /// read-only seat identification: it grants no authority and never creates a new machine.
+    /// </summary>
+    /// <param name="authorityDb">Database context whose active transaction owns the consuming mutation.</param>
+    /// <param name="productId">Exact product boundary.</param>
+    /// <param name="licenseId">Exact licence boundary.</param>
+    /// <param name="submittedCanonicalHardwareId">Canonical identifier submitted to the mutation.</param>
+    /// <param name="cancellationToken">Cancels the bounded database read.</param>
+    /// <returns>The bounded, distinct hardware identities stored on linked licence seats.</returns>
+    Task<IReadOnlyList<string>> ResolveStoredSeatHardwareIdsByCanonicalAsync(
+        LicenseDbContext authorityDb,
+        Guid productId,
+        Guid licenseId,
+        string submittedCanonicalHardwareId,
+        CancellationToken cancellationToken = default);
+
 }
 
 /// <summary>
@@ -452,6 +469,47 @@ public sealed class HardwareAuthorityAliasResolver(
         };
     }
 
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<string>> ResolveStoredSeatHardwareIdsByCanonicalAsync(
+        LicenseDbContext authorityDb,
+        Guid productId,
+        Guid licenseId,
+        string submittedCanonicalHardwareId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsCanonicalHardwareId(submittedCanonicalHardwareId))
+            return [];
+
+        var canonicalDigest = Sha256(submittedCanonicalHardwareId);
+        var storedHardwareIds = await authorityDb.HardwareAuthorityAliases
+            .AsNoTracking()
+            .Where(alias =>
+                alias.IsActive
+                && alias.DisabledAtUtc == null
+                && alias.ProductId == productId
+                && alias.LicenseId == licenseId
+                && alias.CanonicalHardwareIdSha256 == canonicalDigest)
+            .Join(
+                authorityDb.LicenseSeats.AsNoTracking(),
+                alias => alias.LicenseSeatId,
+                seat => seat.Id,
+                (alias, seat) => seat.HardwareId)
+            .Distinct()
+            .Take(4)
+            .ToListAsync(cancellationToken);
+
+        // Diagnostic HWID volontaire (TKT-001277/TKT-001294) : identifie la forme historique
+        // stockee sur le siege avant une mutation de liberation. Aucun droit n'est accorde ici.
+        logger.LogWarning(
+            "HWID_DIAGNOSIS alias-resolution direction=canonical-seat-identity productId={ProductId} licenseId={LicenseId} submitted={Submitted} stored={Stored} count={Count}",
+            productId,
+            licenseId,
+            submittedCanonicalHardwareId,
+            string.Join(',', storedHardwareIds),
+            storedHardwareIds.Count);
+        return storedHardwareIds;
+    }
+
     /// <summary>
     /// Evaluates one loaded alias against its complete authority graph for the submitted identifier.
     /// Shared by the legacy and canonical directions so both apply exactly the same invariants.
@@ -592,12 +650,12 @@ public sealed class HardwareAuthorityAliasResolver(
             }
             // TEMP-FAIL-OPEN(TKT-001262): TEMPORARY observation branch, never leave as is. The intended
             // rule is fail-closed, but the alias/graph authority is known to be buggy (Finalize rotates
-            // the binding without repointing the alias, SUP-000040). Franck's directive (2026-09-21):
+            // the binding without repointing the alias, SUP-000040). The owner's directive (2026-09-21):
             // no known HWID alias/graph divergence blocks a legitimate client; accept and log
             // exhaustively. This branch covers exactly that case: an active alias of the same
             // product, licence and active canonical seat of the same machine. Keep this
             // branch even after the durable fix (atomic alias repointing on rotation) during an
-            // observation phase; restoring fail-closed requires conclusive telemetry AND Franck's
+            // observation phase; restoring fail-closed requires conclusive telemetry AND the owner's
             // explicit approval. Certain business refusals stay: ineligible licence, active explicit
             // HWID ban on the submitted or canonical identifier (checked here; the distribution
             // preflight also checks HWID bans before any grant or download), component bans

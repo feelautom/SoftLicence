@@ -18,192 +18,10 @@ using Xunit;
 
 namespace SoftLicence.Tests.Server;
 
-public sealed partial class RuntimeEnrollmentPostgreSqlTests
+public abstract partial class RuntimeEnrollmentPostgreSqlTestBase
 {
-    [Theory]
-    [InlineData(PaidActivationFailure.SeatLimit)]
-    [InlineData(PaidActivationFailure.Signing)]
-    [InlineData(PaidActivationFailure.Cleanup)]
-    public async Task PaidAutoUnbanActivation_PostgreSql_FailureRollsBackWholeAuthorityGraph(
-        string failure)
-    {
-        using var scenario = await CreatePaidAutoUnbanScenarioAsync(failure);
-        var before = await SnapshotPaidAutoUnbanScenarioAsync(scenario);
 
-        var response = await scenario.Client.PostAsJsonAsync("/api/activation", scenario.Request);
-
-        if (failure == PaidActivationFailure.Cleanup)
-        {
-            Assert.NotNull(scenario.CleanupInterceptor);
-            Assert.True(scenario.CleanupInterceptor.Triggered);
-        }
-        Assert.Equal(
-            failure == PaidActivationFailure.SeatLimit
-                ? HttpStatusCode.BadRequest
-                : HttpStatusCode.InternalServerError,
-            response.StatusCode);
-        Assert.Equal(before, await SnapshotPaidAutoUnbanScenarioAsync(scenario));
-        scenario.Notification.Verify(
-            notifier => notifier.Notify(
-                It.IsAny<string>(),
-                It.IsAny<string>(),
-                It.IsAny<string>(),
-                It.IsAny<object?>()),
-            Times.Never);
-    }
-
-    [Fact]
-    public async Task PaidAutoUnbanActivation_PostgreSql_ReplayIsIdempotentAndNotifiesOnce()
-    {
-        using var scenario = await CreatePaidAutoUnbanScenarioAsync(PaidActivationFailure.None);
-
-        var first = await scenario.Client.PostAsJsonAsync("/api/activation", scenario.Request);
-        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
-        var afterFirst = await SnapshotPaidAutoUnbanScenarioAsync(scenario);
-
-        var replay = await scenario.Client.PostAsJsonAsync("/api/activation", scenario.Request);
-
-        Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
-        var afterReplay = await SnapshotPaidAutoUnbanScenarioAsync(scenario);
-        Assert.False(afterReplay.EligibleBanActive);
-        Assert.Equal(afterFirst.EligibleBanActive, afterReplay.EligibleBanActive);
-        Assert.Equal(afterFirst.ConflictingSeatActive, afterReplay.ConflictingSeatActive);
-        Assert.Equal(afterFirst.BindingState, afterReplay.BindingState);
-        Assert.Equal(afterFirst.BindingInvalidatedAtUtc, afterReplay.BindingInvalidatedAtUtc);
-        Assert.Equal(afterFirst.EnrollmentState, afterReplay.EnrollmentState);
-        Assert.Equal(afterFirst.EnrollmentInvalidatedAtUtc, afterReplay.EnrollmentInvalidatedAtUtc);
-        Assert.Equal(afterFirst.EnrollmentAuthorityEpoch, afterReplay.EnrollmentAuthorityEpoch);
-        scenario.Notification.Verify(
-            notifier => notifier.Notify(
-                NotificationService.Triggers.SecurityIpBanned,
-                It.Is<string>(title => title.StartsWith("AUTO-UNBAN", StringComparison.Ordinal)),
-                It.IsAny<string>(),
-                It.IsAny<object?>()),
-            Times.Once);
-    }
-
-    [Fact]
-    public async Task PaidAutoUnbanActivation_PostgreSql_ConcurrentRebanPreservesIdentityAndRevokesCommercialUse()
-    {
-        var signer = new BlockingSignedLicenseFileService();
-        using var scenario = await CreatePaidAutoUnbanScenarioAsync(PaidActivationFailure.None, signer);
-        var epochBefore = (await SnapshotPaidAutoUnbanScenarioAsync(scenario)).GlobalAuthorityEpoch;
-        var identityBefore = await SnapshotRetainedRuntimeIdentityAsync(scenario.Factory, scenario.EnrollmentId);
-        EnrollmentLicenseAssignment assignmentBefore;
-        await using (var original = await scenario.Factory.CreateDbContextAsync())
-            assignmentBefore = await original.EnrollmentLicenseAssignments.AsNoTracking()
-                .SingleAsync(row => row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE");
-
-        var activation = scenario.Client.PostAsJsonAsync("/api/activation", scenario.Request);
-        await signer.Entered.Task.WaitAsync(TimeSpan.FromSeconds(15));
-
-        var security = CreateHardwareSecurityService(scenario.Factory);
-        var reban = security.BanHardwareIdAsync(
-            scenario.HardwareId,
-            "Concurrent operator piracy re-ban",
-            scenario.ProductId,
-            banCategory: BannedHardwareId.Categories.Piracy,
-            silent: true);
-        await WaitForGlobalAuthorityWaitersAsync(scenario.AdminConnectionString, 1);
-        Assert.False(reban.IsCompleted);
-
-        signer.Release.TrySetResult();
-        var activationResponse = await activation;
-        await reban;
-
-        Assert.Equal(HttpStatusCode.OK, activationResponse.StatusCode);
-        var activationBody = await activationResponse.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.False(string.IsNullOrEmpty(activationBody.GetProperty("licenseFile").GetString()));
-        var after = await SnapshotPaidAutoUnbanScenarioAsync(scenario);
-        Assert.False(after.EligibleBanActive);
-        Assert.True(after.PiracyBanActive);
-        Assert.True(after.TargetSeatActive);
-        Assert.False(after.ConflictingSeatActive);
-        Assert.Equal(identityBefore, await SnapshotRetainedRuntimeIdentityAsync(scenario.Factory, scenario.EnrollmentId));
-        Assert.True(after.GlobalAuthorityEpoch > epochBefore);
-        Assert.True(after.GlobalAuthorityEpoch > after.EnrollmentAuthorityEpoch);
-        await using (var check = await scenario.Factory.CreateDbContextAsync())
-        {
-            var ended = await check.EnrollmentLicenseAssignments.SingleAsync(row => row.Id == assignmentBefore.Id);
-            Assert.Equal("ENDED", ended.State);
-            Assert.Equal("seat_released", ended.EndReason);
-            Assert.NotNull(ended.EndedAtUtc);
-            Assert.Equal(assignmentBefore.Revision, ended.Revision);
-            Assert.Empty(await check.EnrollmentLicenseAssignments.Where(row =>
-                row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE").ToListAsync());
-        }
-        await AssertEndedAssignmentDeniesRuntimeAsync(scenario.Factory, scenario.EnrollmentId);
-        using var statusResponse = await scenario.Client.PostAsJsonAsync("/api/activation/check", scenario.Request);
-        Assert.Equal(HttpStatusCode.OK, statusResponse.StatusCode);
-        var statusBody = await statusResponse.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal("REVOKED", statusBody.GetProperty("status").GetString());
-        scenario.Notification.Verify(
-            notifier => notifier.Notify(
-                NotificationService.Triggers.SecurityIpBanned,
-                It.Is<string>(title => title.StartsWith("AUTO-UNBAN", StringComparison.Ordinal)),
-                It.IsAny<string>(),
-                It.IsAny<object?>()),
-            Times.Once);
-    }
-
-    /// <summary>
-    /// Proves the opposite commit order: a standalone permanent ban queued first on the global
-    /// authority commits before paid activation, which then observes the ban and changes no
-    /// activation graph. Both production operations wait on the same PostgreSQL authority key.
-    /// </summary>
-    [Fact]
-    public async Task PaidAutoUnbanActivation_PostgreSql_StandaloneBanCommittedFirstRefusesWithoutPartialActivation()
-    {
-        using var scenario = await CreatePaidAutoUnbanScenarioAsync(PaidActivationFailure.None);
-        var before = await SnapshotPaidAutoUnbanScenarioAsync(scenario);
-        await using var blocker = new NpgsqlConnection(scenario.AdminConnectionString);
-        await blocker.OpenAsync();
-        await using var blockerTransaction = await blocker.BeginTransactionAsync();
-        await using (var hold = new NpgsqlCommand(
-            "SELECT pg_catalog.pg_advisory_xact_lock(999831, 1)", blocker, blockerTransaction))
-        {
-            await hold.ExecuteNonQueryAsync();
-        }
-
-        var security = CreateHardwareSecurityService(scenario.Factory);
-        var ban = security.BanHardwareIdAsync(
-            scenario.HardwareId,
-            "Standalone operator piracy ban",
-            scenario.ProductId,
-            banCategory: BannedHardwareId.Categories.Piracy,
-            silent: true);
-        await WaitForGlobalAuthorityWaitersAsync(scenario.AdminConnectionString, 1);
-        Assert.False(ban.IsCompleted);
-
-        var activation = scenario.Client.PostAsJsonAsync("/api/activation", scenario.Request);
-        await WaitForGlobalAuthorityWaitersAsync(scenario.AdminConnectionString, 2);
-        Assert.False(activation.IsCompleted);
-
-        await blockerTransaction.CommitAsync();
-        await ban.WaitAsync(TimeSpan.FromSeconds(15));
-        var response = await activation.WaitAsync(TimeSpan.FromSeconds(15));
-
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Equal("BANNED", response.Headers.GetValues("X-SoftLicence-Error-Code").Single());
-        using (var payload = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync()))
-            Assert.Equal("BANNED", payload.RootElement.GetProperty("errorCode").GetString());
-        var after = await SnapshotPaidAutoUnbanScenarioAsync(scenario);
-        Assert.True(after.PiracyBanActive);
-        Assert.False(after.TargetSeatActive);
-        Assert.Equal(before.ConflictingSeatActive, after.ConflictingSeatActive);
-        Assert.Equal(before.BindingState, after.BindingState);
-        Assert.Equal(before.EnrollmentState, after.EnrollmentState);
-        Assert.Equal(before.EnrollmentAuthorityEpoch, after.EnrollmentAuthorityEpoch);
-        scenario.Notification.Verify(
-            notifier => notifier.Notify(
-                It.IsAny<string>(),
-                It.IsAny<string>(),
-                It.IsAny<string>(),
-                It.IsAny<object?>()),
-            Times.Never);
-    }
-
-    private static async Task<PaidAutoUnbanScenario> CreatePaidAutoUnbanScenarioAsync(
+    protected static async Task<PaidAutoUnbanScenario> CreatePaidAutoUnbanScenarioAsync(
         string failure,
         ISignedLicenseFileService? signer = null)
     {
@@ -444,7 +262,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             });
     }
 
-    private static async Task<PaidAutoUnbanSnapshot> SnapshotPaidAutoUnbanScenarioAsync(
+    protected static async Task<PaidAutoUnbanSnapshot> SnapshotPaidAutoUnbanScenarioAsync(
         PaidAutoUnbanScenario scenario)
     {
         await using var db = await scenario.Factory.CreateDbContextAsync();
@@ -492,7 +310,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// <param name="connectionString">An administrator connection able to read <c>pg_locks</c>.</param>
     /// <param name="minimumWaiters">Minimum number of non-granted global authority locks.</param>
     /// <exception cref="TimeoutException">No waiter appeared within about ten seconds.</exception>
-    private static async Task WaitForGlobalAuthorityWaitersAsync(string connectionString, int minimumWaiters)
+    protected static async Task WaitForGlobalAuthorityWaitersAsync(string connectionString, int minimumWaiters)
     {
         await using var observer = new NpgsqlConnection(connectionString);
         await observer.OpenAsync();
@@ -520,7 +338,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             $"Expected at least {minimumWaiters} PostgreSQL waiter(s) on the global mutation authority lock.");
     }
 
-    private static class PaidActivationFailure
+    protected static class PaidActivationFailure
     {
         public const string None = "none";
         public const string SeatLimit = "seat-limit";
@@ -528,7 +346,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         public const string Cleanup = "cleanup";
     }
 
-    private sealed class FixedSignedLicenseFileService : ISignedLicenseFileService
+    protected sealed class FixedSignedLicenseFileService : ISignedLicenseFileService
     {
         public string Generate(
             License license,
@@ -536,7 +354,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             IReadOnlyDictionary<string, string>? featureOverride = null) => "signed-test-license";
     }
 
-    private sealed class ThrowingSignedLicenseFileService : ISignedLicenseFileService
+    protected sealed class ThrowingSignedLicenseFileService : ISignedLicenseFileService
     {
         public string Generate(
             License license,
@@ -545,7 +363,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             throw new InvalidOperationException("Injected signing failure.");
     }
 
-    private sealed class BlockingSignedLicenseFileService : ISignedLicenseFileService
+    protected sealed class BlockingSignedLicenseFileService : ISignedLicenseFileService
     {
         public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -562,7 +380,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     }
 
     /// <summary>Injects failure only when the fixture's losing seat is written inactive by commercial cleanup.</summary>
-    private sealed class DistributionBindingCleanupFailureInterceptor : DbCommandInterceptor
+    protected sealed class DistributionBindingCleanupFailureInterceptor : DbCommandInterceptor
     {
         /// <summary>Exact synthetic losing seat; unrelated updates must not trigger the fault.</summary>
         internal Guid LosingSeatId { get; set; }
@@ -623,7 +441,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         }
     }
 
-    private sealed record PaidAutoUnbanSnapshot(
+    protected sealed record PaidAutoUnbanSnapshot(
         bool EligibleBanActive,
         bool PiracyBanActive,
         bool TargetSeatActive,
@@ -639,7 +457,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         long EnrollmentAuthorityEpoch,
         long GlobalAuthorityEpoch);
 
-    private sealed class PaidAutoUnbanScenario : IDisposable
+    protected sealed class PaidAutoUnbanScenario : IDisposable
     {
         private readonly WebApplicationFactory<Program> _webFactory;
 
@@ -695,5 +513,142 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             Client.Dispose();
             _webFactory.Dispose();
         }
+    }
+}
+
+/// <summary>Runs the tests from PaidAutoUnbanActivationPostgreSqlTests as an independently schedulable PostgreSQL class.</summary>
+/// <param name="classDatabase">The xUnit-owned PostgreSQL clone fixture for this exact test class.</param>
+public sealed partial class PaidAutoUnbanActivationPostgreSqlTests(RuntimeEnrollmentPostgreSqlClassDatabase classDatabase)
+    : RuntimeEnrollmentPostgreSqlTestBase(classDatabase)
+{
+    [Theory(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.PaidAutoUnbanActivation_PostgreSql_FailureRollsBackWholeAuthorityGraph")]
+    [InlineData(PaidActivationFailure.SeatLimit)]
+    [InlineData(PaidActivationFailure.Signing)]
+    [InlineData(PaidActivationFailure.Cleanup)]
+    public async Task PaidAutoUnbanActivation_PostgreSql_FailureRollsBackWholeAuthorityGraph(string failure)
+    {
+        using var scenario = await CreatePaidAutoUnbanScenarioAsync(failure);
+        var before = await SnapshotPaidAutoUnbanScenarioAsync(scenario);
+        var response = await scenario.Client.PostAsJsonAsync("/api/activation", scenario.Request);
+        if (failure == PaidActivationFailure.Cleanup)
+        {
+            Assert.NotNull(scenario.CleanupInterceptor);
+            Assert.True(scenario.CleanupInterceptor.Triggered);
+        }
+
+        Assert.Equal(failure == PaidActivationFailure.SeatLimit ? HttpStatusCode.BadRequest : HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.Equal(before, await SnapshotPaidAutoUnbanScenarioAsync(scenario));
+        scenario.Notification.Verify(notifier => notifier.Notify(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<object?>()), Times.Never);
+    }
+
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.PaidAutoUnbanActivation_PostgreSql_ReplayIsIdempotentAndNotifiesOnce")]
+    public async Task PaidAutoUnbanActivation_PostgreSql_ReplayIsIdempotentAndNotifiesOnce()
+    {
+        using var scenario = await CreatePaidAutoUnbanScenarioAsync(PaidActivationFailure.None);
+        var first = await scenario.Client.PostAsJsonAsync("/api/activation", scenario.Request);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        var afterFirst = await SnapshotPaidAutoUnbanScenarioAsync(scenario);
+        var replay = await scenario.Client.PostAsJsonAsync("/api/activation", scenario.Request);
+        Assert.Equal(HttpStatusCode.OK, replay.StatusCode);
+        var afterReplay = await SnapshotPaidAutoUnbanScenarioAsync(scenario);
+        Assert.False(afterReplay.EligibleBanActive);
+        Assert.Equal(afterFirst.EligibleBanActive, afterReplay.EligibleBanActive);
+        Assert.Equal(afterFirst.ConflictingSeatActive, afterReplay.ConflictingSeatActive);
+        Assert.Equal(afterFirst.BindingState, afterReplay.BindingState);
+        Assert.Equal(afterFirst.BindingInvalidatedAtUtc, afterReplay.BindingInvalidatedAtUtc);
+        Assert.Equal(afterFirst.EnrollmentState, afterReplay.EnrollmentState);
+        Assert.Equal(afterFirst.EnrollmentInvalidatedAtUtc, afterReplay.EnrollmentInvalidatedAtUtc);
+        Assert.Equal(afterFirst.EnrollmentAuthorityEpoch, afterReplay.EnrollmentAuthorityEpoch);
+        scenario.Notification.Verify(notifier => notifier.Notify(NotificationService.Triggers.SecurityOutdatedVersionBanned, It.Is<string>(title => title.StartsWith("AUTO-UNBAN", StringComparison.Ordinal)), It.IsAny<string>(), It.IsAny<object?>()), Times.Once);
+    }
+
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.PaidAutoUnbanActivation_PostgreSql_ConcurrentRebanPreservesIdentityAndRevokesCommercialUse")]
+    public async Task PaidAutoUnbanActivation_PostgreSql_ConcurrentRebanPreservesIdentityAndRevokesCommercialUse()
+    {
+        var signer = new BlockingSignedLicenseFileService();
+        using var scenario = await CreatePaidAutoUnbanScenarioAsync(PaidActivationFailure.None, signer);
+        var epochBefore = (await SnapshotPaidAutoUnbanScenarioAsync(scenario)).GlobalAuthorityEpoch;
+        var identityBefore = await SnapshotRetainedRuntimeIdentityAsync(scenario.Factory, scenario.EnrollmentId);
+        EnrollmentLicenseAssignment assignmentBefore;
+        await using (var original = await scenario.Factory.CreateDbContextAsync())
+            assignmentBefore = await original.EnrollmentLicenseAssignments.AsNoTracking().SingleAsync(row => row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE");
+        var activation = scenario.Client.PostAsJsonAsync("/api/activation", scenario.Request);
+        await signer.Entered.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        var security = CreateHardwareSecurityService(scenario.Factory);
+        var reban = security.BanHardwareIdAsync(scenario.HardwareId, "Concurrent operator piracy re-ban", scenario.ProductId, banCategory: BannedHardwareId.Categories.Piracy, silent: true);
+        await WaitForGlobalAuthorityWaitersAsync(scenario.AdminConnectionString, 1);
+        Assert.False(reban.IsCompleted);
+        signer.Release.TrySetResult();
+        var activationResponse = await activation;
+        await reban;
+        Assert.Equal(HttpStatusCode.OK, activationResponse.StatusCode);
+        var activationBody = await activationResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.False(string.IsNullOrEmpty(activationBody.GetProperty("licenseFile").GetString()));
+        var after = await SnapshotPaidAutoUnbanScenarioAsync(scenario);
+        Assert.False(after.EligibleBanActive);
+        Assert.True(after.PiracyBanActive);
+        Assert.True(after.TargetSeatActive);
+        Assert.False(after.ConflictingSeatActive);
+        Assert.Equal(identityBefore, await SnapshotRetainedRuntimeIdentityAsync(scenario.Factory, scenario.EnrollmentId));
+        Assert.True(after.GlobalAuthorityEpoch > epochBefore);
+        Assert.True(after.GlobalAuthorityEpoch > after.EnrollmentAuthorityEpoch);
+        await using (var check = await scenario.Factory.CreateDbContextAsync())
+        {
+            var ended = await check.EnrollmentLicenseAssignments.SingleAsync(row => row.Id == assignmentBefore.Id);
+            Assert.Equal("ENDED", ended.State);
+            Assert.Equal("seat_released", ended.EndReason);
+            Assert.NotNull(ended.EndedAtUtc);
+            Assert.Equal(assignmentBefore.Revision, ended.Revision);
+            Assert.Empty(await check.EnrollmentLicenseAssignments.Where(row => row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE").ToListAsync());
+        }
+
+        await AssertEndedAssignmentDeniesRuntimeAsync(scenario.Factory, scenario.EnrollmentId);
+        using var statusResponse = await scenario.Client.PostAsJsonAsync("/api/activation/check", scenario.Request);
+        Assert.Equal(HttpStatusCode.OK, statusResponse.StatusCode);
+        var statusBody = await statusResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("REVOKED", statusBody.GetProperty("status").GetString());
+        scenario.Notification.Verify(notifier => notifier.Notify(NotificationService.Triggers.SecurityOutdatedVersionBanned, It.Is<string>(title => title.StartsWith("AUTO-UNBAN", StringComparison.Ordinal)), It.IsAny<string>(), It.IsAny<object?>()), Times.Once);
+    }
+
+    /// <summary>
+    /// Proves the opposite commit order: a standalone permanent ban queued first on the global
+    /// authority commits before paid activation, which then observes the ban and changes no
+    /// activation graph. Both production operations wait on the same PostgreSQL authority key.
+    /// </summary>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.PaidAutoUnbanActivation_PostgreSql_StandaloneBanCommittedFirstRefusesWithoutPartialActivation")]
+    public async Task PaidAutoUnbanActivation_PostgreSql_StandaloneBanCommittedFirstRefusesWithoutPartialActivation()
+    {
+        using var scenario = await CreatePaidAutoUnbanScenarioAsync(PaidActivationFailure.None);
+        var before = await SnapshotPaidAutoUnbanScenarioAsync(scenario);
+        await using var blocker = new NpgsqlConnection(scenario.AdminConnectionString);
+        await blocker.OpenAsync();
+        await using var blockerTransaction = await blocker.BeginTransactionAsync();
+        await using (var hold = new NpgsqlCommand("SELECT pg_catalog.pg_advisory_xact_lock(999831, 1)", blocker, blockerTransaction))
+        {
+            await hold.ExecuteNonQueryAsync();
+        }
+
+        var security = CreateHardwareSecurityService(scenario.Factory);
+        var ban = security.BanHardwareIdAsync(scenario.HardwareId, "Standalone operator piracy ban", scenario.ProductId, banCategory: BannedHardwareId.Categories.Piracy, silent: true);
+        await WaitForGlobalAuthorityWaitersAsync(scenario.AdminConnectionString, 1);
+        Assert.False(ban.IsCompleted);
+        var activation = scenario.Client.PostAsJsonAsync("/api/activation", scenario.Request);
+        await WaitForGlobalAuthorityWaitersAsync(scenario.AdminConnectionString, 2);
+        Assert.False(activation.IsCompleted);
+        await blockerTransaction.CommitAsync();
+        await ban.WaitAsync(TimeSpan.FromSeconds(15));
+        var response = await activation.WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("BANNED", response.Headers.GetValues("X-SoftLicence-Error-Code").Single());
+        using (var payload = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync()))
+            Assert.Equal("BANNED", payload.RootElement.GetProperty("errorCode").GetString());
+        var after = await SnapshotPaidAutoUnbanScenarioAsync(scenario);
+        Assert.True(after.PiracyBanActive);
+        Assert.False(after.TargetSeatActive);
+        Assert.Equal(before.ConflictingSeatActive, after.ConflictingSeatActive);
+        Assert.Equal(before.BindingState, after.BindingState);
+        Assert.Equal(before.EnrollmentState, after.EnrollmentState);
+        Assert.Equal(before.EnrollmentAuthorityEpoch, after.EnrollmentAuthorityEpoch);
+        scenario.Notification.Verify(notifier => notifier.Notify(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<object?>()), Times.Never);
     }
 }

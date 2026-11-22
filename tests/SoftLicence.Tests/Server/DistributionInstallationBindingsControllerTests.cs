@@ -19,6 +19,78 @@ namespace SoftLicence.Tests.Server;
 
 public sealed class DistributionInstallationBindingsControllerTests
 {
+    /// <summary>Both authenticated HTTP boundaries preserve the exact VM-policy contract and suppress internal diagnostics.</summary>
+    [Theory]
+    [InlineData(false, "virtual_machine_not_allowed", "Free and trial licenses cannot be activated on a virtual machine.")]
+    [InlineData(true, "virtual_machine_not_allowed", "Free and trial licenses cannot be activated on a virtual machine.")]
+    [InlineData(false, "machine_evidence_required", "Update your installer or application to provide the machine information required for free and trial licenses.")]
+    [InlineData(true, "machine_evidence_required", "Update your installer or application to provide the machine information required for free and trial licenses.")]
+    public async Task Tkt1550_ControllerPolicyRefusalHasExact403Json(bool finalize, string code, string message)
+    {
+        const string product = "12345678-1234-4234-9234-1234567890ab";
+        var body = JsonSerializer.Serialize(new { schema = finalize ? DistributionInstallationBindingService.FinalizeSchema : "runtime-distribution-hardware-authority",
+            requestId = Guid.NewGuid().ToString("D"), productId = product });
+        var authentication = new Mock<IDistributionS2SAuthenticationService>(MockBehavior.Strict);
+        authentication.Setup(service => service.AuthenticateAndReserveNonceAsync(It.IsAny<HttpContext>(),
+            It.Is<ReadOnlyMemory<byte>>(bytes => Encoding.UTF8.GetString(bytes.ToArray()) == body), product, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new DistributionS2SPrincipal("vm-policy-test", "synthetic-key", AllowLicenseBootstrap: true));
+        var bindings = new Mock<IDistributionInstallationBindingService>();
+        bindings.Setup(service => service.FinalizeAsync("vm-policy-test", It.IsAny<string>(),
+            It.IsAny<DistributionInstallationFinalizeRequest>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new DistributionOperationException(code, 403, "internal-diagnostic-not-public"));
+        var preflight = new Mock<IRuntimeDistributionPreflightService>();
+        preflight.Setup(service => service.EvaluateAsync("vm-policy-test", It.IsAny<string>(),
+            It.IsAny<RuntimeDistributionPreflightRequest>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new DistributionOperationException(code, 403, "internal-diagnostic-not-public"));
+        var controller = CreateController(authentication.Object, bindings.Object, body, preflight.Object);
+        var action = finalize ? await controller.FinalizeInstallation(CancellationToken.None)
+            : await controller.RuntimePreflight(CancellationToken.None);
+        var result = Assert.IsType<ObjectResult>(action);
+        Assert.Equal(403, result.StatusCode);
+        Assert.Equal(JsonSerializer.Serialize(new { error = code, message }),
+            JsonSerializer.Serialize(Assert.IsType<DistributionApiError>(result.Value), new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        authentication.VerifyAll();
+    }
+
+    /// <summary>
+    /// TKT-001720: a predicted seat refusal reaches the Website as an exact 403 carrying only the public
+    /// code, without the internal decision reason or any explanatory message.
+    /// </summary>
+    [Fact]
+    public async Task Tkt1720_RuntimePreflight_PredictedSeatRefusalHasExact403Json()
+    {
+        const string product = "12345678-1234-4234-9234-1234567890ab";
+        var body = JsonSerializer.Serialize(new { schema = "runtime-distribution-hardware-authority",
+            requestId = Guid.NewGuid().ToString("D"), productId = product, seatAdmission = "initial" });
+        var authentication = new Mock<IDistributionS2SAuthenticationService>(MockBehavior.Strict);
+        authentication.Setup(service => service.AuthenticateAndReserveNonceAsync(It.IsAny<HttpContext>(),
+            It.Is<ReadOnlyMemory<byte>>(bytes => Encoding.UTF8.GetString(bytes.ToArray()) == body), product, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new DistributionS2SPrincipal("tkt1720-client", "synthetic-key", AllowLicenseBootstrap: true));
+        var preflight = new Mock<IRuntimeDistributionPreflightService>(MockBehavior.Strict);
+        preflight.Setup(service => service.EvaluateAsync("tkt1720-client", It.IsAny<string>(),
+            It.Is<RuntimeDistributionPreflightRequest>(request => request.SeatAdmission == "initial"),
+            It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new DistributionOperationException("seat_limit_reached", 403, "seat_limit_predicted"));
+        var controller = CreateController(authentication.Object,
+            Mock.Of<IDistributionInstallationBindingService>(), body, preflight.Object);
+
+        var result = Assert.IsType<ObjectResult>(await controller.RuntimePreflight(CancellationToken.None));
+
+        Assert.Equal(403, result.StatusCode);
+        Assert.Equal("{\"error\":\"seat_limit_reached\"}",
+            JsonSerializer.Serialize(Assert.IsType<DistributionApiError>(result.Value), new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        authentication.VerifyAll();
+        preflight.VerifyAll();
+    }
+
+    /// <summary>The optional explanatory message is absent from historical JSON, including an existing support reason.</summary>
+    [Theory]
+    [InlineData(null, "{\"error\":\"not_eligible\"}")]
+    [InlineData("existing_reason", "{\"error\":\"not_eligible\",\"reasonCode\":\"existing_reason\"}")]
+    public void Tkt1550_OldDistributionErrorJsonRemainsByteIdentical(string? reason, string expected) =>
+        Assert.Equal(expected, JsonSerializer.Serialize(new DistributionApiError("not_eligible", reason),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+
     [Fact]
     public async Task RuntimePreflight_AuthenticatesExactBodyAndReturnsOpaqueAuthority()
     {
@@ -29,7 +101,7 @@ public sealed class DistributionInstallationBindingsControllerTests
                 It.Is<ReadOnlyMemory<byte>>(bytes => Encoding.UTF8.GetString(bytes.ToArray()) == body),
                 "12345678-1234-4234-9234-1234567890ab",
                 It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id"));
+            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id", AllowLicenseBootstrap: true));
         var preflight = new Mock<IRuntimeDistributionPreflightService>();
         var response = new RuntimeDistributionPreflightResponse(
             "runtime-distribution-hardware-authority-result",
@@ -63,7 +135,7 @@ public sealed class DistributionInstallationBindingsControllerTests
                 It.Is<ReadOnlyMemory<byte>>(bytes => Encoding.UTF8.GetString(bytes.ToArray()) == body),
                 "12345678-1234-4234-9234-1234567890ab",
                 It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id"));
+            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id", AllowLicenseBootstrap: true));
         var pairs = new Mock<IFinalizeAuthorityPairResolver>();
         var response = new FinalizeAuthorityPairResponse(
             "distribution-finalize-authority-resolution-v1", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", new string('d', 64),
@@ -110,7 +182,7 @@ public sealed class DistributionInstallationBindingsControllerTests
                 It.Is<ReadOnlyMemory<byte>>(bytes => Encoding.UTF8.GetString(bytes.ToArray()) == body),
                 "12345678-1234-4234-9234-1234567890ab",
                 It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id"));
+            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id", AllowLicenseBootstrap: true));
         var bindings = new Mock<IDistributionInstallationBindingService>();
         bindings.Setup(service => service.IssueEntitlementAsync(
                 "tia-connect-website",
@@ -156,7 +228,7 @@ public sealed class DistributionInstallationBindingsControllerTests
                 It.Is<ReadOnlyMemory<byte>>(bytes => Encoding.UTF8.GetString(bytes.ToArray()) == body),
                 "12345678-1234-4234-9234-1234567890ab",
                 It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id"));
+            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id", AllowLicenseBootstrap: true));
         var bindings = new Mock<IDistributionInstallationBindingService>();
         bindings.Setup(service => service.ResolveRuntimeSourceAsync(
                 "tia-connect-website",
@@ -186,7 +258,7 @@ public sealed class DistributionInstallationBindingsControllerTests
         var authentication = new Mock<IDistributionS2SAuthenticationService>();
         authentication.Setup(service => service.AuthenticateAndReserveNonceAsync(
                 It.IsAny<HttpContext>(), It.IsAny<ReadOnlyMemory<byte>>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id"));
+            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id", AllowLicenseBootstrap: true));
         var bindings = new Mock<IDistributionInstallationBindingService>();
         bindings.Setup(service => service.FinalizeAsync(
                 "tia-connect-website", It.IsAny<string>(), It.IsAny<DistributionInstallationFinalizeRequest>(),
@@ -217,7 +289,7 @@ public sealed class DistributionInstallationBindingsControllerTests
         var authentication = new Mock<IDistributionS2SAuthenticationService>();
         authentication.Setup(service => service.AuthenticateAndReserveNonceAsync(
                 It.IsAny<HttpContext>(), It.IsAny<ReadOnlyMemory<byte>>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id"));
+            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id", AllowLicenseBootstrap: true));
         var bindings = new Mock<IDistributionInstallationBindingService>();
         bindings.Setup(service => service.FinalizeAsync(
                 "tia-connect-website", It.IsAny<string>(), It.IsAny<DistributionInstallationFinalizeRequest>(),
@@ -273,7 +345,7 @@ public sealed class DistributionInstallationBindingsControllerTests
         var authentication = new Mock<IDistributionS2SAuthenticationService>();
         authentication.Setup(service => service.AuthenticateAndReserveNonceAsync(
                 It.IsAny<HttpContext>(), It.IsAny<ReadOnlyMemory<byte>>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id"));
+            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id", AllowLicenseBootstrap: true));
         var bindings = new Mock<IDistributionInstallationBindingService>();
         var controller = CreateController(authentication.Object, bindings.Object, body);
 
@@ -294,7 +366,7 @@ public sealed class DistributionInstallationBindingsControllerTests
         var authentication = new Mock<IDistributionS2SAuthenticationService>();
         authentication.Setup(service => service.AuthenticateAndReserveNonceAsync(
                 It.IsAny<HttpContext>(), It.IsAny<ReadOnlyMemory<byte>>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id"));
+            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id", AllowLicenseBootstrap: true));
         var bindings = new Mock<IDistributionInstallationBindingService>();
         var controller = CreateController(authentication.Object, bindings.Object, body);
 
@@ -322,7 +394,7 @@ public sealed class DistributionInstallationBindingsControllerTests
                 It.Is<ReadOnlyMemory<byte>>(bytes => Encoding.UTF8.GetString(bytes.ToArray()) == body),
                 "12345678-1234-4234-9234-1234567890ab",
                 It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id"));
+            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id", AllowLicenseBootstrap: true));
         var bindings = new Mock<IDistributionInstallationBindingService>();
         bindings.Setup(service => service.InvalidateAsync(
                 "tia-connect-website", It.Is<string>(digest => digest.Length == 64),
@@ -351,7 +423,7 @@ public sealed class DistributionInstallationBindingsControllerTests
         authentication.Setup(service => service.AuthenticateAndReserveNonceAsync(
                 It.IsAny<HttpContext>(), It.IsAny<ReadOnlyMemory<byte>>(),
                 "12345678-1234-4234-9234-1234567890ab", It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id"));
+            .ReturnsAsync(new DistributionS2SPrincipal("tia-connect-website", "key-id", AllowLicenseBootstrap: true));
         var response = new DistributionInstallationInvalidationResponse(
             "distribution-installation-invalidation-result-v1", null, "invalidated", grantDigest,
             "grant_revoked", "2026-07-18T18:20:00.0000000Z", 1, "2026-07-18T18:30:00.0000000Z");
@@ -810,10 +882,13 @@ public sealed class RuntimeDistributionPreflightServiceTests
         Assert.Equal("hardware_banned", decision.ReasonCode);
     }
 
-    /// <summary>Proves ban deferral never bypasses another current commercial denial.</summary>
+    /// <summary>
+    /// Proves ban deferral never bypasses another current commercial denial. The former "version" variant was removed
+    /// by TKT-004062: the preflight no longer judges the release of the installation it replaces; the target release
+    /// is judged at transition issue and Finalize (RuntimeDistributionPreflightSourceVersionPostgreSqlTests).
+    /// </summary>
     [Theory]
     [InlineData("capacity", "seat_capacity_exceeded")]
-    [InlineData("version", "version_ineligible")]
     [InlineData("component", "component_banned")]
     public async Task KnownInstallation_AllowlistedBanWithOtherCommercialDenial_RemainsRefused(
         string policy,
@@ -833,9 +908,6 @@ public sealed class RuntimeDistributionPreflightServiceTests
                     {
                         LicenseId = LicenseId, HardwareId = "1111222233334444", IsActive = true
                     });
-                    break;
-                case "version":
-                    (await db.Licenses.SingleAsync(candidate => candidate.Id == LicenseId)).AllowedVersions = "2.*";
                     break;
                 case "component":
                     db.BannedComponents.Add(new BannedComponent
@@ -859,13 +931,12 @@ public sealed class RuntimeDistributionPreflightServiceTests
         Assert.True((await verification.BannedHardwareIds.SingleAsync()).IsActive);
     }
 
-    /// <summary>Proves missing and quarantined assignment graphs fail closed with distinct bounded reasons.</summary>
+    /// <summary>Proves missing and historical quarantined assignments continue to relink validation.</summary>
     [Theory]
-    [InlineData(false, "assignment_missing")]
-    [InlineData(true, "assignment_quarantined")]
-    public async Task KnownInstallation_WithoutActiveAssignment_IsCommerciallyRefused(
-        bool quarantined,
-        string expectedReason)
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task KnownInstallation_WithoutActiveAssignment_ContinuesToHardwareEvidenceValidation(
+        bool quarantined)
     {
         var fixture = CreateFixture();
         var request = Request(null);
@@ -886,8 +957,8 @@ public sealed class RuntimeDistributionPreflightServiceTests
 
         var exception = await Assert.ThrowsAsync<DistributionOperationException>(() =>
             EvaluateAsync(fixture, request));
-        Assert.Equal(StatusCodes.Status403Forbidden, exception.StatusCode);
-        Assert.Equal(expectedReason, exception.ReasonCode);
+        Assert.Equal(StatusCodes.Status400BadRequest, exception.StatusCode);
+        Assert.Null(exception.ReasonCode);
     }
 
     /// <summary>Proves duplicated ACTIVE assignment authority remains infrastructure-unavailable.</summary>

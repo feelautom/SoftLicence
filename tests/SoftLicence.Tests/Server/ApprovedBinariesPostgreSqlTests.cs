@@ -1,4 +1,7 @@
+using System.Data.Common;
+using System.Runtime.ExceptionServices;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using SoftLicence.Server.Data;
@@ -94,6 +97,104 @@ public sealed class ApprovedBinariesPostgreSqlTests
         await using var db = CreateDb(provision.ConnectionString);
         Assert.Equal(2, await db.ApprovedBinaryRegistrations.CountAsync());
         Assert.Equal(6, await db.ApprovedBinaries.CountAsync());
+    }
+
+    /// <summary>
+    /// Proves that a winner committed after each pre-write lookup is classified from its exact key
+    /// and content rather than from the loser's stale Read Committed snapshot.
+    /// </summary>
+    /// <param name="pausePoint">The completed losing query after which the winner is committed.</param>
+    [Theory]
+    [InlineData(RegistrationReadPausePoint.AfterKeyLookup)]
+    [InlineData(RegistrationReadPausePoint.AfterVersionLookup)]
+    [InlineData(RegistrationReadPausePoint.AfterArtifactLookup)]
+    public async Task ConcurrentRegistration_WhenWinnerCommitsBetweenReads_ClassifiesVisibleWinner(
+        RegistrationReadPausePoint pausePoint)
+    {
+        await using var provision = await PostgreSqlProvision.CreateAsync();
+
+        var identical = await ExecuteRegistrationInterleavingAsync(
+            provision.ConnectionString,
+            pausePoint,
+            "identical",
+            winnerRegistrationId: "deterministic-identical",
+            loserRegistrationId: "deterministic-identical",
+            winnerManifest: Hash('a'),
+            loserManifest: Hash('a'),
+            winnerArtifacts: Artifacts('1', '2', '3'),
+            loserArtifacts: Artifacts('1', '2', '3'));
+        Assert.Equal(ApprovedBinaryVerdict.Approved, identical.Loser.Verdict);
+        Assert.True(identical.Loser.Idempotent);
+        Assert.Equal(identical.Winner.BaselineId, identical.Loser.BaselineId);
+
+        var sameKeyDivergent = await ExecuteRegistrationInterleavingAsync(
+            provision.ConnectionString,
+            pausePoint,
+            "same-key-divergent",
+            winnerRegistrationId: "deterministic-same-key",
+            loserRegistrationId: "deterministic-same-key",
+            winnerManifest: Hash('b'),
+            loserManifest: Hash('c'),
+            winnerArtifacts: Artifacts('4', '5', '6'),
+            loserArtifacts: Artifacts('7', '8', '9'));
+        Assert.Equal("registration_id_conflict", sameKeyDivergent.Loser.ErrorCode);
+
+        var differentKey = await ExecuteRegistrationInterleavingAsync(
+            provision.ConnectionString,
+            pausePoint,
+            "different-key",
+            winnerRegistrationId: "deterministic-winner",
+            loserRegistrationId: "deterministic-loser",
+            winnerManifest: Hash('d'),
+            loserManifest: Hash('e'),
+            winnerArtifacts: Artifacts('a', 'b', 'c'),
+            loserArtifacts: Artifacts('d', 'e', 'f'));
+        Assert.Equal("baseline_registration_conflict", differentKey.Loser.ErrorCode);
+
+        var sameKeyDifferentProduct = await ExecuteRegistrationInterleavingAsync(
+            provision.ConnectionString,
+            pausePoint,
+            "same-key-different-product",
+            winnerRegistrationId: "deterministic-cross-product-key",
+            loserRegistrationId: "deterministic-cross-product-key",
+            winnerManifest: Hash('f'),
+            loserManifest: Hash('f'),
+            winnerArtifacts: Artifacts('1', '3', '5'),
+            loserArtifacts: Artifacts('1', '3', '5'),
+            winnerUsesDifferentProduct: true);
+        Assert.Equal("registration_id_conflict", sameKeyDifferentProduct.Loser.ErrorCode);
+    }
+
+    /// <summary>
+    /// Proves that release rows with no owning registration remain classified as non-authoritative
+    /// after the concurrent-winner recheck. This preserves the historical-data safety boundary while
+    /// allowing a newly committed aggregate owner to receive the stable registration-conflict result.
+    /// </summary>
+    [Fact]
+    public async Task ReleaseRowsWithoutRegistration_RemainNonAuthoritative()
+    {
+        await using var provision = await PostgreSqlProvision.CreateAsync();
+        var productId = await SeedProductAsync(provision.ConnectionString, "orphaned-release-rows");
+        await SeedHistoricalBaselineAsync(
+            provision.ConnectionString,
+            productId,
+            "2.3.42",
+            ApprovedBinaryService.ReleaseSource,
+            'a');
+        var service = CreateService(provision.ConnectionString);
+
+        var result = await service.RegisterReleaseBaselineAsync(
+            productId,
+            "2.3.42",
+            "orphaned-release-registration",
+            Hash('d'),
+            Artifacts('d', 'e', 'f'));
+
+        Assert.True(result.ProductExists);
+        Assert.Equal("baseline_not_authoritative", result.Result.ErrorCode);
+        await using var db = CreateDb(provision.ConnectionString);
+        Assert.Empty(await db.ApprovedBinaryRegistrations.ToListAsync());
+        Assert.Equal(3, await db.ApprovedBinaries.CountAsync());
     }
 
     [Fact]
@@ -302,6 +403,196 @@ public sealed class ApprovedBinariesPostgreSqlTests
         Assert.Equal(PostgresErrorCodes.CheckViolation, exception.SqlState);
     }
 
+    /// <summary>
+    /// Runs one losing registration against a deliberately committed winner at an exact query
+    /// boundary. Every exit releases, cancels if needed, and boundedly drains the loser while
+    /// preserving any earlier setup, winner, assertion, or loser exception as the primary failure.
+    /// </summary>
+    /// <param name="connectionString">PostgreSQL connection string for the isolated test database.</param>
+    /// <param name="pausePoint">Losing registration query that must complete before the winner commits.</param>
+    /// <param name="suffix">Unique product-name suffix for the scenario.</param>
+    /// <param name="winnerRegistrationId">Registration key committed by the winning service.</param>
+    /// <param name="loserRegistrationId">Registration key submitted by the paused losing service.</param>
+    /// <param name="winnerManifest">Canonical manifest digest committed by the winner.</param>
+    /// <param name="loserManifest">Canonical manifest digest submitted by the loser.</param>
+    /// <param name="winnerArtifacts">Canonical artifact set committed by the winner.</param>
+    /// <param name="loserArtifacts">Canonical artifact set submitted by the loser.</param>
+    /// <param name="winnerUsesDifferentProduct">
+    /// Whether the winner owns another product while deliberately colliding on the global key.
+    /// </param>
+    /// <returns>The approved winner and the loser's final classification.</returns>
+    private static async Task<(ApprovedBinaryVerificationResult Winner, ApprovedBinaryVerificationResult Loser)>
+        ExecuteRegistrationInterleavingAsync(
+            string connectionString,
+            RegistrationReadPausePoint pausePoint,
+            string suffix,
+            string winnerRegistrationId,
+            string loserRegistrationId,
+            string winnerManifest,
+            string loserManifest,
+            IReadOnlyCollection<ApprovedBinaryArtifact> winnerArtifacts,
+            IReadOnlyCollection<ApprovedBinaryArtifact> loserArtifacts,
+            bool winnerUsesDifferentProduct = false)
+    {
+        var productId = await SeedProductAsync(connectionString, $"deterministic-{suffix}");
+        var winnerProductId = winnerUsesDifferentProduct
+            ? await SeedProductAsync(connectionString, $"deterministic-winner-{suffix}")
+            : productId;
+        var interceptor = new RegistrationReadPauseInterceptor(pausePoint);
+        var pausedService = new ApprovedBinaryService(
+            new InterceptingTestDbContextFactory(connectionString, interceptor),
+            NullLogger<ApprovedBinaryService>.Instance);
+        var winnerService = CreateService(connectionString);
+        using var loserCancellation = new CancellationTokenSource();
+        var loserTask = pausedService.RegisterReleaseBaselineAsync(
+            productId,
+            "2.3.46",
+            loserRegistrationId,
+            loserManifest,
+            loserArtifacts,
+            loserCancellation.Token);
+        Exception? primaryException = null;
+
+        try
+        {
+            var pausedCommand = await interceptor.WaitUntilPausedAsync();
+            AssertPausedCommand(pausePoint, pausedCommand);
+            var winner = await winnerService.RegisterReleaseBaselineAsync(
+                winnerProductId,
+                "2.3.46",
+                winnerRegistrationId,
+                winnerManifest,
+                winnerArtifacts);
+            Assert.Equal(ApprovedBinaryVerdict.Approved, winner.Result.Verdict);
+            Assert.False(winner.Result.Idempotent);
+            interceptor.Resume();
+            var loser = await loserTask.WaitAsync(TimeSpan.FromSeconds(10));
+            return (winner.Result, loser.Result);
+        }
+        catch (Exception exception)
+        {
+            primaryException = exception;
+            throw;
+        }
+        finally
+        {
+            interceptor.Resume();
+            Exception? cleanupException = null;
+            if (!loserTask.IsCompleted)
+            {
+                try
+                {
+                    loserCancellation.Cancel();
+                }
+                catch (Exception exception)
+                {
+                    cleanupException = exception;
+                }
+            }
+
+            try
+            {
+                await loserTask.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            catch (TimeoutException timeoutException)
+            {
+                // WaitAsync does not stop its underlying task. Observe any later fault so the
+                // timed-out loser cannot surface an unobserved exception after fixture disposal.
+                _ = loserTask.ContinueWith(
+                    static faultedTask =>
+                    {
+                        _ = faultedTask.Exception;
+                    },
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+                var drainTimeoutException = new TimeoutException(
+                    "The losing registration task could not be drained within the 10-second timeout.",
+                    timeoutException);
+                cleanupException = cleanupException == null
+                    ? drainTimeoutException
+                    : new AggregateException(
+                        drainTimeoutException.Message,
+                        cleanupException,
+                        drainTimeoutException);
+            }
+            catch (Exception drainException)
+            {
+                cleanupException = cleanupException == null
+                    ? drainException
+                    : new AggregateException("Loser cancellation and bounded drain both failed.", cleanupException, drainException);
+            }
+
+            if (cleanupException != null && !ReferenceEquals(primaryException, cleanupException))
+            {
+                if (primaryException != null)
+                {
+                    // Preserve the primary failure while retaining cleanup diagnostics for debuggers
+                    // and test reporters that inspect Exception.Data.
+                    primaryException.Data["LoserTaskCleanupException"] = cleanupException;
+                }
+                else
+                {
+                    ExceptionDispatchInfo.Capture(cleanupException).Throw();
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Verifies that the deterministic pause captured the intended SQL statement rather than an
+    /// earlier query whose included navigation happens to mention the same tables.
+    /// </summary>
+    /// <param name="pausePoint">Expected pre-write query boundary.</param>
+    /// <param name="command">Exact SQL and parameter names captured by the interceptor.</param>
+    private static void AssertPausedCommand(
+        RegistrationReadPausePoint pausePoint,
+        PausedCommandSnapshot command)
+    {
+        var diagnostic = $"Paused SQL:{Environment.NewLine}{command.CommandText}{Environment.NewLine}" +
+            $"Parameters: {string.Join(", ", command.ParameterNames)}";
+        Assert.True(
+            command.CommandText.Contains("SELECT", StringComparison.Ordinal),
+            diagnostic);
+
+        switch (pausePoint)
+        {
+            case RegistrationReadPausePoint.AfterKeyLookup:
+                Assert.True(
+                    command.CommandText.Contains("\"ApprovedBinaryRegistrations\"", StringComparison.Ordinal),
+                    diagnostic);
+                Assert.True(
+                    command.ParameterNames.Any(name =>
+                        name.Contains("registrationId", StringComparison.OrdinalIgnoreCase)),
+                    diagnostic);
+                break;
+            case RegistrationReadPausePoint.AfterVersionLookup:
+                Assert.True(
+                    command.CommandText.Contains("\"ApprovedBinaryRegistrations\"", StringComparison.Ordinal),
+                    diagnostic);
+                Assert.True(
+                    command.ParameterNames.Any(name =>
+                        name.Contains("productId", StringComparison.OrdinalIgnoreCase)),
+                    diagnostic);
+                Assert.True(
+                    command.ParameterNames.Any(name =>
+                        name.Contains("version", StringComparison.OrdinalIgnoreCase)),
+                    diagnostic);
+                break;
+            case RegistrationReadPausePoint.AfterArtifactLookup:
+                Assert.True(command.CommandText.Contains("EXISTS", StringComparison.Ordinal), diagnostic);
+                Assert.True(
+                    command.CommandText.Contains("\"ApprovedBinaries\"", StringComparison.Ordinal),
+                    diagnostic);
+                Assert.False(
+                    command.CommandText.Contains("\"ApprovedBinaryRegistrations\"", StringComparison.Ordinal),
+                    diagnostic);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(pausePoint), pausePoint, null);
+        }
+    }
+
     private static ApprovedBinaryService CreateService(string connectionString) => new(
         new TestDbContextFactory(connectionString),
         NullLogger<ApprovedBinaryService>.Instance);
@@ -393,6 +684,176 @@ public sealed class ApprovedBinariesPostgreSqlTests
             Task.FromResult(CreateDbContext());
     }
 
+    /// <summary>
+    /// Creates PostgreSQL contexts with the deterministic command interceptor used by one losing
+    /// registration. The interceptor is scoped to this factory and never affects the winner.
+    /// </summary>
+    private sealed class InterceptingTestDbContextFactory : IDbContextFactory<LicenseDbContext>
+    {
+        private readonly DbContextOptions<LicenseDbContext> _options;
+
+        /// <summary>
+        /// Builds immutable PostgreSQL options containing the scenario-specific interceptor.
+        /// </summary>
+        /// <param name="connectionString">Connection string for the isolated PostgreSQL database.</param>
+        /// <param name="interceptor">Interceptor that pauses one selected registration query.</param>
+        public InterceptingTestDbContextFactory(
+            string connectionString,
+            RegistrationReadPauseInterceptor interceptor)
+        {
+            _options = new DbContextOptionsBuilder<LicenseDbContext>()
+                .UseNpgsql(connectionString)
+                .AddInterceptors(interceptor)
+                .Options;
+        }
+
+        /// <summary>
+        /// Creates one context that participates in the deterministic losing-registration schedule.
+        /// </summary>
+        /// <returns>A new license database context.</returns>
+        public LicenseDbContext CreateDbContext() => new(_options);
+
+        /// <summary>
+        /// Creates one context asynchronously without performing additional I/O during construction.
+        /// </summary>
+        /// <param name="cancellationToken">Unused construction token retained by the factory contract.</param>
+        /// <returns>A completed task containing a new license database context.</returns>
+        public Task<LicenseDbContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(CreateDbContext());
+    }
+
+    /// <summary>
+    /// Identifies the completed Read Committed pre-write query after which the test commits the
+    /// competing winner.
+    /// </summary>
+    public enum RegistrationReadPausePoint
+    {
+        /// <summary>
+        /// Pauses after the global registration-key lookup has fixed an empty statement snapshot.
+        /// </summary>
+        AfterKeyLookup,
+
+        /// <summary>
+        /// Pauses after the product/version lookup has fixed an empty statement snapshot.
+        /// </summary>
+        AfterVersionLookup,
+
+        /// <summary>
+        /// Pauses after the target version's release-artifact lookup has fixed an empty snapshot.
+        /// </summary>
+        AfterArtifactLookup
+    }
+
+    /// <summary>
+    /// Immutable evidence for the exact PostgreSQL command selected by the pause interceptor.
+    /// </summary>
+    /// <param name="CommandText">Exact SQL text executed by PostgreSQL.</param>
+    /// <param name="ParameterNames">Exact parameter names supplied by EF Core.</param>
+    private sealed record PausedCommandSnapshot(
+        string CommandText,
+        IReadOnlyList<string> ParameterNames);
+
+    /// <summary>
+    /// Pauses exactly one selected pre-write query after PostgreSQL has fixed its statement
+    /// snapshot but before EF consumes the reader, allowing the winner to commit deterministically.
+    /// </summary>
+    /// <param name="pausePoint">Pre-write query boundary selected by the theory row.</param>
+    private sealed class RegistrationReadPauseInterceptor(RegistrationReadPausePoint pausePoint)
+        : DbCommandInterceptor
+    {
+        /// <summary>
+        /// Signals that the selected statement has executed and its PostgreSQL snapshot is fixed.
+        /// </summary>
+        private readonly TaskCompletionSource<PausedCommandSnapshot> _paused =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>
+        /// Releases the open reader after the competing winner has committed or setup has failed.
+        /// </summary>
+        private readonly TaskCompletionSource _resume = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>
+        /// Prevents a later matching query from introducing a second pause in the same scenario.
+        /// </summary>
+        private int _hasPaused;
+
+        /// <summary>
+        /// Waits until PostgreSQL has executed the selected losing query and its snapshot is fixed.
+        /// </summary>
+        /// <returns>
+        /// A task containing the exact selected command, or one that fails quickly if the expected
+        /// EF query shape is no longer observed.
+        /// </returns>
+        public Task<PausedCommandSnapshot> WaitUntilPausedAsync() =>
+            _paused.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        /// <summary>
+        /// Releases the intercepted reader. Repeated calls are safe so failure cleanup cannot leave
+        /// the losing database operation blocked.
+        /// </summary>
+        public void Resume() => _resume.TrySetResult();
+
+        /// <summary>
+        /// Preserves the executed reader while suspending EF at the selected pre-write lookup.
+        /// </summary>
+        /// <param name="command">Executed PostgreSQL command.</param>
+        /// <param name="eventData">EF command metadata.</param>
+        /// <param name="result">Open reader whose statement snapshot is already fixed.</param>
+        /// <param name="cancellationToken">Cancellation token for the losing registration.</param>
+        /// <returns>The original reader after the test releases the pause.</returns>
+        public override async ValueTask<DbDataReader> ReaderExecutedAsync(
+            DbCommand command,
+            CommandExecutedEventData eventData,
+            DbDataReader result,
+            CancellationToken cancellationToken = default)
+        {
+            if (ShouldPause(command) && Interlocked.CompareExchange(ref _hasPaused, 1, 0) == 0)
+            {
+                _paused.TrySetResult(new PausedCommandSnapshot(
+                    command.CommandText,
+                    command.Parameters
+                        .Cast<DbParameter>()
+                        .Select(parameter => parameter.ParameterName)
+                        .ToArray()));
+                await _resume.Task.WaitAsync(cancellationToken);
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Matches only the requested pre-write lookup by table and parameter identity, excluding
+        /// the product-existence query and every non-selected read.
+        /// </summary>
+        /// <param name="command">Executed EF command to classify.</param>
+        /// <returns><see langword="true"/> only for the scenario's selected lookup.</returns>
+        private bool ShouldPause(DbCommand command)
+        {
+            var parameterNames = command.Parameters
+                .Cast<DbParameter>()
+                .Select(parameter => parameter.ParameterName)
+                .ToList();
+            return pausePoint switch
+            {
+                RegistrationReadPausePoint.AfterKeyLookup =>
+                    command.CommandText.Contains("\"ApprovedBinaryRegistrations\"", StringComparison.Ordinal)
+                    && parameterNames.Any(name =>
+                        name.Contains("registrationId", StringComparison.OrdinalIgnoreCase)),
+                RegistrationReadPausePoint.AfterVersionLookup =>
+                    command.CommandText.Contains("\"ApprovedBinaryRegistrations\"", StringComparison.Ordinal)
+                    && parameterNames.Any(name => name.Contains("productId", StringComparison.OrdinalIgnoreCase))
+                    && parameterNames.Any(name => name.Contains("version", StringComparison.OrdinalIgnoreCase)),
+                RegistrationReadPausePoint.AfterArtifactLookup =>
+                    command.CommandText.Contains("EXISTS", StringComparison.Ordinal)
+                    && command.CommandText.Contains("\"ApprovedBinaries\"", StringComparison.Ordinal)
+                    && !command.CommandText.Contains("\"ApprovedBinaryRegistrations\"", StringComparison.Ordinal)
+                    && parameterNames.Any(name => name.Contains("productId", StringComparison.OrdinalIgnoreCase))
+                    && parameterNames.Any(name => name.Contains("version", StringComparison.OrdinalIgnoreCase)),
+                _ => false
+            };
+        }
+    }
+
     private sealed class PostgreSqlProvision(
         string maintenanceConnectionString,
         string connectionString,
@@ -402,48 +863,16 @@ public sealed class ApprovedBinariesPostgreSqlTests
 
         public static async Task<PostgreSqlProvision> CreateAsync(string? targetMigration = null)
         {
-            var configured = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES");
-            if (string.IsNullOrWhiteSpace(configured))
-                throw new InvalidOperationException(
-                    "SOFTLICENCE_RUNTIME_TEST_POSTGRES is required for PostgreSQL contract tests.");
-
-            var database = "approved_binaries_" + Guid.NewGuid().ToString("N");
-            var maintenance = new NpgsqlConnectionStringBuilder(configured) { Database = "postgres" }.ConnectionString;
-            await using (var connection = new NpgsqlConnection(maintenance))
-            {
-                await connection.OpenAsync();
-                await using var command = connection.CreateCommand();
-                command.CommandText = $"CREATE DATABASE \"{database}\"";
-                await command.ExecuteNonQueryAsync();
-            }
-
-            var target = new NpgsqlConnectionStringBuilder(configured) { Database = database }.ConnectionString;
-            try
-            {
-                await using var db = CreateDb(target);
-                if (targetMigration is null)
-                    await db.Database.MigrateAsync();
-                else
-                    await db.Database.MigrateAsync(targetMigration);
-                return new PostgreSqlProvision(maintenance, target, database);
-            }
-            catch
-            {
-                await DropDatabaseAsync(maintenance, database);
-                throw;
-            }
+            var clone = await PostgreSqlModelDatabase.CloneAsync("approved", targetMigration);
+            return new PostgreSqlProvision(
+                clone.MaintenanceConnectionString,
+                clone.ConnectionString,
+                clone.DatabaseName);
         }
 
         public async ValueTask DisposeAsync() => await DropDatabaseAsync(maintenanceConnectionString, database);
 
         private static async Task DropDatabaseAsync(string maintenanceConnectionString, string database)
-        {
-            NpgsqlConnection.ClearAllPools();
-            await using var connection = new NpgsqlConnection(maintenanceConnectionString);
-            await connection.OpenAsync();
-            await using var command = connection.CreateCommand();
-            command.CommandText = $"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)";
-            await command.ExecuteNonQueryAsync();
-        }
+            => await PostgreSqlModelDatabase.DropAsync(maintenanceConnectionString, database);
     }
 }

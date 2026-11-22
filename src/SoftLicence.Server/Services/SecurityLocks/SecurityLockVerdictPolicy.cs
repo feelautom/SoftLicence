@@ -29,6 +29,8 @@ public static class SecurityLockAdminDecisions
     public const string Release = "RELEASE";
     /// <summary>Admin bans the hardware.</summary>
     public const string Ban = "BAN";
+    /// <summary>Admin explicitly reverses a previously banned lock and its applicable hardware bans.</summary>
+    public const string Unban = "UNBAN";
 }
 
 /// <summary>Inputs of one verdict decision.</summary>
@@ -52,7 +54,7 @@ public sealed record SecurityLockDecisionInput(
 public sealed record SecurityLockDecision(string Verdict, string State);
 
 /// <summary>
-/// Pure verdict policy (TKT-001177, DevBrain #1329/#1330). Security contract: only the server releases a lock;
+/// Pure verdict policy (TKT-001177, internal design note #1329/#1330). Security contract: only the server releases a lock;
 /// levels 1 and 2 are released when authenticated identity and commercial authority are eligible; the
 /// caller constrains this decision when commercial authority or reported hardware linkage is absent;
 /// level 3 needs an admin release except
@@ -71,6 +73,9 @@ public static class SecurityLockVerdictPolicy
         ArgumentNullException.ThrowIfNull(input);
         if (input.HardwareBanned || string.Equals(input.AdminDecision, SecurityLockAdminDecisions.Ban, StringComparison.Ordinal))
             return Banned();
+
+        if (string.Equals(input.AdminDecision, SecurityLockAdminDecisions.Unban, StringComparison.Ordinal))
+            return Released();
 
         var irreversible = SecurityLockCauseCatalog.IsIrreversibleCandidate(input.Level);
         if (irreversible && string.Equals(input.EffectiveMode, SecurityLockCauseCatalog.ModeEnforce, StringComparison.Ordinal))

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "set": {
+    "DistributionS2S__Clients__1__AllowLicenseHardwareExclusions": "true",
+    "DistributionS2S__Clients__2__ClientId": "tia-website-key-activation",
+    "DistributionS2S__Clients__2__Enabled": "true",
+    "DistributionS2S__Clients__2__AllowLicenseKeyActivationSettings": "true",
+    "DistributionS2S__Clients__2__ProductIds__0": "808648bc-a4b9-4f71-bcb1-b7c7e67ca98e",
+    "DistributionS2S__Clients__2__AllowedCidrs__0": "172.17.0.1/32"
+  },
+  "copy": [
+    {
+      "from": "DistributionS2S__Clients__1__PublicKeyPem",
+      "to": "DistributionS2S__Clients__2__PublicKeyPem"
+    },
+    {
+      "from": "DistributionS2S__Clients__1__KeyId",
+      "to": "DistributionS2S__Clients__2__KeyId"
+    }
+  ]
+}

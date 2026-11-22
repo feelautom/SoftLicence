@@ -47,8 +47,8 @@ public sealed class TelemetrySupportProfileAnalyticsServiceTests
         Assert.Equal(1, profile.CandidateCount);
         Assert.NotNull(profile.SelectedCandidate);
         Assert.Equal("HW-A", profile.SelectedCandidate.HardwareId);
-        Assert.Equal("franck@example.com", profile.SelectedCandidate.CustomerEmail);
-        Assert.Equal("fr***@example.com", profile.SelectedCandidate.CustomerEmailRedacted);
+        Assert.Equal("alice@example.com", profile.SelectedCandidate.CustomerEmail);
+        Assert.Equal("al***@example.com", profile.SelectedCandidate.CustomerEmailRedacted);
         Assert.Equal("AAAA****DDDD", profile.SelectedCandidate.LicenseKeyRedacted);
         Assert.Equal("AAAA", profile.SelectedCandidate.LicenseKeyFirstSegment);
         Assert.Equal("TIA-CONNECT-PRO", profile.SelectedCandidate.LicenseTypeSlug);
@@ -85,7 +85,7 @@ public sealed class TelemetrySupportProfileAnalyticsServiceTests
             productId,
             hardwareId: null,
             email: null,
-            emailFragment: "fra",
+            emailFragment: "ali",
             licenseFragment: null,
             clientIp: null,
             days: 7,
@@ -93,8 +93,8 @@ public sealed class TelemetrySupportProfileAnalyticsServiceTests
 
         var body = JsonSerializer.Serialize(profile, new JsonSerializerOptions(JsonSerializerDefaults.Web));
 
-        Assert.Contains("franck@example.com", body, StringComparison.Ordinal);
-        Assert.Contains("fr***@example.com", body, StringComparison.Ordinal);
+        Assert.Contains("alice@example.com", body, StringComparison.Ordinal);
+        Assert.Contains("al***@example.com", body, StringComparison.Ordinal);
         Assert.DoesNotContain(FullLicenseKey, body, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("BBBB", body, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("CCCC", body, StringComparison.OrdinalIgnoreCase);
@@ -488,8 +488,8 @@ public sealed class TelemetrySupportProfileAnalyticsServiceTests
             ProductId = productId,
             LicenseTypeId = proTypeId,
             LicenseKey = FullLicenseKey,
-            CustomerName = "Franck",
-            CustomerEmail = "franck@example.com",
+            CustomerName = "Alice",
+            CustomerEmail = "alice@example.com",
             HardwareId = "HW-A",
             ActivationDate = DateTime.UtcNow.AddDays(-2),
             ValidityDays = 365,

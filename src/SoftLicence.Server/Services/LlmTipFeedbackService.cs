@@ -44,17 +44,59 @@ public sealed class LlmTipFeedbackService
         "fixed-in-product"
     ];
 
+    /// <summary>Longest operator reason accepted for a sharing decision; matches the journal column.</summary>
+    public const int MaxSharingReasonLength = 1000;
+
+    /// <summary>
+    /// Most tips returned by one public snapshot. Bounds the response size of an unauthenticated route; far above the
+    /// few tips an administrator is expected to share.
+    /// </summary>
+    public const int MaxSharedTipsPerSnapshot = 500;
+
     private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
     private readonly IBugTraceProxyService? _bugTrace;
+    private readonly LlmTipProductIdCache _productIdCache;
+    /// <summary>Product to BugTrace project mapping for tip conversion (TKT-003093); never null, empty means "refuse all".</summary>
+    private readonly LlmTipBugTraceRouting _bugTraceRouting;
 
+    /// <summary>
+    /// Creates the LLM tips feedback service.
+    /// </summary>
+    /// <param name="dbFactory">Factory of short-lived database contexts, one per operation.</param>
+    /// <param name="bugTrace">BugTrace proxy used only by the tip-to-ticket conversion; null disables it.</param>
+    /// <param name="productIdCache">
+    /// Shared product-identifier cache (TKT-003573). The service is transient, so production injects
+    /// the singleton; when null (unit tests) a private cache is used for this instance only.
+    /// </param>
+    /// <param name="bugTraceRouting">
+    /// Product to BugTrace project mapping for tip conversion (TKT-003093). Production injects the
+    /// configuration singleton; when null the mapping is empty, so every conversion is refused rather
+    /// than sent to a default project.
+    /// </param>
     public LlmTipFeedbackService(
         IDbContextFactory<LicenseDbContext> dbFactory,
-        IBugTraceProxyService? bugTrace = null)
+        IBugTraceProxyService? bugTrace = null,
+        LlmTipProductIdCache? productIdCache = null,
+        LlmTipBugTraceRouting? bugTraceRouting = null)
     {
         _dbFactory = dbFactory;
         _bugTrace = bugTrace;
+        _productIdCache = productIdCache ?? new LlmTipProductIdCache();
+        _bugTraceRouting = bugTraceRouting ?? new LlmTipBugTraceRouting((string?)null);
     }
 
+    /// <summary>
+    /// Validates and stores one anonymized usage event (for example a tip search) sent by a client
+    /// application, linked to the product whose name matches <c>appName</c> when one exists.
+    /// </summary>
+    /// <param name="request">Usage event; <c>appName</c>, <c>schemaVersion</c> and <c>eventName</c> are required.</param>
+    /// <param name="cancellationToken">
+    /// Stops the work. The HTTP endpoint passes a server-side persistence deadline, not the client
+    /// connection token, so an event already received is stored even if the client stops waiting.
+    /// </param>
+    /// <returns>The stored event identifier with status <c>accepted</c>.</returns>
+    /// <exception cref="ArgumentException">Missing field or payload carrying sensitive raw data; nothing is stored.</exception>
+    /// <exception cref="OperationCanceledException">The token fired; the event may or may not have been committed.</exception>
     public async Task<LlmTipFeedbackIngestResponse> SaveUsageAsync(
         LlmTipFeedbackUsageRequest request,
         CancellationToken cancellationToken = default)
@@ -92,6 +134,17 @@ public sealed class LlmTipFeedbackService
         return new LlmTipFeedbackIngestResponse(entity.Id, "accepted", 1);
     }
 
+    /// <summary>
+    /// Validates and stores one anonymized tip, or increments the occurrence count of the tip that
+    /// already has the same <c>contentHash</c>.
+    /// </summary>
+    /// <param name="request">Tip; must be anonymized and carry <c>contentHash</c> and <c>title</c>.</param>
+    /// <param name="cancellationToken">
+    /// Server-side persistence deadline from the HTTP endpoint, not the client connection token (TKT-003573).
+    /// </param>
+    /// <returns><c>accepted</c> for a new tip, <c>deduplicated</c> with the new count otherwise.</returns>
+    /// <exception cref="ArgumentException">Missing field, non-anonymized or sensitive payload; nothing is stored.</exception>
+    /// <exception cref="OperationCanceledException">The token fired; the write may or may not have been committed.</exception>
     public async Task<LlmTipFeedbackIngestResponse> SaveTipAsync(
         LlmTipFeedbackTipRequest request,
         CancellationToken cancellationToken = default)
@@ -154,6 +207,15 @@ public sealed class LlmTipFeedbackService
         return new LlmTipFeedbackIngestResponse(entity.Id, "accepted", entity.OccurrenceCount);
     }
 
+    /// <summary>
+    /// Lists the tips of one product for a product-scoped analytics key, filtered by exact category and sorted by
+    /// occurrences (default), upvotes, title or first sighting, at most 200 rows. Includes the sharing state.
+    /// </summary>
+    /// <param name="productId">Product of the calling key.</param>
+    /// <param name="category">Exact stored category, or null for every category.</param>
+    /// <param name="sortBy"><c>upvotes</c>, <c>title</c>, <c>firstseen</c>, anything else sorts by occurrences.</param>
+    /// <param name="take">Row count, clamped to 1..200.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
     public async Task<IReadOnlyList<LlmTipFeedbackTipListItem>> ListTipsAsync(
         Guid productId,
         string? category,
@@ -201,10 +263,19 @@ public sealed class LlmTipFeedbackService
                 t.RequestSource,
                 t.RuntimeMode,
                 t.UiMode,
-                null))
+                null,
+                t.SharedWithClients,
+                t.SharingChangedAtUtc))
             .ToListAsync(cancellationToken);
     }
 
+    /// <summary>
+    /// Computes the admin screen aggregates (counts, top categories, versions, severities, daily series, top tips and
+    /// the sorted list) for the filtered tips, including the number of tips shared with every client (TKT-003574).
+    /// </summary>
+    /// <param name="query">Filters; see <see cref="LlmTipFeedbackAdminQuery"/>.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <exception cref="ArgumentException"><c>FromUtc</c> after <c>ToUtc</c>.</exception>
     public async Task<LlmTipFeedbackAdminOverview> GetAdminOverviewAsync(
         LlmTipFeedbackAdminQuery query,
         CancellationToken cancellationToken = default)
@@ -220,6 +291,7 @@ public sealed class LlmTipFeedbackService
         var newTips = await tipsQuery.CountAsync(t => t.ReviewStatus == "new", cancellationToken);
         var needsReview = await tipsQuery.CountAsync(t => t.ReviewStatus != "ignored" && t.ReviewStatus != "fixed-in-product", cancellationToken);
         var approvedTips = await tipsQuery.CountAsync(t => t.Approved, cancellationToken);
+        var sharedTips = await tipsQuery.CountAsync(t => t.SharedWithClients, cancellationToken);
         var totalUpvotes = await tipsQuery.SumAsync(t => (int?)t.Upvotes, cancellationToken) ?? 0;
         var upvotedUsageEvents = await eventsQuery.CountAsync(e => e.EventName == "llm_tip_upvoted", cancellationToken);
 
@@ -301,9 +373,16 @@ public sealed class LlmTipFeedbackService
             topTipsByOccurrences,
             topTipsByUpvotes,
             dailyTips,
-            tips);
+            tips,
+            sharedTips);
     }
 
+    /// <summary>
+    /// Returns one page of the filtered admin tip list (sharing filter included, TKT-003574) with the total count.
+    /// </summary>
+    /// <param name="query">Filters, sort and paging; the page size is clamped to 1..200.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <exception cref="ArgumentException"><c>FromUtc</c> after <c>ToUtc</c>.</exception>
     public async Task<LlmTipFeedbackPagedResult<LlmTipFeedbackTipListItem>> ListAdminTipsAsync(
         LlmTipFeedbackAdminQuery query,
         CancellationToken cancellationToken = default)
@@ -322,12 +401,18 @@ public sealed class LlmTipFeedbackService
         return new LlmTipFeedbackPagedResult<LlmTipFeedbackTipListItem>(total, limit, offset, items);
     }
 
+    /// <summary>
+    /// Returns the full anonymized detail of one tip for the administration screen, with its sharing journal
+    /// (newest first, TKT-003574), or null when no tip has this identifier.
+    /// </summary>
+    /// <param name="id">Tip UUID.</param>
+    /// <param name="cancellationToken">Cancels both database reads.</param>
     public async Task<LlmTipFeedbackTipDetail?> GetTipDetailAsync(
         Guid id,
         CancellationToken cancellationToken = default)
     {
         await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
-        return await db.LlmTipFeedbackTips
+        var detail = await db.LlmTipFeedbackTips
             .AsNoTracking()
             .Where(t => t.Id == id)
             .Select(t => new LlmTipFeedbackTipDetail(
@@ -353,10 +438,22 @@ public sealed class LlmTipFeedbackService
                 t.RuntimeMode,
                 t.UiMode,
                 t.PayloadJson,
-                t.BugTraceTicketRef))
+                t.BugTraceTicketRef,
+                t.SharedWithClients,
+                t.SharingChangedAtUtc,
+                t.SharingChangedBy,
+                null))
             .FirstOrDefaultAsync(cancellationToken);
+        return detail == null ? null : await WithSharingDecisionsAsync(db, detail, cancellationToken);
     }
 
+    /// <summary>
+    /// Returns the detail of one tip found by UUID or exact content hash, restricted to <paramref name="productId"/>
+    /// when given, with its sharing journal (TKT-003574); null when nothing matches or the lookup is blank.
+    /// </summary>
+    /// <param name="idOrContentHash">Tip UUID, or content hash compared ordinally after trimming (as stored).</param>
+    /// <param name="productId">Product the analytics key may reach; null for an administrator screen.</param>
+    /// <param name="cancellationToken">Cancels the database reads.</param>
     public async Task<LlmTipFeedbackTipDetail?> GetTipDetailAsync(
         string idOrContentHash,
         Guid? productId,
@@ -376,7 +473,177 @@ public sealed class LlmTipFeedbackService
         else
             query = query.Where(t => t.ContentHash == lookup);
 
-        return await ProjectTipDetail(query).FirstOrDefaultAsync(cancellationToken);
+        var detail = await ProjectTipDetail(query).FirstOrDefaultAsync(cancellationToken);
+        return detail == null ? null : await WithSharingDecisionsAsync(db, detail, cancellationToken);
+    }
+
+    /// <summary>
+    /// Publishes a tip to every client (<paramref name="shared"/> true) or retracts it (false), as an administrator
+    /// decision journaled in <c>LlmTipFeedbackSharingDecisions</c> (TKT-003574). Used by the administration screen, the
+    /// admin API and, through that API, the MCP.
+    /// </summary>
+    /// <param name="id">Tip UUID; takes precedence over <paramref name="contentHash"/>.</param>
+    /// <param name="contentHash">Exact stored content hash (trimmed, ordinal), used when <paramref name="id"/> is null.</param>
+    /// <param name="productId">Product the caller may reach; null only for the administration screen.</param>
+    /// <param name="shared">Requested state.</param>
+    /// <param name="reason">Operator reason, trimmed; mandatory for a retraction, at most 1000 characters.</param>
+    /// <param name="decidedBy">Server-built actor (<c>admin-ui:&lt;user&gt;</c> or <c>analytics-key:&lt;id&gt;</c>), never a secret.</param>
+    /// <param name="channel"><c>admin-ui</c>, <c>api</c> or <c>mcp</c>, compared case-insensitively then stored lower-case.</param>
+    /// <param name="callerIp">Caller address for API and MCP calls; null from the screen.</param>
+    /// <param name="cancellationToken">Cancels the read and the write.</param>
+    /// <returns>
+    /// The resulting state, with <c>Changed</c> false when the tip already had the requested state (nothing written,
+    /// no journal row: repeating a decision is harmless); null when no tip matches inside the product scope.
+    /// </returns>
+    /// <exception cref="ArgumentException">
+    /// No identifier, unknown channel, blank actor, reason longer than 1000 characters, or retraction without a reason.
+    /// Validation happens before any database access, so nothing is written.
+    /// </exception>
+    /// <remarks>
+    /// Only this method writes the sharing columns; ingestion never does, so a client can neither publish a tip (its
+    /// local approval is the informational <c>Approved</c> flag) nor undo a retraction. The read and the write use
+    /// the tracked entity: two concurrent opposite decisions both land in the journal and the last one wins, which
+    /// the journal shows in order. A retraction is refused without a reason even when the tip is not shared, so the
+    /// rule does not depend on a state the caller may not have seen.
+    /// </remarks>
+    public async Task<LlmTipFeedbackSharingResult?> SetSharingAsync(
+        Guid? id,
+        string? contentHash,
+        Guid? productId,
+        bool shared,
+        string? reason,
+        string decidedBy,
+        string channel,
+        string? callerIp,
+        CancellationToken cancellationToken = default)
+    {
+        if (!id.HasValue && string.IsNullOrWhiteSpace(contentHash))
+            throw new ArgumentException("id or contentHash is required.");
+        var normalizedChannel = (channel ?? string.Empty).Trim().ToLowerInvariant();
+        if (normalizedChannel is not ("admin-ui" or "api" or "mcp"))
+            throw new ArgumentException("channel must be admin-ui, api or mcp.");
+        var actor = Trim(decidedBy, 160);
+        if (string.IsNullOrWhiteSpace(actor))
+            throw new ArgumentException("decidedBy is required.");
+        var normalizedReason = string.IsNullOrWhiteSpace(reason) ? null : reason.Trim();
+        if (normalizedReason is { Length: > MaxSharingReasonLength })
+            throw new ArgumentException($"reason must not exceed {MaxSharingReasonLength} characters.");
+        if (!shared && normalizedReason == null)
+            throw new ArgumentException("reason is required to retract a shared tip.");
+
+        var normalizedHash = Trim(contentHash, 128);
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        var query = db.LlmTipFeedbackTips.AsQueryable();
+        if (productId.HasValue)
+            query = query.Where(t => t.ProductId == productId);
+
+        var tip = id.HasValue
+            ? await query.FirstOrDefaultAsync(t => t.Id == id.Value, cancellationToken)
+            : await query.FirstOrDefaultAsync(t => t.ContentHash == normalizedHash, cancellationToken);
+        if (tip == null)
+            return null;
+
+        if (tip.SharedWithClients == shared)
+        {
+            return new LlmTipFeedbackSharingResult(
+                tip.Id, tip.ContentHash, tip.SharedWithClients, Changed: false, tip.SharingChangedAtUtc, tip.SharingChangedBy);
+        }
+
+        var now = DateTime.UtcNow;
+        tip.SharedWithClients = shared;
+        tip.SharingChangedAtUtc = now;
+        tip.SharingChangedBy = actor;
+        db.LlmTipFeedbackSharingDecisions.Add(new LlmTipFeedbackSharingDecision
+        {
+            TipId = tip.Id,
+            Action = shared ? LlmTipFeedbackSharingDecision.SharedAction : LlmTipFeedbackSharingDecision.RetractedAction,
+            Reason = normalizedReason,
+            DecidedBy = actor,
+            Channel = normalizedChannel,
+            CallerIp = Trim(callerIp, 64),
+            DecidedAtUtc = now
+        });
+        await db.SaveChangesAsync(cancellationToken);
+
+        return new LlmTipFeedbackSharingResult(tip.Id, tip.ContentHash, shared, Changed: true, now, actor);
+    }
+
+    /// <summary>
+    /// Returns the complete snapshot of the tips an administrator shared for the product named
+    /// <paramref name="appName"/>, for the public read route (TKT-003574).
+    /// </summary>
+    /// <param name="appName">
+    /// Product name, trimmed, 1 to 120 characters, matched with the same case-insensitive relational rule as ingestion
+    /// (<c>lower(Name) = lower(@appName)</c>, cached by <see cref="LlmTipProductIdCache"/>).
+    /// </param>
+    /// <param name="category">Optional category, trimmed and compared lower-case on both sides (clients send lower-case).</param>
+    /// <param name="cancellationToken">Cancels the database reads.</param>
+    /// <returns>
+    /// At most <see cref="MaxSharedTipsPerSnapshot"/> tips, newest decision first then by content hash so the order is
+    /// stable for the ETag. An unknown product yields an empty list rather than an error, so the route does not reveal
+    /// which product names exist.
+    /// </returns>
+    /// <exception cref="ArgumentException">Blank or longer than 120 characters <paramref name="appName"/>.</exception>
+    /// <remarks>
+    /// Exposes only the reviewed anonymized content (hash, category, title, description, severity, confidence, sharing
+    /// instant). A tip retracted or never shared is absent. Tips not linked to a product (unknown appName at ingestion)
+    /// are never exposed.
+    /// </remarks>
+    public async Task<IReadOnlyList<LlmTipSharedTip>> ListSharedTipsAsync(
+        string? appName,
+        string? category,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedAppName = string.IsNullOrWhiteSpace(appName) ? null : appName.Trim();
+        if (normalizedAppName == null || normalizedAppName.Length > 120)
+            throw new ArgumentException("appName is required and must not exceed 120 characters.");
+        var normalizedCategory = string.IsNullOrWhiteSpace(category) ? null : category.Trim().ToLowerInvariant();
+
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        var productId = await ResolveProductIdAsync(db, normalizedAppName, cancellationToken);
+        if (!productId.HasValue)
+            return [];
+
+        var query = db.LlmTipFeedbackTips.AsNoTracking()
+            .Where(t => t.ProductId == productId.Value && t.SharedWithClients);
+        // Lower-casing the column keeps historical rows stored with another case; a product holds a few hundred tips
+        // and the (ProductId, SharedWithClients) index narrows the rows first, so the per-row lower() stays cheap.
+        if (normalizedCategory != null)
+            query = query.Where(t => t.Category != null && t.Category.ToLower() == normalizedCategory);
+
+        return await query
+            .OrderByDescending(t => t.SharingChangedAtUtc)
+            .ThenBy(t => t.ContentHash)
+            .Take(MaxSharedTipsPerSnapshot)
+            .Select(t => new LlmTipSharedTip(
+                t.ContentHash,
+                t.Category,
+                t.Title,
+                t.Description,
+                t.Severity,
+                t.Confidence,
+                t.SharingChangedAtUtc ?? t.LastSeenAtUtc))
+            .ToListAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Adds the sharing journal of <paramref name="detail"/>'s tip, newest first, read from the same context.
+    /// </summary>
+    /// <param name="db">Context of the current operation.</param>
+    /// <param name="detail">Projected detail without journal.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>The same detail with <c>SharingDecisions</c> filled (empty when no decision was ever made).</returns>
+    private static async Task<LlmTipFeedbackTipDetail> WithSharingDecisionsAsync(
+        LicenseDbContext db,
+        LlmTipFeedbackTipDetail detail,
+        CancellationToken cancellationToken)
+    {
+        var decisions = await db.LlmTipFeedbackSharingDecisions.AsNoTracking()
+            .Where(d => d.TipId == detail.Id)
+            .OrderByDescending(d => d.DecidedAtUtc)
+            .Select(d => new LlmTipFeedbackSharingDecisionItem(d.Action, d.Reason, d.DecidedBy, d.Channel, d.DecidedAtUtc))
+            .ToListAsync(cancellationToken);
+        return detail with { SharingDecisions = decisions };
     }
 
     public async Task<bool> UpdateReviewStatusAsync(
@@ -428,6 +695,38 @@ public sealed class LlmTipFeedbackService
         return true;
     }
 
+    /// <summary>
+    /// Converts one stored LLM tip into an internal BugTrace ticket in the project of the tip's product
+    /// (TKT-003093), and marks the tip <c>converted-to-bugtrace</c> with the returned ticket reference.
+    /// Used by the admin page and by <c>POST api/llm-tips-feedback/admin/tips/convert-to-bugtrace</c>.
+    /// </summary>
+    /// <remarks>
+    /// Order matters and must be preserved:
+    /// <list type="number">
+    /// <item>A tip that already carries a ticket reference returns that reference with
+    /// <c>Created = false</c>, without contacting BugTrace, even when BugTrace or the mapping is unavailable.</item>
+    /// <item>The destination comes only from <see cref="LlmTipBugTraceRouting"/>; an unmapped product is
+    /// refused before any provider call, never sent to the legacy SoftLicence project.</item>
+    /// <item>The ticket is relayed through the dedicated, provider-verified T-IA authority with the tip
+    /// identifier (lowercase D format) as idempotency key, so two concurrent conversions of the same tip
+    /// (double click, page plus API) replay one provider ticket instead of creating two.</item>
+    /// </list>
+    /// The local status is saved only after the provider returned a reference. If the call fails after
+    /// BugTrace committed the ticket, the tip stays unconverted and a retry replays the same ticket
+    /// through the idempotency key.
+    /// </remarks>
+    /// <param name="id">Tip identifier; takes precedence over <paramref name="contentHash"/>.</param>
+    /// <param name="contentHash">Tip content hash, trimmed to 128 characters and compared exactly.</param>
+    /// <param name="productId">When set, restricts the lookup to that product (product-scoped API keys).</param>
+    /// <param name="priority">Optional BugTrace priority (LOW, NORMAL, HIGH, CRITICAL); otherwise derived from severity.</param>
+    /// <param name="type">Optional BugTrace type (BUG, IMPROVEMENT, TASK); otherwise IMPROVEMENT.</param>
+    /// <param name="cancellationToken">Cancels database work and the provider call; a provider mutation may still commit.</param>
+    /// <returns>The conversion result, or null when no matching tip exists.</returns>
+    /// <exception cref="ArgumentException">Neither <paramref name="id"/> nor <paramref name="contentHash"/> was supplied.</exception>
+    /// <exception cref="LlmTipBugTraceProjectNotConfiguredException">No BugTrace project is configured for the tip's product.</exception>
+    /// <exception cref="InvalidOperationException">The BugTrace proxy or its T-IA authority is not configured, or BugTrace returned no reference.</exception>
+    /// <exception cref="BugTraceTiaAuthorityException">The T-IA token's project identity could not be verified.</exception>
+    /// <exception cref="HttpRequestException">BugTrace rejected the ticket or could not be reached.</exception>
     public async Task<LlmTipFeedbackBugTraceConversionResult?> ConvertToBugTraceAsync(
         Guid? id,
         string? contentHash,
@@ -436,8 +735,6 @@ public sealed class LlmTipFeedbackService
         string? type = null,
         CancellationToken cancellationToken = default)
     {
-        if (_bugTrace == null || !_bugTrace.IsConfigured)
-            throw new InvalidOperationException("BugTrace proxy is not configured.");
         if (!id.HasValue && string.IsNullOrWhiteSpace(contentHash))
             throw new ArgumentException("id or contentHash is required.");
 
@@ -465,7 +762,20 @@ public sealed class LlmTipFeedbackService
                 Created: false);
         }
 
-        var result = await _bugTrace.SubmitTicketAsync(BuildBugTraceTicket(tip, priority, type), cancellationToken);
+        // Destination first, availability second: an unmapped product is a configuration decision the
+        // operator must see as such, even while BugTrace happens to be unavailable.
+        var project = _bugTraceRouting.Resolve(tip.ProductId);
+        if (project == LlmTipBugTraceProject.None)
+            throw new LlmTipBugTraceProjectNotConfiguredException(tip.ProductId, !_bugTraceRouting.IsValid);
+
+        if (_bugTrace == null || !_bugTrace.IsTiaConfigured)
+            throw new InvalidOperationException("BugTrace T-IA authority is not configured.");
+
+        // Never the legacy SubmitTicketAsync: its token files tickets in the SoftLicence project (TKT-003093).
+        var result = await _bugTrace.SubmitTiaTicketAsync(
+            BuildBugTraceTicket(tip, priority, type),
+            tip.Id.ToString("D"),
+            cancellationToken);
         var ticketRef = Trim(
             TryGetJsonString(result, "ticketNumber")
                 ?? TryGetJsonString(result, "number")
@@ -486,6 +796,15 @@ public sealed class LlmTipFeedbackService
             Created: true);
     }
 
+    /// <summary>
+    /// Applies the admin filters to a relational query: product, last-seen window, exact category, severity, version
+    /// and review status, sharing state (TKT-003574), and a case-insensitive search in title, description and hash.
+    /// </summary>
+    /// <param name="query">Source query, not yet filtered.</param>
+    /// <param name="filters">Requested filters; null or blank values are ignored.</param>
+    /// <param name="fromUtc">Inclusive lower bound on <c>LastSeenAtUtc</c>, already converted to UTC.</param>
+    /// <param name="toUtc">Inclusive upper bound on <c>LastSeenAtUtc</c>, already converted to UTC.</param>
+    /// <returns>The filtered query, still translated to SQL.</returns>
     private static IQueryable<LlmTipFeedbackTip> ApplyAdminFilters(
         IQueryable<LlmTipFeedbackTip> query,
         LlmTipFeedbackAdminQuery filters,
@@ -506,6 +825,8 @@ public sealed class LlmTipFeedbackService
             query = query.Where(t => t.AppVersion == filters.AppVersion);
         if (!string.IsNullOrWhiteSpace(filters.ReviewStatus))
             query = query.Where(t => t.ReviewStatus == filters.ReviewStatus);
+        if (filters.Shared.HasValue)
+            query = query.Where(t => t.SharedWithClients == filters.Shared.Value);
         if (!string.IsNullOrWhiteSpace(filters.Search))
         {
             var search = filters.Search.Trim().ToLower();
@@ -561,6 +882,8 @@ public sealed class LlmTipFeedbackService
         };
     }
 
+    /// <summary>Projects tips to admin list items in SQL, sharing state included (TKT-003574).</summary>
+    /// <param name="query">Filtered and sorted tip query.</param>
     private static IQueryable<LlmTipFeedbackTipListItem> ProjectTipList(IQueryable<LlmTipFeedbackTip> query)
     {
         return query.Select(t => new LlmTipFeedbackTipListItem(
@@ -583,9 +906,16 @@ public sealed class LlmTipFeedbackService
             t.RequestSource,
             t.RuntimeMode,
             t.UiMode,
-            t.BugTraceTicketRef));
+            t.BugTraceTicketRef,
+            t.SharedWithClients,
+            t.SharingChangedAtUtc));
     }
 
+    /// <summary>
+    /// Projects tips to admin details in SQL with the sharing state; the journal is added afterwards by
+    /// <see cref="WithSharingDecisionsAsync"/> because it is a separate table.
+    /// </summary>
+    /// <param name="query">Tip query narrowed to the requested tip.</param>
     private static IQueryable<LlmTipFeedbackTipDetail> ProjectTipDetail(IQueryable<LlmTipFeedbackTip> query)
     {
         return query.Select(t => new LlmTipFeedbackTipDetail(
@@ -611,7 +941,11 @@ public sealed class LlmTipFeedbackService
             t.RuntimeMode,
             t.UiMode,
             t.PayloadJson,
-            t.BugTraceTicketRef));
+            t.BugTraceTicketRef,
+            t.SharedWithClients,
+            t.SharingChangedAtUtc,
+            t.SharingChangedBy,
+            null));
     }
 
     private static object BuildBugTraceTicket(LlmTipFeedbackTip tip, string? priority, string? type)
@@ -767,15 +1101,33 @@ public sealed class LlmTipFeedbackService
         }
     }
 
-    private static async Task<Guid?> ResolveProductIdAsync(
+    /// <summary>
+    /// Returns the product whose name matches <paramref name="appName"/> case-insensitively, or null,
+    /// answering from <see cref="LlmTipProductIdCache"/> when it can (TKT-003573).
+    /// </summary>
+    /// <param name="db">Context of the current operation, used only on a cache miss.</param>
+    /// <param name="appName">Client-supplied application name, already validated as non-blank.</param>
+    /// <param name="cancellationToken">Cancels the database lookup on a cache miss.</param>
+    /// <returns>The product identifier, or null when no product has that name.</returns>
+    /// <remarks>
+    /// The relational predicate <c>lower(Name) = lower(@appName)</c> remains the only matching rule;
+    /// the cache is keyed by the raw name and stores that answer, null included. Concurrent misses for
+    /// the same name may each query once; that is harmless and avoids a lock on the ingestion path.
+    /// </remarks>
+    private async Task<Guid?> ResolveProductIdAsync(
         LicenseDbContext db,
         string appName,
         CancellationToken cancellationToken)
     {
-        return await db.Products.AsNoTracking()
+        if (_productIdCache.TryGet(appName, out var cachedProductId))
+            return cachedProductId;
+
+        var productId = await db.Products.AsNoTracking()
             .Where(p => p.Name.ToLower() == appName.ToLower())
             .Select(p => (Guid?)p.Id)
             .FirstOrDefaultAsync(cancellationToken);
+        _productIdCache.Set(appName, productId);
+        return productId;
     }
 
     private static string? FirstValue(Dictionary<string, string> values, params string[] keys)

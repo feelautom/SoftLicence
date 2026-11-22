@@ -73,25 +73,52 @@ internal static class RuntimeCommercialEligibilityValidator
     }
 
     /// <summary>
+    /// Says whether the release frozen in the assessed enrollment is judged against the licence mask
+    /// (<c>AllowedVersions</c>) and the product minimum (<c>MinimumAllowedVersion</c>).
+    /// </summary>
+    /// <remarks>
+    /// TKT-004062: a reinstallation replaces the installed release, so judging the release it replaces refused
+    /// every reinstallation of a machine still enrolled below a newly raised minimum (403 <c>not_eligible</c>,
+    /// reason <c>version_ineligible</c>). Only reinstallation source checks may use <see cref="NotJudged"/>; the
+    /// release that will actually run is judged later by Finalize. Startup, redeem, capability, upgrade and every
+    /// other caller keep <see cref="Judged"/>, so an installed release below the minimum stays refused.
+    /// </remarks>
+    internal enum SourceReleaseVersionPolicy
+    {
+        /// <summary>The enrollment release must match the licence mask and reach the product minimum.</summary>
+        Judged,
+        /// <summary>
+        /// The enrollment release is the one being replaced and is not judged. Licence, seat, quota, ban and
+        /// component policy stay fully enforced.
+        /// </summary>
+        NotJudged
+    }
+
+    /// <summary>
     /// A commercial assessment keeps denial separate from a database or identity failure. Hardware flags
-    /// describe only the reported value's current policy relationship; the optional eligible
-    /// assignment carries the validated seat value, never the reported hardware value.
+    /// describe only the reported value's current policy relationship; the independent active-ban signal
+    /// covers every live ban that can be established even when another commercial rule denies eligibility.
+    /// The optional eligible assignment carries the validated seat value, never the reported hardware value.
     /// </summary>
     /// <param name="Assignment">Active assignment when eligible.</param>
     /// <param name="DenialReason">Bounded closed reason for a policy denial.</param>
     /// <param name="ReportHardwareLinked">Current link of reported hardware, never historical proof.</param>
     /// <param name="ReportHardwareBanned">Whether a current active ban covers the reported hardware.</param>
+    /// <param name="ActiveBanReason">Bounded recognized live-ban reason, independent of denial precedence.</param>
     internal sealed record Assessment(
         EligibleAssignment? Assignment,
         string? DenialReason,
         bool ReportHardwareLinked,
-        bool ReportHardwareBanned)
+        bool ReportHardwareBanned,
+        string? ActiveBanReason)
     {
         /// <summary>Closed business outcome; infrastructure failures remain exceptions.</summary>
         internal AssessmentOutcome Outcome => Assignment is not null && DenialReason is null
             ? AssessmentOutcome.Eligible : AssessmentOutcome.Denied;
         /// <summary>True only when the current assignment and every commercial policy check passed.</summary>
         internal bool IsEligible => Outcome == AssessmentOutcome.Eligible;
+        /// <summary>True when a recognized live ban applies independently of commercial eligibility.</summary>
+        internal bool ActiveBanDetected => ActiveBanReason is not null;
     }
 
     /// <summary>
@@ -108,6 +135,31 @@ internal static class RuntimeCommercialEligibilityValidator
         CancellationToken cancellationToken)
     {
         var assessment = await AssessAsync(db, enrollment, approvedBinaries, now, null, cancellationToken);
+        return assessment.Assignment ?? throw Denied(assessment.DenialReason ?? "commercial_authority_ineligible");
+    }
+
+    /// <summary>
+    /// Same contract as <see cref="ValidateAsync(LicenseDbContext, RuntimeEnrollment, IReadOnlyDictionary{string, string}, DateTimeOffset, CancellationToken)"/>
+    /// with an explicit source-release policy, reserved for reinstallation source checks (TKT-004062).
+    /// </summary>
+    /// <param name="db">Current transaction database context, holding the caller's commercial barrier.</param>
+    /// <param name="enrollment">Cryptographically validated enrollment.</param>
+    /// <param name="approvedBinaries">Validated release binary map used for component bans.</param>
+    /// <param name="now">Fresh provider database time.</param>
+    /// <param name="sourceReleasePolicy">Whether the enrollment release is judged; see <see cref="SourceReleaseVersionPolicy"/>.</param>
+    /// <param name="cancellationToken">Cancellation.</param>
+    /// <returns>The eligible assignment with its exact seat hardware value.</returns>
+    /// <exception cref="RuntimeEnrollmentException">422 <c>authority_ineligible</c> with the denial reason; 503 for a broken graph.</exception>
+    internal static async Task<EligibleAssignment> ValidateAsync(
+        LicenseDbContext db,
+        RuntimeEnrollment enrollment,
+        IReadOnlyDictionary<string, string> approvedBinaries,
+        DateTimeOffset now,
+        SourceReleaseVersionPolicy sourceReleasePolicy,
+        CancellationToken cancellationToken)
+    {
+        var assessment = await AssessAsync(db, enrollment, approvedBinaries, now, null,
+            HardwareBanAssessmentMode.Enforce, sourceReleasePolicy, cancellationToken);
         return assessment.Assignment ?? throw Denied(assessment.DenialReason ?? "commercial_authority_ineligible");
     }
 
@@ -138,6 +190,33 @@ internal static class RuntimeCommercialEligibilityValidator
     /// <param name="hardwareBanMode">Exact owner of the hardware-ban decision.</param>
     /// <param name="cancellationToken">Cancellation.</param>
     /// <returns>A typed eligible or denied commercial result.</returns>
+    internal static Task<Assessment> AssessAsync(
+        LicenseDbContext db,
+        RuntimeEnrollment enrollment,
+        IReadOnlyDictionary<string, string> approvedBinaries,
+        DateTimeOffset now,
+        string? reportedHardwareId,
+        HardwareBanAssessmentMode hardwareBanMode,
+        CancellationToken cancellationToken) => AssessAsync(
+            db, enrollment, approvedBinaries, now, reportedHardwareId, hardwareBanMode,
+            SourceReleaseVersionPolicy.Judged, cancellationToken);
+
+    /// <summary>
+    /// Assesses commercial authority with explicit hardware-ban and source-release policies. Every licence,
+    /// seat, quota, ban and component rule applies in both release policies, in the established denial order.
+    /// </summary>
+    /// <param name="db">Current transaction database context.</param>
+    /// <param name="enrollment">Cryptographically validated enrollment.</param>
+    /// <param name="approvedBinaries">Validated release binary map used for component bans.</param>
+    /// <param name="now">Fresh provider database time.</param>
+    /// <param name="reportedHardwareId">Optional current hardware observation for linkage diagnostics.</param>
+    /// <param name="hardwareBanMode">Exact owner of the hardware-ban decision.</param>
+    /// <param name="sourceReleasePolicy">
+    /// <see cref="SourceReleaseVersionPolicy.NotJudged"/> only for a reinstallation source, whose release is replaced.
+    /// </param>
+    /// <param name="cancellationToken">Cancellation.</param>
+    /// <returns>A typed eligible or denied commercial result; database failures propagate.</returns>
+    /// <exception cref="RuntimeEnrollmentException">503 <c>authority_unavailable</c> for a duplicate or broken assignment graph.</exception>
     internal static async Task<Assessment> AssessAsync(
         LicenseDbContext db,
         RuntimeEnrollment enrollment,
@@ -145,12 +224,22 @@ internal static class RuntimeCommercialEligibilityValidator
         DateTimeOffset now,
         string? reportedHardwareId,
         HardwareBanAssessmentMode hardwareBanMode,
+        SourceReleaseVersionPolicy sourceReleasePolicy,
         CancellationToken cancellationToken)
     {
         var reportHardwareBanned = reportedHardwareId is not null && await db.BannedHardwareIds.AsNoTracking()
             .AnyAsync(ban => ban.IsActive && (ban.ProductId == null || ban.ProductId == enrollment.ProductId)
                 && (ban.ExpiresAt == null || ban.ExpiresAt > now.UtcDateTime)
                 && ban.HardwareId.ToUpper() == reportedHardwareId.ToUpper(), cancellationToken);
+        var componentBans = await db.BannedComponents.AsNoTracking().Where(ban =>
+                ban.IsActive && (ban.ProductId == null || ban.ProductId == enrollment.ProductId)
+                && (ban.ExpiresAt == null || ban.ExpiresAt > now.UtcDateTime))
+            .Select(ban => new { ban.ComponentType, ban.ComponentHash })
+            .ToListAsync(cancellationToken);
+        var componentBanDetected = componentBans.Any(ban =>
+            approvedBinaries.TryGetValue(ban.ComponentType, out var hash)
+            && string.Equals(ApprovedBinaryService.NormalizeSha256(ban.ComponentHash),
+                hash, StringComparison.OrdinalIgnoreCase));
         var assignments = await db.EnrollmentLicenseAssignments.AsNoTracking()
             .Where(row => row.EnrollmentId == enrollment.Id && row.State == "ACTIVE")
             .Take(2).ToListAsync(cancellationToken);
@@ -163,7 +252,8 @@ internal static class RuntimeCommercialEligibilityValidator
             var quarantined = await db.EnrollmentLicenseAssignmentQuarantines.AsNoTracking()
                 .AnyAsync(row => row.EnrollmentId == enrollment.Id, cancellationToken);
             return new Assessment(null, quarantined ? "assignment_quarantined" : "assignment_missing",
-                false, reportHardwareBanned);
+                false, reportHardwareBanned, reportHardwareBanned
+                    ? "hardware_banned" : componentBanDetected ? "component_banned" : null);
         }
 
         var assignment = assignments[0];
@@ -178,45 +268,107 @@ internal static class RuntimeCommercialEligibilityValidator
         var reportHardwareLinked = reportedHardwareId is not null
             && await IsReportHardwareLinkedAsync(
                 db, enrollment, assignment, seat, reportedHardwareId, cancellationToken);
-        if (license.ProductId != enrollment.ProductId
-            || !license.IsActive || license.RevokedAt is not null
-            || license.ExpirationDate is { } expiry && expiry <= now.UtcDateTime
-            || license.MaxSeats < 1 || !seat.IsActive || seat.LicenseId != license.Id
-            || string.IsNullOrWhiteSpace(seat.HardwareId))
-            return new Assessment(null, "commercial_authority_ineligible", reportHardwareLinked, reportHardwareBanned);
-
-        var activeSeats = await db.LicenseSeats.AsNoTracking()
-            .CountAsync(row => row.LicenseId == license.Id && row.IsActive, cancellationToken);
-        if (activeSeats > license.MaxSeats)
-            return new Assessment(null, "seat_capacity_exceeded", reportHardwareLinked, reportHardwareBanned);
-
-        if (!RuntimeEnrollmentService.IsVersionAllowed(enrollment.ReleaseVersion, license.AllowedVersions)
-            || RuntimeEnrollmentService.IsVersionBelow(
-                enrollment.ReleaseVersion, license.Product?.MinimumAllowedVersion))
-            return new Assessment(null, "version_ineligible", reportHardwareLinked, reportHardwareBanned);
-
-        var canonicalHardware = seat.HardwareId.ToUpperInvariant();
-        if (hardwareBanMode == HardwareBanAssessmentMode.Enforce
+        var canonicalHardware = string.IsNullOrWhiteSpace(seat.HardwareId)
+            ? null
+            : seat.HardwareId.ToUpperInvariant();
+        var canonicalHardwareBanned = hardwareBanMode == HardwareBanAssessmentMode.Enforce
+            && canonicalHardware is not null
             && await db.BannedHardwareIds.AsNoTracking().AnyAsync(ban =>
                 ban.IsActive && (ban.ProductId == null || ban.ProductId == enrollment.ProductId)
                 && (ban.ExpiresAt == null || ban.ExpiresAt > now.UtcDateTime)
-                && ban.HardwareId.ToUpper() == canonicalHardware, cancellationToken))
-            return new Assessment(null, "hardware_banned", reportHardwareLinked, reportHardwareBanned);
+                && ban.HardwareId.ToUpper() == canonicalHardware, cancellationToken);
+        var activeBanReason = reportHardwareBanned || canonicalHardwareBanned
+            ? "hardware_banned"
+            : componentBanDetected ? "component_banned" : null;
 
-        var componentBans = await db.BannedComponents.AsNoTracking().Where(ban =>
-                ban.IsActive && (ban.ProductId == null || ban.ProductId == enrollment.ProductId)
-                && (ban.ExpiresAt == null || ban.ExpiresAt > now.UtcDateTime))
-            .Select(ban => new { ban.ComponentType, ban.ComponentHash })
-            .ToListAsync(cancellationToken);
-        if (componentBans.Any(ban => approvedBinaries.TryGetValue(ban.ComponentType, out var hash)
-            && string.Equals(ApprovedBinaryService.NormalizeSha256(ban.ComponentHash),
-                hash, StringComparison.OrdinalIgnoreCase)))
-            return new Assessment(null, "component_banned", reportHardwareLinked, reportHardwareBanned);
+        // Keep the established denial reason precedence while carrying live-ban priority separately for SHADOW.
+        // TKT-003647: the licence and seat rules live in ClassifyLicenseAndSeat, shared with the current-assignment
+        // read; every finer reason it returns still maps to the single historical code here.
+        if (ClassifyLicenseAndSeat(license, seat, enrollment.ProductId, now.UtcDateTime) is not null)
+            return new Assessment(null, "commercial_authority_ineligible", reportHardwareLinked,
+                reportHardwareBanned, activeBanReason);
+
+        var activeSeats = await db.LicenseSeats.AsNoTracking()
+            .CountAsync(row => row.LicenseId == license.Id && row.IsActive, cancellationToken);
+        if (ExceedsSeatCapacity(license, activeSeats))
+            return new Assessment(null, "seat_capacity_exceeded", reportHardwareLinked,
+                reportHardwareBanned, activeBanReason);
+
+        // TKT-004062: a reinstallation source is the release being replaced. Its version is skipped only under the
+        // explicit NotJudged policy; the target release is judged by Finalize, and every other check stays above.
+        if (sourceReleasePolicy == SourceReleaseVersionPolicy.Judged
+            && (!RuntimeEnrollmentService.IsVersionAllowed(enrollment.ReleaseVersion, license.AllowedVersions)
+                || RuntimeEnrollmentService.IsVersionBelow(
+                    enrollment.ReleaseVersion, license.Product?.MinimumAllowedVersion)))
+            return new Assessment(null, "version_ineligible", reportHardwareLinked,
+                reportHardwareBanned, activeBanReason);
+
+        if (canonicalHardwareBanned)
+            return new Assessment(null, "hardware_banned", reportHardwareLinked,
+                reportHardwareBanned, activeBanReason);
+
+        if (componentBanDetected)
+            return new Assessment(null, "component_banned", reportHardwareLinked,
+                reportHardwareBanned, activeBanReason);
 
         return new Assessment(new EligibleAssignment(
                 assignment.Id, assignment.Revision, license.Id, seat.Id, seat.HardwareId),
-            null, reportHardwareLinked, reportHardwareBanned);
+            null, reportHardwareLinked, reportHardwareBanned, activeBanReason);
     }
+
+    /// <summary>Licence revoked (<see cref="License.RevokedAt"/> set); checked first because a revocation also deactivates.</summary>
+    internal const string LicenseRevokedReason = "license_revoked";
+    /// <summary>Licence deactivated without revocation.</summary>
+    internal const string LicenseInactiveReason = "license_inactive";
+    /// <summary>Key period over: <see cref="License.ExpirationDate"/> at or before the provider clock (not the commercial period).</summary>
+    internal const string LicenseExpiredReason = "license_expired";
+    /// <summary>Licence of another product or without any seat (<see cref="License.MaxSeats"/> below 1).</summary>
+    internal const string LicenseUnusableReason = "license_unusable";
+    /// <summary>Assigned seat inactive, attached to another licence, or without a hardware identifier.</summary>
+    internal const string SeatUnavailableReason = "seat_unavailable";
+    /// <summary>More active seats than <see cref="License.MaxSeats"/>; same code as the historical assessment.</summary>
+    internal const string SeatCapacityExceededReason = "seat_capacity_exceeded";
+
+    /// <summary>
+    /// Classifies whether the licence and seat of an ACTIVE assignment are usable at <paramref name="nowUtc"/>,
+    /// from their stored state only: no version, ban, price, offer or account right is considered. It is the single
+    /// source of the licence and seat rules of <see cref="AssessAsync(LicenseDbContext, RuntimeEnrollment,
+    /// IReadOnlyDictionary{string, string}, DateTimeOffset, string?, HardwareBanAssessmentMode, CancellationToken)"/>
+    /// (which reports every reason as <c>commercial_authority_ineligible</c>) and of the TKT-003647 current-assignment
+    /// read (which reports the finer reason). Pure function, no database access.
+    /// </summary>
+    /// <param name="license">Licence of the ACTIVE assignment.</param>
+    /// <param name="seat">Seat of the ACTIVE assignment.</param>
+    /// <param name="enrollmentProductId">Product of the enrollment, which the licence must share.</param>
+    /// <param name="nowUtc">Provider (database) UTC time; an expiry equal to it already counts as expired.</param>
+    /// <returns>
+    /// Null when usable; otherwise the first matching reason in this precedence: <see cref="LicenseRevokedReason"/>,
+    /// <see cref="LicenseInactiveReason"/>, <see cref="LicenseExpiredReason"/>, <see cref="LicenseUnusableReason"/>,
+    /// <see cref="SeatUnavailableReason"/>. Seat capacity needs a count and is checked by
+    /// <see cref="ExceedsSeatCapacity"/> afterwards.
+    /// </returns>
+    internal static string? ClassifyLicenseAndSeat(License license, LicenseSeat seat, Guid enrollmentProductId, DateTime nowUtc)
+    {
+        if (license.RevokedAt is not null)
+            return LicenseRevokedReason;
+        if (!license.IsActive)
+            return LicenseInactiveReason;
+        if (license.ExpirationDate is { } expiry && expiry <= nowUtc)
+            return LicenseExpiredReason;
+        if (license.ProductId != enrollmentProductId || license.MaxSeats < 1)
+            return LicenseUnusableReason;
+        if (!seat.IsActive || seat.LicenseId != license.Id || string.IsNullOrWhiteSpace(seat.HardwareId))
+            return SeatUnavailableReason;
+        return null;
+    }
+
+    /// <summary>
+    /// True when the licence has more active seats than it allows. Equality is allowed: the assigned seat itself is
+    /// one of the counted active seats. Shared by the assessment and the TKT-003647 current-assignment read.
+    /// </summary>
+    /// <param name="license">Licence whose <see cref="License.MaxSeats"/> applies.</param>
+    /// <param name="activeSeatCount">Number of active seats of that licence, counted by the caller in its transaction.</param>
+    internal static bool ExceedsSeatCapacity(License license, int activeSeatCount) => activeSeatCount > license.MaxSeats;
 
     /// <summary>Converts a bounded business reason to the stable public 422 response.</summary>
     private static RuntimeEnrollmentException Denied(string diagnosticCode) =>

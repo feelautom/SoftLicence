@@ -296,7 +296,7 @@ public sealed class SoftLicenceAnalyticsTools
     }
 
     [McpServerTool]
-    [Description("Get activation funnel analytics combining license lifecycle and access logs.")]
+    [Description("Get activation funnel analytics combining license lifecycle and access logs. With a global analytics key, productName or productId is required.")]
     public async Task<JsonElement> GetTelemetryActivationFunnel(
         [Description("Time window in days. Clamped from 1 to 30.")] int days = 7,
         [Description("Maximum number of grouped items. Clamped from 1 to 100.")] int top = 20,
@@ -313,7 +313,7 @@ public sealed class SoftLicenceAnalyticsTools
     }
 
     [McpServerTool]
-    [Description("Get recent license activation failures with full customer email when a license can be matched, plus status, reason, machine, IP, and inferred client version. License keys are never returned.")]
+    [Description("Get recent license activation failures with full customer email when a license can be matched, plus status, reason, machine, IP, and inferred client version. License keys are never returned. With a global analytics key, productName or productId is required.")]
     public async Task<JsonElement> GetActivationFailures(
         [Description("Time window in days. Clamped from 1 to 30. Ignored when date or fromUtc/toUtc is provided.")] int days = 7,
         [Description("Explicit UTC calendar day in YYYY-MM-DD format. Optional.")] string? date = null,
@@ -631,8 +631,36 @@ public sealed class SoftLicenceAnalyticsTools
             NormalizeOptional(productName));
     }
 
+    /// <summary>
+    /// MCP tool <c>get_paid_weekly_activity</c> (TKT-003652): weekly usage history of paid licenses for retention
+    /// reports. Clamps weeks to 1-52, skip to 0 or more and take to 1-200 before calling the server, which applies
+    /// the same bounds again. Read-only; returns the server JSON as is.
+    /// </summary>
     [McpServerTool]
-    [Description("List available license type slugs for a SoftLicence product with active, expired, revoked, and total license counts.")]
+    [Description("Weekly usage history of paid/non-Freemium licenses (Pro included) over 1 to 52 ISO weeks: per license and per week, active and usage days, app starts, usage events and distinct usage events, MCP and Copilot tool calls, errors, license failures and license prompts, machines, new seats, latest version. Aggregates only, no raw events; weeks without activity are omitted. Customer emails in full for authenticated analytics calls; license keys and hardware IDs redacted/hash-based. Paginated by license.")]
+    public async Task<JsonElement> GetPaidWeeklyActivity(
+        [Description("Optional comma-separated license type slugs or names. Empty means all paid/non-Freemium types. Use get_license_types to discover slugs.")] string? licenseTypes = null,
+        [Description("License status filter: active, expired, revoked, expired_or_revoked, or all. Default: active.")] string? status = "active",
+        [Description("Number of ISO weeks to cover, current week included. Clamped from 1 to 52. Default: 12.")] int weeks = 12,
+        [Description("Number of licenses to skip for pagination. Default: 0.")] int skip = 0,
+        [Description("Maximum number of licenses returned. Clamped from 1 to 200. Default: 100.")] int take = 100,
+        [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
+        [Description("Optional exact product name. Use list_products first when unsure.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        return await _client.GetPaidWeeklyActivityAsync(
+            NormalizeLicenseTypes(licenseTypes),
+            NormalizeStatus(status),
+            Math.Clamp(weeks, 1, 52),
+            Math.Max(0, skip),
+            Math.Clamp(take, 1, 200),
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName));
+    }
+
+    [McpServerTool]
+    [Description("List available license type slugs for a SoftLicence product with active, expired, revoked, and total license counts, and whether each type is open to anonymous public trials (allowPublicTrial, read-only).")]
     public async Task<JsonElement> GetLicenseTypes(
         [Description("Include free/Freemium/trial license types. Default: true. Set false to list only paid/non-Freemium types.")] bool includeFree = true,
         [Description("Optional product UUID. Mono-product keys may only request their configured product.")] string? productId = null,
@@ -644,6 +672,103 @@ public sealed class SoftLicenceAnalyticsTools
             cancellationToken,
             NormalizeOptional(productId),
             NormalizeOptional(productName));
+    }
+
+    /// <summary>Reads direct settings and custom parameters for license types of one authorized product.</summary>
+    /// <remarks>Optional filters (slug without regard to case, exact parameter key) narrow the product catalogue. This tool performs no writes and exposes no license keys.</remarks>
+    [McpServerTool]
+    [Description("Read all direct settings and custom parameters (key, name, value) for license types in one authorized SoftLicence product. Supports optional filters: slug (case-insensitive, like other slug lookups) and custom parameter key (exact). Requires analytics:multi-product:read; product-scoped keys remain limited to their product. Read-only.")]
+    public async Task<JsonElement> GetLicenseTypeSettings(
+        [Description("Optional product UUID; required for global keys when productName is absent. Product-scoped keys may only select their configured product.")] string? productId = null,
+        [Description("Optional exact product name, mutually exclusive with productId.")] string? productName = null,
+        [Description("Optional license type slug, compared without regard to case.")] string? slug = null,
+        [Description("Optional exact custom parameter key. Returns only types containing this key.")] string? parameterKey = null,
+        CancellationToken cancellationToken = default)
+    {
+        return await _client.GetLicenseTypeSettingsAsync(
+            cancellationToken,
+            NormalizeOptional(productId),
+            NormalizeOptional(productName),
+            NormalizeExactSelector(slug, nameof(slug)),
+            NormalizeExactSelector(parameterKey, nameof(parameterKey)));
+    }
+
+    /// <summary>
+    /// Previews a licence-type change batch (TKT-002781): for each operation the target, the values before and after, and
+    /// the active licences of the type; writes nothing. The returned previewHash must be passed unchanged to the apply.
+    /// </summary>
+    [McpServerTool]
+    [Description("ALWAYS CALL FIRST before ApplyLicenseTypeChanges. Preview creating or changing SoftLicence licence types, their custom parameters and plugin entries for one product: returns, per operation, the target, values before and after, the active licences of the type, notes, and a previewHash. Writes nothing. Requires the license-types:write scope and the internal network (this MCP). Show the preview to the user before applying.")]
+    public async Task<JsonElement> PreviewLicenseTypeChanges(
+        [Description("JSON array of operations, applied in order to the one selected product. Kinds: createType {kind, slug, name, description?, defaultDurationDays?, isRecurring?, defaultAllowedVersions?, defaultMaxSeats?, maxActivationsPerDay?, allowAnonymous?, isFree?, enforceSingleUsePerHardwareId?, disableNewActivations?, allowPublicTrial?, teamEligible?, params?:[{key,name,value}]} (never copies parameters of other types; an existing slug is refused); updateType {kind, slug, any setting above except slug} (the slug is never renamed); setParam {kind, slugs:[...], key, value, paramName (required when the key is new on a type)}; removeParam {kind, slugs:[...], key}; createPlugin {kind, name} (global keys only; a plugin of a root product gets a new key pair backed up to the Drive, a plugin of a plugin shares its parent's pair). There is no 'all types': list every slug.")] string operations,
+        [Description("Optional product UUID; required for global keys when productName is absent.")] string? productId = null,
+        [Description("Optional exact product name, mutually exclusive with productId.")] string? productName = null,
+        [Description("Optional reference written to the journal (ticket, instance).")] string? requestedBy = null,
+        CancellationToken cancellationToken = default)
+    {
+        return await _client.SendLicenseTypeChangesAsync(false,
+            BuildLicenseTypeChangeBatch(operations, productId, productName, requestedBy, previewHash: null), cancellationToken);
+    }
+
+    /// <summary>
+    /// Applies a previewed batch with its previewHash (TKT-002781). The server rereads the catalogue and refuses with
+    /// PREVIEW_STALE when anything changed since the preview; otherwise it writes everything with one journal row.
+    /// </summary>
+    [McpServerTool]
+    [Description("Apply a licence-type change batch previously shown by PreviewLicenseTypeChanges, with exactly the same operations and its previewHash. All or nothing, in one transaction with a journal row; PREVIEW_STALE or CONCURRENT_CHANGE means nothing was written and a new preview is needed. Never returns a private key or an API secret. Requires the license-types:write scope.")]
+    public async Task<JsonElement> ApplyLicenseTypeChanges(
+        [Description("Exactly the operations JSON array sent to the preview.")] string operations,
+        [Description("previewHash returned by PreviewLicenseTypeChanges for this batch.")] string previewHash,
+        [Description("Optional product UUID, as in the preview.")] string? productId = null,
+        [Description("Optional exact product name, as in the preview.")] string? productName = null,
+        [Description("Optional reference written to the journal (ticket, instance).")] string? requestedBy = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(previewHash))
+            throw new ArgumentException("previewHash from PreviewLicenseTypeChanges is required.", nameof(previewHash));
+        return await _client.SendLicenseTypeChangesAsync(true,
+            BuildLicenseTypeChangeBatch(operations, productId, productName, requestedBy, previewHash.Trim()), cancellationToken);
+    }
+
+    /// <summary>Reads the licence-type change journal of one product (TKT-002781).</summary>
+    [McpServerTool]
+    [Description("Read the journal of licence-type changes applied through ApplyLicenseTypeChanges for one product, newest first: when, which key, from where, reference, and each operation with its values before and after. Requires analytics:multi-product:read. Read-only.")]
+    public async Task<JsonElement> GetLicenseTypeChangeAudit(
+        [Description("Optional product UUID; required for global keys when productName is absent.")] string? productId = null,
+        [Description("Optional exact product name, mutually exclusive with productId.")] string? productName = null,
+        [Description("Rows returned, 1 to 200. Default: 50.")] int take = 50,
+        CancellationToken cancellationToken = default)
+    {
+        return await _client.GetLicenseTypeChangeAuditAsync(cancellationToken, NormalizeOptional(productId), NormalizeOptional(productName), take);
+    }
+
+    /// <summary>
+    /// Builds the batch object of the change routes from the tool arguments. The operations must be a JSON array; they
+    /// are passed as given, because the server is the only authority that normalizes and validates them.
+    /// </summary>
+    private static JsonElement BuildLicenseTypeChangeBatch(string operations, string? productId, string? productName, string? requestedBy, string? previewHash)
+    {
+        JsonElement parsed;
+        try
+        {
+            using var document = JsonDocument.Parse(operations);
+            parsed = document.RootElement.Clone();
+        }
+        catch (JsonException ex)
+        {
+            throw new ArgumentException("operations must be a JSON array: " + ex.Message, nameof(operations));
+        }
+        if (parsed.ValueKind != JsonValueKind.Array)
+            throw new ArgumentException("operations must be a JSON array.", nameof(operations));
+        var batch = new Dictionary<string, object?>
+        {
+            ["productId"] = NormalizeOptional(productId),
+            ["productName"] = NormalizeOptional(productName),
+            ["requestedBy"] = NormalizeOptional(requestedBy),
+            ["previewHash"] = previewHash,
+            ["operations"] = parsed
+        };
+        return JsonSerializer.SerializeToElement(batch);
     }
 
     [McpServerTool]
@@ -923,6 +1048,133 @@ public sealed class SoftLicenceAnalyticsTools
             parsed, cancellationToken, NormalizeOptional(productId), NormalizeOptional(productName));
     }
 
+    /// <summary>Lists product-scoped security locks with exact machine and state filters.</summary>
+    [McpServerTool]
+    [Description("List SoftLicence security locks. Requires security:read. state and hardwareId are exact; email is a case-insensitive display search.")]
+    public async Task<JsonElement> ListSecurityLocks(
+        [Description("Optional exact state: OPEN, RELEASED, or BANNED.")] string? state = null,
+        [Description("Optional exact hardware identifier. It is not trimmed or case-normalized.")] string? hardwareId = null,
+        [Description("Optional case-insensitive customer-email display search.")] string? email = null,
+        [Description("Maximum rows, 1 to 100.")] int take = 50,
+        [Description("Optional product UUID. Required with a global analytics key.")] string? productId = null,
+        [Description("Optional exact product name. Required with a global analytics key when productId is omitted.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (state != null && state is not ("OPEN" or "RELEASED" or "BANNED"))
+            throw new ArgumentException("state must be exactly OPEN, RELEASED, or BANNED.", nameof(state));
+        if (hardwareId != null && string.IsNullOrWhiteSpace(hardwareId))
+            throw new ArgumentException("hardwareId cannot be blank when supplied.", nameof(hardwareId));
+        if (email != null && string.IsNullOrWhiteSpace(email))
+            throw new ArgumentException("email cannot be blank when supplied.", nameof(email));
+        if (take is < 1 or > 100)
+            throw new ArgumentOutOfRangeException(nameof(take), "take must be between 1 and 100.");
+        return await _client.ListSecurityLocksAsync(
+            state, hardwareId, email, take, NormalizeOptional(productId), NormalizeOptional(productName), cancellationToken);
+    }
+
+    /// <summary>Gets one product-scoped security lock by its canonical row UUID.</summary>
+    [McpServerTool]
+    [Description("Get one SoftLicence security lock with its full bounded evidence and open-incident count. Requires security:read.")]
+    public async Task<JsonElement> GetSecurityLock(
+        [Description("Exact lower-case canonical security-lock report UUID.")] string lockReportId,
+        [Description("Optional product UUID. Required with a global analytics key.")] string? productId = null,
+        [Description("Optional exact product name. Required with a global analytics key when productId is omitted.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        var parsed = ParseCanonicalUuid(lockReportId, nameof(lockReportId));
+        return await _client.GetSecurityLockAsync(
+            parsed, NormalizeOptional(productId), NormalizeOptional(productName), cancellationToken);
+    }
+
+    /// <summary>Lists remembered product-scoped RELEASE decisions using exact authority selectors.</summary>
+    [McpServerTool]
+    [Description("List remembered security-lock RELEASE decisions. Requires security:read; hardwareId and cause comparisons are exact.")]
+    public async Task<JsonElement> ListSecurityLockReleaseDecisions(
+        [Description("Optional exact lower-case canonical decision UUID.")] string? decisionId = null,
+        [Description("Optional exact hardware identifier. It is not trimmed or case-normalized.")] string? hardwareId = null,
+        [Description("Optional exact cause. It is not trimmed or case-normalized.")] string? cause = null,
+        [Description("Include revoked decisions when true.")] bool includeInactive = false,
+        [Description("Maximum rows, 1 to 100.")] int take = 50,
+        [Description("Optional product UUID. Required with a global analytics key.")] string? productId = null,
+        [Description("Optional exact product name. Required with a global analytics key when productId is omitted.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (take is < 1 or > 100)
+            throw new ArgumentOutOfRangeException(nameof(take), "take must be between 1 and 100.");
+        if (hardwareId != null && string.IsNullOrWhiteSpace(hardwareId))
+            throw new ArgumentException("hardwareId cannot be blank when supplied.", nameof(hardwareId));
+        if (cause != null && string.IsNullOrWhiteSpace(cause))
+            throw new ArgumentException("cause cannot be blank when supplied.", nameof(cause));
+        var parsedDecisionId = decisionId == null ? (Guid?)null : ParseCanonicalUuid(decisionId, nameof(decisionId));
+        return await _client.ListSecurityLockReleaseDecisionsAsync(
+            parsedDecisionId, hardwareId, cause, includeInactive, take,
+            NormalizeOptional(productId), NormalizeOptional(productName), cancellationToken);
+    }
+
+    /// <summary>Records an audited RELEASE or BAN and verifies the resulting provider state.</summary>
+    [McpServerTool]
+    [Description("Release or ban one security lock. Requires SOFTLICENCE_ADMIN_SECRET in addition to security:read, a reason, and a named audit reference. Server refusals are returned as structured mutation errors.")]
+    public async Task<JsonElement> DecideSecurityLock(
+        [Description("Exact lower-case canonical security-lock report UUID.")] string lockReportId,
+        [Description("Exact decision: RELEASE or BAN.")] string decision,
+        [Description("Required operator reason stored with the decision.")] string reason,
+        [Description("Required named audit reference, for example TKT-001838.")] string auditReference,
+        [Description("Named operator stored with the decision.")] string decidedBy = "Codex MCP",
+        [Description("Optional product UUID. Required with a global analytics key for verification.")] string? productId = null,
+        [Description("Optional exact product name. Required with a global analytics key when productId is omitted.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        var parsed = ParseCanonicalUuid(lockReportId, nameof(lockReportId));
+        if (decision is not ("RELEASE" or "BAN"))
+            throw new ArgumentException("decision must be exactly RELEASE or BAN.", nameof(decision));
+        RequireAuditText(reason, nameof(reason));
+        RequireAuditText(auditReference, nameof(auditReference));
+        RequireAuditText(decidedBy, nameof(decidedBy));
+        return await _client.DecideSecurityLockAsync(
+            parsed, decision, reason, auditReference, decidedBy,
+            NormalizeOptional(productId), NormalizeOptional(productName), cancellationToken);
+    }
+
+    /// <summary>
+    /// Explicitly reverses one BANNED lock and verifies its resulting released state. A successful diagnostic can
+    /// still require reinstall when the stable scope has no ACTIVE enrollment capable of receiving recovery.
+    /// </summary>
+    [McpServerTool]
+    [Description("Explicitly unban one BANNED security lock. Requires SOFTLICENCE_ADMIN_SECRET in addition to security:read, a reason, and a named audit reference. This is distinct from RELEASE. A successful release_no_active_enrollment diagnostic means the lock was unbanned and incidents were closed, but the client must reinstall T-IA Connect before it can enroll again.")]
+    public async Task<JsonElement> UnbanSecurityLock(
+        [Description("Exact lower-case canonical security-lock report UUID.")] string lockReportId,
+        [Description("Required operator reason stored with the explicit unban.")] string reason,
+        [Description("Required named audit reference, for example TKT-001838.")] string auditReference,
+        [Description("Named operator stored with the explicit unban.")] string decidedBy = "Codex MCP",
+        [Description("Optional product UUID. Required with a global analytics key for verification.")] string? productId = null,
+        [Description("Optional exact product name. Required with a global analytics key when productId is omitted.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        var parsed = ParseCanonicalUuid(lockReportId, nameof(lockReportId));
+        RequireAuditText(reason, nameof(reason));
+        RequireAuditText(auditReference, nameof(auditReference));
+        RequireAuditText(decidedBy, nameof(decidedBy));
+        return await _client.UnbanSecurityLockAsync(
+            parsed, reason, auditReference, decidedBy,
+            NormalizeOptional(productId), NormalizeOptional(productName), cancellationToken);
+    }
+
+    /// <summary>Revokes one remembered RELEASE and verifies the inactive provider row.</summary>
+    [McpServerTool]
+    [Description("Revoke one remembered security-lock RELEASE decision. Requires SOFTLICENCE_ADMIN_SECRET in addition to security:read and returns a read-back.")]
+    public async Task<JsonElement> RevokeSecurityLockReleaseDecision(
+        [Description("Exact lower-case canonical remembered-decision UUID.")] string decisionId,
+        [Description("Named operator stored with the revocation.")] string decidedBy = "Codex MCP",
+        [Description("Optional product UUID. Required with a global analytics key for verification.")] string? productId = null,
+        [Description("Optional exact product name. Required with a global analytics key when productId is omitted.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        var parsed = ParseCanonicalUuid(decisionId, nameof(decisionId));
+        RequireAuditText(decidedBy, nameof(decidedBy));
+        return await _client.RevokeSecurityLockReleaseDecisionAsync(
+            parsed, decidedBy, NormalizeOptional(productId), NormalizeOptional(productName), cancellationToken);
+    }
+
     [McpServerTool]
     [Description("List supported SoftLicence hardware-ban categories for MCP write tools. This does not require write credentials.")]
     public JsonElement GetSecurityHardwareBanCategories()
@@ -999,6 +1251,39 @@ public sealed class SoftLicenceAnalyticsTools
     }
 
     [McpServerTool]
+    [Description("Read SoftLicence IP threat scores (TKT-002685). Without ip: persisted scores at or above minScore, highest first, with an active-ban flag. With ip: the score rows of that IP (plain and IPv4-mapped forms), the last client identity seen from it in 30 days (HWID, masked licence, application) and its recent resets. Quarantine starts at 100 (requests delayed), automatic ban at 200. Requires SOFTLICENCE_ADMIN_SECRET (global admin).")]
+    public async Task<JsonElement> ListIpThreatScores(
+        [Description("Optional IPv4 or IPv6 address for the detailed view.")] string? ip = null,
+        [Description("Minimum score for the list. Default: 50.")] int minScore = 50,
+        [Description("Maximum rows for the list (1-500). Default: 100.")] int take = 100,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedIp = NormalizeOptional(ip);
+        if (normalizedIp != null && !System.Net.IPAddress.TryParse(normalizedIp, out _))
+            throw new ArgumentException("ip must be an IPv4 or IPv6 address.", nameof(ip));
+        return await _client.GetIpThreatScoresAsync(
+            normalizedIp, Math.Max(0, minScore), Math.Clamp(take, 1, 500), cancellationToken);
+    }
+
+    [McpServerTool]
+    [Description("Reset one IP threat score to zero in the SoftLicence database and server memory, without restart (TKT-002685). Use it when a legitimate client was scored by mistake. The server journals the reset (IP, erased score, actor, reason) and returns a post-reset verification. It does not lift an IP ban. Requires SOFTLICENCE_ADMIN_SECRET (global admin) and a reason.")]
+    public async Task<JsonElement> ResetIpThreatScore(
+        [Description("IPv4 or IPv6 address. The plain and IPv4-mapped forms are both reset.")] string ip,
+        [Description("Explicit operator reason. Required.")] string reason,
+        [Description("Optional BugTrace ticket reference, for example TKT-002685.")] string? ticketRef = null,
+        [Description("Optional actor name for the journal.")] string? resetBy = "Codex MCP",
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedIp = NormalizeOptional(ip);
+        if (normalizedIp == null || !System.Net.IPAddress.TryParse(normalizedIp, out _))
+            throw new ArgumentException("ip must be an IPv4 or IPv6 address.", nameof(ip));
+        if (string.IsNullOrWhiteSpace(reason))
+            throw new ArgumentException("reason is required.", nameof(reason));
+        return await _client.ResetIpThreatScoreAsync(
+            normalizedIp, reason.Trim(), NormalizeOptional(ticketRef), NormalizeOptional(resetBy), cancellationToken);
+    }
+
+    [McpServerTool]
     [Description("Create or reactivate an enforceable SoftLicence release-binary fingerprint ban through the admin API. Only FP_EXE, FP_DLL and FP_CORE are enforceable. Hardware fingerprints are correlation-only; the server refuses them and returns impact/cardinality details. Requires SOFTLICENCE_ADMIN_SECRET and returns post-mutation verification.")]
     public async Task<JsonElement> CreateSecurityComponentBan(
         [Description("Enforceable component type: FP_EXE, FP_DLL or FP_CORE. CPU, MB, BIOS, DISK and HOST are correlation-only and cannot be globally banned.")] string componentType,
@@ -1054,6 +1339,10 @@ public sealed class SoftLicenceAnalyticsTools
             cancellationToken);
     }
 
+    /// <summary>
+    /// Lists centralized anonymized LLM tips, normalizing optional filters (blank becomes null), clamping the page to
+    /// 1..200 and forwarding the sharing filter <paramref name="shared"/> (TKT-003574).
+    /// </summary>
     [McpServerTool]
     [Description("List centralized anonymized LLM Tips Feedback for the configured SoftLicence product. Compact, paginated, and separated from standard telemetry.")]
     public async Task<JsonElement> ListLlmTipFeedback(
@@ -1070,6 +1359,7 @@ public sealed class SoftLicenceAnalyticsTools
         [Description("Pagination offset. Minimum 0.")] int offset = 0,
         [Description("Sort field: occurrenceCount, lastSeenAtUtc, createdAtUtc, firstSeenAtUtc, upvotes, title. Default occurrenceCount.")] string? sortBy = "occurrenceCount",
         [Description("Sort direction: desc or asc. Default desc.")] string? sortDir = "desc",
+        [Description("Sharing filter: true for tips shared with every client, false for unshared tips, omitted for both.")] bool? shared = null,
         CancellationToken cancellationToken = default)
     {
         return await _client.ListLlmTipFeedbackAsync(
@@ -1086,7 +1376,8 @@ public sealed class SoftLicenceAnalyticsTools
             Math.Max(0, offset),
             NormalizeLlmTipSortBy(sortBy),
             NormalizeSortDir(sortDir),
-            cancellationToken);
+            cancellationToken,
+            shared);
     }
 
     [McpServerTool]
@@ -1136,6 +1427,51 @@ public sealed class SoftLicenceAnalyticsTools
             cancellationToken);
     }
 
+    /// <summary>
+    /// Publishes one LLM tip to every client or retracts it (TKT-003574). Only an administrator decision publishes a
+    /// tip: the client's own approval never does. The server journals each change (who, when, path, reason).
+    /// </summary>
+    /// <param name="shared">True to share with every client, false to retract.</param>
+    /// <param name="id">Tip UUID; optional when <paramref name="contentHash"/> is given.</param>
+    /// <param name="contentHash">Exact tip content hash; optional when <paramref name="id"/> is given.</param>
+    /// <param name="reason">Reason recorded in the journal; mandatory to retract.</param>
+    /// <param name="productId">Product UUID; global keys must give it or <paramref name="productName"/>.</param>
+    /// <param name="productName">Exact product name.</param>
+    /// <param name="cancellationToken">Caller cancellation.</param>
+    /// <returns>The server result, with <c>changed</c> false when the tip already had the requested state.</returns>
+    /// <exception cref="ArgumentException">
+    /// No selector, or a retraction without a reason; refused locally so no request is sent.
+    /// </exception>
+    /// <remarks>
+    /// Needs the analytics key scope <c>llm-tips:share</c> (granted per key on the key screen, never by default) and
+    /// the internal network; the server refuses otherwise and the refusal surfaces as a tool error.
+    /// </remarks>
+    [McpServerTool]
+    [Description("Share one centralized LLM tip with every client (shared=true) or retract it (shared=false, reason required). Needs the analytics key scope llm-tips:share. Each change is journaled with who, when and why.")]
+    public async Task<JsonElement> SetLlmTipFeedbackSharing(
+        [Description("True to share the tip with every client, false to retract it.")] bool shared,
+        [Description("Tip UUID. Optional when contentHash is provided.")] string? id = null,
+        [Description("Tip contentHash. Optional when id is provided.")] string? contentHash = null,
+        [Description("Reason recorded in the journal. Required to retract, optional to share. Do not include secrets.")] string? reason = null,
+        [Description("Optional product UUID. Global analytics keys must provide productId or productName.")] string? productId = null,
+        [Description("Optional exact product name. Global analytics keys must provide productId or productName.")] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(id) && string.IsNullOrWhiteSpace(contentHash))
+            throw new ArgumentException("id or contentHash is required.");
+        if (!shared && string.IsNullOrWhiteSpace(reason))
+            throw new ArgumentException("reason is required to retract a shared tip.", nameof(reason));
+
+        return await _client.SetLlmTipFeedbackSharingAsync(
+            NormalizeOptional(id),
+            NormalizeOptional(contentHash),
+            shared,
+            NormalizeOptional(reason),
+            NormalizeOptional(productId),
+            NormalizeOptional(productName),
+            cancellationToken);
+    }
+
     [McpServerTool]
     [Description("Update review status for one centralized LLM Tips Feedback item by id or contentHash.")]
     public async Task<JsonElement> UpdateLlmTipFeedbackReviewStatus(
@@ -1172,6 +1508,16 @@ public sealed class SoftLicenceAnalyticsTools
     {
         var trimmed = value?.Trim();
         return string.IsNullOrWhiteSpace(trimmed) ? null : trimmed;
+    }
+
+    /// <summary>Preserves exact identifier bytes while rejecting boundary whitespace and control characters.</summary>
+    private static string? NormalizeExactSelector(string? value, string parameterName)
+    {
+        if (value is null || value.Length == 0)
+            return null;
+        if (char.IsWhiteSpace(value[0]) || char.IsWhiteSpace(value[^1]) || value.Any(char.IsControl))
+            throw new ArgumentException("Exact selectors cannot contain boundary whitespace or control characters.", parameterName);
+        return value;
     }
 
     private static string? NormalizeReviewStatus(string? status)
@@ -1369,5 +1715,21 @@ public sealed class SoftLicenceAnalyticsTools
     {
         if (!Guid.TryParseExact(value, "D", out var parsed) || value != parsed.ToString("D"))
             throw new ArgumentException("The value must be a canonical lowercase UUID in D form.", parameterName);
+    }
+
+    /// <summary>Parses a UUID only after proving its exact canonical lower-case representation.</summary>
+    private static Guid ParseCanonicalUuid(string value, string parameterName)
+    {
+        ValidateCanonicalUuid(value, parameterName);
+        return Guid.ParseExact(value, "D");
+    }
+
+    /// <summary>Requires bounded nonblank human audit text without changing its stored value.</summary>
+    private static void RequireAuditText(string value, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            throw new ArgumentException("A nonblank audit value is required.", parameterName);
+        if (value.Length > 300 || value.Any(char.IsControl))
+            throw new ArgumentException("Audit values must contain at most 300 printable characters.", parameterName);
     }
 }

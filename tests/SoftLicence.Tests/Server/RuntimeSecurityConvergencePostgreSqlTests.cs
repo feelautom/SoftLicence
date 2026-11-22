@@ -19,9 +19,107 @@ using Xunit;
 
 namespace SoftLicence.Tests.Server;
 
-public sealed partial class RuntimeEnrollmentPostgreSqlTests
+public abstract partial class RuntimeEnrollmentPostgreSqlTestBase
 {
-    [Fact]
+
+    /// <summary>Hashes every persisted scalar identity field without printing synthetic encrypted key material in assertions.</summary>
+    /// <param name="factory">Factory for the scenario-owned database.</param>
+    /// <param name="enrollmentId">The exact identity whose enrollment and binding must remain unchanged.</param>
+    /// <returns>A stable digest of the complete enrollment and binding snapshots.</returns>
+    protected static async Task<string> SnapshotRetainedRuntimeIdentityAsync(
+        IDbContextFactory<LicenseDbContext> factory, Guid enrollmentId)
+    {
+        await using var db = await factory.CreateDbContextAsync();
+        var enrollment = await db.RuntimeEnrollments.AsNoTracking().SingleAsync(row => row.Id == enrollmentId);
+        var binding = await db.DistributionInstallationBindings.AsNoTracking().SingleAsync(row => row.Id == enrollment.BindingId);
+        return Sha256(JsonSerializer.Serialize(new { enrollment, binding }));
+    }
+
+    /// <summary>Proves ended commercial authority denies execution without changing the retained Runtime identity.</summary>
+    /// <param name="factory">Factory for the scenario-owned database.</param>
+    /// <param name="enrollmentId">The retained enrollment with no current commercial assignment.</param>
+    protected static async Task AssertEndedAssignmentDeniesRuntimeAsync(
+        IDbContextFactory<LicenseDbContext> factory, Guid enrollmentId)
+    {
+        var before = await SnapshotRetainedRuntimeIdentityAsync(factory, enrollmentId);
+        await using var db = await factory.CreateDbContextAsync();
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        await RuntimeCommercialEligibilityValidator.AcquireWriteBarrierAsync(db, CancellationToken.None);
+        var enrollment = await db.RuntimeEnrollments.AsNoTracking().SingleAsync(row => row.Id == enrollmentId);
+        var refusal = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() =>
+            RuntimeCommercialEligibilityValidator.ValidateAsync(db, enrollment,
+                new Dictionary<string, string>(), DateTimeOffset.UtcNow, CancellationToken.None));
+        Assert.Equal(StatusCodes.Status422UnprocessableEntity, refusal.StatusCode);
+        Assert.Equal("authority_ineligible", refusal.ErrorCode);
+        Assert.Equal("assignment_missing", refusal.DiagnosticCode);
+        await transaction.RollbackAsync();
+        Assert.Equal(before, await SnapshotRetainedRuntimeIdentityAsync(factory, enrollmentId));
+    }
+
+    protected static SecurityService CreateHardwareSecurityService(IDbContextFactory<LicenseDbContext> factory)
+    {
+        var notifier = new Mock<NotificationService>(
+            factory,
+            Mock.Of<ILogger<NotificationService>>(),
+            Mock.Of<IHttpClientFactory>());
+        return new SecurityService(
+            factory,
+            Mock.Of<ILogger<SecurityService>>(),
+            notifier.Object,
+            new ConfigurationBuilder().Build());
+    }
+
+    protected static async Task SeedHardwareBanProductAsync(
+        IDbContextFactory<LicenseDbContext> factory,
+        Guid productId)
+    {
+        await using var db = await factory.CreateDbContextAsync();
+        db.Products.Add(new Product
+        {
+            Id = productId,
+            Name = "Hardware ban test " + productId.ToString("N"),
+            PrivateKeyXml = string.Empty,
+            PublicKeyXml = string.Empty,
+            ApiSecret = Guid.NewGuid().ToString("N")
+        });
+        await db.SaveChangesAsync();
+    }
+
+    protected static (RuntimeEnrollmentCapabilityRequest Request, string Digest, RuntimeProofHeaders Proof)
+        NewSecurityCapability(PreparedBootstrapScenario scenario, string suffix)
+    {
+        var request = new RuntimeEnrollmentCapabilityRequest
+        {
+            Schema = RuntimeEnrollmentService.CapabilitySchema,
+            ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion,
+            EnrollmentId = scenario.EnrollmentId.ToString("D"),
+            Epoch = 1,
+            SecurityEpoch = 1,
+            InstallationId = scenario.Fixture.InstallationId,
+            ReleaseVersion = scenario.Fixture.Version,
+            SessionId = Guid.NewGuid().ToString("D"),
+            Audience = "https://broker.example.test",
+            Scope = ["runtime.execute"],
+            Binaries = CapabilityBinaries()
+        };
+        var digest = Sha256("security-capability-" + suffix + Guid.NewGuid().ToString("N"));
+        var proof = Proof(
+            scenario.EnrollmentKey,
+            "capability",
+            scenario.EnrollmentId,
+            request.Audience,
+            "-",
+            digest);
+        return (request, digest, proof);
+    }
+}
+
+/// <summary>Runs the tests from RuntimeSecurityConvergencePostgreSqlTests as an independently schedulable PostgreSQL class.</summary>
+/// <param name="classDatabase">The xUnit-owned PostgreSQL clone fixture for this exact test class.</param>
+public sealed partial class RuntimeSecurityConvergencePostgreSqlTests(RuntimeEnrollmentPostgreSqlClassDatabase classDatabase)
+    : RuntimeEnrollmentPostgreSqlTestBase(classDatabase)
+{
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.HardwareAutoUnban_PostgreSql_MixedAuthorityFailsClosedWithoutMutation")]
     public async Task HardwareAutoUnban_PostgreSql_MixedAuthorityFailsClosedWithoutMutation()
     {
         var connections = await ProvisionIsolatedAsync();
@@ -30,33 +128,18 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var hardwareId = "PG-MIXED-" + Guid.NewGuid().ToString("N").ToUpperInvariant();
         await SeedHardwareBanProductAsync(factory, productId);
         var security = CreateHardwareSecurityService(factory);
-        await security.BanHardwareIdAsync(
-            hardwareId,
-            "Auto-ban: outdated version",
-            productId,
-            banCategory: BannedHardwareId.Categories.OutdatedVersion,
-            silent: true);
-        await security.BanHardwareIdAsync(
-            hardwareId,
-            "Auto-ban: quarantine remains operator-owned",
-            productId: null,
-            banCategory: BannedHardwareId.Categories.DevCanaryQuarantine,
-            silent: true);
-
+        await security.BanHardwareIdAsync(hardwareId, "Auto-ban: outdated version", productId, banCategory: BannedHardwareId.Categories.OutdatedVersion, silent: true);
+        await security.BanHardwareIdAsync(hardwareId, "Auto-ban: quarantine remains operator-owned", productId: null, banCategory: BannedHardwareId.Categories.DevCanaryQuarantine, silent: true);
         long epochBefore;
         await using (var before = await factory.CreateDbContextAsync())
             epochBefore = (await before.RuntimeEnrollmentAuthorityStates.AsNoTracking().SingleAsync()).Epoch;
-
         Assert.False(await security.AutoUnbanByHwidAsync(hardwareId, productId));
-
         await using var check = await factory.CreateDbContextAsync();
-        Assert.Equal(2, await check.BannedHardwareIds.CountAsync(candidate =>
-            candidate.HardwareId == hardwareId && candidate.IsActive));
-        Assert.Equal(epochBefore,
-            (await check.RuntimeEnrollmentAuthorityStates.AsNoTracking().SingleAsync()).Epoch);
+        Assert.Equal(2, await check.BannedHardwareIds.CountAsync(candidate => candidate.HardwareId == hardwareId && candidate.IsActive));
+        Assert.Equal(epochBefore, (await check.RuntimeEnrollmentAuthorityStates.AsNoTracking().SingleAsync()).Epoch);
     }
 
-    [Fact]
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.HardwareBanConcurrency_PostgreSql_SecurityBanCannotBeLiftedByVersionAutoUnban")]
     public async Task HardwareBanConcurrency_PostgreSql_SecurityBanCannotBeLiftedByVersionAutoUnban()
     {
         var connections = await ProvisionIsolatedAsync();
@@ -66,32 +149,16 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         await SeedHardwareBanProductAsync(factory, productId);
         var firstReplica = CreateHardwareSecurityService(factory);
         var secondReplica = CreateHardwareSecurityService(factory);
-        await firstReplica.BanHardwareIdAsync(
-            hardwareId,
-            "Auto-ban: outdated version",
-            productId,
-            banCategory: BannedHardwareId.Categories.OutdatedVersion,
-            silent: true);
-
-        await Task.WhenAll(
-            firstReplica.AutoUnbanByHwidAsync(hardwareId, productId),
-            secondReplica.BanHardwareIdAsync(
-                hardwareId,
-                "Piracy authority",
-                productId,
-                banCategory: BannedHardwareId.Categories.Piracy,
-                silent: true));
-
+        await firstReplica.BanHardwareIdAsync(hardwareId, "Auto-ban: outdated version", productId, banCategory: BannedHardwareId.Categories.OutdatedVersion, silent: true);
+        await Task.WhenAll(firstReplica.AutoUnbanByHwidAsync(hardwareId, productId), secondReplica.BanHardwareIdAsync(hardwareId, "Piracy authority", productId, banCategory: BannedHardwareId.Categories.Piracy, silent: true));
         await using var check = await factory.CreateDbContextAsync();
-        var active = await check.BannedHardwareIds
-            .Where(candidate => candidate.HardwareId == hardwareId && candidate.IsActive)
-            .ToListAsync();
+        var active = await check.BannedHardwareIds.Where(candidate => candidate.HardwareId == hardwareId && candidate.IsActive).ToListAsync();
         Assert.Single(active);
         Assert.Equal(BannedHardwareId.Categories.Piracy, active[0].BanCategory);
         Assert.Equal("Piracy authority", active[0].Reason);
     }
 
-    [Fact]
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.HardwareBanTwoReplicas_PostgreSql_ObserveCommittedUnbanWithoutPositiveCacheDelay")]
     public async Task HardwareBanTwoReplicas_PostgreSql_ObserveCommittedUnbanWithoutPositiveCacheDelay()
     {
         var connections = await ProvisionIsolatedAsync();
@@ -101,26 +168,16 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         await SeedHardwareBanProductAsync(factory, productId);
         var firstReplica = CreateHardwareSecurityService(factory);
         var secondReplica = CreateHardwareSecurityService(factory);
-        await firstReplica.BanHardwareIdAsync(
-            hardwareId,
-            "Operator ban",
-            productId,
-            banCategory: BannedHardwareId.Categories.Manual,
-            silent: true);
-
+        await firstReplica.BanHardwareIdAsync(hardwareId, "Operator ban", productId, banCategory: BannedHardwareId.Categories.Manual, silent: true);
         Assert.True(await secondReplica.IsHardwareIdBannedAsync(hardwareId, productId));
         Guid banId;
         await using (var db = await factory.CreateDbContextAsync())
-            banId = await db.BannedHardwareIds
-                .Where(candidate => candidate.HardwareId == hardwareId.ToUpperInvariant() && candidate.IsActive)
-                .Select(candidate => candidate.Id)
-                .SingleAsync();
-
+            banId = await db.BannedHardwareIds.Where(candidate => candidate.HardwareId == hardwareId.ToUpperInvariant() && candidate.IsActive).Select(candidate => candidate.Id).SingleAsync();
         Assert.True(await firstReplica.UnbanHardwareIdAsync(banId, "ticket=TKT-000095"));
         Assert.False(await secondReplica.IsHardwareIdBannedAsync(hardwareId.ToUpperInvariant(), productId));
     }
 
-    [Fact]
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.ExpiredHardwareBanCleanup_PostgreSql_RevalidatesConcurrentRenewalUnderGlobalMutationAuthority")]
     public async Task ExpiredHardwareBanCleanup_PostgreSql_RevalidatesConcurrentRenewalUnderGlobalMutationAuthority()
     {
         var connections = await ProvisionIsolatedAsync();
@@ -129,53 +186,35 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         var hardwareId = "PG-EXPIRY-" + Guid.NewGuid().ToString("N").ToUpperInvariant();
         await SeedHardwareBanProductAsync(factory, productId);
         var security = CreateHardwareSecurityService(factory);
-        await security.BanHardwareIdAsync(
-            hardwareId,
-            "Temporary operator ban",
-            productId,
-            expiresAt: DateTime.UtcNow.AddMinutes(-1),
-            banCategory: BannedHardwareId.Categories.Manual,
-            silent: true);
-
-        var adminOptions = new DbContextOptionsBuilder<LicenseDbContext>()
-            .UseNpgsql(connections.Admin)
-            .Options;
+        await security.BanHardwareIdAsync(hardwareId, "Temporary operator ban", productId, expiresAt: DateTime.UtcNow.AddMinutes(-1), banCategory: BannedHardwareId.Categories.Manual, silent: true);
+        var adminOptions = new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(connections.Admin).Options;
         await using var blocker = new LicenseDbContext(adminOptions);
         await using var blockerTransaction = await blocker.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted);
-        await blocker.Database.ExecuteSqlRawAsync(
-            "SELECT pg_catalog.pg_advisory_xact_lock(999831, 1)");
+        await blocker.Database.ExecuteSqlRawAsync("SELECT pg_catalog.pg_advisory_xact_lock(999831, 1)");
         var lockKey = $"hardware-ban-v1|{hardwareId}";
-        await blocker.Database.ExecuteSqlInterpolatedAsync(
-            $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, {999095L}))");
-
+        await blocker.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, {999095L}))");
         var cleanup = security.IsHardwareIdBannedAsync(hardwareId, productId);
         var blockerConnection = (Npgsql.NpgsqlConnection)blocker.Database.GetDbConnection();
-        await WaitForGlobalAuthorityWaitersBlockedByAsync(
-            connections.Admin, blockerConnection.ProcessID, 1);
+        await WaitForGlobalAuthorityWaitersBlockedByAsync(connections.Admin, blockerConnection.ProcessID, 1);
         Assert.False(cleanup.IsCompleted);
-        var renewed = await blocker.BannedHardwareIds.SingleAsync(candidate =>
-            candidate.HardwareId == hardwareId && candidate.ProductId == productId);
+        var renewed = await blocker.BannedHardwareIds.SingleAsync(candidate => candidate.HardwareId == hardwareId && candidate.ProductId == productId);
         renewed.ExpiresAt = DateTime.UtcNow.AddMinutes(5);
         await blocker.SaveChangesAsync();
         await blockerTransaction.CommitAsync();
-
         Assert.True(await cleanup);
         await using var check = await factory.CreateDbContextAsync();
-        var stored = await check.BannedHardwareIds.SingleAsync(candidate =>
-            candidate.HardwareId == hardwareId && candidate.ProductId == productId);
+        var stored = await check.BannedHardwareIds.SingleAsync(candidate => candidate.HardwareId == hardwareId && candidate.ProductId == productId);
         Assert.True(stored.IsActive);
         Assert.True(stored.ExpiresAt > DateTime.UtcNow);
     }
 
-    [Fact]
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.LicenseRevokeRestoreConcurrency_PostgreSql_ConvergesToCommittedSerializableState")]
     public async Task LicenseRevokeRestoreConcurrency_PostgreSql_ConvergesToCommittedSerializableState()
     {
         var connections = await ProvisionIsolatedAsync();
         const string adminSecret = "tkt-000095-postgresql-admin";
         var licenseKey = "PG-STATE-RACE-" + Guid.NewGuid().ToString("N").ToUpperInvariant();
-        var dbOptions = new DbContextOptionsBuilder<LicenseDbContext>()
-            .UseNpgsql(connections.App)
-            .Options;
+        var dbOptions = new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(connections.App).Options;
         Guid licenseId;
         long epochBefore;
         await using (var seed = new LicenseDbContext(dbOptions))
@@ -228,20 +267,11 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         using var restoreClient = webFactory.CreateClient();
         revokeClient.DefaultRequestHeaders.Add("X-Admin-Secret", adminSecret);
         restoreClient.DefaultRequestHeaders.Add("X-Admin-Secret", adminSecret);
-
-        var responses = await Task.WhenAll(
-            revokeClient.PostAsJsonAsync(
-                $"/api/admin/licenses/{licenseKey}/revoke",
-                new { Reason = "concurrent operator revoke" }),
-            restoreClient.PostAsync($"/api/admin/licenses/{licenseKey}/unrevoke", content: null));
-
+        var responses = await Task.WhenAll(revokeClient.PostAsJsonAsync($"/api/admin/licenses/{licenseKey}/revoke", new { Reason = "concurrent operator revoke" }), restoreClient.PostAsync($"/api/admin/licenses/{licenseKey}/unrevoke", content: null));
         Assert.All(responses, response => Assert.Equal(HttpStatusCode.OK, response.StatusCode));
         await using var check = new LicenseDbContext(dbOptions);
         var stored = await check.Licenses.AsNoTracking().SingleAsync(candidate => candidate.Id == licenseId);
-        var history = await check.LicenseHistories.AsNoTracking()
-            .Where(candidate => candidate.LicenseId == licenseId)
-            .OrderBy(candidate => candidate.Timestamp)
-            .ToListAsync();
+        var history = await check.LicenseHistories.AsNoTracking().Where(candidate => candidate.LicenseId == licenseId).OrderBy(candidate => candidate.Timestamp).ToListAsync();
         var epochAfter = (await check.RuntimeEnrollmentAuthorityStates.AsNoTracking().SingleAsync()).Epoch;
         if (stored.IsActive)
         {
@@ -258,23 +288,16 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         }
     }
 
-    [Theory]
+    [Theory(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.SecurityAuthorityTransition_PostgreSql_PreservesIdentityAndRestoresFreshCapability")]
     [InlineData("ban")]
     [InlineData("revoke")]
-    public async Task SecurityAuthorityTransition_PostgreSql_PreservesIdentityAndRestoresFreshCapability(
-        string transition)
+    public async Task SecurityAuthorityTransition_PostgreSql_PreservesIdentityAndRestoresFreshCapability(string transition)
     {
         using var scenario = await CreatePreparedBootstrapScenarioAsync();
         await ActivatePreparedEnrollmentAsync(scenario);
         var initialCapability = NewSecurityCapability(scenario, "initial");
-        var issued = await scenario.Runtime.CreateCapabilityAsync(
-            scenario.EnrollmentId,
-            initialCapability.Digest,
-            initialCapability.Request,
-            initialCapability.Proof,
-            IPAddress.Loopback);
-        using (var payload = JsonDocument.Parse(
-                   DecodeBase64Url(issued.Response.CapabilityToken.Split('.')[1])))
+        var issued = await scenario.Runtime.CreateCapabilityAsync(scenario.EnrollmentId, initialCapability.Digest, initialCapability.Request, initialCapability.Proof, IPAddress.Loopback);
+        using (var payload = JsonDocument.Parse(DecodeBase64Url(issued.Response.CapabilityToken.Split('.')[1])))
         {
             var issuedAt = payload.RootElement.GetProperty("iat").GetInt64();
             var expiresAt = payload.RootElement.GetProperty("exp").GetInt64();
@@ -285,35 +308,22 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         string hardwareId;
         await using (var authority = await scenario.Factory.CreateDbContextAsync())
         {
-            var binding = await authority.DistributionInstallationBindings.AsNoTracking()
-                .SingleAsync(candidate => candidate.Id == scenario.Fixture.BindingId);
+            var binding = await authority.DistributionInstallationBindings.AsNoTracking().SingleAsync(candidate => candidate.Id == scenario.Fixture.BindingId);
             licenseId = binding.LicenseId;
-            hardwareId = await authority.LicenseSeats.AsNoTracking()
-                .Where(candidate => candidate.Id == binding.LicenseSeatId)
-                .Select(candidate => candidate.HardwareId)
-                .SingleAsync();
+            hardwareId = await authority.LicenseSeats.AsNoTracking().Where(candidate => candidate.Id == binding.LicenseSeatId).Select(candidate => candidate.HardwareId).SingleAsync();
         }
 
         var identityBefore = await SnapshotRetainedRuntimeIdentityAsync(scenario.Factory, scenario.EnrollmentId);
         EnrollmentLicenseAssignment assignmentBefore;
         await using (var original = await scenario.Factory.CreateDbContextAsync())
-            assignmentBefore = await original.EnrollmentLicenseAssignments.AsNoTracking()
-                .SingleAsync(row => row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE");
+            assignmentBefore = await original.EnrollmentLicenseAssignments.AsNoTracking().SingleAsync(row => row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE");
         Guid? banId = null;
         var security = CreateHardwareSecurityService(scenario.Factory);
         if (transition == "ban")
         {
-            await security.BanHardwareIdAsync(
-                hardwareId,
-                "Operator security ban",
-                scenario.Fixture.ProductId,
-                banCategory: BannedHardwareId.Categories.Manual,
-                silent: true);
+            await security.BanHardwareIdAsync(hardwareId, "Operator security ban", scenario.Fixture.ProductId, banCategory: BannedHardwareId.Categories.Manual, silent: true);
             await using var banLookup = await scenario.Factory.CreateDbContextAsync();
-            banId = await banLookup.BannedHardwareIds
-                .Where(candidate => candidate.HardwareId == hardwareId.ToUpperInvariant() && candidate.IsActive)
-                .Select(candidate => candidate.Id)
-                .SingleAsync();
+            banId = await banLookup.BannedHardwareIds.Where(candidate => candidate.HardwareId == hardwareId.ToUpperInvariant() && candidate.IsActive).Select(candidate => candidate.Id).SingleAsync();
         }
         else
         {
@@ -326,29 +336,18 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         }
 
         var rejectedCapability = NewSecurityCapability(scenario, "after-" + transition);
-        var rejection = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() =>
-            scenario.Runtime.CreateCapabilityAsync(
-                scenario.EnrollmentId,
-                rejectedCapability.Digest,
-                rejectedCapability.Request,
-                rejectedCapability.Proof,
-                IPAddress.Loopback));
+        var rejection = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => scenario.Runtime.CreateCapabilityAsync(scenario.EnrollmentId, rejectedCapability.Digest, rejectedCapability.Request, rejectedCapability.Proof, IPAddress.Loopback));
         Assert.Equal("authority_ineligible", rejection.ErrorCode);
         Assert.Equal(StatusCodes.Status422UnprocessableEntity, rejection.StatusCode);
         Assert.Equal(transition == "ban" ? "hardware_banned" : "assignment_missing", rejection.DiagnosticCode);
-        var replayRefusal = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() =>
-            scenario.Runtime.CreateCapabilityAsync(scenario.EnrollmentId, initialCapability.Digest,
-                initialCapability.Request, initialCapability.Proof, IPAddress.Loopback));
+        var replayRefusal = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() => scenario.Runtime.CreateCapabilityAsync(scenario.EnrollmentId, initialCapability.Digest, initialCapability.Request, initialCapability.Proof, IPAddress.Loopback));
         Assert.Equal(rejection.ErrorCode, replayRefusal.ErrorCode);
         Assert.Equal(rejection.DiagnosticCode, replayRefusal.DiagnosticCode);
         Assert.Equal(identityBefore, await SnapshotRetainedRuntimeIdentityAsync(scenario.Factory, scenario.EnrollmentId));
-
         await using (var invalidated = await scenario.Factory.CreateDbContextAsync())
         {
-            var enrollment = await invalidated.RuntimeEnrollments
-                .SingleAsync(candidate => candidate.Id == scenario.EnrollmentId);
-            var binding = await invalidated.DistributionInstallationBindings
-                .SingleAsync(candidate => candidate.Id == scenario.Fixture.BindingId);
+            var enrollment = await invalidated.RuntimeEnrollments.SingleAsync(candidate => candidate.Id == scenario.EnrollmentId);
+            var binding = await invalidated.DistributionInstallationBindings.SingleAsync(candidate => candidate.Id == scenario.Fixture.BindingId);
             Assert.Equal("ACTIVE", enrollment.State);
             Assert.Equal(1, enrollment.SecurityEpoch);
             Assert.Equal("active", binding.State);
@@ -358,16 +357,13 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
             if (transition == "revoke")
             {
                 Assert.NotNull(assignment.EndedAtUtc);
-                Assert.Empty(await invalidated.EnrollmentLicenseAssignments.Where(row =>
-                    row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE").ToListAsync());
+                Assert.Empty(await invalidated.EnrollmentLicenseAssignments.Where(row => row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE").ToListAsync());
             }
         }
 
         if (transition == "ban")
         {
-            Assert.True(await security.UnbanHardwareIdAsync(
-                banId ?? throw new InvalidOperationException("Missing ban id."),
-                "ticket=TKT-000095"));
+            Assert.True(await security.UnbanHardwareIdAsync(banId ?? throw new InvalidOperationException("Missing ban id."), "ticket=TKT-000095"));
         }
         else
         {
@@ -381,123 +377,26 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
 
         // Restore commercial use through the original possession key, never by inventing a new enrollment.
         var fresh = NewSecurityCapability(scenario, "restored-" + transition);
-        var restored = await scenario.Runtime.CreateCapabilityAsync(scenario.EnrollmentId,
-            fresh.Digest, fresh.Request, fresh.Proof, IPAddress.Loopback);
+        var restored = await scenario.Runtime.CreateCapabilityAsync(scenario.EnrollmentId, fresh.Digest, fresh.Request, fresh.Proof, IPAddress.Loopback);
         Assert.False(restored.Idempotent);
         Assert.NotEqual(issued.Response.CapabilityToken, restored.Response.CapabilityToken);
         var segments = restored.Response.CapabilityToken.Split('.');
         Assert.Equal(3, segments.Length);
         using var signing = CreateSigningKey(ActiveSigningPrivateKey);
-        Assert.True(signing.VerifyData(System.Text.Encoding.ASCII.GetBytes(segments[0] + "." + segments[1]),
-            DecodeBase64Url(segments[2]), System.Security.Cryptography.HashAlgorithmName.SHA256,
-            System.Security.Cryptography.RSASignaturePadding.Pss));
+        Assert.True(signing.VerifyData(System.Text.Encoding.ASCII.GetBytes(segments[0] + "." + segments[1]), DecodeBase64Url(segments[2]), System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.RSASignaturePadding.Pss));
         using var restoredPayload = JsonDocument.Parse(DecodeBase64Url(segments[1]));
         Assert.Equal(scenario.EnrollmentId.ToString("D"), restoredPayload.RootElement.GetProperty("sub").GetString());
         Assert.Equal(fresh.Request.Audience, restoredPayload.RootElement.GetProperty("aud").GetString());
         Assert.Equal(fresh.Request.SessionId, restoredPayload.RootElement.GetProperty("session_id").GetString());
-        Assert.Equal(120, restoredPayload.RootElement.GetProperty("exp").GetInt64()
-            - restoredPayload.RootElement.GetProperty("iat").GetInt64());
+        Assert.Equal(120, restoredPayload.RootElement.GetProperty("exp").GetInt64() - restoredPayload.RootElement.GetProperty("iat").GetInt64());
         Assert.Equal(identityBefore, await SnapshotRetainedRuntimeIdentityAsync(scenario.Factory, scenario.EnrollmentId));
         await using var finalCheck = await scenario.Factory.CreateDbContextAsync();
         Assert.Single(await finalCheck.RuntimeEnrollments.Where(row => row.BindingId == scenario.Fixture.BindingId).ToListAsync());
-        var currentAssignment = await finalCheck.EnrollmentLicenseAssignments.SingleAsync(row =>
-            row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE");
+        var currentAssignment = await finalCheck.EnrollmentLicenseAssignments.SingleAsync(row => row.EnrollmentId == scenario.EnrollmentId && row.State == "ACTIVE");
         Assert.Equal(assignmentBefore.LicenseId, currentAssignment.LicenseId);
         Assert.Equal(assignmentBefore.LicenseSeatId, currentAssignment.LicenseSeatId);
         Assert.Equal(assignmentBefore.Revision + (transition == "revoke" ? 1 : 0), currentAssignment.Revision);
         Assert.Equal(transition == "ban", currentAssignment.Id == assignmentBefore.Id);
-        Assert.Equal(transition == "revoke" ? "ENDED" : "ACTIVE",
-            (await finalCheck.EnrollmentLicenseAssignments.SingleAsync(row => row.Id == assignmentBefore.Id)).State);
-    }
-
-    /// <summary>Hashes every persisted scalar identity field without printing synthetic encrypted key material in assertions.</summary>
-    /// <param name="factory">Factory for the scenario-owned database.</param>
-    /// <param name="enrollmentId">The exact identity whose enrollment and binding must remain unchanged.</param>
-    /// <returns>A stable digest of the complete enrollment and binding snapshots.</returns>
-    private static async Task<string> SnapshotRetainedRuntimeIdentityAsync(
-        IDbContextFactory<LicenseDbContext> factory, Guid enrollmentId)
-    {
-        await using var db = await factory.CreateDbContextAsync();
-        var enrollment = await db.RuntimeEnrollments.AsNoTracking().SingleAsync(row => row.Id == enrollmentId);
-        var binding = await db.DistributionInstallationBindings.AsNoTracking().SingleAsync(row => row.Id == enrollment.BindingId);
-        return Sha256(JsonSerializer.Serialize(new { enrollment, binding }));
-    }
-
-    /// <summary>Proves ended commercial authority denies execution without changing the retained Runtime identity.</summary>
-    /// <param name="factory">Factory for the scenario-owned database.</param>
-    /// <param name="enrollmentId">The retained enrollment with no current commercial assignment.</param>
-    private static async Task AssertEndedAssignmentDeniesRuntimeAsync(
-        IDbContextFactory<LicenseDbContext> factory, Guid enrollmentId)
-    {
-        var before = await SnapshotRetainedRuntimeIdentityAsync(factory, enrollmentId);
-        await using var db = await factory.CreateDbContextAsync();
-        await using var transaction = await db.Database.BeginTransactionAsync();
-        await RuntimeCommercialEligibilityValidator.AcquireWriteBarrierAsync(db, CancellationToken.None);
-        var enrollment = await db.RuntimeEnrollments.AsNoTracking().SingleAsync(row => row.Id == enrollmentId);
-        var refusal = await Assert.ThrowsAsync<RuntimeEnrollmentException>(() =>
-            RuntimeCommercialEligibilityValidator.ValidateAsync(db, enrollment,
-                new Dictionary<string, string>(), DateTimeOffset.UtcNow, CancellationToken.None));
-        Assert.Equal(StatusCodes.Status422UnprocessableEntity, refusal.StatusCode);
-        Assert.Equal("authority_ineligible", refusal.ErrorCode);
-        Assert.Equal("assignment_missing", refusal.DiagnosticCode);
-        await transaction.RollbackAsync();
-        Assert.Equal(before, await SnapshotRetainedRuntimeIdentityAsync(factory, enrollmentId));
-    }
-
-    private static SecurityService CreateHardwareSecurityService(IDbContextFactory<LicenseDbContext> factory)
-    {
-        var notifier = new Mock<NotificationService>(
-            factory,
-            Mock.Of<ILogger<NotificationService>>(),
-            Mock.Of<IHttpClientFactory>());
-        return new SecurityService(
-            factory,
-            Mock.Of<ILogger<SecurityService>>(),
-            notifier.Object,
-            new ConfigurationBuilder().Build());
-    }
-
-    private static async Task SeedHardwareBanProductAsync(
-        IDbContextFactory<LicenseDbContext> factory,
-        Guid productId)
-    {
-        await using var db = await factory.CreateDbContextAsync();
-        db.Products.Add(new Product
-        {
-            Id = productId,
-            Name = "Hardware ban test " + productId.ToString("N"),
-            PrivateKeyXml = string.Empty,
-            PublicKeyXml = string.Empty,
-            ApiSecret = Guid.NewGuid().ToString("N")
-        });
-        await db.SaveChangesAsync();
-    }
-
-    private static (RuntimeEnrollmentCapabilityRequest Request, string Digest, RuntimeProofHeaders Proof)
-        NewSecurityCapability(PreparedBootstrapScenario scenario, string suffix)
-    {
-        var request = new RuntimeEnrollmentCapabilityRequest
-        {
-            Schema = RuntimeEnrollmentService.CapabilitySchema,
-            ProtocolVersion = RuntimeEnrollmentService.ProtocolVersion,
-            EnrollmentId = scenario.EnrollmentId.ToString("D"),
-            Epoch = 1,
-            SecurityEpoch = 1,
-            InstallationId = scenario.Fixture.InstallationId,
-            ReleaseVersion = scenario.Fixture.Version,
-            SessionId = Guid.NewGuid().ToString("D"),
-            Audience = "https://broker.example.test",
-            Scope = ["runtime.execute"],
-            Binaries = CapabilityBinaries()
-        };
-        var digest = Sha256("security-capability-" + suffix + Guid.NewGuid().ToString("N"));
-        var proof = Proof(
-            scenario.EnrollmentKey,
-            "capability",
-            scenario.EnrollmentId,
-            request.Audience,
-            "-",
-            digest);
-        return (request, digest, proof);
+        Assert.Equal(transition == "revoke" ? "ENDED" : "ACTIVE", (await finalCheck.EnrollmentLicenseAssignments.SingleAsync(row => row.Id == assignmentBefore.Id)).State);
     }
 }

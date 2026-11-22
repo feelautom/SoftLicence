@@ -17,7 +17,13 @@ public enum ApprovedBinaryObservationKind
     BaselineMissing
 }
 
-public class SecurityIncidentService
+/// <summary>
+/// Aggregates server-side security evidence into <see cref="SecurityIncident"/> rows and sends their notifications.
+/// Public ApprovedBinaries evidence goes to one aggregate per product, family and window (no identity), except
+/// fingerprint mismatches carrying a usable hardware identifier, which go to the per-hardware incident of
+/// <c>SecurityIncidentService.HardwareBinaries.cs</c> (TKT-003674). Nothing here applies a sanction.
+/// </summary>
+public partial class SecurityIncidentService
 {
     public const string PublicTelemetryAggregateIdentity = "PUBLIC-TELEMETRY-AGGREGATE";
     public const int MaxEvidencePerPublicAggregate = 16;

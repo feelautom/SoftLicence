@@ -524,22 +524,18 @@ public sealed class HistoricalReturnPostgreSqlTests
             Assert.Fail("No PostgreSQL lock observed for " + marker);
         }
 
-        /// <summary>Creates/migrates a uniquely owned database on an explicitly configured loopback PostgreSQL server.</summary>
+        /// <summary>Clones a uniquely owned current-schema database on the loopback PostgreSQL server.</summary>
         public static async Task<Fixture> CreateAsync()
         {
-            var settings = new NpgsqlConnectionStringBuilder(Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES")
-                ?? throw new InvalidOperationException("Local test PostgreSQL connection required"));
-            if (settings.Host is not ("localhost" or "127.0.0.1" or "::1")) throw new InvalidOperationException("Loopback test host required");
-            settings.Database = "postgres"; var maintenance = settings.ConnectionString;
-            var database = "tkt1011_" + Guid.NewGuid().ToString("N");
-            await using (var admin = new NpgsqlConnection(maintenance)) { await admin.OpenAsync();
-                await using var cmd = new NpgsqlCommand($"CREATE DATABASE \"{database}\"", admin); await cmd.ExecuteNonQueryAsync(); }
-            settings.Database = database;
+            var clone = await PostgreSqlModelDatabase.CloneAsync("historical_return");
             Fixture? f = null;
             try
             {
-                f = new Fixture(maintenance, database, settings.ConnectionString);
-                await using var db = f.Db(); await db.Database.MigrateAsync();
+                f = new Fixture(
+                    clone.MaintenanceConnectionString,
+                    clone.DatabaseName,
+                    clone.ConnectionString);
+                await using var db = f.Db();
                 var product = new Product { Name = "TIAConnect", ApiSecret = "tkt1011-product-fixture" };
                 var type = new LicenseType { Product = product, Name = "Fixture Pro", Slug = "TKT1011-PRO", IsRecurring = true, DefaultMaxSeats = 3 };
                 type.CustomParams.Add(new LicenseTypeCustomParam { Key = "copilot", Name = "Fixture", Value = "true" });
@@ -559,9 +555,9 @@ public sealed class HistoricalReturnPostgreSqlTests
                 {
                     // Host construction may fail before the fixture exists. The database name
                     // is still the locally generated UUID above and must not leak on this path.
-                    await using var admin = new NpgsqlConnection(maintenance); await admin.OpenAsync();
-                    await using var cmd = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)", admin);
-                    await cmd.ExecuteNonQueryAsync();
+                    await PostgreSqlModelDatabase.DropAsync(
+                        clone.MaintenanceConnectionString,
+                        clone.DatabaseName);
                 }
                 throw;
             }
@@ -570,9 +566,8 @@ public sealed class HistoricalReturnPostgreSqlTests
         /// <summary>Stops the owned HTTP host before dropping only its generated fixture database.</summary>
         public async ValueTask DisposeAsync()
         {
-            Client.Dispose(); await host.DisposeAsync(); NpgsqlConnection.ClearAllPools();
-            await using var admin = new NpgsqlConnection(maintenance); await admin.OpenAsync();
-            await using var cmd = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)", admin); await cmd.ExecuteNonQueryAsync();
+            Client.Dispose(); await host.DisposeAsync();
+            await PostgreSqlModelDatabase.DropAsync(maintenance, database);
         }
     }
 }

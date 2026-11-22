@@ -1327,8 +1327,12 @@ public class TelemetryServiceTests
         Assert.False(incident.IsHardwareBanned);
     }
 
+    /// <summary>
+    /// Mismatches whose declared hardware identifier cannot identify a machine (here: spaces) still fall back to
+    /// the single capped public aggregate (TKT-003674 keeps that path for unusable identifiers).
+    /// </summary>
     [Fact]
-    public async Task SaveEventAsync_ManyDeclaredHwidsAndHashes_CreateOneCappedPublicAggregate()
+    public async Task SaveEventAsync_ManyUnusableHwidsAndHashes_CreateOneCappedPublicAggregate()
     {
         await SeedApprovedBinaryBaselineAsync("2.2.904");
         var service = BuildTelemetryServiceWithSecurity();
@@ -1338,7 +1342,7 @@ public class TelemetryServiceTests
             await service.SaveEventAsync(new TelemetryEventRequest
             {
                 AppName = "TIAConnect",
-                HardwareId = $"DECLARED-HWID-{index:D2}",
+                HardwareId = $"DECLARED HWID {index:D2}",
                 Version = "2.2.904",
                 EventName = "Startup_AppStarted",
                 Properties = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -1356,7 +1360,7 @@ public class TelemetryServiceTests
         Assert.Equal(25, incident.OccurrenceCount);
         Assert.Equal(SecurityIncidentService.MaxEvidencePerPublicAggregate, incident.Evidence.Count);
         Assert.Equal(25, await checkDb.TelemetryRecords.Select(row => row.HardwareId).Distinct().CountAsync());
-        Assert.DoesNotContain(incident.Evidence, evidence => evidence.ComponentHash.Contains("DECLARED-HWID", StringComparison.Ordinal));
+        Assert.DoesNotContain(incident.Evidence, evidence => evidence.ComponentHash.Contains("DECLARED HWID", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -1426,13 +1430,15 @@ public class TelemetryServiceTests
         Assert.Empty(await checkDb.BannedComponents.ToListAsync());
         Assert.False(await checkDb.BannedHardwareIds.AnyAsync(b => b.HardwareId == relatedHardwareId));
 
+        // TKT-003674: the mismatch is attached to the incident of its machine, still without any sanction.
         var incident = await checkDb.SecurityIncidents.Include(i => i.Evidence).SingleAsync();
-        Assert.Equal(SecurityIncidentService.PublicTelemetryAggregateIdentity, incident.HardwareId);
-        Assert.Null(incident.Version);
-        Assert.Null(incident.ClientIp);
-        Assert.Equal("ApprovedBinaryMismatch", incident.Family);
+        Assert.Equal(sourceHardwareId, incident.HardwareId);
+        Assert.Equal("2.1.839", incident.Version);
+        Assert.Equal(SecurityIncidentService.ApprovedBinaryHardwareMismatchFamily, incident.Family);
         Assert.False(incident.IsHardwareBanned);
         Assert.Equal(1, incident.OccurrenceCount);
+        Assert.Null(incident.InitialNotificationSentAtUtc);
+        Assert.Single(await checkDb.SecurityIncidentObservations.ToListAsync());
         var evidence = Assert.Single(incident.Evidence);
         Assert.Equal("FP_EXE", evidence.ComponentType);
         Assert.Equal(patchedExeHash.ToUpperInvariant(), evidence.ComponentHash);
@@ -1482,6 +1488,18 @@ public class TelemetryServiceTests
                 It.IsAny<DateTime?>(),
                 It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("Simulated incident persistence failure"));
+        // TKT-003674: the per-hardware write fails first, then its public-aggregate fallback fails too.
+        incidentService.Setup(s => s.RecordHardwareBinaryMismatchAsync(
+                It.IsAny<Guid>(),
+                It.IsAny<string?>(),
+                It.IsAny<string>(),
+                It.IsAny<string?>(),
+                It.IsAny<string?>(),
+                It.IsAny<string?>(),
+                It.IsAny<IReadOnlyDictionary<string, string>>(),
+                It.IsAny<DateTime?>(),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("Simulated per-hardware incident failure"));
         var service = BuildTelemetryServiceWithSecurity(incidentService.Object);
 
         await service.SaveEventAsync(new TelemetryEventRequest

@@ -21,110 +21,11 @@ using Xunit;
 namespace SoftLicence.Tests.Server;
 
 /// <summary>Exercises the Source C producer over a script-owned isolated PostgreSQL 17 database.</summary>
-public sealed partial class RuntimeEnrollmentPostgreSqlTests
+public abstract partial class RuntimeEnrollmentPostgreSqlTestBase
 {
-    /// <summary>
-    /// Produces all four scenarios through the production v2 service, proves bounded metadata collection,
-    /// semantic replay, cancellation retry, PS256 output, and absence of raw provider values.
-    /// </summary>
-    [Fact]
-    public async Task Tkt000672SourceCAuthority_RealV2FlowsAreBoundedReplayableAndMetadataOnly()
-    {
-        var connectionString = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES");
-        var bootstrapConnectionString = Environment.GetEnvironmentVariable(
-            "SOFTLICENCE_RUNTIME_TEST_POSTGRES_BOOTSTRAP");
-        if (string.IsNullOrWhiteSpace(connectionString))
-            throw new InvalidOperationException(
-                "Use scripts/Invoke-Tkt000672SourceCAuthority.ps1 to provision the isolated PostgreSQL 17 resource.");
-        var builder = new NpgsqlConnectionStringBuilder(connectionString);
-        var database = builder.Database ?? throw new InvalidOperationException("The isolated database name is required.");
-        Assert.StartsWith("sl_tkt672_sc_", database, StringComparison.Ordinal);
-        if (string.IsNullOrWhiteSpace(bootstrapConnectionString))
-            bootstrapConnectionString = connectionString;
-        await AssertOwnedDatabaseAsync(bootstrapConnectionString, database);
-        var bootstrapOptions = new DbContextOptionsBuilder<LicenseDbContext>()
-            .UseNpgsql(bootstrapConnectionString).Options;
-        await using (var migration = new LicenseDbContext(bootstrapOptions))
-            await migration.Database.MigrateAsync();
-        await GrantAndAssertApplicationPrivilegesAsync(
-            bootstrapConnectionString, connectionString, builder.Username!, database);
-        await ProvisionEnrollmentEncryptionKeyAsync(bootstrapConnectionString, "test");
-        var options = new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(connectionString).Options;
-        var factory = new Tkt000672PostgreSqlFactory(options);
-
-        DateTimeOffset observed;
-        await using (var clock = await factory.CreateDbContextAsync())
-        {
-            await clock.Database.OpenConnectionAsync();
-            var databaseNow = await RuntimeEnrollmentService.DatabaseNowAsync(clock, CancellationToken.None);
-            // One millisecond-precision anchor keeps request timestamps and current licence policy coherent.
-            observed = DateTimeOffset.FromUnixTimeMilliseconds(databaseNow.ToUnixTimeMilliseconds());
-        }
-        await using var executor = new PostgreSqlRealScenarioExecutor(factory, observed);
-        using var signers = new StableSignerFactory();
-        var harness = new Tkt000672SourceCAuthorityHarness(
-            new Tkt000672PostgreSqlEvidenceReader(factory), executor, signers);
-        var request = Tkt000672SourceCAuthorityContract.ParseRequest(PostgreSqlRequest(observed)).Request!;
-        executor.InterruptAfterFirstPersistedGeneration = true;
-        await Assert.ThrowsAsync<OperationCanceledException>(() =>
-            harness.RunAsync(request, CancellationToken.None));
-        await using (var interrupted = await factory.CreateDbContextAsync())
-            Assert.Equal(1, await interrupted.RuntimeEnrollmentAuthorityGenerations.AsNoTracking().CountAsync(
-                item => executor.RequestIds.Contains(item.RequestId)));
-        using var start = new Barrier(2);
-        // Releases both complete harness calls together so the executor's per-scenario atomicity is observable.
-        async Task<Tkt000672HarnessResult> CompleteAsync()
-        {
-            start.SignalAndWait();
-            return await harness.RunAsync(request, CancellationToken.None);
-        }
-        var completions = await Task.WhenAll(Task.Run(CompleteAsync), Task.Run(CompleteAsync));
-        Assert.All(completions, result => Assert.True(result.Ok));
-        var first = completions[0];
-        Assert.True(first.Ok);
-        Assert.Equal(9, executor.RealServiceCalls);
-        Assert.Equal(5, first.Response!.Manifest["payload"]!["history"]!["generationCount"]!.GetValue<int>());
-        Assert.Equal(
-            [
-                ("PROVEN", "PROVEN_EXACT_ATTESTED_TUPLE", 1, 1),
-                ("PARTIAL", "PARTIAL_REQUIRED_EVIDENCE_MISSING", 1, 1),
-                ("AMBIGUOUS", "AMBIGUOUS_MULTIPLE_ATTESTED_TUPLES", 2, 2),
-                ("INCONSISTENT", "INCONSISTENT_ATTESTED_TUPLE_CONFLICT", 1, 1)
-            ],
-            first.Response.ClassificationEvidence.Select(item =>
-                (item.Classification, item.Reason, item.RequestCount, item.GenerationCount)).ToArray());
-        var firstDigest = first.Response.Manifest["authorityDigest"]!.GetValue<string>();
-        var second = await harness.RunAsync(request, CancellationToken.None);
-        Assert.True(second.Ok);
-        Assert.Equal(9, executor.RealServiceCalls);
-        Assert.Equal(firstDigest, second.Response!.Manifest["authorityDigest"]!.GetValue<string>());
-        Assert.DoesNotContain(executor.RawGrantRefs, grant =>
-            second.Response.Manifest.ToJsonString().Contains(grant, StringComparison.Ordinal));
-        await using var check = await factory.CreateDbContextAsync();
-        Assert.Equal(5, await check.RuntimeEnrollmentAuthorityGenerations.AsNoTracking()
-            .CountAsync(item => executor.RequestIds.Contains(item.RequestId)));
-        Assert.Equal(5, await check.RuntimeEnrollmentAuthorityRequests.AsNoTracking()
-            .CountAsync(item => executor.RequestIds.Contains(item.RequestId)));
-        Assert.Equal(executor.RequestIds.Count, await check.RuntimeEnrollmentAuthorityAttempts.AsNoTracking()
-            .Where(item => executor.RequestIds.Contains(item.RequestId))
-            .Select(item => item.RequestId).Distinct().CountAsync());
-
-        var priorRuntimeConnection = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES");
-        try
-        {
-            Environment.SetEnvironmentVariable(
-                "SOFTLICENCE_RUNTIME_TEST_POSTGRES", bootstrapConnectionString, EnvironmentVariableTarget.Process);
-            await AuthorityRecovery_TwoStageProductionFlowCommitsAndReplaysExactly(-90);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(
-                "SOFTLICENCE_RUNTIME_TEST_POSTGRES", priorRuntimeConnection, EnvironmentVariableTarget.Process);
-        }
-    }
 
     /// <summary>Grants and proves the exact non-superuser application privileges after bootstrap migrations.</summary>
-    private static async Task GrantAndAssertApplicationPrivilegesAsync(
+    protected static async Task GrantAndAssertApplicationPrivilegesAsync(
         string bootstrapConnectionString, string applicationConnectionString,
         string applicationRole, string database)
     {
@@ -205,7 +106,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// <param name="connectionString">Bootstrap connection kept out of output.</param>
     /// <param name="database">Expected ticket-owned database name.</param>
     /// <returns>A task completing only after the exact ownership row is proven.</returns>
-    private static async Task AssertOwnedDatabaseAsync(string connectionString, string database)
+    protected static async Task AssertOwnedDatabaseAsync(string connectionString, string database)
     {
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync();
@@ -224,7 +125,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// <summary>Serializes one closed metadata-only request for the isolated PostgreSQL execution.</summary>
     /// <param name="observed">Shared database-clock anchor for this synthetic scenario.</param>
     /// <returns>Owned compact UTF-8 JSON bytes.</returns>
-    private static byte[] PostgreSqlRequest(DateTimeOffset observed) => System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
+    protected static byte[] PostgreSqlRequest(DateTimeOffset observed) => System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
     {
         schema = Tkt000672SourceCAuthorityContract.RequestSchema,
         runId = "run_00000000000000000000000000000003",
@@ -243,7 +144,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// a per-scenario gate makes concurrent complete harness calls share one persisted state; interrupted genesis
     /// remains resumable and recovery preparation/finalization never bypasses the controller.
     /// </summary>
-    private sealed class PostgreSqlRealScenarioExecutor : ITkt000672AuthorityScenarioExecutor, IAsyncDisposable
+    private protected sealed class PostgreSqlRealScenarioExecutor : ITkt000672AuthorityScenarioExecutor, IAsyncDisposable
     {
         private readonly Tkt000672PostgreSqlFactory factory;
         private readonly DateTimeOffset observed;
@@ -556,7 +457,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     }
 
     /// <summary>Owns one atomic scenario fixture and all ephemeral HTTP/cryptographic resources.</summary>
-    private sealed class ScenarioState : IDisposable
+    protected sealed class ScenarioState : IDisposable
     {
         private readonly List<IDisposable> owned;
 
@@ -638,7 +539,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     }
 
     /// <summary>Authenticates exact test-host S2S headers with a run-local PS256 key and one-use nonce set.</summary>
-    private sealed class StrictS2SAuthentication : IDistributionS2SAuthenticationService, IDisposable
+    protected sealed class StrictS2SAuthentication : IDistributionS2SAuthenticationService, IDisposable
     {
         private readonly RSA key = RSA.Create(2048);
         private readonly ConcurrentDictionary<string, byte> nonces = new(StringComparer.Ordinal);
@@ -666,6 +567,10 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         }
 
         /// <inheritdoc />
+        /// <remarks>
+        /// Returns the rights of the main distribution client (recovery, upgrade and, since TKT-003162, licence
+        /// bootstrap, which the installation and enrollment routes require).
+        /// </remarks>
         public Task<DistributionS2SPrincipal> AuthenticateAndReserveNonceAsync(
             Microsoft.AspNetCore.Http.HttpContext context, ReadOnlyMemory<byte> exactBody,
             string productId, CancellationToken cancellationToken)
@@ -687,7 +592,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
                     HashAlgorithmName.SHA256, RSASignaturePadding.Pss))
                 throw new DistributionS2SAuthenticationException("s2s_authentication_invalid", 401);
             return Task.FromResult(new DistributionS2SPrincipal(client, keyId,
-                AllowRuntimeRecovery: true, AllowRuntimeUpgrade: true));
+                AllowRuntimeRecovery: true, AllowRuntimeUpgrade: true, AllowLicenseBootstrap: true));
         }
 
         /// <summary>Disposes the run-local private test credential.</summary>
@@ -710,7 +615,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// Retains two distinct run-local PKCS#8 encodings so replayed harness calls use one stable public trust
     /// identity while each returned RSA owner remains independently disposable. Encodings are zeroed on disposal.
     /// </summary>
-    private sealed class StableSignerFactory : ITkt000672ManifestSignerFactory, IDisposable
+    private protected sealed class StableSignerFactory : ITkt000672ManifestSignerFactory, IDisposable
     {
         private readonly byte[] manifest = CreatePrivateKey();
         private readonly byte[] trust = CreatePrivateKey();
@@ -743,7 +648,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
 
     /// <summary>Creates contexts bound only to the isolated non-superuser application-role options.</summary>
     /// <param name="options">Prevalidated Npgsql options for the ticket-owned database.</param>
-    private sealed class Tkt000672PostgreSqlFactory(DbContextOptions<LicenseDbContext> options)
+    protected sealed class Tkt000672PostgreSqlFactory(DbContextOptions<LicenseDbContext> options)
         : IDbContextFactory<LicenseDbContext>
     {
         /// <inheritdoc />
@@ -751,5 +656,101 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
         /// <inheritdoc />
         public Task<LicenseDbContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult(CreateDbContext());
+    }
+}
+
+/// <summary>Runs the tests from Tkt000672SourceCAuthorityPostgreSqlTests as an independently schedulable PostgreSQL class.</summary>
+/// <param name="classDatabase">The xUnit-owned PostgreSQL clone fixture for this exact test class.</param>
+public sealed partial class Tkt000672SourceCAuthorityPostgreSqlTests(RuntimeEnrollmentPostgreSqlClassDatabase classDatabase)
+    : RuntimeEnrollmentPostgreSqlTestBase(classDatabase)
+{
+    /// <summary>
+    /// Produces all four scenarios through the production v2 service, proves bounded metadata collection,
+    /// semantic replay, cancellation retry, PS256 output, and absence of raw provider values.
+    /// </summary>
+    [Fact(DisplayName = "SoftLicence.Tests.Server.RuntimeEnrollmentPostgreSqlTests.Tkt000672SourceCAuthority_RealV2FlowsAreBoundedReplayableAndMetadataOnly")]
+    public async Task Tkt000672SourceCAuthority_RealV2FlowsAreBoundedReplayableAndMetadataOnly()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES");
+        var bootstrapConnectionString = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES_BOOTSTRAP");
+        if (string.IsNullOrWhiteSpace(connectionString))
+            throw new InvalidOperationException("Use scripts/Invoke-Tkt000672SourceCAuthority.ps1 to provision the isolated PostgreSQL 17 resource.");
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        var database = builder.Database ?? throw new InvalidOperationException("The isolated database name is required.");
+        Assert.StartsWith("sl_tkt672_sc_", database, StringComparison.Ordinal);
+        if (string.IsNullOrWhiteSpace(bootstrapConnectionString))
+            bootstrapConnectionString = connectionString;
+        await AssertOwnedDatabaseAsync(bootstrapConnectionString, database);
+        var bootstrapOptions = new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(bootstrapConnectionString).Options;
+        await using (var migration = new LicenseDbContext(bootstrapOptions))
+            await migration.Database.MigrateAsync();
+        await GrantAndAssertApplicationPrivilegesAsync(bootstrapConnectionString, connectionString, builder.Username!, database);
+        await ProvisionEnrollmentEncryptionKeyAsync(bootstrapConnectionString, "test");
+        var options = new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(connectionString).Options;
+        var factory = new Tkt000672PostgreSqlFactory(options);
+        DateTimeOffset observed;
+        await using (var clock = await factory.CreateDbContextAsync())
+        {
+            await clock.Database.OpenConnectionAsync();
+            var databaseNow = await RuntimeEnrollmentService.DatabaseNowAsync(clock, CancellationToken.None);
+            // One millisecond-precision anchor keeps request timestamps and current licence policy coherent.
+            observed = DateTimeOffset.FromUnixTimeMilliseconds(databaseNow.ToUnixTimeMilliseconds());
+        }
+
+        await using var executor = new PostgreSqlRealScenarioExecutor(factory, observed);
+        using var signers = new StableSignerFactory();
+        var harness = new Tkt000672SourceCAuthorityHarness(new Tkt000672PostgreSqlEvidenceReader(factory), executor, signers);
+        var request = Tkt000672SourceCAuthorityContract.ParseRequest(PostgreSqlRequest(observed)).Request!;
+        executor.InterruptAfterFirstPersistedGeneration = true;
+        await Assert.ThrowsAsync<OperationCanceledException>(() => harness.RunAsync(request, CancellationToken.None));
+        await using (var interrupted = await factory.CreateDbContextAsync())
+            Assert.Equal(1, await interrupted.RuntimeEnrollmentAuthorityGenerations.AsNoTracking().CountAsync(item => executor.RequestIds.Contains(item.RequestId)));
+        using var start = new Barrier(2);
+        // Releases both complete harness calls together so the executor's per-scenario atomicity is observable.
+        async Task<Tkt000672HarnessResult> CompleteAsync()
+        {
+            start.SignalAndWait();
+            return await harness.RunAsync(request, CancellationToken.None);
+        }
+
+        var completions = await Task.WhenAll(Task.Run(CompleteAsync), Task.Run(CompleteAsync));
+        Assert.All(completions, result => Assert.True(result.Ok));
+        var first = completions[0];
+        Assert.True(first.Ok);
+        Assert.Equal(9, executor.RealServiceCalls);
+        Assert.Equal(5, first.Response!.Manifest["payload"]!["history"]!["generationCount"]!.GetValue<int>());
+        Assert.Equal([("PROVEN", "PROVEN_EXACT_ATTESTED_TUPLE", 1, 1), ("PARTIAL", "PARTIAL_REQUIRED_EVIDENCE_MISSING", 1, 1), ("AMBIGUOUS", "AMBIGUOUS_MULTIPLE_ATTESTED_TUPLES", 2, 2), ("INCONSISTENT", "INCONSISTENT_ATTESTED_TUPLE_CONFLICT", 1, 1)], first.Response.ClassificationEvidence.Select(item => (item.Classification, item.Reason, item.RequestCount, item.GenerationCount)).ToArray());
+        var firstDigest = first.Response.Manifest["authorityDigest"]!.GetValue<string>();
+        var second = await harness.RunAsync(request, CancellationToken.None);
+        Assert.True(second.Ok);
+        Assert.Equal(9, executor.RealServiceCalls);
+        Assert.Equal(firstDigest, second.Response!.Manifest["authorityDigest"]!.GetValue<string>());
+        Assert.DoesNotContain(executor.RawGrantRefs, grant => second.Response.Manifest.ToJsonString().Contains(grant, StringComparison.Ordinal));
+        await using var check = await factory.CreateDbContextAsync();
+        Assert.Equal(5, await check.RuntimeEnrollmentAuthorityGenerations.AsNoTracking().CountAsync(item => executor.RequestIds.Contains(item.RequestId)));
+        Assert.Equal(5, await check.RuntimeEnrollmentAuthorityRequests.AsNoTracking().CountAsync(item => executor.RequestIds.Contains(item.RequestId)));
+        Assert.Equal(executor.RequestIds.Count, await check.RuntimeEnrollmentAuthorityAttempts.AsNoTracking().Where(item => executor.RequestIds.Contains(item.RequestId)).Select(item => item.RequestId).Distinct().CountAsync());
+        var priorRuntimeConnection = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES");
+        try
+        {
+            Environment.SetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES", bootstrapConnectionString, EnvironmentVariableTarget.Process);
+            // This direct cross-scenario invocation bypasses xUnit construction, so it must reproduce xUnit's
+            // class-fixture lifetime and drop the generated clone before restoring the process-wide connection.
+            var runtimeDatabase = new RuntimeEnrollmentPostgreSqlClassDatabase();
+            await runtimeDatabase.InitializeAsync();
+            try
+            {
+                await new RuntimeEnrollmentCorePostgreSqlTests(runtimeDatabase)
+                    .AuthorityRecovery_TwoStageProductionFlowCommitsAndReplaysExactly(-90);
+            }
+            finally
+            {
+                await runtimeDatabase.DisposeAsync();
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES", priorRuntimeConnection, EnvironmentVariableTarget.Process);
+        }
     }
 }

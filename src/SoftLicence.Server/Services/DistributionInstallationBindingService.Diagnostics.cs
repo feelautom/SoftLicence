@@ -27,6 +27,7 @@ public sealed partial class DistributionInstallationBindingService
     /// <param name="targetSeat">Resolved target seat, including the exact server-created Added entity; null means neither is available.</param>
     /// <param name="finalizeOwners">Distinct historical finalize callers, never emitted.</param>
     /// <param name="now">The decision's frozen time; diagnostics do not perform a later state lookup.</param>
+    /// <param name="sourceSeatHardwareMatches">The decision's own source-seat continuity result, including an authenticated migration receipt; never recomputed here.</param>
     /// <remarks>
     /// This deliberately mirrors the decision for explanation only. Keep it synchronized with
     /// RecoverSameAuthorityInstallationAsync, but never use these results to grant authority.
@@ -50,7 +51,8 @@ public sealed partial class DistributionInstallationBindingService
         LicenseSeat? sourceSeat,
         LicenseSeat? targetSeat,
         IReadOnlyList<string> finalizeOwners,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        bool sourceSeatHardwareMatches)
     {
         try
         {
@@ -87,7 +89,7 @@ public sealed partial class DistributionInstallationBindingService
                 ("source_seat_license_matches", sourceSeat == null ? null : sourceSeat.LicenseId == source.LicenseId),
                 ("source_seat_inactive", sourceSeat == null ? null : !sourceSeat.IsActive),
                 ("source_seat_unlinked", sourceSeat == null ? null : sourceSeat.UnlinkedAt != null),
-                ("source_seat_hardware_matches", sourceSeat == null ? null : Sha256(sourceSeat.HardwareId) == source.HardwareIdHash),
+                ("source_seat_hardware_matches", sourceSeat == null ? null : sourceSeatHardwareMatches),
                 ("target_seat_present", targetSeat != null),
                 ("target_seat_license_matches", targetSeat == null ? null : targetSeat.LicenseId == entitlement.LicenseId),
                 ("target_seat_active", targetSeat == null ? null : targetSeat.IsActive),

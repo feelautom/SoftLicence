@@ -200,16 +200,16 @@ public sealed class LicenseRenewalIdempotencyPostgreSqlTests
     /// <summary>Seeds one recurring provider-owned license without creating any renewal ledger row.</summary>
     /// <param name="connectionString">The isolated database connection string.</param>
     /// <param name="suffix">A deterministic semantic label used to keep fixtures distinct.</param>
-    /// <param name="historicalSchema">Uses only the known pre-AuthorityVersion model at PreviousMigration.</param>
+    /// <param name="historicalSchema">Uses the exact pre-AuthorityVersion and pre-commercial-nature model at PreviousMigration.</param>
     /// <returns>The identifiers and exact expiration required by the HTTP assertions.</returns>
     private static async Task<RenewalFixture> SeedRecurringLicenseAsync(
         string connectionString,
         string suffix,
         bool historicalSchema = false)
     {
-        // The August boundary predates this generated column; all other mapped fields remain strict.
+        // The August boundary predates both additive license columns; every other mapped field remains strict.
         await using var db = historicalSchema
-            ? HistoricalSchemaModel.CreateContext(connectionString, [(typeof(License), nameof(License.AuthorityVersion))])
+            ? HistoricalSchemaModel.CreateContext(connectionString, [(typeof(License), nameof(License.AuthorityVersion)), (typeof(License), nameof(License.CommercialNature)), (typeof(LicenseType), nameof(LicenseType.AllowPublicTrial)), (typeof(LicenseType), nameof(LicenseType.TeamEligible))])
             : CreateDb(connectionString);
         if (historicalSchema)
             Assert.Equal(PreviousMigration, (await db.Database.GetAppliedMigrationsAsync()).Last());
@@ -229,7 +229,9 @@ public sealed class LicenseRenewalIdempotencyPostgreSqlTests
             DefaultMaxSeats = 1,
             IsRecurring = true
         };
-        var expiration = new DateTime(2027, 5, 1, 10, 0, 0, DateTimeKind.Utc);
+        // Renewal starts from max(expiry, now): the seeded expiry must stay in the future whenever the suite runs, so
+        // the year is relative to the run instead of a fixed calendar year (TKT-004122).
+        var expiration = new DateTime(DateTime.UtcNow.Year + 2, 5, 1, 10, 0, 0, DateTimeKind.Utc);
         var license = new License
         {
             Id = Guid.NewGuid(),
@@ -260,56 +262,26 @@ public sealed class LicenseRenewalIdempotencyPostgreSqlTests
         /// <summary>Gets the isolated ticket-owned database connection string.</summary>
         public string ConnectionString { get; } = connectionString;
 
-        /// <summary>Creates and migrates one bounded PostgreSQL database.</summary>
+        /// <summary>Clones one bounded PostgreSQL database from the exact requested schema model.</summary>
         /// <param name="targetMigration">An optional historical migration boundary.</param>
         /// <returns>The database owner that guarantees cleanup through asynchronous disposal.</returns>
         public static async Task<PostgreSqlProvision> CreateAsync(string? targetMigration = null)
         {
-            var configured = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES");
-            if (string.IsNullOrWhiteSpace(configured))
-                throw new InvalidOperationException(
-                    "SOFTLICENCE_RUNTIME_TEST_POSTGRES is required for TKT-000794 PostgreSQL tests.");
-
-            var database = "tkt794_renewal_" + Guid.NewGuid().ToString("N");
-            var maintenance = new NpgsqlConnectionStringBuilder(configured) { Database = "postgres" }.ConnectionString;
-            await using (var connection = new NpgsqlConnection(maintenance))
-            {
-                await connection.OpenAsync();
-                await using var command = connection.CreateCommand();
-                command.CommandText = $"CREATE DATABASE \"{database}\"";
-                await command.ExecuteNonQueryAsync();
-            }
-
-            var target = new NpgsqlConnectionStringBuilder(configured) { Database = database }.ConnectionString;
-            try
-            {
-                await using var db = CreateDb(target);
-                var migrator = db.GetService<IMigrator>();
-                await migrator.MigrateAsync(targetMigration);
-                return new PostgreSqlProvision(maintenance, target, database);
-            }
-            catch
-            {
-                await DropDatabaseAsync(maintenance, database);
-                throw;
-            }
+            var clone = await PostgreSqlModelDatabase.CloneAsync("renewal", targetMigration);
+            return new PostgreSqlProvision(
+                clone.MaintenanceConnectionString,
+                clone.ConnectionString,
+                clone.DatabaseName);
         }
 
-        /// <summary>Clears Npgsql pools and drops the exact database created by this instance.</summary>
+        /// <summary>Drops the exact database created by this instance through an unpooled maintenance connection.</summary>
         public async ValueTask DisposeAsync() =>
             await DropDatabaseAsync(maintenanceConnectionString, database);
 
-        /// <summary>Removes one exact generated database after clearing pooled connections.</summary>
+        /// <summary>Removes one exact generated database through an unpooled maintenance connection.</summary>
         /// <param name="maintenanceConnectionString">The maintenance database connection string.</param>
         /// <param name="database">The generated database identifier, never caller input.</param>
         private static async Task DropDatabaseAsync(string maintenanceConnectionString, string database)
-        {
-            NpgsqlConnection.ClearAllPools();
-            await using var connection = new NpgsqlConnection(maintenanceConnectionString);
-            await connection.OpenAsync();
-            await using var command = connection.CreateCommand();
-            command.CommandText = $"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)";
-            await command.ExecuteNonQueryAsync();
-        }
+            => await PostgreSqlModelDatabase.DropAsync(maintenanceConnectionString, database);
     }
 }

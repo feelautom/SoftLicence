@@ -122,9 +122,12 @@ public sealed class PortalDeactivationPostgreSqlTests(PortalDeactivationPostgreS
         Assert.Empty(await verify.LicenseHistories.Where(row => row.LicenseId == seed.LicenseId).ToListAsync());
     }
 
-    /// <summary>Preserves authenticated subscription cleanup across multiple seats at quota, without exempting the button.</summary>
+    /// <summary>
+    /// Preserves authenticated subscription cleanup across multiple seats with a daily limit of 1. Since TKT-003751 no
+    /// deactivation reason is ever limited by the daily hardware quota.
+    /// </summary>
     [Fact]
-    public async Task SubscriptionTermination_AtQuota_CleansAllSeats_ButInteractiveReasonsRemainLimited()
+    public async Task SubscriptionTermination_WithDailyLimitOne_CleansAllSeats()
     {
         var now = await ReadDailyScenarioAnchorAsync(ReadDatabaseUtcNowAsync, delay => Task.Delay(delay));
         var seed = await fixture.SeedAsync("termination-quota", true, TimeSpan.FromHours(1), now);
@@ -141,10 +144,6 @@ public sealed class PortalDeactivationPostgreSqlTests(PortalDeactivationPostgreS
                     IsActive = true, FirstActivatedAt = now.UtcDateTime.AddHours(-1), LastCheckInAt = now.UtcDateTime });
             await db.SaveChangesAsync();
         }
-        foreach (var reason in new[] { "settings_button", "uninstall" })
-            await Assert.ThrowsAsync<PortalDeactivationQuotaException>(() => fixture.Service(now).DeactivateAsync(
-                "tia-connect-website-portal", new string('d', 64), seed.Request(reason)));
-
         var requests = hardwareIds.Select(hardwareId => seed.Request("subscription_termination") with {
             RequestId = Guid.NewGuid().ToString("D"), HardwareId = hardwareId }).ToArray();
         // Match the real caller's concurrent per-seat cleanup and stable child request identities.
@@ -215,9 +214,12 @@ public sealed class PortalDeactivationPostgreSqlTests(PortalDeactivationPostgreS
         }
     }
 
-    /// <summary>Proves two portal requests cannot both consume the last quota slot.</summary>
+    /// <summary>
+    /// TKT-003751 (owner rule): two concurrent dashboard unlinks of two seats with a daily limit of 1 both
+    /// succeed; unlinking is never counted nor refused by the daily hardware quota.
+    /// </summary>
     [Fact]
-    public async Task DistinctRequests_CompeteForOneQuotaSlot()
+    public async Task DistinctRequests_AtDailyLimitOne_BothDeactivate()
     {
         var seed = await fixture.SeedAsync("quota-race", true, TimeSpan.FromHours(1), Now);
         await using (var db = fixture.Factory.CreateDbContext())
@@ -232,12 +234,11 @@ public sealed class PortalDeactivationPostgreSqlTests(PortalDeactivationPostgreS
         var second = first with { RequestId = Guid.NewGuid().ToString("D"), HardwareId = "OTHER-QUOTA-SEAT" };
         var failures = await Task.WhenAll(new[] { first, second }.Select(request => Record.ExceptionAsync(() =>
             fixture.Service(Now).DeactivateAsync("tia-connect-website-portal", new string('a', 64), request))));
-        Assert.Single(failures, failure => failure == null);
-        Assert.Single(failures, failure => failure is PortalDeactivationQuotaException);
+        Assert.All(failures, failure => Assert.Null(failure));
         await using var verify = fixture.Factory.CreateDbContext();
-        Assert.Equal(1, await verify.LicenseSeats.CountAsync(row => row.LicenseId == seed.LicenseId && row.IsActive));
-        Assert.Equal(1, await verify.PortalDeactivationOperations.CountAsync(row => row.LicenseId == seed.LicenseId));
-        Assert.Equal(1, await verify.LicenseHistories.CountAsync(row => row.LicenseId == seed.LicenseId));
+        Assert.Equal(0, await verify.LicenseSeats.CountAsync(row => row.LicenseId == seed.LicenseId && row.IsActive));
+        Assert.Equal(2, await verify.PortalDeactivationOperations.CountAsync(row => row.LicenseId == seed.LicenseId));
+        Assert.Equal(2, await verify.LicenseHistories.CountAsync(row => row.LicenseId == seed.LicenseId));
     }
 
     /// <summary>Proves a receipt cannot mutate a reactivated seat, but a new operation can.</summary>
@@ -266,21 +267,21 @@ public sealed class PortalDeactivationPostgreSqlTests(PortalDeactivationPostgreS
     }
 
     /// <summary>
-    /// TKT-001206 regression: unlink, reactivate and unlink the same seat again must keep counting.
-    /// The former inactive-seat count forgot a reactivated seat and allowed unlimited cycles.
+    /// TKT-003751 (owner rule, supersedes TKT-001206): unlink, reactivate the same seat and unlink again, three
+    /// times with a daily limit of 1, is never refused; the same PC counts once at most in the day.
     /// </summary>
     [Fact]
-    public async Task ReactivatedSeat_StillConsumesSeatChangeQuota()
+    public async Task ReactivatedSeat_RepeatedUnlinks_AtLimitOne_NeverRefused()
     {
         var seed = await fixture.SeedAsync("tkt1206-cycle", true, TimeSpan.FromHours(1), Now);
         await using (var db = fixture.Factory.CreateDbContext())
         {
             var license = await db.Licenses.Include(row => row.Type).SingleAsync(row => row.Id == seed.LicenseId);
-            license.Type!.MaxActivationsPerDay = 2;
+            license.Type!.MaxActivationsPerDay = 1;
             await db.SaveChangesAsync();
         }
         var service = fixture.Service(Now);
-        for (var cycle = 0; cycle < 2; cycle++)
+        for (var cycle = 0; cycle < 3; cycle++)
         {
             var request = seed.Request("settings_button") with { RequestId = Guid.NewGuid().ToString("D") };
             var result = await service.DeactivateAsync("tia-connect-website-portal", new string('a', 64), request);
@@ -288,54 +289,57 @@ public sealed class PortalDeactivationPostgreSqlTests(PortalDeactivationPostgreS
             await ReactivateSeedSeatAsync(seed);
         }
 
-        var refused = await Assert.ThrowsAsync<PortalDeactivationQuotaException>(() => service.DeactivateAsync(
-            "tia-connect-website-portal", new string('a', 64),
-            seed.Request("settings_button") with { RequestId = Guid.NewGuid().ToString("D") }));
-        Assert.Equal(2, refused.Refusal.Limit);
         await using var verify = fixture.Factory.CreateDbContext();
-        Assert.True((await verify.LicenseSeats.SingleAsync(row => row.Id == seed.SeatId)).IsActive);
-        Assert.Equal(2, await verify.PortalDeactivationOperations.CountAsync(row => row.LicenseId == seed.LicenseId));
+        Assert.Equal(3, await verify.PortalDeactivationOperations.CountAsync(row => row.LicenseId == seed.LicenseId));
+        var license2 = await verify.Licenses.Include(row => row.Type).SingleAsync(row => row.Id == seed.LicenseId);
+        Assert.True((await SeatChangeQuota.GetStatusAsync(verify, license2, DateTime.UtcNow)).UsedToday <= 1);
     }
 
     /// <summary>
-    /// Proves the relational event classification: customer Desktop or reset-code history counts,
-    /// portal history is not double counted, administrator API rows, subscription cleanup and
-    /// events outside the UTC day do not count.
+    /// TKT-003751: the quota counts distinct hardware identifiers whose seat became active within the UTC day.
+    /// Two seat rows of the same identifier count once; an activation the day before, a seat never activated since
+    /// the column exists, another licence, and every release record (Desktop unlink history, portal operations,
+    /// administrator rows) count nothing.
     /// </summary>
     [Fact]
-    public async Task SeatChangeQuota_CountsOnlyCustomerReleasesOfTheUtcDay()
+    public async Task SeatChangeQuota_CountsDistinctIdentifiersActivatedInTheUtcDay()
     {
         var seed = await fixture.SeedAsync("tkt1206-classify", true, TimeSpan.FromHours(1), Now);
+        var other = await fixture.SeedAsync("tkt3751-other-licence", true, TimeSpan.FromHours(1), Now);
         var today = Now.UtcDateTime;
         await using (var db = fixture.Factory.CreateDbContext())
         {
             var license = await db.Licenses.Include(row => row.Type).SingleAsync(row => row.Id == seed.LicenseId);
-            license.Type!.MaxActivationsPerDay = 3;
+            license.Type!.MaxActivationsPerDay = 2;
+            db.LicenseSeats.AddRange(
+                Seat(seed.LicenseId, "TKT3751-PC-A", today.AddHours(-3)),
+                Seat(seed.LicenseId, "TKT3751-PC-A", today.AddHours(-2)),
+                Seat(seed.LicenseId, "TKT3751-PC-B", today.AddMinutes(-30)),
+                Seat(seed.LicenseId, "TKT3751-PC-C", today.Date.AddTicks(-1)),
+                Seat(other.LicenseId, "TKT3751-PC-D", today.AddMinutes(-10)));
             db.LicenseHistories.AddRange(
                 History(seed.LicenseId, today.AddMinutes(-10), "203.0.113.7"),
-                History(seed.LicenseId, today.AddMinutes(-9), "Unknown"),
-                History(seed.LicenseId, today.AddMinutes(-8), "Admin (API)"),
-                History(seed.LicenseId, today.AddMinutes(-7), "S2S:tia-connect-website-portal"),
-                History(seed.LicenseId, today.AddMinutes(-6), "s2s:lowercase-is-not-the-portal-prefix"),
-                History(seed.LicenseId, today.Date.AddTicks(-1), "203.0.113.7"));
-            db.PortalDeactivationOperations.AddRange(
-                Operation(seed, today.AddMinutes(-5), "settings_button", "deactivated"),
-                Operation(seed, today.AddMinutes(-4), "subscription_termination", "deactivated"),
-                Operation(seed, today.AddMinutes(-3), "uninstall", "already_inactive"),
-                Operation(seed, today.Date.AddDays(-1), "settings_button", "deactivated"));
+                History(seed.LicenseId, today.AddMinutes(-8), "Admin (API)"));
+            db.PortalDeactivationOperations.Add(Operation(seed, today.AddMinutes(-5), "settings_button", "deactivated"));
             await db.SaveChangesAsync();
+            // The seeded seat was activated at the real clock, outside this fixed day: never activated in it.
+            await db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE \"LicenseSeats\" SET \"LastActivatedAt\" = NULL WHERE \"Id\" = {seed.SeatId}");
         }
 
         await using var read = fixture.Factory.CreateDbContext();
         var target = await read.Licenses.Include(row => row.Type).SingleAsync(row => row.Id == seed.LicenseId);
         var status = await SeatChangeQuota.GetStatusAsync(read, target, today);
 
-        // Counted: IP, Unknown, the lowercase performer (exact ordinal prefix) and one portal operation.
-        Assert.Equal(4, status.UsedToday);
-        Assert.Equal(3, status.Limit);
+        Assert.Equal(2, status.UsedToday);
+        Assert.Equal(2, status.Limit);
         Assert.True(status.IsExhausted);
         Assert.Equal(0, status.Remaining);
         Assert.Equal(today.Date.AddDays(1), status.ResetAtUtc);
+        Assert.False(await SeatChangeQuota.IsActivationRefusedAsync(read, target, "TKT3751-PC-A", today));
+        Assert.False(await SeatChangeQuota.IsActivationRefusedAsync(read, target, "TKT3751-PC-B", today));
+        Assert.True(await SeatChangeQuota.IsActivationRefusedAsync(read, target, "TKT3751-PC-C", today));
+        Assert.True(await SeatChangeQuota.IsActivationRefusedAsync(read, target, "TKT3751-PC-NEW", today));
     }
 
     /// <summary>
@@ -348,7 +352,7 @@ public sealed class PortalDeactivationPostgreSqlTests(PortalDeactivationPostgreS
         var seed = await fixture.SeedAsync("tkt1206-live", true, TimeSpan.FromHours(1), Now);
         await using (var db = fixture.Factory.CreateDbContext())
         {
-            db.PortalDeactivationOperations.Add(Operation(seed, Now.UtcDateTime.AddMinutes(-5), "settings_button", "deactivated"));
+            db.LicenseSeats.Add(Seat(seed.LicenseId, "TKT3751-PC-LIVE", Now.UtcDateTime.AddMinutes(-5)));
             await db.SaveChangesAsync();
         }
 
@@ -391,6 +395,21 @@ public sealed class PortalDeactivationPostgreSqlTests(PortalDeactivationPostgreS
         await db.SaveChangesAsync();
     }
 
+    /// <summary>
+    /// Builds one released seat row whose last activation is the given UTC instant (set explicitly, so the context
+    /// keeps it instead of stamping the real clock).
+    /// </summary>
+    private static LicenseSeat Seat(Guid licenseId, string hardwareId, DateTime lastActivatedAtUtc) => new()
+    {
+        LicenseId = licenseId,
+        HardwareId = hardwareId,
+        IsActive = false,
+        FirstActivatedAt = lastActivatedAtUtc,
+        LastCheckInAt = lastActivatedAtUtc,
+        LastActivatedAt = lastActivatedAtUtc,
+        UnlinkedAt = lastActivatedAtUtc
+    };
+
     /// <summary>Builds one unlink history row with an exact performer and UTC timestamp.</summary>
     private static LicenseHistory History(Guid licenseId, DateTime timestampUtc, string performedBy) => new()
     {
@@ -427,35 +446,13 @@ public sealed class PortalDeactivationPostgreSqlFixture : IAsyncLifetime
     /// <summary>Gets the factory bound only to the isolated TKT-000798 database.</summary>
     public TestDbContextFactory Factory { get; private set; } = null!;
 
-    /// <summary>Creates the random database and migrates the full current model.</summary>
+    /// <summary>Clones the random database from the shared full current-schema model.</summary>
     public async Task InitializeAsync()
     {
-        var configured = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES");
-        if (string.IsNullOrWhiteSpace(configured))
-            throw new InvalidOperationException("SOFTLICENCE_RUNTIME_TEST_POSTGRES is required for PostgreSQL contract tests.");
-
-        _database = "tkt000798_portal_" + Guid.NewGuid().ToString("N");
-        _maintenanceConnectionString = new NpgsqlConnectionStringBuilder(configured) { Database = "postgres" }.ConnectionString;
-        await using (var maintenance = new NpgsqlConnection(_maintenanceConnectionString))
-        {
-            await maintenance.OpenAsync();
-            await using var create = maintenance.CreateCommand();
-            create.CommandText = $"CREATE DATABASE \"{_database}\"";
-            await create.ExecuteNonQueryAsync();
-        }
-
-        var target = new NpgsqlConnectionStringBuilder(configured) { Database = _database }.ConnectionString;
-        Factory = new TestDbContextFactory(target);
-        try
-        {
-            await using var db = Factory.CreateDbContext();
-            await db.Database.MigrateAsync();
-        }
-        catch
-        {
-            await DropDatabaseAsync();
-            throw;
-        }
+        var clone = await PostgreSqlModelDatabase.CloneAsync("portal");
+        _database = clone.DatabaseName;
+        _maintenanceConnectionString = clone.MaintenanceConnectionString;
+        Factory = new TestDbContextFactory(clone.ConnectionString);
     }
 
     /// <summary>Drops the isolated database even when a contract test fails.</summary>
@@ -526,12 +523,7 @@ public sealed class PortalDeactivationPostgreSqlFixture : IAsyncLifetime
     {
         if (string.IsNullOrEmpty(_database) || string.IsNullOrEmpty(_maintenanceConnectionString))
             return;
-        NpgsqlConnection.ClearAllPools();
-        await using var maintenance = new NpgsqlConnection(_maintenanceConnectionString);
-        await maintenance.OpenAsync();
-        await using var drop = maintenance.CreateCommand();
-        drop.CommandText = $"DROP DATABASE IF EXISTS \"{_database}\" WITH (FORCE)";
-        await drop.ExecuteNonQueryAsync();
+        await PostgreSqlModelDatabase.DropAsync(_maintenanceConnectionString, _database);
         _database = string.Empty;
         _maintenanceConnectionString = string.Empty;
     }

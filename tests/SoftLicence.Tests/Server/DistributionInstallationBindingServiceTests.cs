@@ -1704,6 +1704,13 @@ public sealed partial class DistributionInstallationBindingServiceTests : IDispo
             string submittedHardwareId,
             HardwareAuthorityResolutionIntent intent,
             CancellationToken cancellationToken = default) => Task.FromResult(resolution);
+
+        public Task<IReadOnlyList<string>> ResolveStoredSeatHardwareIdsByCanonicalAsync(
+            LicenseDbContext authorityDb,
+            Guid productId,
+            Guid licenseId,
+            string submittedCanonicalHardwareId,
+            CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<string>>([]);
     }
 
     private static DistributionEntitlementIssueRequest IssueRequest(

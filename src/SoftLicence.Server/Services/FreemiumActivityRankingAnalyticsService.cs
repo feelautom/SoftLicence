@@ -232,6 +232,7 @@ public sealed class FreemiumActivityRankingAnalyticsService
                 Name = t.Name,
                 IsFree = !IsPaidType(t),
                 DefaultDurationDays = t.DefaultDurationDays,
+                AllowPublicTrial = t.AllowPublicTrial,
                 TotalLicenses = t.Licenses.Count,
                 ActiveLicenses = t.Licenses.Count(l => ResolveLicenseStatus(l, now) == "active"),
                 ExpiredLicenses = t.Licenses.Count(l => ResolveLicenseStatus(l, now) == "expired"),
@@ -499,7 +500,12 @@ public sealed class FreemiumActivityRankingAnalyticsService
             take);
     }
 
-    private static List<string> NormalizeLicenseTypes(string? licenseTypes)
+    /// <summary>
+    /// Parses the caller's comma-separated license type filter (slugs or names) into at most 25 distinct,
+    /// trimmed entries, compared case-insensitively. Shared with <see cref="PaidWeeklyActivityAnalyticsService"/>
+    /// so both paid analytics apply the same filter. An empty or blank value means "all paid types".
+    /// </summary>
+    internal static List<string> NormalizeLicenseTypes(string? licenseTypes)
     {
         if (string.IsNullOrWhiteSpace(licenseTypes))
             return new List<string>();
@@ -512,7 +518,13 @@ public sealed class FreemiumActivityRankingAnalyticsService
             .ToList();
     }
 
-    private static bool IsPaidType(LicenseType type)
+    /// <summary>
+    /// Decides whether a license type counts as paid (non-Freemium): not flagged free and no free, freemium or
+    /// trial marker in its slug or name (ordinal, case-insensitive). This is the single paid definition shared
+    /// by the paid ranking and <see cref="PaidWeeklyActivityAnalyticsService"/>; it is a technical license
+    /// classification only and makes no commercial judgement.
+    /// </summary>
+    internal static bool IsPaidType(LicenseType type)
     {
         if (type.IsFree)
             return false;
@@ -524,7 +536,11 @@ public sealed class FreemiumActivityRankingAnalyticsService
             || name.Contains(marker, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static string NormalizeStatus(string? status)
+    /// <summary>
+    /// Maps a caller status filter to one of active, expired, revoked, expired_or_revoked or all
+    /// (trimmed, lower-cased invariantly). Unknown or blank values fall back to active instead of failing.
+    /// </summary>
+    internal static string NormalizeStatus(string? status)
     {
         var normalized = string.IsNullOrWhiteSpace(status)
             ? DefaultStatusFilter
@@ -537,7 +553,11 @@ public sealed class FreemiumActivityRankingAnalyticsService
         };
     }
 
-    private static string ResolveLicenseStatus(License license, DateTime now)
+    /// <summary>
+    /// Returns revoked when the license is inactive or carries a revocation date, expired when its key
+    /// expiration is at or before <paramref name="now"/>, otherwise active. Revocation wins over expiry.
+    /// </summary>
+    internal static string ResolveLicenseStatus(License license, DateTime now)
     {
         if (!license.IsActive || license.RevokedAt.HasValue)
             return "revoked";
@@ -548,7 +568,11 @@ public sealed class FreemiumActivityRankingAnalyticsService
         return "active";
     }
 
-    private static bool StatusMatches(string filter, string status)
+    /// <summary>
+    /// Tests a resolved license status against a normalized filter; all matches everything and
+    /// expired_or_revoked matches both terminal states.
+    /// </summary>
+    internal static bool StatusMatches(string filter, string status)
     {
         return filter switch
         {
@@ -727,7 +751,11 @@ public sealed class FreemiumActivityRankingAnalyticsService
         return $"{prefix}***@{parts[1]}";
     }
 
-    private static string RedactKey(string? key)
+    /// <summary>
+    /// Masks a license key to its first and last four alphanumeric characters (dashes and spaces removed);
+    /// keys of eight characters or fewer become ***. Never returns the full key.
+    /// </summary>
+    internal static string RedactKey(string? key)
     {
         if (string.IsNullOrWhiteSpace(key))
             return "";
@@ -739,7 +767,8 @@ public sealed class FreemiumActivityRankingAnalyticsService
         return $"{compact[..4]}...{compact[^4..]}";
     }
 
-    private static string RedactHardwareId(string hardwareId)
+    /// <summary>Masks a hardware ID to its first six and last four characters; IDs of eight characters or fewer become ***.</summary>
+    internal static string RedactHardwareId(string hardwareId)
     {
         if (hardwareId.Length <= 8)
             return "***";
@@ -747,7 +776,11 @@ public sealed class FreemiumActivityRankingAnalyticsService
         return $"{hardwareId[..6]}...{hardwareId[^4..]}";
     }
 
-    private static string HashHardwareId(string hardwareId)
+    /// <summary>
+    /// Returns the first 16 lowercase hexadecimal characters of the SHA-256 of the exact UTF-8 hardware ID,
+    /// a stable correlation token that does not reveal the ID. The input is hashed as given (no case change).
+    /// </summary>
+    internal static string HashHardwareId(string hardwareId)
     {
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(hardwareId));
         return Convert.ToHexString(bytes)[..16].ToLowerInvariant();

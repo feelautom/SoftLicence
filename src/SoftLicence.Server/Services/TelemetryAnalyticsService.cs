@@ -4,6 +4,10 @@ using System.Text.Json;
 
 namespace SoftLicence.Server.Services;
 
+/// <summary>
+/// Builds product telemetry aggregates from the resolved record type while preserving compatibility
+/// with both classic error rows and event-backed error rows.
+/// </summary>
 public class TelemetryAnalyticsService
 {
     private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
@@ -13,6 +17,13 @@ public class TelemetryAnalyticsService
         _dbFactory = dbFactory;
     }
 
+    /// <summary>
+    /// Returns telemetry KPIs and rankings for the requested UTC lookback. Error-backed events use
+    /// their unchanged event name in TopErrors; classic errors keep their stored error type/message.
+    /// </summary>
+    /// <param name="productId">Optional product boundary, or <see langword="null"/> for all products.</param>
+    /// <param name="days">Number of days included in the lookback.</param>
+    /// <returns>The aggregated telemetry dashboard data.</returns>
     public async Task<TelemetryAnalyticsData> GetAnalyticsAsync(Guid? productId, int days)
     {
         using var db = await _dbFactory.CreateDbContextAsync();
@@ -34,7 +45,9 @@ public class TelemetryAnalyticsService
                 r.HardwareId,
                 r.Version,
                 r.EventName,
-                ErrorType = r.ErrorData != null ? r.ErrorData.ErrorType : null,
+                ErrorType = r.ErrorData != null
+                    ? r.ErrorData.ErrorType
+                    : r.Type == TelemetryType.Error ? r.EventName : null,
                 ErrorMessage = r.ErrorData != null ? r.ErrorData.Message : null,
                 DiagnosticScore = r.DiagnosticData != null ? (int?)r.DiagnosticData.Score : null
             })

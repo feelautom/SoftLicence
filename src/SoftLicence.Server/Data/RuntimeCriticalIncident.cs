@@ -31,4 +31,9 @@ public sealed class RuntimeCriticalIncident
     public int? RecoveredSecurityEpoch { get; set; }
     public long? RecoveredAuthorityEpoch { get; set; }
     public DateTime? RecoveredAtUtc { get; set; }
+
+    [MaxLength(32)]
+    public string? NonBlockingReason { get; set; }
+
+    public Guid? RememberedReleaseDecisionId { get; set; }
 }

@@ -431,7 +431,8 @@ public sealed class CommercialOwnershipCommandPostgreSqlTests
         DbContextOptions<LicenseDbContext> options,
         string connectionString)
     {
-        await using var db = new LicenseDbContext(options);
+        // TKT-002466: later LicenseTypes columns (AllowPublicTrial) are absent at this schema; detect and omit them.
+        await using var db = await HistoricalSchemaModel.CreateContextAsync(connectionString);
         var product = new Product
         {
             Name = "tkt782-upgrade-" + Guid.NewGuid().ToString("N"),
@@ -640,45 +641,18 @@ public sealed class CommercialOwnershipCommandPostgreSqlTests
         /// <summary>Gets the isolated application connection string.</summary>
         public string ConnectionString { get; } = connectionString;
 
-        /// <summary>Creates and migrates one isolated database from the configured PostgreSQL authority.</summary>
+        /// <summary>Clones one isolated database from the exact requested schema model.</summary>
         public static async Task<PostgreSqlProvision> CreateAsync(string? targetMigration = null)
         {
-            var configured = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES");
-            if (string.IsNullOrWhiteSpace(configured))
-            {
-                throw new InvalidOperationException(
-                    "SOFTLICENCE_RUNTIME_TEST_POSTGRES is required for TKT-000782 PostgreSQL tests.");
-            }
-
-            var database = "tkt782_ownership_" + Guid.NewGuid().ToString("N");
-            var maintenance = new NpgsqlConnectionStringBuilder(configured) { Database = "postgres" }.ConnectionString;
-            await using (var connection = new NpgsqlConnection(maintenance))
-            {
-                await connection.OpenAsync();
-                await using var command = connection.CreateCommand();
-                command.CommandText = $"CREATE DATABASE \"{database}\"";
-                await command.ExecuteNonQueryAsync();
-            }
-
-            var target = new NpgsqlConnectionStringBuilder(configured) { Database = database }.ConnectionString;
-            var options = new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(target).Options;
-            await using (var db = new LicenseDbContext(options))
-            {
-                var migrator = db.GetService<IMigrator>();
-                await migrator.MigrateAsync(targetMigration);
-            }
-            return new PostgreSqlProvision(maintenance, target, database);
+            var clone = await PostgreSqlModelDatabase.CloneAsync("ownership", targetMigration);
+            return new PostgreSqlProvision(
+                clone.MaintenanceConnectionString,
+                clone.ConnectionString,
+                clone.DatabaseName);
         }
 
-        /// <summary>Clears pools and drops the isolated database even after a failed assertion.</summary>
+        /// <summary>Force-drops the isolated database through an unpooled connection even after a failed assertion.</summary>
         public async ValueTask DisposeAsync()
-        {
-            NpgsqlConnection.ClearAllPools();
-            await using var connection = new NpgsqlConnection(maintenanceConnectionString);
-            await connection.OpenAsync();
-            await using var command = connection.CreateCommand();
-            command.CommandText = $"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)";
-            await command.ExecuteNonQueryAsync();
-        }
+            => await PostgreSqlModelDatabase.DropAsync(maintenanceConnectionString, database);
     }
 }

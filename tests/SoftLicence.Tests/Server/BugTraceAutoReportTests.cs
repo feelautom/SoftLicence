@@ -23,14 +23,18 @@ public sealed class BugTraceAutoReportTests : IDisposable
 {
     private const string ProjectId = "9f3c8fea-8740-42af-be83-6f527c6d102a";
     private const string LicenseKey = "AUTOREPORT-LICENSE-001";
+    /// <summary>Reuses immutable EF InMemory infrastructure while each fixture keeps a distinct database name and application provider.</summary>
+    private static readonly IServiceProvider EntityFrameworkServices = new ServiceCollection()
+        .AddEntityFrameworkInMemoryDatabase()
+        .BuildServiceProvider();
+    /// <summary>Remains constant for the shared EF provider; unique database names preserve fixture-level durable-state isolation.</summary>
+    private static readonly InMemoryDatabaseRoot DatabaseRoot = new();
     private readonly ServiceProvider _provider;
     private readonly RecordingBugTraceProxy _proxy = new();
     private readonly BugTraceAutoReportService _service;
     private readonly Guid _licenseId = Guid.NewGuid();
     /// <summary>Controls retry eligibility without wall-clock delays.</summary>
     private readonly MutableTimeProvider _timeProvider = new(DateTimeOffset.Parse("2026-09-02T08:00:00Z"));
-    /// <summary>Shares one in-memory database across the normal and failure-injecting factories.</summary>
-    private readonly InMemoryDatabaseRoot _databaseRoot = new();
     /// <summary>Isolates each test fixture's durable outbox state.</summary>
     private readonly string _databaseName = Guid.NewGuid().ToString("N");
 
@@ -41,7 +45,9 @@ public sealed class BugTraceAutoReportTests : IDisposable
         services.AddLogging();
         services.AddMemoryCache();
         services.AddDbContextFactory<LicenseDbContext>(options =>
-            options.UseInMemoryDatabase(_databaseName, _databaseRoot));
+            options
+                .UseInMemoryDatabase(_databaseName, DatabaseRoot)
+                .UseInternalServiceProvider(EntityFrameworkServices));
         _provider = services.BuildServiceProvider();
 
         var factory = _provider.GetRequiredService<IDbContextFactory<LicenseDbContext>>();
@@ -71,6 +77,127 @@ public sealed class BugTraceAutoReportTests : IDisposable
         Assert.DoesNotContain(LicenseKey, ticket.Description, StringComparison.Ordinal);
         Assert.DoesNotContain(request.HardwareId, ticket.Description, StringComparison.Ordinal);
         Assert.Equal("customer@example.invalid", ticket.ReporterEmail);
+        Assert.Equal(1, _proxy.TiaAuthorityVerificationCount);
+        Assert.Equal(1, _proxy.TiaSubmissionCount);
+    }
+
+    /// <summary>Proves provider authority verification completes before a report can be accepted or persisted.</summary>
+    [Fact]
+    public async Task EnqueueAsync_WaitsForTiaAuthorityBeforeAcceptanceAndPersistence()
+    {
+        var verificationStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var verificationRelease = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _proxy.TiaAuthorityVerifier = async cancellationToken =>
+        {
+            verificationStarted.TrySetResult(true);
+            await verificationRelease.Task.WaitAsync(cancellationToken);
+        };
+
+        var enqueueTask = _service.EnqueueAsync(
+            CreateRequest("a4111111-1111-1111-1111-111111111111"));
+        await verificationStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        try
+        {
+            Assert.False(enqueueTask.IsCompleted);
+            var factory = _provider.GetRequiredService<IDbContextFactory<LicenseDbContext>>();
+            await using var db = await factory.CreateDbContextAsync();
+            Assert.Empty(await db.SystemSettings.AsNoTracking().ToListAsync());
+        }
+        finally
+        {
+            verificationRelease.TrySetResult(true);
+        }
+
+        var result = await enqueueTask;
+        Assert.True(result.Accepted);
+        Assert.Equal(1, _proxy.TiaAuthorityVerificationCount);
+    }
+
+    /// <summary>Maps every provider-identity trust failure to a typed rejection before outbox persistence or submission.</summary>
+    [Theory]
+    [InlineData(BugTraceTiaAuthorityFailureReason.IdentityMismatch)]
+    [InlineData(BugTraceTiaAuthorityFailureReason.IdentityRejected)]
+    [InlineData(BugTraceTiaAuthorityFailureReason.IdentityUnavailable)]
+    public async Task EnqueueAsync_TiaAuthorityFailureRejectsWithoutPersistenceOrSubmission(
+        BugTraceTiaAuthorityFailureReason reason)
+    {
+        _proxy.TiaAuthorityVerifier = _ =>
+            throw new BugTraceTiaAuthorityException(reason);
+
+        var result = await _service.EnqueueAsync(
+            CreateRequest("a5111111-1111-1111-1111-111111111111"));
+
+        Assert.False(result.Accepted);
+        Assert.Equal("bugtrace_unavailable", result.ErrorCode);
+        Assert.Equal(1, _proxy.TiaAuthorityVerificationCount);
+        Assert.Empty(_proxy.SubmittedTickets);
+        Assert.Empty(_proxy.IdempotencyKeys);
+        var factory = _provider.GetRequiredService<IDbContextFactory<LicenseDbContext>>();
+        await using var db = await factory.CreateDbContextAsync();
+        Assert.Empty(await db.SystemSettings.AsNoTracking().ToListAsync());
+    }
+
+    /// <summary>
+    /// Proves a restarted service replays durable acceptance without provider access while a genuinely
+    /// new report still fails closed and leaves the outbox unchanged.
+    /// </summary>
+    [Fact]
+    public async Task EnqueueAsync_DurableReplayBypassesUnavailableAuthorityButNewReportFailsClosed()
+    {
+        var factory = _provider.GetRequiredService<IDbContextFactory<LicenseDbContext>>();
+        var request = CreateRequest("a6111111-1111-1111-1111-111111111111");
+        var accepted = await _service.EnqueueAsync(request);
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            Assert.Equal(2, await db.SystemSettings.CountAsync());
+        }
+
+        _proxy.TiaAuthorityVerifier = _ =>
+            throw new BugTraceTiaAuthorityException(BugTraceTiaAuthorityFailureReason.IdentityUnavailable);
+        using var restartedCache = new MemoryCache(new MemoryCacheOptions());
+        var restartedService = new BugTraceAutoReportService(
+            factory,
+            _proxy,
+            restartedCache,
+            _timeProvider,
+            NullLogger<BugTraceAutoReportService>.Instance);
+
+        var replay = await restartedService.EnqueueAsync(request);
+        var fingerprintReplay = await restartedService.EnqueueAsync(
+            CreateRequest("a8111111-1111-1111-1111-111111111111"));
+        Assert.Equal(1, _proxy.TiaAuthorityVerificationCount);
+
+        var newReport = await restartedService.EnqueueAsync(
+            CreateRequest("a7111111-1111-1111-1111-111111111111", "New failure during provider outage"));
+
+        Assert.True(accepted.Accepted);
+        Assert.True(replay.Accepted);
+        Assert.True(replay.Duplicate);
+        Assert.True(fingerprintReplay.Accepted);
+        Assert.True(fingerprintReplay.Duplicate);
+        Assert.False(newReport.Accepted);
+        Assert.Equal("bugtrace_unavailable", newReport.ErrorCode);
+        Assert.Equal(2, _proxy.TiaAuthorityVerificationCount);
+        Assert.Empty(_proxy.SubmittedTickets);
+        Assert.Empty(_proxy.IdempotencyKeys);
+        await using var verificationDb = await factory.CreateDbContextAsync();
+        Assert.Equal(2, await verificationDb.SystemSettings.CountAsync());
+    }
+
+    /// <summary>Rejects automatic reports before persistence when the dedicated T-IA authority is unavailable.</summary>
+    [Fact]
+    public async Task EnqueueAsync_TiaAuthorityNotConfigured_FailsClosedWithoutProviderSideEffect()
+    {
+        _proxy.IsTiaConfigured = false;
+
+        var result = await _service.EnqueueAsync(
+            CreateRequest("a0111111-1111-1111-1111-111111111111"));
+
+        Assert.False(result.Accepted);
+        Assert.Equal("bugtrace_unavailable", result.ErrorCode);
+        Assert.Equal(0, _proxy.TiaAuthorityVerificationCount);
+        Assert.Empty(_proxy.SubmittedTickets);
+        Assert.Empty(_proxy.IdempotencyKeys);
     }
 
     [Fact]
@@ -205,7 +332,8 @@ public sealed class BugTraceAutoReportTests : IDisposable
     {
         const string reportId = "91111111-1111-1111-1111-111111111111";
         var options = new DbContextOptionsBuilder<LicenseDbContext>()
-            .UseInMemoryDatabase(_databaseName, _databaseRoot)
+            .UseInMemoryDatabase(_databaseName, DatabaseRoot)
+            .UseInternalServiceProvider(EntityFrameworkServices)
             .Options;
         var failingFactory = new FailReceiptSaveDbContextFactory(options);
         var service = new BugTraceAutoReportService(
@@ -409,13 +537,29 @@ public sealed class BugTraceAutoReportTests : IDisposable
 
         public string ExpectedProjectId => ProjectId;
         public bool IsConfigured => true;
+        /// <summary>Controls the dedicated authority preflight independently from legacy proxy configuration.</summary>
+        public bool IsTiaConfigured { get; set; } = true;
+        /// <summary>Injects one bounded provider-identity outcome before auto-report acceptance.</summary>
+        public Func<CancellationToken, Task> TiaAuthorityVerifier { get; set; } =
+            static _ => Task.CompletedTask;
+        /// <summary>Gets the number of explicit provider-identity checks requested by the service.</summary>
+        public int TiaAuthorityVerificationCount { get; private set; }
         public List<BugTraceTicketBody> SubmittedTickets { get; } = [];
+        /// <summary>Gets the number of calls made through the explicit T-IA idempotent submission contract.</summary>
+        public int TiaSubmissionCount { get; private set; }
         /// <summary>Gets the exact keys observed on successive provider submissions.</summary>
         public List<string?> IdempotencyKeys { get; } = [];
         /// <summary>Gets or sets whether the first newly created ticket loses its synthetic response.</summary>
         public bool LoseFirstSuccessfulResponse { get; set; }
         /// <summary>Gets the number of distinct provider tickets created.</summary>
         public int CreatedTicketCount { get; private set; }
+
+        /// <summary>Records and executes the configured provider-identity outcome without legacy fallback.</summary>
+        public async Task VerifyTiaAuthorityAsync(CancellationToken ct = default)
+        {
+            TiaAuthorityVerificationCount++;
+            await TiaAuthorityVerifier(ct);
+        }
 
         /// <summary>Records the server-owned ticket and returns a synthetic upstream reference.</summary>
         public Task<JsonElement> SubmitTicketAsync(object ticketBody, CancellationToken ct = default)
@@ -426,6 +570,16 @@ public sealed class BugTraceAutoReportTests : IDisposable
             object ticketBody,
             string idempotencyKey,
             CancellationToken ct = default) => SubmitTicketCoreAsync(ticketBody, idempotencyKey);
+
+        /// <summary>Records use of the dedicated T-IA auto-report path while preserving exact replay semantics.</summary>
+        public Task<JsonElement> SubmitTiaTicketAsync(
+            object ticketBody,
+            string idempotencyKey,
+            CancellationToken ct = default)
+        {
+            TiaSubmissionCount++;
+            return SubmitTicketCoreAsync(ticketBody, idempotencyKey);
+        }
 
         /// <summary>Creates or replays one synthetic provider receipt using exact key semantics.</summary>
         private Task<JsonElement> SubmitTicketCoreAsync(object ticketBody, string? idempotencyKey)

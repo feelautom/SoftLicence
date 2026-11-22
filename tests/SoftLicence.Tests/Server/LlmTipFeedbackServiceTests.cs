@@ -326,9 +326,9 @@ public sealed class LlmTipFeedbackServiceTests
     [Fact]
     public async Task ConvertToBugTraceAsync_CreatesAnonymizedTicketAndMarksTipConverted()
     {
-        await SeedProductAsync("TIAConnect");
+        var productId = await SeedProductAsync("TIAConnect");
         var bugTrace = new FakeBugTraceProxyService();
-        var service = new LlmTipFeedbackService(_dbFactoryMock.Object, bugTrace);
+        var service = BuildRoutedService(bugTrace, productId.ToString("D"));
         await service.SaveTipAsync(BuildTip("hash-convert-bugtrace", upvotes: 8, severity: "critical"));
         var tip = (await service.GetAdminOverviewAsync(new LlmTipFeedbackAdminQuery { Days = 0 })).Tips.Single();
 
@@ -355,12 +355,124 @@ public sealed class LlmTipFeedbackServiceTests
         Assert.Single(bugTrace.SubmittedTickets);
     }
 
+    /// <summary>
+    /// TKT-003093 regression: a tip reported by the T-IA Connect product must be converted through the
+    /// dedicated, provider-verified T-IA authority, whose token selects the T-IA-Connect BugTrace project.
+    /// The legacy SoftLicence technical-report authority must never receive it, because BugTrace chooses
+    /// the destination project from the token alone and that token files tickets in the SoftLicence project.
+    /// </summary>
+    [Fact]
+    public async Task ConvertToBugTraceAsync_WhenTipComesFromTiaConnect_UsesTiaProjectAuthorityNotSoftLicence()
+    {
+        var productId = await SeedProductAsync("TIAConnect");
+        var bugTrace = new FakeBugTraceProxyService();
+        var service = BuildRoutedService(bugTrace, productId.ToString("D"));
+        await service.SaveTipAsync(BuildTip("hash-tia-project-routing"));
+        var tip = (await service.GetAdminOverviewAsync(new LlmTipFeedbackAdminQuery { Days = 0 })).Tips.Single();
+
+        var result = await service.ConvertToBugTraceAsync(tip.Id, null, tip.ProductId);
+
+        Assert.NotNull(result);
+        Assert.True(result.Created);
+        Assert.Empty(bugTrace.LegacySubmittedTickets);
+        Assert.Single(bugTrace.SubmittedTiaTickets);
+        // The tip identifier is the provider idempotency key, so a concurrent double click replays one ticket.
+        Assert.Equal(tip.Id.ToString("D"), Assert.Single(bugTrace.TiaIdempotencyKeys));
+    }
+
+    /// <summary>
+    /// TKT-003093: a product without a configured BugTrace project is refused before any provider call, with no
+    /// fallback to the legacy SoftLicence project, and the tip stays unconverted.
+    /// </summary>
+    [Fact]
+    public async Task ConvertToBugTraceAsync_WhenProductHasNoProject_RefusesWithoutAnyProviderCall()
+    {
+        var productId = await SeedProductAsync("TIAConnect");
+        var bugTrace = new FakeBugTraceProxyService();
+        var service = BuildRoutedService(bugTrace, Guid.NewGuid().ToString("D"));
+        await service.SaveTipAsync(BuildTip("hash-unrouted-product"));
+        var tip = (await service.GetAdminOverviewAsync(new LlmTipFeedbackAdminQuery { Days = 0 })).Tips.Single();
+
+        var refusal = await Assert.ThrowsAsync<LlmTipBugTraceProjectNotConfiguredException>(
+            () => service.ConvertToBugTraceAsync(tip.Id, null, tip.ProductId));
+
+        Assert.Equal(productId, refusal.ProductId);
+        Assert.False(refusal.MappingInvalid);
+        Assert.Empty(bugTrace.SubmittedTickets);
+        var detail = await service.GetTipDetailAsync(tip.Id);
+        Assert.NotNull(detail);
+        Assert.Null(detail.BugTraceTicketRef);
+        Assert.NotEqual("converted-to-bugtrace", detail.ReviewStatus);
+    }
+
+    /// <summary>
+    /// TKT-003093: a malformed mapping setting refuses every conversion (flagged as such) instead of routing part
+    /// of the products, and no provider call is made.
+    /// </summary>
+    [Fact]
+    public async Task ConvertToBugTraceAsync_WhenMappingIsMalformed_RefusesEveryProduct()
+    {
+        var productId = await SeedProductAsync("TIAConnect");
+        var bugTrace = new FakeBugTraceProxyService();
+        var service = BuildRoutedService(bugTrace, productId.ToString("D") + ",not-a-guid");
+        await service.SaveTipAsync(BuildTip("hash-malformed-mapping"));
+        var tip = (await service.GetAdminOverviewAsync(new LlmTipFeedbackAdminQuery { Days = 0 })).Tips.Single();
+
+        var refusal = await Assert.ThrowsAsync<LlmTipBugTraceProjectNotConfiguredException>(
+            () => service.ConvertToBugTraceAsync(tip.Id, null, tip.ProductId));
+
+        Assert.True(refusal.MappingInvalid);
+        Assert.Empty(bugTrace.SubmittedTickets);
+    }
+
+    /// <summary>
+    /// TKT-003093: a mapped product whose T-IA authority is not configured fails as "unavailable" without ever
+    /// falling back to the legacy SoftLicence token.
+    /// </summary>
+    [Fact]
+    public async Task ConvertToBugTraceAsync_WhenTiaAuthorityIsNotConfigured_FailsWithoutLegacyFallback()
+    {
+        var productId = await SeedProductAsync("TIAConnect");
+        var bugTrace = new FakeBugTraceProxyService { IsTiaConfigured = false };
+        var service = BuildRoutedService(bugTrace, productId.ToString("D"));
+        await service.SaveTipAsync(BuildTip("hash-tia-unconfigured"));
+        var tip = (await service.GetAdminOverviewAsync(new LlmTipFeedbackAdminQuery { Days = 0 })).Tips.Single();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => service.ConvertToBugTraceAsync(tip.Id, null, tip.ProductId));
+
+        Assert.Empty(bugTrace.SubmittedTickets);
+    }
+
+    /// <summary>
+    /// TKT-003093 anti-duplicate: an already converted tip returns its existing ticket without contacting BugTrace,
+    /// even after its product mapping was removed and with no proxy at all.
+    /// </summary>
+    [Fact]
+    public async Task ConvertToBugTraceAsync_WhenTipAlreadyConverted_ReturnsExistingTicketWithoutProvider()
+    {
+        var productId = await SeedProductAsync("TIAConnect");
+        var bugTrace = new FakeBugTraceProxyService();
+        var routed = BuildRoutedService(bugTrace, productId.ToString("D"));
+        await routed.SaveTipAsync(BuildTip("hash-already-converted"));
+        var tip = (await routed.GetAdminOverviewAsync(new LlmTipFeedbackAdminQuery { Days = 0 })).Tips.Single();
+        await routed.ConvertToBugTraceAsync(tip.Id, null, tip.ProductId);
+        var unrouted = new LlmTipFeedbackService(_dbFactoryMock.Object);
+
+        var replay = await unrouted.ConvertToBugTraceAsync(null, "hash-already-converted", tip.ProductId);
+
+        Assert.NotNull(replay);
+        Assert.False(replay.Created);
+        Assert.Equal("BT-00042", replay.BugTraceTicketRef);
+        Assert.Single(bugTrace.SubmittedTickets);
+    }
+
     [Fact]
     public async Task PostTip_WhenPersistenceFails_ReturnsServiceUnavailableInsteadOfAccepted()
     {
         var controller = BuildControllerWithFailingPersistence();
 
-        var result = await controller.PostTip(BuildTip("hash-persistence-failure"), CancellationToken.None);
+        var result = await controller.PostTip(BuildTip("hash-persistence-failure"));
 
         var objectResult = Assert.IsType<ObjectResult>(result);
         Assert.Equal(503, objectResult.StatusCode);
@@ -377,26 +489,36 @@ public sealed class LlmTipFeedbackServiceTests
             AppName = "TIAConnect",
             SchemaVersion = "1",
             EventName = "llm_tip_created"
-        }, CancellationToken.None);
+        });
 
         var objectResult = Assert.IsType<ObjectResult>(result);
         Assert.Equal(503, objectResult.StatusCode);
         Assert.Contains("llm_tip_feedback_persistence_failed", JsonSerializer.Serialize(objectResult.Value));
     }
 
-    private async Task SeedProductAsync(string name)
+    /// <summary>Seeds one product and returns its identifier, so routing tests can map it explicitly.</summary>
+    private async Task<Guid> SeedProductAsync(string name)
     {
+        var productId = Guid.NewGuid();
         await using var db = new LicenseDbContext(_dbOptions);
         db.Products.Add(new Product
         {
-            Id = Guid.NewGuid(),
+            Id = productId,
             Name = name,
             PrivateKeyXml = "key",
             PublicKeyXml = "key",
             ApiSecret = "secret-" + name
         });
         await db.SaveChangesAsync();
+        return productId;
     }
+
+    /// <summary>
+    /// Builds a service whose LLM tip routing is parsed from <paramref name="tiaProductIds"/>, exactly as the
+    /// BUGTRACE_LLM_TIP_TIA_PRODUCT_IDS setting would be (TKT-003093).
+    /// </summary>
+    private LlmTipFeedbackService BuildRoutedService(FakeBugTraceProxyService bugTrace, string tiaProductIds) =>
+        new(_dbFactoryMock.Object, bugTrace, bugTraceRouting: new LlmTipBugTraceRouting(tiaProductIds));
 
     private async Task<int> CountTelemetryRowsAsync()
     {

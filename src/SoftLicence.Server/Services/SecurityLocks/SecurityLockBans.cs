@@ -58,4 +58,54 @@ public static class SecurityLockBans
         target.Reason = reason;
         target.BanCategory = category;
     }
+
+    /// <summary>
+    /// Stages deactivation of every active global or product ban applicable to one canonical hardware identity.
+    /// The caller owns the transaction and hardware advisory lock.
+    /// </summary>
+    /// <param name="db">Caller-owned context and transaction.</param>
+    /// <param name="canonicalHardwareId">Exact canonical hardware identifier.</param>
+    /// <param name="productId">Product whose lock is being explicitly unbanned.</param>
+    /// <param name="admin">Named administrator.</param>
+    /// <param name="auditedReason">Bounded reason containing the named audit reference.</param>
+    /// <param name="nowUtc">Authoritative mutation time.</param>
+    /// <param name="cancellationToken">Cancellation.</param>
+    /// <returns>The number of active ban rows deactivated.</returns>
+    public static async Task<int> StageUnbanAsync(
+        LicenseDbContext db,
+        string canonicalHardwareId,
+        Guid productId,
+        string admin,
+        string auditedReason,
+        DateTime nowUtc,
+        CancellationToken cancellationToken)
+    {
+        var bans = await db.BannedHardwareIds
+            .Where(ban => ban.HardwareId.ToUpper() == canonicalHardwareId
+                && ban.IsActive
+                && (ban.ProductId == null || ban.ProductId == productId))
+            .ToListAsync(cancellationToken);
+        var entry = $"unban={nowUtc:O} | admin={admin} | {auditedReason}";
+        foreach (var ban in bans)
+        {
+            ban.IsActive = false;
+            ban.Reason = JoinBoundedAuditReason(ban.Reason, entry, 500);
+        }
+        return bans.Count;
+    }
+
+    /// <summary>Appends the newest audit entry while retaining as much prior reason text as the column allows.</summary>
+    private static string JoinBoundedAuditReason(string? current, string entry, int maxLength)
+    {
+        if (entry.Length >= maxLength)
+            return entry[..maxLength];
+        if (string.IsNullOrWhiteSpace(current))
+            return entry;
+        const string separator = " | ";
+        var prior = current.Trim();
+        var available = maxLength - entry.Length - separator.Length;
+        if (prior.Length > available)
+            prior = prior[..available];
+        return $"{prior}{separator}{entry}";
+    }
 }

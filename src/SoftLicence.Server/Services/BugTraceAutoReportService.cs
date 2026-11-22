@@ -108,7 +108,7 @@ public sealed partial class BugTraceAutoReportService : IBugTraceAutoReportServi
         var serverFingerprint = ComputeDiagnosticFingerprint(request.Report.ErrorType, request.Report.Message);
         if (!string.Equals(request.Report.Fingerprint, serverFingerprint, StringComparison.Ordinal))
             return BugTraceAutoReportEnqueueResult.Reject("fingerprint_mismatch");
-        if (!_bugTrace.IsConfigured)
+        if (!_bugTrace.IsTiaConfigured)
             return BugTraceAutoReportEnqueueResult.Reject("bugtrace_unavailable");
         if (!string.Equals(request.ProjectId, _bugTrace.ExpectedProjectId, StringComparison.OrdinalIgnoreCase))
             return BugTraceAutoReportEnqueueResult.Reject("project_invalid");
@@ -132,29 +132,60 @@ public sealed partial class BugTraceAutoReportService : IBugTraceAutoReportServi
         var outboxKey = ReportKey(OutboxPrefix, license.Id, reportId);
         var receiptKey = ReportKey(ReceiptPrefix, license.Id, reportId);
         var fingerprintKey = FingerprintKey(license.Id, serverFingerprint);
-        var now = _timeProvider.GetUtcNow();
+
+        // A durable replay is a local read, not a new provider operation. Resolve it before the
+        // network preflight so a provider outage cannot invalidate an already accepted report.
+        await _enqueueGate.WaitAsync(cancellationToken);
+        try
+        {
+            var replay = await TryReplayStoredAsync(
+                db,
+                [outboxKey, receiptKey],
+                fingerprintKey,
+                binding,
+                _timeProvider.GetUtcNow(),
+                cancellationToken);
+            if (replay is not null)
+                return replay;
+        }
+        finally
+        {
+            _enqueueGate.Release();
+        }
+
+        try
+        {
+            // Syntax-only configuration checks cannot prove which provider project owns an opaque token.
+            // Verify after licence authorization but before rate limiting or any durable outbox mutation.
+            await _bugTrace.VerifyTiaAuthorityAsync(cancellationToken);
+        }
+        catch (BugTraceTiaAuthorityException exception)
+        {
+            _logger.LogWarning(
+                "BugTrace auto-report T-IA authority unavailable before acceptance; reason={Reason}",
+                exception.Reason);
+            return BugTraceAutoReportEnqueueResult.Reject("bugtrace_unavailable");
+        }
 
         await _enqueueGate.WaitAsync(cancellationToken);
         try
         {
-            var existing = await ReadStoredAsync(db, [outboxKey, receiptKey], cancellationToken);
-            if (existing is not null)
-            {
-                if (!string.Equals(existing.Binding, binding, StringComparison.Ordinal))
-                    return BugTraceAutoReportEnqueueResult.Reject("report_id_conflict");
-                return Accepted(existing, duplicate: true);
-            }
+            // Another request may have accepted the same report while this call verified provider
+            // authority. Recheck both durable identities before consuming rate limit or inserting.
+            var now = _timeProvider.GetUtcNow();
+            db.ChangeTracker.Clear();
+            var replay = await TryReplayStoredAsync(
+                db,
+                [outboxKey, receiptKey],
+                fingerprintKey,
+                binding,
+                now,
+                cancellationToken);
+            if (replay is not null)
+                return replay;
 
             var existingFingerprint = await db.SystemSettings
                 .SingleOrDefaultAsync(item => item.Key == fingerprintKey, cancellationToken);
-            if (existingFingerprint is not null
-                && TryReadFingerprint(existingFingerprint.Value, out var fingerprint)
-                && fingerprint.ExpiresAtUtc > now)
-            {
-                var duplicate = await ReadStoredAsync(db, fingerprint.OutboxKey, cancellationToken);
-                if (duplicate is not null)
-                    return Accepted(duplicate, duplicate: true);
-            }
 
             // Retries and duplicates do not consume the burst budget. The counter applies only after
             // authoritative license resolution and immediately before a new durable acceptance.
@@ -249,7 +280,7 @@ public sealed partial class BugTraceAutoReportService : IBugTraceAutoReportServi
                 {
                     // The durable report ID is the cross-repository operation identity. Reusing it unchanged
                     // lets BugTrace replay its receipt after either an ambiguous response or a local save failure.
-                    var upstream = await _bugTrace.SubmitTicketAsync(
+                    var upstream = await _bugTrace.SubmitTiaTicketAsync(
                         stored.Ticket,
                         stored.ReportId,
                         cancellationToken);
@@ -474,6 +505,39 @@ public sealed partial class BugTraceAutoReportService : IBugTraceAutoReportServi
         _logger.LogInformation(
             "Accepted identified BugTrace auto-report; hardwareMatch={HardwareMatch}",
             hardwareMatches);
+    }
+
+    /// <summary>
+    /// Resolves an already accepted report or fingerprint entirely from durable local state while the
+    /// caller holds the enqueue gate.
+    /// </summary>
+    private static async Task<BugTraceAutoReportEnqueueResult?> TryReplayStoredAsync(
+        LicenseDbContext db,
+        IReadOnlyCollection<string> reportKeys,
+        string fingerprintKey,
+        string binding,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var existing = await ReadStoredAsync(db, reportKeys, cancellationToken);
+        if (existing is not null)
+        {
+            if (!string.Equals(existing.Binding, binding, StringComparison.Ordinal))
+                return BugTraceAutoReportEnqueueResult.Reject("report_id_conflict");
+            return Accepted(existing, duplicate: true);
+        }
+
+        var existingFingerprint = await db.SystemSettings.AsNoTracking()
+            .SingleOrDefaultAsync(item => item.Key == fingerprintKey, cancellationToken);
+        if (existingFingerprint is null
+            || !TryReadFingerprint(existingFingerprint.Value, out var fingerprint)
+            || fingerprint.ExpiresAtUtc <= now)
+        {
+            return null;
+        }
+
+        var duplicate = await ReadStoredAsync(db, fingerprint.OutboxKey, cancellationToken);
+        return duplicate is null ? null : Accepted(duplicate, duplicate: true);
     }
 
     /// <summary>Reads one durable outbox record and fails closed on malformed state.</summary>

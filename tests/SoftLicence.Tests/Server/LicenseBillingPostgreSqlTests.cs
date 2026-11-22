@@ -20,6 +20,40 @@ namespace SoftLicence.Tests.Server;
 /// <summary>Real HTTP/PostgreSQL billing authority tests with synthetic identities and an injected UTC clock.</summary>
 public sealed class LicenseBillingPostgreSqlTests
 {
+    /// <summary>New H1 receipts preserve exact identity, reject duration substitution and suspend at the absolute deadline.</summary>
+    [Fact]
+    public async Task OneHourGrace_SuspendsAtBoundaryAndPreservesKey()
+    {
+        await using var f = await Fixture.CreateAsync();
+        var before = await f.ReadAsync();
+        var grace = (await f.RequestAsync("GRACE")) with { GraceDurationMinutes = 60 };
+        await f.OkAsync(grace);
+        await f.OkAsync(grace);
+        Assert.Equal(f.Start.AddHours(1), (await f.ReadAsync()).ExpirationDate);
+        var suspend = (await f.RequestAsync("SUSPEND", grace.OperationId)) with { GraceDurationMinutes = 60 };
+        f.Clock.Now = f.Start.AddMinutes(59);
+        await f.StatusAsync(suspend, HttpStatusCode.Conflict);
+        f.Clock.Now = f.Start.AddHours(1);
+        await f.StatusAsync(suspend with { GraceDurationMinutes = null }, HttpStatusCode.Conflict);
+        await f.OkAsync(suspend);
+        var after = await f.ReadAsync();
+        Assert.False(after.IsActive);
+        Assert.Equal(before.LicenseKey, after.LicenseKey);
+        Assert.Equal(f.Start.AddHours(1), after.ExpirationDate);
+    }
+
+    /// <summary>Only the new one-hour policy is accepted explicitly; arbitrary duration cannot mint extra access.</summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(61)]
+    [InlineData(1440)]
+    public async Task OneHourGrace_RejectsUnapprovedDuration(int minutes)
+    {
+        await using var f = await Fixture.CreateAsync();
+        await f.StatusAsync((await f.RequestAsync("GRACE")) with { GraceDurationMinutes = minutes }, HttpStatusCode.BadRequest);
+        Assert.Equal(f.Start, (await f.ReadAsync()).ExpirationDate);
+    }
+
     /// <summary>A prepared extension is absolute and idempotent; paid renewal supersedes it permanently.</summary>
     [Fact]
     public async Task Continuity_ReplayAndPaidRenewalDoNotAccumulate()
@@ -911,23 +945,19 @@ public sealed class LicenseBillingPostgreSqlTests
             Assert.Fail("No PostgreSQL lock observed for " + marker);
         }
 
-        /// <summary>Creates/migrates a uniquely owned database on an explicitly configured loopback PostgreSQL server.</summary>
+        /// <summary>Clones a uniquely owned current-schema database on the loopback PostgreSQL server.</summary>
         public static async Task<Fixture> CreateAsync()
         {
-            var settings = new NpgsqlConnectionStringBuilder(Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES")
-                ?? throw new InvalidOperationException("Local test PostgreSQL connection required"));
-            if (settings.Host is not ("localhost" or "127.0.0.1" or "::1")) throw new InvalidOperationException("Loopback test host required");
-            settings.Database = "postgres"; var maintenance = settings.ConnectionString;
-            var database = "tkt748_" + Guid.NewGuid().ToString("N");
-            await using (var admin = new NpgsqlConnection(maintenance)) { await admin.OpenAsync();
-                await using var cmd = new NpgsqlCommand($"CREATE DATABASE \"{database}\"", admin); await cmd.ExecuteNonQueryAsync(); }
-            settings.Database = database;
+            var clone = await PostgreSqlModelDatabase.CloneAsync("billing");
             Fixture? f = null;
             try
             {
-                f = new Fixture(maintenance, database, settings.ConnectionString);
-                await using var db = f.Db(); await db.Database.MigrateAsync();
-                var product = new Product { Name = database, ApiSecret = "tkt748-product-fixture" };
+                f = new Fixture(
+                    clone.MaintenanceConnectionString,
+                    clone.DatabaseName,
+                    clone.ConnectionString);
+                await using var db = f.Db();
+                var product = new Product { Name = clone.DatabaseName, ApiSecret = "tkt748-product-fixture" };
                 var type = new LicenseType { Product = product, Name = "Fixture Pro", Slug = "TKT748-PRO", IsRecurring = true, DefaultMaxSeats = 3 };
                 type.CustomParams.Add(new LicenseTypeCustomParam { Key = "copilot", Name = "Fixture", Value = "true" });
                 db.AddRange(product, type); await db.SaveChangesAsync(); f.ProductId = product.Id;
@@ -946,9 +976,9 @@ public sealed class LicenseBillingPostgreSqlTests
                 {
                     // Host construction may fail before the fixture exists. The database name
                     // is still the locally generated UUID above and must not leak on this path.
-                    await using var admin = new NpgsqlConnection(maintenance); await admin.OpenAsync();
-                    await using var cmd = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)", admin);
-                    await cmd.ExecuteNonQueryAsync();
+                    await PostgreSqlModelDatabase.DropAsync(
+                        clone.MaintenanceConnectionString,
+                        clone.DatabaseName);
                 }
                 throw;
             }
@@ -957,9 +987,8 @@ public sealed class LicenseBillingPostgreSqlTests
         /// <summary>Stops the owned HTTP host before dropping only its generated fixture database.</summary>
         public async ValueTask DisposeAsync()
         {
-            Client.Dispose(); await host.DisposeAsync(); NpgsqlConnection.ClearAllPools();
-            await using var admin = new NpgsqlConnection(maintenance); await admin.OpenAsync();
-            await using var cmd = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)", admin); await cmd.ExecuteNonQueryAsync();
+            Client.Dispose(); await host.DisposeAsync();
+            await PostgreSqlModelDatabase.DropAsync(maintenance, database);
         }
     }
 }

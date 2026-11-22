@@ -20,10 +20,16 @@ public sealed class RuntimeDistributionPreflightRequest
     public string? InstallationId { get; set; }
     /// <summary>Gets or sets the base64url SHA-256 thumbprint of the installation CNG key.</summary>
     public string? KeyThumbprint { get; set; }
-    /// <summary>Gets or sets transient raw observations for an installation not yet enrolled.</summary>
+    /// <summary>Gets or sets current observations; a known installation must prove UUID concordance with its locked assignment.</summary>
     public RuntimeDistributionHardwareEvidence? HardwareEvidence { get; set; }
     /// <summary>Gets or sets an existing lowercase digest for post-authorization ban revalidation.</summary>
     public string? HardwareIdHash { get; set; }
+    /// <summary>
+    /// Gets or sets the optional seat-admission request (TKT-001720). Absent keeps the historical decision;
+    /// the exact value <c>initial</c> asks the provider to predict the finalize seat-capacity refusal of a
+    /// fresh initial installation before any download. Every other value is a malformed contract.
+    /// </summary>
+    public string? SeatAdmission { get; set; }
 
     /// <summary>Captures unknown JSON members so the service can reject contract widening.</summary>
     [JsonExtensionData]
@@ -33,8 +39,8 @@ public sealed class RuntimeDistributionPreflightRequest
 /// <summary>
 /// Machine observations sent by the WebSetup for an installation not yet enrolled (TKT-001277 lot 2c). The server
 /// alone derives the licence identifier from <see cref="SystemUuid"/> with the SDK rule; the WebSetup computes and
-/// decides nothing. <see cref="MachineEvidence"/> is investigation evidence stored by
-/// <c>MachineIdentityObservationService</c> and never takes part in the decision.
+/// decides nothing. The authenticated request's <see cref="MachineEvidence"/> is classified for restricted
+/// commercial offers. The separate investigation observation table never supplies authority.
 /// </summary>
 public sealed class RuntimeDistributionHardwareEvidence
 {

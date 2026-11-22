@@ -36,6 +36,8 @@ namespace SoftLicence.Server.Middlewares
         /// Captures bounded API audit metadata after the downstream pipeline completes while redacting
         /// sensitive licensing, telemetry, runtime, and BugTrace report payloads before persistence.
         /// Security checks may consume request-scoped authority in memory, but redacted routes never store it.
+        /// Before the pipeline, banned IPs are refused and IPs in the quarantine zone (100 to 199) are
+        /// delayed, except telemetry, whitelisted IPs and IPs serving an active licence (TKT-003189).
         /// </summary>
         /// <param name="context">Current HTTP exchange and request-scoped audit annotations.</param>
         /// <param name="dbFactory">Factory used to persist one isolated audit record.</param>
@@ -102,7 +104,9 @@ namespace SoftLicence.Server.Middlewares
             }
 
             // 1.5 ZONE DE QUARANTAINE (THROTTLING)
-            // Si le score est entre 100 et 199, on ralentit volontairement la réponse
+            // Si le score est entre 100 et 199, on ralentit volontairement la réponse.
+            // Persisted scores are loaded once so a score stored before a restart is not read as zero.
+            await security.EnsureThreatScoresLoadedAsync();
             var currentScore = security.GetThreatScore(clientIp);
             var banCount = await security.GetBanCountAsync(clientIp);
 
@@ -110,7 +114,7 @@ namespace SoftLicence.Server.Middlewares
             {
                 // TEMP-FAIL-OPEN(TKT-001268): TEMPORARY, never leave as is. The intended strict rule
                 // is to delay genuinely hostile traffic. SoftLicence currently misclassifies known
-                // Runtime clock-recovery requests, and Franck requested observation without blocking
+                // Runtime clock-recovery requests, and the product owner requested observation without blocking
                 // legitimate clients. Analyse and correct every logged case, then restore the strict
                 // decision and remove this marker only after production telemetry proves it correct.
                 _logger.LogWarning(
@@ -121,8 +125,13 @@ namespace SoftLicence.Server.Middlewares
                     banCount,
                     correlationId);
             }
-            else if (currentScore >= 100 && currentScore < 200 && !security.IsWhitelisted(clientIp))
+            else if (!isTelemetryPath && currentScore >= 100 && currentScore < 200 && !security.IsWhitelisted(clientIp)
+                && !await security.IsActiveClientIpAsync(clientIp))
             {
+                // Telemetry is never delayed, as it is never banned (TKT-002685): shared egress addresses
+                // (Cloudflare) carry real client telemetry and may hold a persisted quarantine score.
+                // An IP serving an active licence is never delayed either (TKT-003189); the lookup runs
+                // last, only for IPs in the quarantine zone, and its verdict is cached for five minutes.
                 // Délai progressif : 5s de base + 1s par tranche de 10 points au dessus de 100
                 int delaySec = 5 + ((currentScore - 100) / 10);
                 await Task.Delay(TimeSpan.FromSeconds(Math.Min(delaySec, 15)));
@@ -151,15 +160,23 @@ namespace SoftLicence.Server.Middlewares
                 // Sinon, punition géométrique : Points = Base(20) * (BanCount * 2)
                 int scanPts = banCount >= 5 ? 200 : (20 * Math.Max(1, banCount * 2));
 
-                await security.ReportThreatAsync(clientIp, scanPts, $"Proactive scan detection: {path} (Ban history: x{banCount})");
-
                 // GeoIP : Capturé AVANT le Task.Run car le service est Scoped
                 var geo = await geoIp.GetGeoInfoAsync(clientIp);
                 var userAgent = context.Request.Headers["User-Agent"].ToString();
                 var method = context.Request.Method;
+
+                await security.ReportThreatAsync(
+                    clientIp,
+                    scanPts,
+                    $"Proactive scan detection: {path} (Ban history: x{banCount})",
+                    new Services.ThreatScoreContext(
+                        Services.ThreatScoreCategory.Scan, method, path,
+                        CountryCode: geo.CountryCode, Isp: geo.Isp));
                 var threatScore = security.GetThreatScore(clientIp);
 
-                _ = Task.Run(async () => {
+                await AuditPersistenceScheduler.ScheduleAsync(
+                    config["IsIntegrationTest"] == "true",
+                    async () => {
                     try {
                         using var scope = _scopeFactory.CreateScope();
                         var scopedDbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<LicenseDbContext>>();
@@ -270,6 +287,10 @@ namespace SoftLicence.Server.Middlewares
                 var licenseKey = context.Items[LogKeys.LicenseKey]?.ToString() ?? "";
                 var hardwareId = context.Items[LogKeys.HardwareId]?.ToString() ?? "";
                 var hardwareIdForSecurityChecks = hardwareId;
+                var licenseKeyForSecurityChecks = licenseKey;
+                var runtimeEnrollmentId = TryGetRuntimeEnrollmentId(
+                    path,
+                    context.Request.Headers["X-Runtime-Enrollment-Id"]);
                 var endpoint = context.Items[LogKeys.Endpoint]?.ToString() ?? "HTTP_REQUEST";
                 var resultStatusOverride = context.Items[LogKeys.ResultStatusOverride]?.ToString();
                 var runtimeAuthenticationDisposition =
@@ -312,12 +333,14 @@ namespace SoftLicence.Server.Middlewares
                     }
                 }
 
-                // GeoIP : On l'appelle AVANT le Task.Run car le service geoIp est Scoped
-                // et serait disposé si on attendait l'exécution de la tâche de fond.
+                // GeoIP is captured before scheduling because production persistence is detached
+                // and cannot retain the request-scoped service.
                 var geo = await geoIp.GetGeoInfoAsync(clientIp);
 
                 // --- ENREGISTREMENT ASYNCHRONE ---
-                _ = Task.Run(async () =>
+                await AuditPersistenceScheduler.ScheduleAsync(
+                    config["IsIntegrationTest"] == "true",
+                    async () =>
                 {
                     try
                     {
@@ -330,6 +353,17 @@ namespace SoftLicence.Server.Middlewares
                             // Scoring de menace (uniquement pour les visiteurs non-authentifiés)
                             if (!isAuthenticated && !scopedSecurity.IsWhitelisted(clientIp))
                             {
+                                var threatContext = new Services.ThreatScoreContext(
+                                    statusCode is 401 or 403
+                                        ? Services.ThreatScoreCategory.AuthFailure
+                                        : Services.ThreatScoreCategory.NotFound,
+                                    method,
+                                    requestPath,
+                                    hardwareIdForSecurityChecks,
+                                    licenseKeyForSecurityChecks,
+                                    appName,
+                                    geo.CountryCode,
+                                    geo.Isp);
                                 if (ShouldSuppressAuthenticationThreatScore(
                                         requestPath,
                                         statusCode,
@@ -338,7 +372,7 @@ namespace SoftLicence.Server.Middlewares
                                     // TEMP-FAIL-OPEN(TKT-001268): TEMPORARY, never leave as is. The
                                     // strict rule is to score hostile authentication failures. The
                                     // server currently knows this exact result is its Runtime clock
-                                    // recovery handshake, so Franck requested logging instead of client
+                                    // recovery handshake, so the product owner requested logging instead of client
                                     // punishment. Fix the protocol/data cause for every logged case,
                                     // prove production classification, then remove this marker and
                                     // restore the correct strict decision.
@@ -352,10 +386,47 @@ namespace SoftLicence.Server.Middlewares
                                         banCount,
                                         correlationId);
                                 }
+                                else if (IsUnscoredCommercialRefusal(statusCode, resultStatusOverride))
+                                {
+                                    // TKT-004159: the named 403 license_hardware_excluded is a commercial refusal
+                                    // of a client whose machine was excluded from the licence by its owner, not an
+                                    // authentication failure. Scoring it as one (50 points) banned the client's IP
+                                    // after four retries. It stays refused and audited, without punishing the IP.
+                                    _logger.LogWarning(
+                                        "Commercial refusal was not threat-scored (TKT-004159): path {Path}, IP {ClientIp}, status {StatusCode}, code {ErrorCode}, prior score {ThreatScore}, correlation {CorrelationId}.",
+                                        requestPath,
+                                        clientIp,
+                                        statusCode,
+                                        resultStatusOverride,
+                                        currentScore,
+                                        correlationId);
+                                }
+                                else if (statusCode is 401 or 403
+                                         && runtimeEnrollmentId.HasValue
+                                         && await IsKnownRuntimeEnrollmentAsync(scopedDbFactory, runtimeEnrollmentId.Value))
+                                {
+                                    // TKT-002685: a refusal on a Runtime route or a lock report that names an
+                                    // enrollment existing in the database comes from an identified installation
+                                    // (expired proof, clock, key rotation), not from a scanner. It stays refused
+                                    // and audited but does not punish the client's IP. Unknown or missing
+                                    // enrollment identifiers keep the normal scoring.
+                                    _logger.LogWarning(
+                                        "Runtime refusal from a known enrollment was not threat-scored (TKT-002685): path {Path}, IP {ClientIp}, status {StatusCode}, enrollment {EnrollmentId}, prior score {ThreatScore}, correlation {CorrelationId}.",
+                                        requestPath,
+                                        clientIp,
+                                        statusCode,
+                                        runtimeEnrollmentId.Value,
+                                        currentScore,
+                                        correlationId);
+                                }
                                 else if (banCount >= 5)
                                 {
                                     // BASTA : Tolérance zéro pour les récidivistes lourds
-                                    await scopedSecurity.ReportThreatAsync(clientIp, 200, $"Zero tolerance (Ban history: x{banCount})");
+                                    await scopedSecurity.ReportThreatAsync(
+                                        clientIp,
+                                        200,
+                                        $"Zero tolerance (Ban history: x{banCount})",
+                                        threatContext with { Category = Services.ThreatScoreCategory.RepeatOffender });
                                 }
                                 else
                                 {
@@ -364,7 +435,7 @@ namespace SoftLicence.Server.Middlewares
                                     if (statusCode == 404)
                                     {
                                         // Endpoints légitimes d'autres produits feelautom qui n'existent pas
-                                        // sur ce serveur — ne pas pénaliser (vrais clients, pas des bots)
+                                        // sur ce serveur, ne pas pénaliser (vrais clients, pas des bots)
                                         var knownCrossDomainPaths = new[] { "/api/build-id", "/api/updates/check", "/api/internal/" };
                                         bool isKnownCrossProduct = knownCrossDomainPaths.Any(p => requestPath.StartsWith(p, StringComparison.OrdinalIgnoreCase));
 
@@ -372,13 +443,21 @@ namespace SoftLicence.Server.Middlewares
                                         {
                                             // Si déjà banni ou en quarantaine, base 10, sinon base 2
                                             int basePts = (banCount > 0 || currentScore >= 100) ? 10 : 2;
-                                            await scopedSecurity.ReportThreatAsync(clientIp, basePts * multiplier, $"404 on {requestPath} (Multiplier: x{multiplier})");
+                                            await scopedSecurity.ReportThreatAsync(
+                                                clientIp,
+                                                basePts * multiplier,
+                                                $"404 on {requestPath} (Multiplier: x{multiplier})",
+                                                threatContext with { Category = Services.ThreatScoreCategory.NotFound });
                                         }
                                     }
 
                                     if (statusCode == 401 || statusCode == 403)
                                     {
-                                        await scopedSecurity.ReportThreatAsync(clientIp, 50 * multiplier, $"Auth failure on {requestPath} (Multiplier: x{multiplier})");
+                                        await scopedSecurity.ReportThreatAsync(
+                                            clientIp,
+                                            50 * multiplier,
+                                            $"Auth failure on {requestPath} (Multiplier: x{multiplier})",
+                                            threatContext with { Category = Services.ThreatScoreCategory.AuthFailure });
                                     }
                                 }
                             }
@@ -602,7 +681,10 @@ namespace SoftLicence.Server.Middlewares
                 || normalizedPath.Equals("/api/internal/v1/distribution-installation-bindings/invalidate", StringComparison.OrdinalIgnoreCase)
                 || normalizedPath.Equals("/api/internal/v1/distribution-license-bootstraps/issue", StringComparison.OrdinalIgnoreCase)
                 || normalizedPath.Equals("/api/internal/v1/distribution-license-bootstraps/remint", StringComparison.OrdinalIgnoreCase)
-                || normalizedPath.Equals("/api/internal/v1/distribution-license-bootstraps/recover", StringComparison.OrdinalIgnoreCase);
+                || normalizedPath.Equals("/api/internal/v1/distribution-license-bootstraps/recover", StringComparison.OrdinalIgnoreCase)
+                || normalizedPath.Equals("/api/internal/v1/license-hardware-exclusions", StringComparison.OrdinalIgnoreCase)
+                || normalizedPath.Equals("/api/internal/v1/license-hardware-exclusions/lift", StringComparison.OrdinalIgnoreCase)
+                || normalizedPath.Equals("/api/internal/v1/license-hardware-exclusions/list", StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>
@@ -646,11 +728,71 @@ namespace SoftLicence.Server.Middlewares
             string? runtimeAuthenticationDisposition)
         {
             return statusCode == StatusCodes.Status401Unauthorized
-                && IsPublicRuntimeEnrollmentPath(path)
+                && (IsPublicRuntimeEnrollmentPath(path) || IsSecurityLockReportPath(path))
                 && string.Equals(
                     runtimeAuthenticationDisposition,
                     Services.RuntimeEnrollmentService.ProofClockSkewDiagnosticCode,
                     StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// Returns whether a refusal is a named commercial refusal that must not raise the threat score (TKT-004159).
+        /// Only the exact 403 <c>license_hardware_excluded</c> qualifies. The code comes from
+        /// <see cref="LogKeys.ResultStatusOverride"/>, a request item written only by the server (the activation
+        /// controller's named-failure helper, with constant codes), never from client input; any other code, status
+        /// or a missing item keeps the normal authentication-failure scoring.
+        /// </summary>
+        /// <param name="statusCode">Final HTTP status of the response.</param>
+        /// <param name="resultStatusOverride">Server-set refusal code of the request, or null.</param>
+        /// <returns><c>true</c> when the refusal is exempt from scoring.</returns>
+        internal static bool IsUnscoredCommercialRefusal(int statusCode, string? resultStatusOverride) =>
+            statusCode == StatusCodes.Status403Forbidden
+            && string.Equals(
+                resultStatusOverride,
+                Services.LicenseHardwareExclusionChecker.PublicErrorCode,
+                StringComparison.Ordinal);
+
+        /// <summary>Exact authenticated security lock report route (TKT-001177), signed with the Runtime clock.</summary>
+        private static bool IsSecurityLockReportPath(string path) =>
+            path.Equals(Services.RuntimeEnrollmentService.SecurityLockReportPath, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Extracts the enrollment identifier of a public Runtime route (path segment) or of a lock report
+        /// (singleton <c>X-Runtime-Enrollment-Id</c> header). Only an exact lower-case UUID text is accepted,
+        /// the same form the controllers authenticate; anything else yields no identifier and normal scoring.
+        /// </summary>
+        /// <param name="path">Lower-cased request path.</param>
+        /// <param name="enrollmentHeader">Raw header values.</param>
+        /// <returns>The enrollment identifier, or <see langword="null"/>.</returns>
+        internal static Guid? TryGetRuntimeEnrollmentId(string path, Microsoft.Extensions.Primitives.StringValues enrollmentHeader)
+        {
+            string? candidate = null;
+            const string runtimePrefix = "/api/v1/runtime-enrollments/";
+            if (path.StartsWith(runtimePrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                var rest = path[runtimePrefix.Length..];
+                var slash = rest.IndexOf('/');
+                candidate = slash < 0 ? rest : rest[..slash];
+            }
+            else if (IsSecurityLockReportPath(path) && enrollmentHeader.Count == 1)
+            {
+                candidate = enrollmentHeader[0];
+            }
+
+            return candidate != null
+                && Guid.TryParseExact(candidate, "D", out var parsed)
+                && string.Equals(parsed.ToString("D"), candidate, StringComparison.Ordinal)
+                    ? parsed
+                    : null;
+        }
+
+        /// <summary>Checks, by primary key, whether the enrollment exists (any state).</summary>
+        private static async Task<bool> IsKnownRuntimeEnrollmentAsync(
+            IDbContextFactory<LicenseDbContext> dbFactory,
+            Guid enrollmentId)
+        {
+            await using var db = await dbFactory.CreateDbContextAsync();
+            return await db.RuntimeEnrollments.AsNoTracking().AnyAsync(enrollment => enrollment.Id == enrollmentId);
         }
 
         private static bool IsPublicRuntimeEnrollmentPath(string path)

@@ -22,7 +22,7 @@ namespace SoftLicence.Tests.Server;
 public sealed class McpHttpModeTests : IAsyncLifetime
 {
     private const string GoodKey = "sla_http_mode_good_key";
-    private const string VpnAddress = "10.10.0.3";
+    private const string VpnAddress = "192.0.2.3";
     private const string TestRemoteIpHeader = "X-Test-Remote-Ip";
 
     private readonly StubSoftLicence _softLicence = new();
@@ -39,7 +39,7 @@ public sealed class McpHttpModeTests : IAsyncLifetime
             {
                 ["SOFTLICENCE_BASE_URL"] = "https://softlicence.test",
                 ["SOFTLICENCE_MCP_RESULT_DIRECTORY"] = _resultDirectory,
-                ["SOFTLICENCE_MCP_ALLOWED_CIDRS"] = "10.10.0.0/24",
+                ["SOFTLICENCE_MCP_ALLOWED_CIDRS"] = "192.0.2.0/24",
             });
             // Real forwarding handler in front of the stubbed SoftLicence server.
             builder.Services.AddSingleton(provider => new HttpClient(
@@ -102,7 +102,7 @@ public sealed class McpHttpModeTests : IAsyncLifetime
     {
         HttpResponseMessage? last = null;
         for (var attempt = 0; attempt < 11; attempt++)
-            last = await PostRpcAsync("tools/list", remoteIp: "10.10.0.7", key: $"sla_wrong_{attempt}");
+            last = await PostRpcAsync("tools/list", remoteIp: "192.0.2.7", key: $"sla_wrong_{attempt}");
 
         Assert.Equal(HttpStatusCode.TooManyRequests, last!.StatusCode);
     }
@@ -161,7 +161,7 @@ public sealed class McpHttpModeTests : IAsyncLifetime
     {
         Assert.Throws<InvalidOperationException>(() => McpHttpAccessGate.ParseAllowedNetworks(""));
         Assert.Throws<InvalidOperationException>(() => McpHttpAccessGate.ParseAllowedNetworks("0.0.0.0/0"));
-        Assert.Single(McpHttpAccessGate.ParseAllowedNetworks(" 10.10.0.0/24 "));
+        Assert.Single(McpHttpAccessGate.ParseAllowedNetworks(" 192.0.2.0/24 "));
     }
 
     [Fact]

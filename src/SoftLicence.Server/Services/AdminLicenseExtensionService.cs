@@ -22,6 +22,35 @@ public sealed class AdminLicenseExtensionService(IDbContextFactory<LicenseDbCont
     public sealed record Receipt(int Version, Guid ExpectedAuthorityVersion, int Days, string ActorId,
         DateTime ConfirmedAtUtc, DateTime OldExpirationUtc, DateTime NewExpirationUtc);
 
+    /// <summary>Current administrative entitlement, independent of payment and without operator personal data.</summary>
+    public sealed record Entitlement(Guid OperationId, DateTime ConfirmedAtUtc, DateTime ExpiresAtUtc);
+
+    /// <summary>
+    /// Returns the latest audited extension only while its exact expiry still matches the supplied live licence.
+    /// Later expiry changes, revocation, expiration and malformed audit records never become positive evidence.
+    /// Queries the existing licence-history index; callers must already authorize the exact product and key.
+    /// </summary>
+    public static async Task<Entitlement?> ReadEntitlementAsync(LicenseDbContext db, License license,
+        DateTime now, CancellationToken cancellationToken = default)
+    {
+        if (!license.IsActive || license.RevokedAt.HasValue || license.RevocationReason is not null
+            || license.ExpirationDate is not { } expiry || expiry <= now) return null;
+        var history = await db.LicenseHistories.AsNoTracking()
+            .Where(h => h.LicenseId == license.Id && h.Action == HistoryAction)
+            .OrderByDescending(h => h.Timestamp).ThenByDescending(h => h.Id)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (history?.Details is null) return null;
+        Receipt? receipt;
+        try { receipt = JsonSerializer.Deserialize<Receipt>(history.Details); }
+        catch (JsonException) { return null; } // Invalid persisted evidence is ineligible, not a provider outage.
+        if (receipt is null || receipt.Version != 1 || receipt.ExpectedAuthorityVersion == Guid.Empty
+            || string.IsNullOrWhiteSpace(receipt.ActorId) || receipt.ConfirmedAtUtc != history.Timestamp
+            || receipt.ConfirmedAtUtc > now || receipt.NewExpirationUtc != expiry
+            || CalculateExpirationUtc(receipt.OldExpirationUtc, receipt.ConfirmedAtUtc, receipt.Days) != expiry)
+            return null;
+        return new(history.Id, receipt.ConfirmedAtUtc, expiry);
+    }
+
     /// <summary>Accepts only one to four ASCII digits representing 1..3650; signs, whitespace and fractions are invalid.</summary>
     public static bool TryParseDays(string? text, out int days)
     {
@@ -85,7 +114,6 @@ public sealed class AdminLicenseExtensionService(IDbContextFactory<LicenseDbCont
         if (license is null) return new("NotFound");
         if (license.AuthorityVersion != command.ExpectedAuthorityVersion) return new("Conflict");
         if (!license.IsActive || license.RevokedAt.HasValue || !license.ExpirationDate.HasValue) return new("Ineligible");
-        if (pass is not null && pass.PaidThroughUtc != license.ExpirationDate.Value) return new("InconsistentPass");
         // Use the fresh expiry under the authority lock, never a browser-provided base date.
         var calculated = CalculateExpirationUtc(license.ExpirationDate.Value, confirmedAt, command.Days);
         if (calculated is null) return new("ExpirationOutOfRange");

@@ -38,6 +38,53 @@ public sealed class DeploymentConfigurationTests
             StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// TKT-004061 (owner decision, 20/11/2026): proves the production compose passes the assignment-enforcement switch to the
+    /// server, defaulting to record-only "open". Without this line the server, which defaults to "closed" when the
+    /// variable is missing, would start blocking at deployment and a value set in Docker would never reach it.
+    /// Fails when the line is missing, sits outside the server service or defaults to anything but "open".
+    /// </summary>
+    [Fact]
+    public void DockerCompose_WiresAssignmentEnforcementToServerDefaultingToOpen()
+    {
+        const string name = "SOFTLICENCE_ASSIGNMENT_ENFORCEMENT";
+        var compose = ReadProjectFile("Docker/docker-compose.yml");
+        var expected = $"- {name}=${{{name}:-open}}";
+        var serverStart = compose.IndexOf("\n  server:", StringComparison.Ordinal);
+        var nextService = compose.IndexOf("\n  softlicence:", serverStart + 1, StringComparison.Ordinal);
+
+        Assert.True(serverStart >= 0);
+        Assert.True(nextService > serverStart);
+        Assert.Equal(1, CountOrdinal(compose, expected));
+        Assert.Equal(1, CountOrdinal(compose[serverStart..nextService], expected));
+        Assert.DoesNotContain($"${{{name}:-closed}}", compose, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// TKT-003093: proves the production compose maps exactly the TIAConnect product to the T-IA-Connect BugTrace
+    /// project for LLM tip conversion, once and inside the server service. Without it every conversion is refused.
+    /// The deploy.ps1 drift guard admits any valid product list (checked by its own Python tests), so it must
+    /// reference the generic validator for this variable rather than a fixed product.
+    /// Private repository only (TKT-004182): it reads <c>deploy.ps1</c>, which the public mirror does not contain, so
+    /// the public publish workflow must not run it.
+    /// </summary>
+    [Fact]
+    [Trait("Category", "PrivateRepository")]
+    public void DockerCompose_RoutesTiaConnectLlmTipsToTheTiaProjectInServerOnly()
+    {
+        const string expected = "- BUGTRACE_LLM_TIP_TIA_PRODUCT_IDS=808648bc-a4b9-4f71-bcb1-b7c7e67ca98e";
+        var compose = ReadProjectFile("Docker/docker-compose.yml");
+        var serverStart = compose.IndexOf("\n  server:", StringComparison.Ordinal);
+        var nextService = compose.IndexOf("\n  softlicence:", serverStart + 1, StringComparison.Ordinal);
+
+        Assert.True(serverStart >= 0);
+        Assert.True(nextService > serverStart);
+        Assert.Equal(1, CountOrdinal(compose, "BUGTRACE_LLM_TIP_TIA_PRODUCT_IDS"));
+        Assert.Equal(1, CountOrdinal(compose[serverStart..nextService], expected));
+        var deploy = ReadProjectFile("deploy.ps1");
+        Assert.Contains("require(valid_product_id_list(new_env.get(tip_routing)), \"tkt3093_llm_tip_routing_drift\")", deploy, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void DockerCompose_WiresRuntimeSigningRotationContractToMigratorAndServer()
     {

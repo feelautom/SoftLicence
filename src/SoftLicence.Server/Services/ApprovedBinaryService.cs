@@ -59,6 +59,22 @@ public sealed class ApprovedBinaryService
         _logger = logger;
     }
 
+    /// <summary>
+    /// Creates the immutable release baseline for one product version, or classifies an existing
+    /// registration without overwriting it.
+    /// </summary>
+    /// <param name="productId">Product whose release baseline is being registered.</param>
+    /// <param name="version">Version text; surrounding whitespace is removed before validation.</param>
+    /// <param name="registrationId">Case-sensitive printable ASCII idempotency key.</param>
+    /// <param name="manifestDigestSha256">Canonical lowercase SHA-256 digest of the release manifest.</param>
+    /// <param name="artifacts">Complete canonical set of required artifact fingerprints.</param>
+    /// <param name="cancellationToken">Token that cancels database work without changing an existing baseline.</param>
+    /// <returns>
+    /// Whether the product exists and the resulting approval, idempotent replay, validation failure,
+    /// or stable conflict classification. Concurrent writers leave exactly one committed baseline.
+    /// Once a winner is visible, the same registration key is evaluated for exact idempotency or
+    /// <c>registration_id_conflict</c>; a different key yields <c>baseline_registration_conflict</c>.
+    /// </returns>
     public async Task<(bool ProductExists, ApprovedBinaryVerificationResult Result)> RegisterReleaseBaselineAsync(
         Guid productId,
         string? version,
@@ -113,16 +129,36 @@ public sealed class ApprovedBinaryService
             {
                 if (transaction != null)
                     await transaction.RollbackAsync(cancellationToken);
-                return (true, Conflict("baseline_registration_conflict"));
+                return (true, ClassifyVisibleVersionRegistration(
+                    versionRegistration,
+                    productId,
+                    normalizedVersion,
+                    registrationId!,
+                    manifestDigestSha256!,
+                    baselineDigest,
+                    normalization.Artifacts));
             }
 
             if (await db.ApprovedBinaries.AsNoTracking().AnyAsync(
                     row => row.ProductId == productId && row.Version == normalizedVersion,
                     cancellationToken))
             {
+                // Read Committed allows the winning transaction to commit between the first
+                // registration lookup and this artifact lookup. Re-read the aggregate owner so
+                // that a valid concurrent winner is not misclassified as orphaned artifacts.
+                versionRegistration = await LoadRegistrationAsync(db, productId, normalizedVersion, cancellationToken);
                 if (transaction != null)
                     await transaction.RollbackAsync(cancellationToken);
-                return (true, Conflict("baseline_not_authoritative"));
+                return (true, versionRegistration == null
+                    ? Conflict("baseline_not_authoritative")
+                    : ClassifyVisibleVersionRegistration(
+                        versionRegistration,
+                        productId,
+                        normalizedVersion,
+                        registrationId!,
+                        manifestDigestSha256!,
+                        baselineDigest,
+                        normalization.Artifacts));
             }
 
             var registration = new ApprovedBinaryRegistration
@@ -392,6 +428,40 @@ public sealed class ApprovedBinaryService
                 manifestDigest, baselineDigest, artifacts));
         return (true, Conflict("baseline_registration_conflict"));
     }
+
+    /// <summary>
+    /// Classifies an aggregate already selected by product and version while preserving the
+    /// registration key's ordinal idempotency boundary.
+    /// </summary>
+    /// <param name="registration">Committed aggregate visible for the requested product and version.</param>
+    /// <param name="productId">Requested product identifier.</param>
+    /// <param name="version">Normalized requested version.</param>
+    /// <param name="registrationId">Case-sensitive registration key supplied by the caller.</param>
+    /// <param name="manifestDigest">Canonical manifest digest supplied by the caller.</param>
+    /// <param name="baselineDigest">Canonical aggregate digest computed from the supplied artifacts.</param>
+    /// <param name="artifacts">Canonical supplied artifact set.</param>
+    /// <returns>
+    /// Exact replay/content classification for the same ordinal key, or
+    /// <c>baseline_registration_conflict</c> when another key owns the version.
+    /// </returns>
+    private static ApprovedBinaryVerificationResult ClassifyVisibleVersionRegistration(
+        ApprovedBinaryRegistration registration,
+        Guid productId,
+        string version,
+        string registrationId,
+        string manifestDigest,
+        string baselineDigest,
+        IReadOnlyList<ApprovedBinaryArtifact> artifacts) =>
+        string.Equals(registration.RegistrationKey, registrationId, StringComparison.Ordinal)
+            ? EvaluateRegistrationRequest(
+                registration,
+                productId,
+                version,
+                registrationId,
+                manifestDigest,
+                baselineDigest,
+                artifacts)
+            : Conflict("baseline_registration_conflict");
 
     private static ApprovedBinaryVerificationResult EvaluateRegistrationRequest(
         ApprovedBinaryRegistration registration,

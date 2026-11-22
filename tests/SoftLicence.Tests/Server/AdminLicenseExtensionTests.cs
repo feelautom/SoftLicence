@@ -65,6 +65,28 @@ public sealed class AdminLicenseExtensionTests(AdminExtensionDatabase database) 
         if (pass) Assert.Equal(result.ExpirationUtc, (await db.PersonalDayPasses.SingleAsync(p => p.LicenseId == license.Id)).PaidThroughUtc);
     }
 
+    /// <summary>
+    /// TKT-002331 : une clé dont la date diffère de son registre n'est plus refusée (ancien code InconsistentPass) ;
+    /// la prolongation part de la date de la clé et recale le registre sur la nouvelle date.
+    /// </summary>
+    [Fact]
+    public async Task Confirm_KeyAndLedgerDiffer_ExtendsFromKeyExpiry()
+    {
+        var license = await SeedAsync(Now.AddDays(5), true);
+        await using (var setup = database.CreateDbContext())
+        {
+            (await setup.PersonalDayPasses.SingleAsync(p => p.LicenseId == license.Id)).PaidThroughUtc = Now.AddDays(4);
+            await setup.SaveChangesAsync();
+        }
+        var command = new AdminLicenseExtensionService.Command(Guid.NewGuid(), license.Id, license.AuthorityVersion, 1);
+        var result = await new AdminLicenseExtensionService(database, new FrozenClock(Now)).ConfirmAsync(command, Admin);
+        Assert.Equal("Applied", result.Code);
+        Assert.Equal(license.ExpirationDate!.Value.AddDays(1), result.ExpirationUtc);
+        await using var db = database.CreateDbContext();
+        Assert.Equal(result.ExpirationUtc, (await db.Licenses.SingleAsync(l => l.Id == license.Id)).ExpirationDate);
+        Assert.Equal(result.ExpirationUtc, (await db.PersonalDayPasses.SingleAsync(p => p.LicenseId == license.Id)).PaidThroughUtc);
+    }
+
     /// <summary>Concurrent exact replays create one audit and one 24-hour grant, even after the clock changes.</summary>
     [Theory]
     [InlineData(-1)] [InlineData(180)]
@@ -87,6 +109,32 @@ public sealed class AdminLicenseExtensionTests(AdminExtensionDatabase database) 
         Assert.Equal("Conflict", (await later.ConfirmAsync(command, other)).Code);
         await using var db = database.CreateDbContext();
         Assert.Equal(1, await db.LicenseHistories.CountAsync(h => h.LicenseId == license.Id));
+    }
+
+    /// <summary>Authenticated consumers receive only exact current administrative evidence, never a stale or revoked grant.</summary>
+    [Fact]
+    public async Task ReadEntitlement_RequiresCurrentAuditedExpiry()
+    {
+        var license = await SeedAsync(Now.AddDays(-1), true);
+        var command = new AdminLicenseExtensionService.Command(Guid.NewGuid(), license.Id, license.AuthorityVersion, 1);
+        var service = new AdminLicenseExtensionService(database, new FrozenClock(Now));
+        await using var db = database.CreateDbContext();
+        Assert.Null(await AdminLicenseExtensionService.ReadEntitlementAsync(db, license, Now));
+        Assert.Equal("Applied", (await service.ConfirmAsync(command, Admin)).Code);
+        var current = await db.Licenses.AsNoTracking().SingleAsync(l => l.Id == license.Id);
+        var proof = await AdminLicenseExtensionService.ReadEntitlementAsync(db, current, Now);
+        Assert.NotNull(proof);
+        Assert.Equal(command.OperationId, proof.OperationId);
+        Assert.Equal(Now.AddDays(1), proof.ExpiresAtUtc);
+        Assert.Null(await AdminLicenseExtensionService.ReadEntitlementAsync(db, current, Now.AddDays(1)));
+        current.ExpirationDate = Now.AddDays(2);
+        Assert.Null(await AdminLicenseExtensionService.ReadEntitlementAsync(db, current, Now));
+        current.ExpirationDate = Now.AddDays(1);
+        current.RevokedAt = Now;
+        Assert.Null(await AdminLicenseExtensionService.ReadEntitlementAsync(db, current, Now));
+        current.RevokedAt = null;
+        current.IsActive = false;
+        Assert.Null(await AdminLicenseExtensionService.ReadEntitlementAsync(db, current, Now));
     }
 
     /// <summary>The reported March expiry gains two exact days, independent of the earlier confirmation date.</summary>
@@ -159,7 +207,7 @@ public sealed class AdminLicenseExtensionTests(AdminExtensionDatabase database) 
     /// <summary>Every business refusal preserves expiry, pass horizon and history.</summary>
     [Theory]
     [InlineData("overflow", "ExpirationOutOfRange")] [InlineData("revoked", "Ineligible")]
-    [InlineData("deferred", "Ineligible")] [InlineData("mismatch", "InconsistentPass")]
+    [InlineData("deferred", "Ineligible")]
     [InlineData("stale", "Conflict")] [InlineData("anonymous", "Unauthorized")]
     [InlineData("zero", "InvalidDays")] [InlineData("negative", "InvalidDays")] [InlineData("over", "InvalidDays")]
     public async Task Refusal_DoesNotWrite(string scenario, string expected)
@@ -348,11 +396,11 @@ public sealed class AdminLicenseExtensionTests(AdminExtensionDatabase database) 
     }
 }
 
-/// <summary>Owns a unique disposable PostgreSQL database on an explicitly local test server; applies production migrations.</summary>
+/// <summary>Owns a unique disposable PostgreSQL database cloned from the current production schema model.</summary>
 public sealed class AdminExtensionDatabase : IDbContextFactory<LicenseDbContext>, IAsyncLifetime
 {
     /// <summary>Generated identifier is never derived from external input or a shared database name.</summary>
-    private readonly string name = "tkt1480_" + Guid.NewGuid().ToString("N");
+    private string name = "";
     /// <summary>Verified loopback connection used only to create/drop the owned database.</summary>
     private string maintenance = "";
     /// <summary>Connection to this fixture's database, never production.</summary>
@@ -364,27 +412,17 @@ public sealed class AdminExtensionDatabase : IDbContextFactory<LicenseDbContext>
     /// <summary>Refuses non-local database targets and provisions a bounded, generated database name.</summary>
     public async Task InitializeAsync()
     {
-        var configured = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES")
-            ?? throw new InvalidOperationException("SOFTLICENCE_RUNTIME_TEST_POSTGRES is required.");
-        var builder = new NpgsqlConnectionStringBuilder(configured);
-        if (builder.Host is not ("127.0.0.1" or "localhost" or "::1")) throw new InvalidOperationException("Local test PostgreSQL required.");
-        builder.Database = "postgres"; maintenance = builder.ConnectionString;
-        builder.Database = name; connectionString = builder.ConnectionString;
-        await ExecuteMaintenanceAsync($"CREATE DATABASE \"{name}\""); created = true;
-        try { await using var db = CreateDbContext(); await db.Database.MigrateAsync(); }
-        catch { await DisposeAsync(); throw; }
+        var clone = await PostgreSqlModelDatabase.CloneAsync("admin_extension");
+        maintenance = clone.MaintenanceConnectionString;
+        connectionString = clone.ConnectionString;
+        name = clone.DatabaseName;
+        created = true;
     }
     /// <summary>Drops only this fixture's generated database; no shared database or global pool is changed.</summary>
     public async Task DisposeAsync()
     {
         if (!created) return;
-        using (var poolConnection = new NpgsqlConnection(connectionString)) NpgsqlConnection.ClearPool(poolConnection);
-        await ExecuteMaintenanceAsync($"DROP DATABASE \"{name}\" WITH (FORCE)"); created = false;
-    }
-    /// <summary>Executes only fixture-owned database lifecycle statements against the verified local maintenance database.</summary>
-    private async Task ExecuteMaintenanceAsync(string sql)
-    {
-        await using var connection = new NpgsqlConnection(maintenance); await connection.OpenAsync();
-        await using var command = new NpgsqlCommand(sql, connection); await command.ExecuteNonQueryAsync();
+        await PostgreSqlModelDatabase.DropAsync(maintenance, name);
+        created = false;
     }
 }

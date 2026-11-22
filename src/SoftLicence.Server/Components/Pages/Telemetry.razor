@@ -141,7 +141,8 @@
                     
                     <h6 class="mt-4 mb-2">@L["Telemetry_EventData"] (@SelectedRecord.Type)</h6>
                     <div class="p-3 bg-black text-info rounded border border-secondary" style="font-size: 0.85rem; max-height: 400px; overflow-y: auto;">
-                        @if (SelectedRecord.Type == TelemetryType.Event && SelectedRecord.EventData != null)
+                        @if (SelectedRecord.EventData != null &&
+                            (SelectedRecord.Type == TelemetryType.Event || SelectedRecord.Type == TelemetryType.Error))
                         {
                             <pre>@FormatJson(SelectedRecord.EventData.PropertiesJson)</pre>
                         }

@@ -21,7 +21,7 @@ services:
       - SOFTLICENCE_MCP_TRANSPORT=http
       # Internal call to the SoftLicence server on its Docker network (no public round trip).
       - SOFTLICENCE_BASE_URL=http://server:8080
-      - SOFTLICENCE_MCP_ALLOWED_CIDRS=${SOFTLICENCE_MCP_ALLOWED_CIDRS:-10.10.0.0/24}
+      - SOFTLICENCE_MCP_ALLOWED_CIDRS=${SOFTLICENCE_MCP_ALLOWED_CIDRS:-192.0.2.0/24}
       - SOFTLICENCE_MCP_RESULT_DIRECTORY=/app/mcp-results
     networks:
       - softlicence

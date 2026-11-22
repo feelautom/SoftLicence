@@ -552,7 +552,7 @@ public sealed class RuntimeEnrollmentsControllerTests
         var s2s = new Mock<IDistributionS2SAuthenticationService>(MockBehavior.Strict);
         s2s.Setup(service => service.AuthenticateAndReserveNonceAsync(
                 It.IsAny<HttpContext>(), It.IsAny<ReadOnlyMemory<byte>>(), productId, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new DistributionS2SPrincipal("website-step1", "key-1"));
+            .ReturnsAsync(new DistributionS2SPrincipal("website-step1", "key-1", AllowLicenseBootstrap: true));
         var runtime = new Mock<IRuntimeEnrollmentService>(MockBehavior.Strict);
         var response = new RuntimeReinstallAuthorityResponse(
             RuntimeEnrollmentService.ReinstallAuthorityResponseSchema,
@@ -601,7 +601,7 @@ public sealed class RuntimeEnrollmentsControllerTests
         var s2s = new Mock<IDistributionS2SAuthenticationService>(MockBehavior.Strict);
         s2s.Setup(service => service.AuthenticateAndReserveNonceAsync(
                 It.IsAny<HttpContext>(), It.IsAny<ReadOnlyMemory<byte>>(), productId, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new DistributionS2SPrincipal("website-step1", "key-1"));
+            .ReturnsAsync(new DistributionS2SPrincipal("website-step1", "key-1", AllowLicenseBootstrap: true));
         var runtime = new Mock<IRuntimeEnrollmentService>(MockBehavior.Strict);
         runtime.Setup(service => service.AuthorizeReinstallAsync(
                 "website-step1",
@@ -641,7 +641,7 @@ public sealed class RuntimeEnrollmentsControllerTests
         var s2s = new Mock<IDistributionS2SAuthenticationService>(MockBehavior.Strict);
         s2s.Setup(service => service.AuthenticateAndReserveNonceAsync(
                 It.IsAny<HttpContext>(), It.IsAny<ReadOnlyMemory<byte>>(), productId, It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new DistributionS2SPrincipal("website-step1", "key-1"));
+            .ReturnsAsync(new DistributionS2SPrincipal("website-step1", "key-1", AllowLicenseBootstrap: true));
         var runtime = new Mock<IRuntimeEnrollmentService>(MockBehavior.Strict);
         runtime.Setup(service => service.AuthorizeReinstallAsync(
                 "website-step1", It.IsAny<RuntimeReinstallAuthorityRequest>(), It.IsAny<CancellationToken>()))

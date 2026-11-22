@@ -594,7 +594,7 @@ else
                                         <td class="text-nowrap text-muted">@TZ.ToLocal(rec.Timestamp).ToString("dd/MM HH:mm")</td>
                                         <td><code class="small">@rec.HardwareId</code></td>
                                         <td><small class="text-muted">@rec.Version</small></td>
-                                        <td><code class="text-danger small">@(rec.ErrorData?.ErrorType ?? "?")</code></td>
+                                        <td><code class="text-danger small">@(rec.ErrorData?.ErrorType ?? rec.EventName)</code></td>
                                         <td class="text-muted" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">@(rec.ErrorData?.Message ?? "-")</td>
                                         <td><button class="btn btn-outline-info btn-sm" @onclick="() => ShowRecord(rec)">Voir</button></td>
                                     </tr>
@@ -900,7 +900,8 @@ else
                         </div>
                         <h6 class="mt-4 mb-2">Données (@selectedRecord.Type)</h6>
                         <div class="p-3 bg-black text-info rounded border border-secondary" style="font-size:.85rem;max-height:420px;overflow-y:auto;">
-                            @if (selectedRecord.Type == TelemetryType.Event && selectedRecord.EventData != null)
+                            @if (selectedRecord.EventData != null &&
+                                (selectedRecord.Type == TelemetryType.Event || selectedRecord.Type == TelemetryType.Error))
                             {
                                 <pre>@FormatJson(selectedRecord.EventData.PropertiesJson)</pre>
                             }
@@ -1413,6 +1414,7 @@ else
     {
         t4Errors = await db.TelemetryRecords.AsNoTracking().AsSplitQuery()
             .Include(r => r.ErrorData)
+            .Include(r => r.EventData)
             .Include(r => r.Product)
             .Where(r => r.Type == TelemetryType.Error &&
                         r.Timestamp >= since &&

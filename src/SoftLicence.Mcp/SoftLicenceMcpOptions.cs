@@ -17,7 +17,7 @@ public sealed class SoftLicenceMcpOptions
     /// HTTP mode only (TKT-001169): comma-separated networks allowed to call /mcp, from
     /// SOFTLICENCE_MCP_ALLOWED_CIDRS. Defaults to the WireGuard VPN.
     /// </summary>
-    public string AllowedCidrs { get; set; } = "10.10.0.0/24";
+    public string AllowedCidrs { get; set; } = "192.0.2.0/24";
     /// <summary>Requested per-response transport bound; runtime clamps it to the safe 1 KiB..16 MiB range.</summary>
     public int AnalyticsResponseMaxBytes { get; set; } = 16 * 1024 * 1024;
 

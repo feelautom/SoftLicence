@@ -232,8 +232,6 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
             throw new DistributionOperationException("bootstrap_ineligible",
                 StatusCodes.Status422UnprocessableEntity, exception.DiagnosticCode);
         }
-        if (assignment.LicenseId != binding.LicenseId || assignment.SeatId != binding.LicenseSeatId)
-            throw Reject("bootstrap_ineligible");
         if (!approved.Binaries.TryGetValue("FP_EXE", out var executable)
             || !approved.Binaries.TryGetValue("FP_DLL", out var nativeDll)
             || !approved.Binaries.TryGetValue("FP_CORE", out var core)
@@ -252,11 +250,13 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
                 .SingleOrDefaultAsync(row => row.Id == replay.CapabilityId, cancellationToken);
             if (replayAuthorization == null
                 || replayAuthorization.ExpiresAtUtc <= now.UtcDateTime
-                || !AuthorizationMatches(replayAuthorization, binding, enrollment, clientId, productId)
                 || replayCapability == null || replayCapability.AuthorizationId != replayAuthorization.Id
                 || replayCapability.State != "ISSUED"
                 || replayCapability.ExpiresAtUtc <= now.UtcDateTime)
                 throw new DistributionOperationException("bootstrap_expired", StatusCodes.Status410Gone);
+            if (!AuthorizationMatches(
+                    replayAuthorization, binding, enrollment, assignment, clientId, productId))
+                throw Reject("bootstrap_ineligible");
             var bytes = OpenResponse(replay);
             try
             {
@@ -278,7 +278,8 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
                     cancellationToken)
                 ?? throw Reject("bootstrap_ineligible");
             if (authorization.ExpiresAtUtc <= now.UtcDateTime
-                || !AuthorizationMatches(authorization, binding, enrollment, clientId, productId))
+                || !AuthorizationMatches(
+                    authorization, binding, enrollment, assignment, clientId, productId))
                 throw Reject("bootstrap_ineligible");
 
             if (operation == RecoverOperation)
@@ -304,7 +305,7 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
                     cancellationToken);
             if (existingAuthorization != null)
                 throw Conflict("bootstrap_already_issued");
-            authorization = NewAuthorization(clientId, binding, enrollment, now);
+            authorization = NewAuthorization(clientId, binding, enrollment, assignment, now);
             db.Add(authorization);
         }
 
@@ -360,11 +361,25 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
     /// <summary>Recognizes only persisted Distribution entitlement contracts with relational authority.</summary>
     private static bool IsModernEntitlementContractVersion(int contractVersion) => contractVersion is 3 or 4;
 
+    /// <summary>
+    /// Creates a bootstrap generation that retains historical distribution lineage while freezing
+    /// the independently validated current commercial licence and seat used to sign its response.
+    /// </summary>
+    /// <param name="clientId">Authenticated Distribution service principal.</param>
+    /// <param name="binding">Immutable historical installation lineage.</param>
+    /// <param name="enrollment">Current cryptographic Runtime identity.</param>
+    /// <param name="assignment">Current eligible commercial licence and seat.</param>
+    /// <param name="now">Provider time used for issuance auditing.</param>
+    /// <returns>A pending generation whose replay remains bound to the same commercial assignment.</returns>
     private DistributionLicenseBootstrapAuthorization NewAuthorization(
-        string clientId, DistributionInstallationBinding binding, RuntimeEnrollment enrollment, DateTimeOffset now) => new()
+        string clientId,
+        DistributionInstallationBinding binding,
+        RuntimeEnrollment enrollment,
+        RuntimeCommercialEligibilityValidator.EligibleAssignment assignment,
+        DateTimeOffset now) => new()
     {
-        Id = Guid.NewGuid(), ProductId = binding.ProductId, LicenseId = binding.LicenseId,
-        LicenseSeatId = binding.LicenseSeatId, EntitlementId = binding.EntitlementId,
+        Id = Guid.NewGuid(), ProductId = binding.ProductId, LicenseId = assignment.LicenseId,
+        LicenseSeatId = assignment.SeatId, EntitlementId = binding.EntitlementId,
         BindingId = binding.Id, RuntimeEnrollmentId = enrollment.Id,
         ClientId = clientId, GrantRefDigestSha256 = binding.GrantRefDigestSha256,
         SubjectRefDigestSha256 = binding.SubjectRefDigestSha256!, HandoffDigestSha256 = binding.HandoffDigestSha256,
@@ -387,6 +402,7 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
     /// <param name="authorization">Stored immutable bootstrap generation.</param>
     /// <param name="binding">Current binding used only for issuance-lineage comparisons.</param>
     /// <param name="enrollment">Current Runtime credential and frozen credential epochs.</param>
+    /// <param name="assignment">Current commercial assignment that must match the frozen generation.</param>
     /// <param name="clientId">Authenticated S2S owner of this request.</param>
     /// <param name="productId">Canonical product scope from the strict request.</param>
     /// <returns>Whether the old generation still matches its original issuance lineage.</returns>
@@ -394,6 +410,7 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
         DistributionLicenseBootstrapAuthorization authorization,
         DistributionInstallationBinding binding,
         RuntimeEnrollment enrollment,
+        RuntimeCommercialEligibilityValidator.EligibleAssignment assignment,
         string clientId,
         Guid productId) =>
         authorization.State == "ISSUED"
@@ -401,8 +418,8 @@ public sealed class DistributionLicenseBootstrapService : IDistributionLicenseBo
         && authorization.BindingId == binding.Id
         && authorization.RuntimeEnrollmentId == enrollment.Id
         && authorization.ProductId == productId
-        && authorization.LicenseId == binding.LicenseId
-        && authorization.LicenseSeatId == binding.LicenseSeatId
+        && authorization.LicenseId == assignment.LicenseId
+        && authorization.LicenseSeatId == assignment.SeatId
         && authorization.EntitlementId == binding.EntitlementId
         && authorization.GrantRefDigestSha256 == binding.GrantRefDigestSha256
         && authorization.SubjectRefDigestSha256 == binding.SubjectRefDigestSha256

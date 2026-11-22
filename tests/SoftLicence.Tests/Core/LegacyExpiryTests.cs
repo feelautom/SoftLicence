@@ -5,7 +5,7 @@ using Xunit;
 namespace SoftLicence.Tests.Core;
 
 /// <summary>
-/// Enforces Franck's rule (30/09/2026): every piece of code kept for the old system carries
+/// Enforces the owner's rule (30/09/2026): every piece of code kept for the old system carries
 /// <c>LEGACY-EXPIRY(TKT-xxxxxx, yyyy-mm-dd)</c> and must be gone after that date. The day after an expiry this test
 /// fails until the tagged code, and its tag, are removed as described in the ticket.
 /// </summary>

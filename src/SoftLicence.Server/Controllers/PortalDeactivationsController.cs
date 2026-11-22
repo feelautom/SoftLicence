@@ -75,13 +75,18 @@ public sealed class PortalDeactivationsController : ControllerBase
         }
         catch (DistributionOperationException exception)
         {
-            return StatusCode(exception.StatusCode, new DistributionApiError(exception.ErrorCode));
+            // TKT-004085: a named assignment refusal also publishes its bounded reason (and Retry-After when busy).
+            AssignmentRefusals.ApplyRetryAfter(Response, exception.ErrorCode);
+            return StatusCode(exception.StatusCode, new DistributionApiError(
+                exception.ErrorCode, AssignmentRefusals.PublicReasonCode(exception.ErrorCode, exception.ReasonCode)));
         }
         catch (Exception exception) when (exception is InvalidDataException or JsonException)
         {
             return BadRequest(new DistributionApiError("invalid_request"));
         }
-        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested
+            // TKT-004085: an assignment-trigger refusal is answered as its named code by ApiExceptionSafetyNetMiddleware.
+            && !AssignmentRefusals.IsTriggerRefusal(exception))
         {
             return StatusCode(StatusCodes.Status500InternalServerError, new DistributionApiError("internal_error"));
         }

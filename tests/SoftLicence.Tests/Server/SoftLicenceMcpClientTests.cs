@@ -582,7 +582,7 @@ public sealed class SoftLicenceMcpClientTests
     }
 
     [Fact]
-    public async Task GetTelemetryOverviewAsync_WhenServerFails_DoesNotExposeResponseDetails()
+    public async Task GetTelemetryOverviewAsync_WhenServerFails_ThrowsRefusalWithoutResponseDetails()
     {
         var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError)
         {
@@ -593,19 +593,20 @@ public sealed class SoftLicenceMcpClientTests
         });
         var client = CreateClient(handler);
 
-        var result = await client.GetTelemetryOverviewAsync(
-            days: 7,
-            top: 20,
-            date: null,
-            fromUtc: null,
-            toUtc: null,
-            CancellationToken.None);
+        var refusal = await Assert.ThrowsAsync<SoftLicenceProviderRefusalException>(() =>
+            client.GetTelemetryOverviewAsync(
+                days: 7,
+                top: 20,
+                date: null,
+                fromUtc: null,
+                toUtc: null,
+                CancellationToken.None));
 
-        Assert.False(result.GetProperty("ok").GetBoolean());
-        Assert.Equal("ANALYTICS_SERVER_ERROR", result.GetProperty("errorCode").GetString());
-        Assert.Equal("SoftLicence analytics API returned an internal server error.", result.GetProperty("message").GetString());
-        Assert.DoesNotContain("connection detail", result.ToString(), StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("diagnostic trace", result.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("ANALYTICS_SERVER_ERROR", refusal.ErrorCode);
+        Assert.Equal(500, refusal.StatusCode);
+        Assert.Contains("SoftLicence analytics API returned an internal server error.", refusal.Message);
+        Assert.DoesNotContain("connection detail", refusal.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("diagnostic trace", refusal.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -1448,6 +1449,35 @@ public sealed class SoftLicenceMcpClientTests
             capturedRequest.RequestUri!.AbsoluteUri);
     }
 
+    /// <summary>Proves the weekly paid activity call targets its route and encodes every bound parameter (TKT-003652).</summary>
+    [Fact]
+    public async Task GetPaidWeeklyActivityAsync_EncodesWeeklyParameters()
+    {
+        HttpRequestMessage? capturedRequest = null;
+        var handler = new CapturingHandler(request =>
+        {
+            capturedRequest = request;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"totalLicenses":1}""", Encoding.UTF8, "application/json")
+            };
+        });
+        var client = CreateClient(handler);
+
+        await client.GetPaidWeeklyActivityAsync(
+            licenseTypes: "TIA-CONNECT-PRO",
+            status: "all",
+            weeks: 52,
+            skip: 100,
+            take: 200,
+            CancellationToken.None);
+
+        Assert.NotNull(capturedRequest);
+        Assert.Equal(
+            "https://softlicence.test/api/analytics/licenses/paid-weekly-activity?licenseTypes=TIA-CONNECT-PRO&status=all&weeks=52&skip=100&take=200",
+            capturedRequest.RequestUri!.AbsoluteUri);
+    }
+
     [Fact]
     public async Task GetLicenseTypesAsync_EncodesIncludeFree()
     {
@@ -1493,6 +1523,32 @@ public sealed class SoftLicenceMcpClientTests
         Assert.NotNull(capturedRequest);
         Assert.Equal(
             "https://softlicence.test/api/analytics/licenses/types?includeFree=true&productId=11111111-2222-3333-4444-555555555555",
+            capturedRequest.RequestUri!.AbsoluteUri);
+    }
+
+    [Fact]
+    public async Task GetLicenseTypeSettingsAsync_EncodesProductAndExactFilters()
+    {
+        HttpRequestMessage? capturedRequest = null;
+        var handler = new CapturingHandler(request =>
+        {
+            capturedRequest = request;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("[]", Encoding.UTF8, "application/json")
+            };
+        });
+        var client = CreateClient(handler);
+
+        await client.GetLicenseTypeSettingsAsync(
+            CancellationToken.None,
+            productName: "TIAConnect",
+            slug: "CLASSROOM-TEACHER",
+            parameterKey: "hasClassroomTeacher");
+
+        Assert.NotNull(capturedRequest);
+        Assert.Equal(
+            "https://softlicence.test/api/analytics/licenses/types/settings?productName=TIAConnect&slug=CLASSROOM-TEACHER&parameterKey=hasClassroomTeacher",
             capturedRequest.RequestUri!.AbsoluteUri);
     }
 
@@ -1685,6 +1741,68 @@ public sealed class SoftLicenceMcpClientTests
         Assert.Contains("\"reviewStatus\":\"needs-doc\"", capturedBody);
     }
 
+    /// <summary>
+    /// TKT-003574: the sharing decision is posted to the admin sharing route with the analytics key and
+    /// <c>source</c> <c>mcp</c>, so the server journal shows the MCP path.
+    /// </summary>
+    [Fact]
+    public async Task SetLlmTipFeedbackSharingAsync_PostsTheDecisionWithMcpSource()
+    {
+        HttpRequestMessage? capturedRequest = null;
+        string? capturedBody = null;
+        var handler = new CapturingHandler(request =>
+        {
+            capturedRequest = request;
+            capturedBody = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"id":"00000000-0000-0000-0000-000000000001","contentHash":"hash","sharedWithClients":false,"changed":true}""", Encoding.UTF8, "application/json")
+            };
+        });
+        var client = CreateClient(handler);
+
+        await client.SetLlmTipFeedbackSharingAsync(
+            id: null,
+            contentHash: "hash-share",
+            shared: false,
+            reason: "Bug report, not a tip",
+            productId: null,
+            productName: "TIAConnect",
+            CancellationToken.None);
+
+        Assert.NotNull(capturedRequest);
+        Assert.Equal(HttpMethod.Post, capturedRequest.Method);
+        Assert.Equal("https://softlicence.test/api/llm-tips-feedback/admin/tips/sharing", capturedRequest.RequestUri!.AbsoluteUri);
+        Assert.Equal("analytics-key", capturedRequest.Headers.GetValues("X-Analytics-Key").Single());
+        Assert.Contains("\"contentHash\":\"hash-share\"", capturedBody);
+        Assert.Contains("\"shared\":false", capturedBody);
+        Assert.Contains("\"reason\":\"Bug report, not a tip\"", capturedBody);
+        Assert.Contains("\"source\":\"mcp\"", capturedBody);
+        Assert.Contains("\"productName\":\"TIAConnect\"", capturedBody);
+    }
+
+    /// <summary>TKT-003574: the list tool forwards the sharing filter as <c>shared=true</c>.</summary>
+    [Fact]
+    public async Task ListLlmTipFeedbackAsync_PassesTheSharingFilter()
+    {
+        HttpRequestMessage? capturedRequest = null;
+        var handler = new CapturingHandler(request =>
+        {
+            capturedRequest = request;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"total":0,"limit":50,"offset":0,"items":[]}""", Encoding.UTF8, "application/json")
+            };
+        });
+        var client = CreateClient(handler);
+
+        await client.ListLlmTipFeedbackAsync(
+            null, null, null, "TIAConnect", null, null, null, null, null, 50, 0, null, null, CancellationToken.None, shared: true);
+
+        Assert.NotNull(capturedRequest);
+        Assert.Contains("shared=true", capturedRequest.RequestUri!.Query, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task GetTelemetryLicenseHardwareAuditAsync_EncodesAuditParameters()
     {
@@ -1744,7 +1862,7 @@ public sealed class SoftLicenceMcpClientTests
     }
 
     [Fact]
-    public async Task GetTelemetryOverviewAsync_WhenProductSelectorIsRequired_ReturnsAvailableProducts()
+    public async Task GetTelemetryOverviewAsync_WhenProductSelectorIsRequired_ThrowsRefusalCarryingAvailableProducts()
     {
         var requests = new List<string>();
         var handler = new CapturingHandler(request =>
@@ -1771,30 +1889,107 @@ public sealed class SoftLicenceMcpClientTests
         });
         var client = CreateClient(handler);
 
-        var result = await client.GetTelemetryOverviewAsync(
-            days: 1,
-            top: 5,
-            date: null,
-            fromUtc: null,
-            toUtc: null,
-            CancellationToken.None);
+        var refusal = await Assert.ThrowsAsync<SoftLicenceProviderRefusalException>(() =>
+            client.GetTelemetryOverviewAsync(
+                days: 1,
+                top: 5,
+                date: null,
+                fromUtc: null,
+                toUtc: null,
+                CancellationToken.None));
 
-        Assert.False(result.GetProperty("ok").GetBoolean());
-        Assert.Equal("PRODUCT_SELECTOR_REQUIRED", result.GetProperty("errorCode").GetString());
-        Assert.Contains("list_products", result.GetProperty("hint").GetString());
-        Assert.Equal(400, result.GetProperty("statusCode").GetInt32());
-        Assert.Equal(
-            "TIAConnect",
-            result.GetProperty("availableProducts").GetProperty("products")[0].GetProperty("name").GetString());
+        Assert.Equal("PRODUCT_SELECTOR_REQUIRED", refusal.ErrorCode);
+        Assert.Equal(400, refusal.StatusCode);
+        Assert.Contains("list_products", refusal.Message);
+        Assert.Contains("TIAConnect", refusal.Message);
         Assert.Equal(2, requests.Count);
         Assert.Equal("https://softlicence.test/api/analytics/telemetry/overview?days=1&top=5", requests[0]);
         Assert.Equal("https://softlicence.test/api/analytics/products", requests[1]);
     }
 
+    /// <summary>
+    /// A global key with more than eight products receives every exact selector, for both provider list shapes.
+    /// Names are display values: preserve their spelling, casing and order instead of normalizing them.
+    /// </summary>
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task GetTelemetryOverviewAsync_WhenProductFallbackExceedsTransportBound_OmitsProductsSafely(
+    public async Task GetTelemetryOverviewAsync_WhenGlobalKeyHasElevenProducts_ListsEveryExactProductName(
+        bool wrappedProducts)
+    {
+        string[] productNames =
+        [
+            "FrenchInvoice", "YOUR_APP_NAME", "YOUR_APP_NAME.Plugin.CrmConnector", "YOUR_APP_NAME.Plugin.Dnd",
+            "YOUR_APP_NAME.Plugin.Mcp", "YOUR_APP_NAME.Plugin.Recordings", "YOUR_APP_NAMEPlugins", "YOUR_APP_NAME.Plugin.SmsOvh",
+            "YOUR_APP_NAME.Plugin.Transcription", "TIAConnect", "Urag"
+        ];
+        var products = productNames.Select(name => new { name }).ToArray();
+        var productListJson = wrappedProducts
+            ? JsonSerializer.Serialize(new { productsReturned = products.Length, products })
+            : JsonSerializer.Serialize(products);
+        // Simulate only the authenticated product-list read and the original selector refusal;
+        // no live provider is contacted, and unrelated diagnostic fields are never supplied.
+        var handler = new CapturingHandler(request =>
+            request.RequestUri!.AbsolutePath.EndsWith("/api/analytics/products", StringComparison.Ordinal)
+                ? new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(productListJson, Encoding.UTF8, "application/json")
+                }
+                : new HttpResponseMessage(HttpStatusCode.BadRequest)
+                {
+                    Content = new StringContent(
+                        """{"errorCode":"PRODUCT_SELECTOR_REQUIRED","message":"Select a product."}""",
+                        Encoding.UTF8, "application/json")
+                });
+        // Keep the result-store marker with disposable build outputs, avoiding the user's shared store.
+        var client = new SoftLicenceAnalyticsClient(new HttpClient(handler),
+            Options.Create(new SoftLicenceMcpOptions
+            {
+                SoftLicenceBaseUrl = "https://softlicence.test/",
+                SoftLicenceApiKey = "analytics-key",
+                ResultDirectory = Path.Combine(AppContext.BaseDirectory, "tkt-003426-results")
+            }));
+
+        var refusal = await Assert.ThrowsAsync<SoftLicenceProviderRefusalException>(() =>
+            client.GetTelemetryOverviewAsync(days: 1, top: 5, date: null, fromUtc: null, toUtc: null, CancellationToken.None));
+
+        Assert.Equal("PRODUCT_SELECTOR_REQUIRED", refusal.ErrorCode);
+        Assert.Equal(400, refusal.StatusCode);
+        Assert.Contains("list_products", refusal.Message);
+        Assert.EndsWith($"Products available to this key: {string.Join(", ", productNames)}.", refusal.Message);
+    }
+
+    /// <summary>A provider refusal never relays a hidden diagnostic field from the response body.</summary>
+    [Fact]
+    public async Task GetTelemetryOverviewAsync_WhenProductSelectorIsRequired_DoesNotRelayTheProviderBody()
+    {
+        var handler = new CapturingHandler(request =>
+            request.RequestUri!.AbsolutePath.EndsWith("/api/analytics/products", StringComparison.Ordinal)
+                ? new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(
+                        """{"products":[{"productId":"808648bc-a4b9-4f71-bcb1-b7c7e67ca98e","name":"TIAConnect"}]}""",
+                        Encoding.UTF8, "application/json")
+                }
+                : new HttpResponseMessage(HttpStatusCode.BadRequest)
+                {
+                    Content = new StringContent(
+                        """{"errorCode":"PRODUCT_SELECTOR_REQUIRED","message":"Select a product.","sensitiveSentinel":"do-not-expose-this-value"}""",
+                        Encoding.UTF8, "application/json")
+                });
+        var client = CreateClient(handler);
+
+        var refusal = await Assert.ThrowsAsync<SoftLicenceProviderRefusalException>(() =>
+            client.GetTelemetryOverviewAsync(days: 1, top: 5, date: null, fromUtc: null, toUtc: null, CancellationToken.None));
+
+        Assert.DoesNotContain("do-not-expose-this-value", refusal.Message);
+        Assert.DoesNotContain("sensitiveSentinel", refusal.Message);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GetTelemetryOverviewAsync_WhenProductFallbackExceedsTransportBound_ThrowsRefusalWithoutProducts(
         bool omitContentLength)
     {
         var requests = 0;
@@ -1819,11 +2014,12 @@ public sealed class SoftLicenceMcpClientTests
         });
         var client = CreateClient(handler, responseMaxBytes: 1024);
 
-        var result = await client.GetTelemetryOverviewAsync(
-            days: 1, top: 5, date: null, fromUtc: null, toUtc: null, CancellationToken.None);
+        var refusal = await Assert.ThrowsAsync<SoftLicenceProviderRefusalException>(() =>
+            client.GetTelemetryOverviewAsync(
+                days: 1, top: 5, date: null, fromUtc: null, toUtc: null, CancellationToken.None));
 
-        Assert.Equal("PRODUCT_SELECTOR_REQUIRED", result.GetProperty("errorCode").GetString());
-        Assert.Equal(JsonValueKind.Null, result.GetProperty("availableProducts").ValueKind);
+        Assert.Equal("PRODUCT_SELECTOR_REQUIRED", refusal.ErrorCode);
+        Assert.DoesNotContain("Products available to this key", refusal.Message);
         Assert.Equal(2, requests);
     }
 
@@ -1850,13 +2046,15 @@ public sealed class SoftLicenceMcpClientTests
         });
         var client = CreateClient(handler);
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var ex = await Assert.ThrowsAsync<SoftLicenceProviderRefusalException>(() =>
             client.GetTelemetryOverviewAsync(days: 7, top: 20, date: null, fromUtc: null, toUtc: null, CancellationToken.None));
 
         // TKT-001168: the message names the endpoint, relays the server text and hints at missing scopes.
         Assert.Contains("rejected SOFTLICENCE_API_KEY", ex.Message);
         Assert.Contains("HTTP 401 on /api/analytics/", ex.Message);
         Assert.Contains("Missing or invalid X-Analytics-Key header.", ex.Message);
+        Assert.Equal("ANALYTICS_AUTH_FAILED", ex.ErrorCode);
+        Assert.Equal(401, ex.StatusCode);
         Assert.Contains("security:read", ex.Message);
     }
 
@@ -1946,6 +2144,100 @@ public sealed class SoftLicenceMcpClientTests
                 Guid.NewGuid().ToString("D"), null, "TIAConnect", CancellationToken.None));
 
         Assert.Contains("transport byte bound", error.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>Proves that lock reads preserve exact filters and never attach the administrative credential.</summary>
+    [Fact]
+    public async Task ListSecurityLocksAsync_PreservesExactFiltersAndUsesAnalyticsCredential()
+    {
+        HttpRequestMessage? capturedRequest = null;
+        var client = CreateClient(new CapturingHandler(request =>
+        {
+            capturedRequest = request;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"recordsReturned":0,"locks":[]}""", Encoding.UTF8, "application/json")
+            };
+        }));
+
+        await client.ListSecurityLocksAsync(
+            "OPEN", "Hw-Exact ", "Alice@Example.Test", 17, null, "TIAConnect", CancellationToken.None);
+
+        Assert.NotNull(capturedRequest);
+        Assert.Equal("/api/analytics/security/locks", capturedRequest.RequestUri!.AbsolutePath);
+        Assert.Equal("OPEN", GetQueryValue(capturedRequest.RequestUri, "state"));
+        Assert.Equal("Hw-Exact ", GetQueryValue(capturedRequest.RequestUri, "hardwareId"));
+        Assert.Equal("Alice@Example.Test", GetQueryValue(capturedRequest.RequestUri, "email"));
+        Assert.Equal("analytics-key", Assert.Single(capturedRequest.Headers.GetValues("X-Analytics-Key")));
+        Assert.False(capturedRequest.Headers.Contains("X-Admin-Secret"));
+    }
+
+    /// <summary>Proves that a server refusal remains structured while the client still performs its read-back.</summary>
+    [Fact]
+    public async Task DecideSecurityLockAsync_ReturnsReadableServerRefusalAndVerifiesByReadRoute()
+    {
+        var lockId = Guid.Parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        var requests = new List<(HttpMethod Method, Uri Uri, string? AdminSecret, string Body)>();
+        var client = CreateClient(new CapturingHandler(request =>
+        {
+            requests.Add((request.Method, request.RequestUri!,
+                request.Headers.TryGetValues("X-Admin-Secret", out var values) ? values.Single() : null,
+                request.Content?.ReadAsStringAsync().GetAwaiter().GetResult() ?? string.Empty));
+            if (request.Method == HttpMethod.Post)
+            {
+                return new HttpResponseMessage(HttpStatusCode.Conflict)
+                {
+                    Content = new StringContent("""{"error":"lock_banned_irreversible"}""", Encoding.UTF8, "application/json")
+                };
+            }
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","state":"BANNED"}""", Encoding.UTF8, "application/json")
+            };
+        }));
+
+        var result = await client.DecideSecurityLockAsync(
+            lockId, "RELEASE", "Reviewed evidence", "TKT-001838", "Alice",
+            null, "TIAConnect", CancellationToken.None);
+
+        Assert.Equal("write_conflict", result.GetProperty("mutation").GetProperty("errorCode").GetString());
+        Assert.Equal("lock_banned_irreversible",
+            result.GetProperty("mutation").GetProperty("error").GetProperty("error").GetString());
+        Assert.Equal("BANNED", result.GetProperty("verification").GetProperty("state").GetString());
+        Assert.Equal(2, requests.Count);
+        Assert.Equal("admin-secret", requests[0].AdminSecret);
+        Assert.Contains("Reviewed evidence | auditRef=TKT-001838", requests[0].Body, StringComparison.Ordinal);
+        Assert.Null(requests[1].AdminSecret);
+        Assert.Equal($"/api/analytics/security/locks/{lockId:D}", requests[1].Uri.AbsolutePath);
+    }
+
+    /// <summary>Proves that explicit unban sends distinct audit fields and verifies the released state.</summary>
+    [Fact]
+    public async Task UnbanSecurityLockAsync_SendsAuditAndReturnsReadBack()
+    {
+        var lockId = Guid.Parse("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+        var requests = new List<(HttpMethod Method, Uri Uri, string Body)>();
+        var client = CreateClient(new CapturingHandler(request =>
+        {
+            requests.Add((request.Method, request.RequestUri!,
+                request.Content?.ReadAsStringAsync().GetAwaiter().GetResult() ?? string.Empty));
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(request.Method == HttpMethod.Post
+                    ? """{"state":"RELEASED","adminDecision":"UNBAN","recoveredIncidentCount":1,"deactivatedHardwareBanCount":2}"""
+                    : """{"state":"RELEASED","adminDecision":"UNBAN"}""", Encoding.UTF8, "application/json")
+            };
+        }));
+
+        var result = await client.UnbanSecurityLockAsync(
+            lockId, "False positive reviewed", "TKT-001838", "Alice",
+            null, "TIAConnect", CancellationToken.None);
+
+        Assert.Equal("UNBAN", result.GetProperty("mutation").GetProperty("adminDecision").GetString());
+        Assert.Equal("RELEASED", result.GetProperty("verification").GetProperty("state").GetString());
+        Assert.Contains("\"auditReference\":\"TKT-001838\"", requests[0].Body, StringComparison.Ordinal);
+        Assert.Equal($"/api/admin/security-locks/{lockId:D}/unban", requests[0].Uri.AbsolutePath);
+        Assert.Equal($"/api/analytics/security/locks/{lockId:D}", requests[1].Uri.AbsolutePath);
     }
 
     [Theory]

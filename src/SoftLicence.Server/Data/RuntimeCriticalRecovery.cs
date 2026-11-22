@@ -26,6 +26,14 @@ public sealed class RuntimeCriticalRecovery
     [MaxLength(64)]
     public string RecoveredByKeyId { get; set; } = string.Empty;
 
+    [MaxLength(24)]
+    public string Source { get; set; } = "S2S";
+
+    public Guid? SecurityLockReportId { get; set; }
+
+    [MaxLength(100)]
+    public string? RecoveredByAdmin { get; set; }
+
     public DateTime RecoveredAtUtc { get; set; }
 }
 

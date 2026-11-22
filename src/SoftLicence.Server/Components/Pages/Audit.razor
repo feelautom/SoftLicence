@@ -5,6 +5,7 @@
 @inject SoftLicence.Server.Services.ToastService Toast
 @inject SoftLicence.Server.Services.AuditNotifier AuditNotifier
 @inject SoftLicence.Server.Services.SecurityService Security
+@inject SoftLicence.Server.Services.AuthService Auth
 @implements IDisposable
 @using SoftLicence.Server.Data
 @using Microsoft.EntityFrameworkCore
@@ -190,6 +191,74 @@
         else
         {
             <div class="animate-fade">
+                <!-- SCORES DE MENACE (TKT-002685) -->
+                <div class="mb-4">
+                    <h6 class="text-info d-flex align-items-center mb-2">
+                        @L["Audit_ThreatScores"] (@ThreatScores.Count)
+                    </h6>
+                    <div class="text-muted small mb-3">@L["Audit_ThreatScoresHelp"]</div>
+                    <div class="row g-2 align-items-center mb-3">
+                        <div class="col-md-6">
+                            @* TKT-003191: bind on every keystroke. With the default change event the value only
+                               arrived on blur, so the Reset buttons stayed disabled while typing and the click that
+                               blurred the field landed on a still-disabled button. *@
+                            <input class="form-control form-control-sm bg-dark text-light border-secondary"
+                                   placeholder="@L["Audit_ThreatScoreResetReason"]"
+                                   @bind="ThreatResetReason"
+                                   @bind:event="oninput" />
+                        </div>
+                    </div>
+                    @if (ThreatScores.Any())
+                    {
+                        <div class="table-responsive">
+                            <table class="table table-sm table-dark align-middle small mb-0">
+                                <thead>
+                                    <tr>
+                                        <th>IP</th>
+                                        <th>@L["Audit_ThreatScore"]</th>
+                                        <th>@L["Audit_ThreatFirstSeen"]</th>
+                                        <th>@L["Audit_ThreatLastHit"]</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (var score in ThreatScores)
+                                    {
+                                        <tr>
+                                            <td>
+                                                <code class="text-info">@score.IpAddress</code>
+                                                @if (score.IsBanned)
+                                                {
+                                                    <span class="badge bg-danger ms-2" style="font-size: 0.6rem;">BAN</span>
+                                                }
+                                            </td>
+                                            <td>
+                                                <span class="badge @(score.Score >= 100 ? "bg-danger" : "bg-warning text-dark")">@score.Score</span>
+                                            </td>
+                                            <td>@TZ.ToLocal(score.FirstSeen).ToString("dd/MM/yyyy HH:mm")</td>
+                                            <td>@TZ.ToLocal(score.LastHit).ToString("dd/MM/yyyy HH:mm")</td>
+                                            <td class="text-end">
+                                                <button class="btn btn-sm btn-outline-success py-0"
+                                                        disabled="@string.IsNullOrWhiteSpace(ThreatResetReason)"
+                                                        title="@L["Audit_ThreatScoreResetHint"]"
+                                                        @onclick="() => ResetThreatScore(score.IpAddress)">
+                                                    @L["Audit_ThreatScoreReset"]
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="text-center py-3 text-muted small italic">@L["Audit_NoThreatScores"]</div>
+                    }
+                </div>
+
+                <hr class="border-secondary border-opacity-25 my-4" />
+
                 <!-- IPS BANNIES ACTIVES -->
                 <div class="mb-4">
                     <h6 class="text-warning d-flex align-items-center mb-3">
@@ -354,6 +423,8 @@
     private List<BannedIp> ActiveBans = new();
     private List<BannedIp> ExpiredBans = new();
     private Dictionary<string, GeoInfo> ResolvedBans = new();
+    private IReadOnlyList<SoftLicence.Server.Services.ThreatScoreSnapshot> ThreatScores = [];
+    private string ThreatResetReason = "";
     
     private AccessLog? SelectedLog;
     private string SearchTerm = "";
@@ -452,6 +523,33 @@
             Security.EvictBanCache(ip);
             Toast.ShowSuccess($"IP {ip} supprimée de l'historique");
             await Refresh();
+        }
+    }
+
+    /// <summary>
+    /// Erases one IP threat score in the database and in memory without restart (TKT-002685). The reset is
+    /// journaled with the signed-in administrator and the mandatory reason; the ban list is unchanged.
+    /// </summary>
+    /// <param name="ip">Persisted IP key.</param>
+    private async Task ResetThreatScore(string ip)
+    {
+        if (string.IsNullOrWhiteSpace(ThreatResetReason))
+        {
+            Toast.ShowError(L["Audit_ThreatScoreResetReasonRequired"]);
+            return;
+        }
+        try
+        {
+            var adminName = (await Auth.GetAuthenticationStateAsync()).User.Identity?.Name;
+            var result = await Security.ResetThreatScoreAsync(
+                ip, "admin-ui:" + (adminName ?? "admin"), ThreatResetReason);
+            Toast.ShowSuccess($"IP {result.IpAddress} : {result.PreviousScore} -> 0");
+            ThreatResetReason = "";
+            await Refresh();
+        }
+        catch (SoftLicence.Server.Services.ThreatScoreResetValidationException exception)
+        {
+            Toast.ShowError(exception.Message);
         }
     }
 
@@ -560,6 +658,7 @@
             }
 
             ActiveBans = allBans.Where(b => b.IsActive).ToList();
+            ThreatScores = await Security.ListThreatScoresAsync(50, 200);
             ExpiredBans = allBans.Where(b => !b.IsActive).ToList();
             foreach (var ban in allBans)
             {

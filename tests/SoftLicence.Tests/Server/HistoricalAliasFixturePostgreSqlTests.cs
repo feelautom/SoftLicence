@@ -9,10 +9,10 @@ using Xunit;
 namespace SoftLicence.Tests.Server;
 
 /// <summary>Builds historical alias fixtures on a fresh historical schema, then leaves real upgrades to the test.</summary>
-public sealed partial class RuntimeEnrollmentPostgreSqlTests
+public abstract partial class RuntimeEnrollmentPostgreSqlTestBase
 {
     /// <summary>The last schema before alias creation and its authenticated-history backfill.</summary>
-    private const string HistoricalAliasBaseline = "20260816131533_AllowRuntimeHardwareAuthorityMigrationProofs";
+    protected const string HistoricalAliasBaseline = "20260816131533_AllowRuntimeHardwareAuthorityMigrationProofs";
 
     /// <summary>
     /// Seeds one synthetic historical migration graph into a new database at the pre-alias schema.
@@ -23,7 +23,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// <param name="subjectRef">Optional synthetic subject used by the later Finalize scenario.</param>
     /// <returns>A scenario owning the historical database and independent keys; callers must upgrade before using current services.</returns>
     /// <remarks>Every seed insert is bounded to the template product/binding. Failure cleans both owned databases. No Down migration is invoked.</remarks>
-    private static async Task<PreparedBootstrapScenario> CreateHistoricalAliasScenarioAsync(string? subjectRef = null)
+    internal static async Task<PreparedBootstrapScenario> CreateHistoricalAliasScenarioAsync(string? subjectRef = null)
     {
         var connections = await ProvisionIsolatedAsync(targetMigration: HistoricalAliasBaseline);
         using var cleanup = new BootstrapIsolatedDatabaseCleanup(connections.Admin, connections.App);
@@ -129,7 +129,7 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// <param name="canonicalDigest">Whether to represent the historical contract that stored the canonical digest on this row.</param>
     /// <returns>A task completing after the exact row count was inserted with historical constraints enabled.</returns>
     /// <remarks>JSON stays in process memory and is never logged. No constraint, trigger or migration ledger is disabled or rewritten.</remarks>
-    private static async Task CopyHistoricalAliasRowsAsync(NpgsqlConnection source, NpgsqlConnection target,
+    protected static async Task CopyHistoricalAliasRowsAsync(NpgsqlConnection source, NpgsqlConnection target,
         string table, string predicate, PreparedBootstrapScenario scenario, int minimumRows, int maximumRows,
         bool canonicalDigest = false)
     {
@@ -156,13 +156,13 @@ public sealed partial class RuntimeEnrollmentPostgreSqlTests
     /// <param name="LicenseId">Licence shared by the two seats.</param>
     /// <param name="SourceSeatId">Canonical seat released before alias backfill.</param>
     /// <param name="LegacySeatId">New legacy seat created before alias backfill.</param>
-    private sealed record HistoricalAliasGraph(Guid LicenseId, Guid SourceSeatId, Guid LegacySeatId);
+    internal sealed record HistoricalAliasGraph(Guid LicenseId, Guid SourceSeatId, Guid LegacySeatId);
 
     /// <summary>Builds the historical inactive graph using schema-compatible SQL before the real upgrade.</summary>
     /// <param name="scenario">Owned pre-alias database seeded with exactly one active migrated enrollment.</param>
     /// <returns>The exact licence and seat identifiers used by the unchanged assertions after upgrade.</returns>
     /// <remarks>All mutations are parameterized and transactional; current EF entities are not queried against the historical schema.</remarks>
-    private static async Task<HistoricalAliasGraph> ReleaseHistoricalAliasSeatAsync(PreparedBootstrapScenario scenario)
+    internal static async Task<HistoricalAliasGraph> ReleaseHistoricalAliasSeatAsync(PreparedBootstrapScenario scenario)
     {
         await using var connection = new NpgsqlConnection(scenario.AdminConnectionString);
         await connection.OpenAsync();

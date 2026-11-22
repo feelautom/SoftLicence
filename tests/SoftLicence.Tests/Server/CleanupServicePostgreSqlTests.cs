@@ -513,12 +513,32 @@ public sealed class CleanupServicePostgreSqlTests
             Func<LicenseDbContext, Task>? migrateAsync = null,
             Action<string>? databaseCreated = null)
         {
+            if (migrateAsync is null)
+            {
+                var clone = await PostgreSqlModelDatabase.CloneAsync("cleanup");
+                try
+                {
+                    databaseCreated?.Invoke(clone.DatabaseName);
+                    return new PostgreSqlProvision(
+                        clone.MaintenanceConnectionString,
+                        clone.ConnectionString,
+                        clone.DatabaseName);
+                }
+                catch
+                {
+                    await PostgreSqlModelDatabase.DropAsync(
+                        clone.MaintenanceConnectionString,
+                        clone.DatabaseName);
+                    throw;
+                }
+            }
+
             var configured = Environment.GetEnvironmentVariable("SOFTLICENCE_RUNTIME_TEST_POSTGRES");
             if (string.IsNullOrWhiteSpace(configured))
                 throw new InvalidOperationException("SOFTLICENCE_RUNTIME_TEST_POSTGRES is required for PostgreSQL contract tests.");
 
             var database = "telemetry_retention_" + Guid.NewGuid().ToString("N");
-            var maintenance = new NpgsqlConnectionStringBuilder(configured) { Database = "postgres" }.ConnectionString;
+            var maintenance = new NpgsqlConnectionStringBuilder(configured) { Database = "postgres", Pooling = false }.ConnectionString;
             await using (var connection = new NpgsqlConnection(maintenance))
             {
                 await connection.OpenAsync();
@@ -529,15 +549,12 @@ public sealed class CleanupServicePostgreSqlTests
 
             databaseCreated?.Invoke(database);
 
-            var target = new NpgsqlConnectionStringBuilder(configured) { Database = database }.ConnectionString;
+            var target = new NpgsqlConnectionStringBuilder(configured) { Database = database, Pooling = false }.ConnectionString;
             try
             {
                 var options = new DbContextOptionsBuilder<LicenseDbContext>().UseNpgsql(target).Options;
                 await using var db = new LicenseDbContext(options);
-                if (migrateAsync == null)
-                    await db.Database.MigrateAsync();
-                else
-                    await migrateAsync(db);
+                await migrateAsync(db);
                 return new PostgreSqlProvision(maintenance, target, database);
             }
             catch
@@ -567,13 +584,6 @@ public sealed class CleanupServicePostgreSqlTests
         }
 
         private static async Task DropDatabaseAsync(string maintenanceConnectionString, string database)
-        {
-            NpgsqlConnection.ClearAllPools();
-            await using var connection = new NpgsqlConnection(maintenanceConnectionString);
-            await connection.OpenAsync();
-            await using var command = connection.CreateCommand();
-            command.CommandText = $"DROP DATABASE IF EXISTS \"{database}\" WITH (FORCE)";
-            await command.ExecuteNonQueryAsync();
-        }
+            => await PostgreSqlModelDatabase.DropAsync(maintenanceConnectionString, database);
     }
 }

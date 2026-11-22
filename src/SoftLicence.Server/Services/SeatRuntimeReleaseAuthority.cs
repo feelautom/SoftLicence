@@ -14,6 +14,15 @@ internal static class SeatRuntimeReleaseAuthority
     internal const string Reason = "seat_released";
 
     /// <summary>
+    /// Row-locking read of every assignment revision of one seat; <c>{0}</c> is the seat identifier.
+    /// PostgreSQL requires UPDATE privilege on at least one column for <c>FOR UPDATE</c>, while the
+    /// application role is otherwise read-only on this table: the lock right is granted on
+    /// <c>"Id"</c> only by the <c>GrantSeatReleaseAssignmentRowLock</c> migration.
+    /// </summary>
+    internal const string AssignmentRowLockSql =
+        "SELECT * FROM public.\"EnrollmentLicenseAssignments\" WHERE \"LicenseSeatId\" = {0} ORDER BY \"Revision\", \"Id\" FOR UPDATE";
+
+    /// <summary>
     /// Begins a read-committed transaction when needed, then acquires the global Runtime mutation
     /// lock and the item2 commercial-write barrier before any mutable authority row is read.
     /// </summary>
@@ -49,8 +58,20 @@ internal static class SeatRuntimeReleaseAuthority
     /// <summary>
     /// Locks one licence and its seats in deterministic order after the global barriers, captures
     /// every original ACTIVE assignment, and returns a fresh authoritative database timestamp.
-    /// A live Runtime graph without its item2 assignment is reported as infrastructure failure.
+    /// A commercial assignment graph that only support can resolve (live Runtime graph without its item2 assignment,
+    /// ambiguous or diverging rights) is refused with the named 409 <c>assignment_reconciliation_required</c>
+    /// (TKT-004085); a scope mismatch or a row deleted under the lock stays a 503 <c>authority_unavailable</c>.
     /// </summary>
+    /// <remarks>
+    /// Per seat (TKT-001428): the live installation of a seat is the PENDING or ACTIVE enrollment holding the seat's
+    /// ACTIVE right, or else an enrollment created on that seat whose ACTIVE right is not on another seat (an account
+    /// relink moves the right without changing the enrollment's <c>LicenseSeatId</c>). A seat without a live
+    /// installation is released without snapshot when none of its assignments is ACTIVE, and refused
+    /// (<c>seat_release_assignment_without_runtime</c>) when one still is. A seat with one live installation and no
+    /// ACTIVE assignment is accepted only when that installation's single
+    /// assignment ended with <c>license_revoked</c>; ENDED rows of earlier installations are ignored. Every refusal
+    /// is recorded and let through instead while the assignment switch is open (<see cref="AssignmentEnforcement"/>).
+    /// </remarks>
     /// <param name="db">The context whose transaction already owns both global barriers.</param>
     /// <param name="productId">The exact product that owns the licence.</param>
     /// <param name="license">The tracked licence being released.</param>
@@ -58,7 +79,11 @@ internal static class SeatRuntimeReleaseAuthority
     /// <param name="fallbackNowUtc">The time source used only by non-relational tests.</param>
     /// <param name="cancellationToken">Stops the database operation.</param>
     /// <returns>The authoritative release time and immutable assignment snapshots.</returns>
-    /// <exception cref="DistributionOperationException">The commercial relation is missing, ambiguous, or divergent.</exception>
+    /// <exception cref="DistributionOperationException">
+    /// 409 <c>assignment_reconciliation_required</c> when the commercial relation is missing, ambiguous or divergent
+    /// and the switch is closed (bounded <c>seat_release_*</c> reason); 503 <c>authority_unavailable</c> when the scope
+    /// does not match or a locked row disappeared.
+    /// </exception>
     internal static async Task<SeatReleaseScope> PrepareAsync(
         LicenseDbContext db,
         Guid productId,
@@ -106,8 +131,7 @@ internal static class SeatRuntimeReleaseAuthority
         foreach (var seat in orderedSeats.OrderBy(candidate => candidate.Id))
         {
             var assignments = db.Database.IsNpgsql()
-                ? await db.EnrollmentLicenseAssignments.FromSqlInterpolated(
-                        $"SELECT * FROM public.\"EnrollmentLicenseAssignments\" WHERE \"LicenseSeatId\" = {seat.Id} ORDER BY \"Revision\", \"Id\" FOR UPDATE")
+                ? await db.EnrollmentLicenseAssignments.FromSqlRaw(AssignmentRowLockSql, seat.Id)
                     .AsNoTracking().ToListAsync(cancellationToken)
                 : await db.EnrollmentLicenseAssignments.AsNoTracking()
                     .Where(candidate => candidate.LicenseSeatId == seat.Id)
@@ -117,30 +141,44 @@ internal static class SeatRuntimeReleaseAuthority
             if (activeAssignments.Length > 1)
             {
                 if (!await IsSwitchOpenAsync())
-                    throw Unavailable("seat_release_assignment_ambiguous");
+                    throw ReconciliationRequired("seat_release_assignment_ambiguous");
                 AssignmentEnforcement.Record(db, AssignmentEnforcement.SeatReleaseControl, "seat_release_assignment_ambiguous",
                     "released_without_assignment_snapshot", license.Id, seat.Id, null, $"seat={seat.Id:D} reason=seat_release_assignment_ambiguous");
                 continue;
             }
 
+            // TKT-001428 (c): a live installation belongs to the seat that holds its ACTIVE right. An account relink
+            // moves the right to the seat of another licence while the enrollment keeps its original LicenseSeatId
+            // (its Runtime identity never changes), so the lookup by LicenseSeatId alone missed the installation on
+            // the new seat and refused the website sign-out, and counted it on the seat it had left. Rights of other
+            // seats are read without row locks: both global barriers taken by BeginAsync already serialize every
+            // Runtime and commercial-assignment mutation.
+            var activeEnrollmentIdsOnSeat = activeAssignments.Select(candidate => candidate.EnrollmentId).ToArray();
             var liveEnrollmentIds = await db.RuntimeEnrollments.AsNoTracking()
-                .Where(candidate => candidate.LicenseSeatId == seat.Id
-                    && (candidate.State == "PENDING" || candidate.State == "ACTIVE"))
+                .Where(candidate => (candidate.State == "PENDING" || candidate.State == "ACTIVE")
+                    && (activeEnrollmentIdsOnSeat.Contains(candidate.Id)
+                        || (candidate.LicenseSeatId == seat.Id
+                            && !db.EnrollmentLicenseAssignments.Any(right => right.EnrollmentId == candidate.Id
+                                && right.State == "ACTIVE" && right.LicenseSeatId != seat.Id))))
                 .Select(candidate => candidate.Id).OrderBy(candidate => candidate).ToListAsync(cancellationToken);
             if (liveEnrollmentIds.Count > 1)
             {
                 if (!await IsSwitchOpenAsync())
-                    throw Unavailable("seat_release_enrollment_ambiguous");
+                    throw ReconciliationRequired("seat_release_enrollment_ambiguous");
                 AssignmentEnforcement.Record(db, AssignmentEnforcement.SeatReleaseControl, "seat_release_enrollment_ambiguous",
                     "released_without_assignment_snapshot", license.Id, seat.Id, null, $"seat={seat.Id:D} reason=seat_release_enrollment_ambiguous");
                 continue;
             }
             if (liveEnrollmentIds.Count == 0)
             {
-                if (assignments.Count != 0)
+                // TKT-001428: only an ACTIVE right without a live installation is inconsistent. A seat whose history
+                // is entirely ENDED (enrollment invalidated by the UUID migration, a reinstall or an earlier release)
+                // has nothing left to end and is the normal state of a seat being released or switched; refusing it
+                // blocked three legitimate customers in production (portal deactivation, automatic seat switch).
+                if (activeAssignments.Length != 0)
                 {
                     if (!await IsSwitchOpenAsync())
-                        throw Unavailable("seat_release_assignment_without_runtime");
+                        throw ReconciliationRequired("seat_release_assignment_without_runtime");
                     AssignmentEnforcement.Record(db, AssignmentEnforcement.SeatReleaseControl, "seat_release_assignment_without_runtime",
                         "released_without_assignment_snapshot", license.Id, seat.Id, null, $"seat={seat.Id:D} reason=seat_release_assignment_without_runtime");
                 }
@@ -158,12 +196,17 @@ internal static class SeatRuntimeReleaseAuthority
             }
             else
             {
-                var immutableLicenseRevocation = assignments.Where(candidate =>
+                // TKT-001428: judge only the rights of the live installation. ENDED rows of earlier installations
+                // of the same seat are closed history and cannot hold the seat (no ACTIVE row exists here); counting
+                // them refused a seat whose live installation lost its right through a licence revocation.
+                var liveEnrollmentAssignments = assignments
+                    .Where(candidate => candidate.EnrollmentId == liveEnrollmentIds[0]).ToArray();
+                var immutableLicenseRevocation = liveEnrollmentAssignments.Where(candidate =>
                     candidate.State == "ENDED" && candidate.EndReason == "license_revoked").ToArray();
-                if (assignments.Count != 1 || immutableLicenseRevocation.Length != 1)
+                if (liveEnrollmentAssignments.Length != 1 || immutableLicenseRevocation.Length != 1)
                 {
                     if (!await IsSwitchOpenAsync())
-                        throw Unavailable("seat_release_assignment_missing");
+                        throw ReconciliationRequired("seat_release_assignment_missing");
                     AssignmentEnforcement.Record(db, AssignmentEnforcement.SeatReleaseControl, "seat_release_assignment_missing",
                         "released_without_assignment_snapshot", license.Id, seat.Id, null, $"seat={seat.Id:D} reason=seat_release_assignment_missing");
                     continue;
@@ -176,7 +219,7 @@ internal static class SeatRuntimeReleaseAuthority
                 || assignment.EnrollmentId != liveEnrollmentIds[0])
             {
                 if (!await IsSwitchOpenAsync())
-                    throw Unavailable("seat_release_assignment_diverged");
+                    throw ReconciliationRequired("seat_release_assignment_diverged");
                 AssignmentEnforcement.Record(db, AssignmentEnforcement.SeatReleaseControl, "seat_release_assignment_diverged",
                     "released_without_assignment_snapshot", license.Id, seat.Id, null, $"seat={seat.Id:D} reason=seat_release_assignment_diverged");
                 continue;
@@ -200,20 +243,35 @@ internal static class SeatRuntimeReleaseAuthority
     /// <param name="scope">The immutable authority captured before mutation.</param>
     /// <param name="seats">The exact seats whose ACTIVE successors must remain absent.</param>
     /// <param name="cancellationToken">Stops the database operation.</param>
-    /// <exception cref="DistributionOperationException">The trigger result differs from the captured authority.</exception>
+    /// <exception cref="DistributionOperationException">
+    /// 409 <c>assignment_reconciliation_required</c> when the trigger result differs from the captured authority, or
+    /// when the assignment trigger itself refuses the release (quarantined installation, unresolved graph); 409
+    /// <c>seat_assignment_busy</c> when it reports a concurrent claimant. The caller's transaction must then be rolled
+    /// back, which leaves the seat exactly as it was.
+    /// </exception>
     internal static async Task CompleteAsync(
         LicenseDbContext db,
         SeatReleaseScope scope,
         IReadOnlyCollection<LicenseSeat> seats,
         CancellationToken cancellationToken = default)
     {
-        await db.SaveChangesAsync(cancellationToken);
-        if (db.Database.IsNpgsql())
+        try
         {
-            await db.Database.ExecuteSqlRawAsync(
-                "SET CONSTRAINTS \"TR_LicenseSeats_AssignmentDualWrite\" IMMEDIATE; " +
-                "SET CONSTRAINTS \"TR_LicenseSeats_AssignmentDualWrite\" DEFERRED;",
-                cancellationToken);
+            await db.SaveChangesAsync(cancellationToken);
+            if (db.Database.IsNpgsql())
+            {
+                await db.Database.ExecuteSqlRawAsync(
+                    "SET CONSTRAINTS \"TR_LicenseSeats_AssignmentDualWrite\" IMMEDIATE; " +
+                    "SET CONSTRAINTS \"TR_LicenseSeats_AssignmentDualWrite\" DEFERRED;",
+                    cancellationToken);
+            }
+        }
+        catch (Exception exception) when (AssignmentRefusals.TryTranslate(exception, out var refusal))
+        {
+            // TKT-004085: the assignment trigger fires here (forced IMMEDIATE, or BEFORE triggers at SaveChanges). Its
+            // refusal is a legitimate licence state, not an outage: every release caller receives the named code instead
+            // of an unhandled PostgresException (empty HTTP 500). Any other database error propagates unchanged.
+            throw refusal;
         }
 
         // TKT-001277 lot 2d: same switch as PrepareAsync. With the switch open the two post-release proofs record
@@ -234,7 +292,7 @@ internal static class SeatRuntimeReleaseAuthority
                     && ended.EndedAtUtc != original.ExpectedEndedAtUtc))
             {
                 if (!await IsSwitchOpenAsync())
-                    throw Unavailable("seat_release_assignment_not_ended");
+                    throw ReconciliationRequired("seat_release_assignment_not_ended");
                 AssignmentEnforcement.Record(db, AssignmentEnforcement.SeatReleaseControl,
                     "seat_release_assignment_not_ended", "release_kept", original.LicenseId,
                     original.LicenseSeatId, original.EnrollmentId,
@@ -251,7 +309,7 @@ internal static class SeatRuntimeReleaseAuthority
                     || enrollmentIds.Contains(candidate.EnrollmentId)), cancellationToken))
         {
             if (!await IsSwitchOpenAsync())
-                throw Unavailable("seat_release_successor_active");
+                throw ReconciliationRequired("seat_release_successor_active");
             AssignmentEnforcement.Record(db, AssignmentEnforcement.SeatReleaseControl,
                 "seat_release_successor_active", "release_kept", null, seatIds.FirstOrDefault(), null,
                 $"seats={string.Join(',', seatIds)} reason=seat_release_successor_active");
@@ -261,11 +319,23 @@ internal static class SeatRuntimeReleaseAuthority
             await db.SaveChangesAsync(cancellationToken);
     }
 
-    /// <summary>Creates the bounded infrastructure failure used for an unsafe release graph.</summary>
+    /// <summary>
+    /// Creates the bounded infrastructure failure kept for a release scope that does not match its caller or a row that
+    /// disappeared under the lock: these are code invariants or concurrent deletions, not a licence state to explain.
+    /// </summary>
     /// <param name="diagnosticCode">The internal bounded reason; it never contains hardware data.</param>
     /// <returns>A public 503 authority failure with the internal diagnostic attached.</returns>
     private static DistributionOperationException Unavailable(string diagnosticCode) =>
         new("authority_unavailable", StatusCodes.Status503ServiceUnavailable, diagnosticCode);
+
+    /// <summary>
+    /// Creates the named 409 refusal for an assignment graph that only a support reconciliation can resolve
+    /// (TKT-004085). It replaced the former 503 <c>authority_unavailable</c>, which made clients report an outage.
+    /// </summary>
+    /// <param name="diagnosticCode">The bounded <c>seat_release_*</c> reason, returned as <c>reasonCode</c>; never hardware data.</param>
+    /// <returns>The refusal to throw; the caller's transaction rolls back and nothing is released.</returns>
+    private static DistributionOperationException ReconciliationRequired(string diagnosticCode) =>
+        AssignmentRefusals.ReconciliationRequired(diagnosticCode);
 
     /// <summary>Captures the authoritative release instant and original assignments.</summary>
     /// <param name="ObservedAtUtc">The fresh database time after all decisive waits.</param>

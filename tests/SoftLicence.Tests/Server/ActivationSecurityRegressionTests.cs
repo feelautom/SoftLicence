@@ -87,7 +87,7 @@ public sealed class ActivationSecurityRegressionTests : IClassFixture<WebApplica
         await AssertBanInactiveAsync("B000000000000002");
         _notifierMock.Verify(
             n => n.Notify(
-                NotificationService.Triggers.SecurityIpBanned,
+                NotificationService.Triggers.SecurityOutdatedVersionBanned,
                 "AUTO-UNBAN VERSION OBSOLETE",
                 It.Is<string>(message => message.Contains("outdated_version")),
                 It.IsAny<object>()),

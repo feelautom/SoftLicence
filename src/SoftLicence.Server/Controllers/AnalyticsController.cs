@@ -1082,6 +1082,49 @@ public sealed partial class AnalyticsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>
+    /// Returns one page of paid (non-Freemium) licenses with ISO-week usage aggregates over 1 to 52 weeks
+    /// (TKT-003652): active and usage days, starts, usage events, MCP and Copilot tool calls, errors,
+    /// license failures and prompts, machines, new seats and latest version. Read-only, aggregates only.
+    /// </summary>
+    /// <remarks>
+    /// Same analytics key and product-scope rules as <c>paid-activity-ranking</c>: an invalid key gets the
+    /// standard analytics failure, a product outside the key's scope gets the product resolution error.
+    /// The service is resolved per action so the large controller constructor stays unchanged.
+    /// </remarks>
+    [HttpGet("licenses/paid-weekly-activity")]
+    public async Task<IActionResult> GetPaidWeeklyActivity(
+        [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
+        [FromServices] PaidWeeklyActivityAnalyticsService paidWeeklyActivityAnalytics,
+        [FromQuery] string? licenseTypes = null,
+        [FromQuery] string? status = "active",
+        [FromQuery] int weeks = 12,
+        [FromQuery] int skip = 0,
+        [FromQuery] int take = 100,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
+        CancellationToken cancellationToken = default)
+    {
+        var auth = await AuthenticateAnalyticsAsync(analyticsKey, cancellationToken);
+        if (auth == null)
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
+
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
+        var result = await paidWeeklyActivityAnalytics.GetForProductIdAsync(
+            product.ProductId,
+            licenseTypes,
+            status,
+            weeks,
+            skip,
+            take,
+            cancellationToken);
+
+        return Ok(result);
+    }
+
     [HttpGet("licenses/types")]
     public async Task<IActionResult> GetLicenseTypes(
         [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
@@ -1104,6 +1147,46 @@ public sealed partial class AnalyticsController : ControllerBase
             cancellationToken);
 
         return Ok(result);
+    }
+
+    /// <summary>Returns the complete product-scoped license type settings through a read-only analytics route.</summary>
+    /// <remarks>Requires analytics:multi-product:read. Product-scoped keys remain restricted to their configured product.</remarks>
+    [HttpGet("licenses/types/settings")]
+    public async Task<IActionResult> GetLicenseTypeSettings(
+        [FromHeader(Name = "X-Analytics-Key")] string? analyticsKey,
+        [FromQuery] string? productId = null,
+        [FromQuery] string? productName = null,
+        [FromQuery] string? slug = null,
+        [FromQuery] string? parameterKey = null,
+        CancellationToken cancellationToken = default)
+    {
+        var auth = await _apiKeyAuth.ValidateForRequestAsync(
+            HttpContext,
+            analyticsKey,
+            AnalyticsApiKeyScopes.MultiProductRead,
+            cancellationToken);
+        if (auth == null)
+            return AnalyticsApiKeyHttp.Failure(HttpContext);
+
+        var product = await ResolveAnalyticsProductAsync(auth, productId, productName, cancellationToken);
+        if (product.Error != null)
+            return product.Error;
+
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        var types = await db.LicenseTypes
+            .AsNoTracking()
+            .Include(type => type.CustomParams)
+            .Where(type => type.ProductId == product.ProductId)
+            .ToListAsync(cancellationToken);
+
+        var filteredTypes = types
+            .Where(type => slug == null || string.Equals(type.Slug, slug, StringComparison.OrdinalIgnoreCase))
+            .Where(type => parameterKey == null || type.CustomParams.Any(parameter =>
+                string.Equals(parameter.Key, parameterKey, StringComparison.Ordinal)))
+            .Select(AdminController.ProjectLicenseType)
+            .ToList();
+
+        return Ok(filteredTypes);
     }
 
     [HttpGet("licenses/recent-onboarding-metrics")]

@@ -14,6 +14,10 @@ public static class SecurityLockAdminOutcomes
     public const string DecidedByInvalid = "decided_by_invalid";
     /// <summary>Reason longer than 500 characters.</summary>
     public const string ReasonTooLong = "reason_too_long";
+    /// <summary>An explicit unban requires a nonblank operator reason.</summary>
+    public const string ReasonRequired = "reason_required";
+    /// <summary>An explicit unban requires a bounded named audit reference.</summary>
+    public const string AuditReferenceInvalid = "audit_reference_invalid";
     /// <summary>Unknown report row.</summary>
     public const string NotFound = "not_found";
     /// <summary>Row outside the caller's product scope.</summary>
@@ -22,6 +26,15 @@ public static class SecurityLockAdminOutcomes
     public const string LockBannedIrreversible = "lock_banned_irreversible";
     /// <summary>The reported hardware has no provable assignment or alias at server receipt time.</summary>
     public const string HardwareUnlinked = "hardware_unlinked";
+    /// <summary>The incident generation changed while the administrative recovery was being prepared.</summary>
+    public const string RecoveryConflict = "recovery_conflict";
+    /// <summary>Only a currently banned report can use the explicit unban operation.</summary>
+    public const string LockNotBanned = "lock_not_banned";
+
+    /// <summary>The incident release succeeded, but the current seat no longer matches the immutable report hardware.</summary>
+    public const string RememberedReleaseHardwareChanged = "remembered_release_hardware_changed";
+    /// <summary>The incidents were closed for audit, but no ACTIVE enrollment can receive the recovery receipt.</summary>
+    public const string ReleaseNoActiveEnrollment = "release_no_active_enrollment";
 }
 
 /// <summary>Result of one admin decision.</summary>
@@ -29,7 +42,11 @@ public static class SecurityLockAdminOutcomes
 /// <param name="Row">Updated row when <paramref name="Outcome"/> is ok.</param>
 /// <param name="DiagnosticCode">Bounded internal cause; never includes reported hardware or credentials.</param>
 public sealed record SecurityLockAdminDecisionResult(
-    string Outcome, SecurityLockReport? Row, string? DiagnosticCode = null);
+    string Outcome,
+    SecurityLockReport? Row,
+    string? DiagnosticCode = null,
+    int RecoveredIncidentCount = 0,
+    int DeactivatedHardwareBanCount = 0);
 
 /// <summary>
 /// Admin decisions on security locks (TKT-001177), shared by the admin API and the "Verrous" page so both apply the
@@ -42,12 +59,17 @@ public sealed record SecurityLockAdminDecisionResult(
 public sealed class SecurityLockAdminService
 {
     private readonly IDbContextFactory<LicenseDbContext> _dbFactory;
+    private readonly IRuntimeEnrollmentAuthorityService _authority;
 
     /// <summary>Creates the service.</summary>
     /// <param name="dbFactory">Database factory.</param>
-    public SecurityLockAdminService(IDbContextFactory<LicenseDbContext> dbFactory)
+    /// <param name="authority">Runtime authority lock service.</param>
+    public SecurityLockAdminService(
+        IDbContextFactory<LicenseDbContext> dbFactory,
+        IRuntimeEnrollmentAuthorityService authority)
     {
         _dbFactory = dbFactory;
+        _authority = authority;
     }
 
     /// <summary>
@@ -86,66 +108,293 @@ public sealed class SecurityLockAdminService
             return new(SecurityLockAdminOutcomes.Forbidden, null);
         if (decision == SecurityLockAdminDecisions.Ban && !IsCanonicalHardwareId(preflight.HardwareId))
             return Unlinked("report_hardware_noncanonical");
-        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         if (string.Equals(decision, SecurityLockAdminDecisions.Ban, StringComparison.Ordinal))
         {
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
             // BAN can insert or reactivate BannedHardwareIds. Global authority must precede the
             // hardware and report locks; otherwise Runtime can hold global/shared while this path
             // holds hardware/report and both wait on the other side.
             await SecurityService.AcquireHardwareBanWriteAuthorityAsync(db, preflight.HardwareId);
+            var banRow = await db.SecurityLockReports.FromSqlInterpolated($"""
+                SELECT * FROM public."SecurityLockReports" WHERE "Id" = {id} FOR UPDATE
+                """).SingleOrDefaultAsync(cancellationToken);
+            if (banRow is null) return new(SecurityLockAdminOutcomes.NotFound, null);
+            if (scopedProductId.HasValue && scopedProductId.Value != banRow.ProductId)
+                return new(SecurityLockAdminOutcomes.Forbidden, null);
+            if (!string.Equals(banRow.HardwareId, preflight.HardwareId, StringComparison.Ordinal)
+                || !IsCanonicalHardwareId(banRow.HardwareId))
+                return Unlinked("report_hardware_changed");
+            if (banRow.LinkStatus is not (SecurityLockReportLinkStatuses.VerifiedSeat
+                or SecurityLockReportLinkStatuses.VerifiedAlias))
+                return Unlinked(banRow.LinkStatus == SecurityLockReportLinkStatuses.UnknownLegacy
+                    ? "report_link_legacy_unknown" : banRow.LinkReasonCode ?? "report_hardware_unlinked");
+
+            var now = DateTime.UtcNow;
+            banRow.AdminDecision = decision;
+            banRow.AdminDecisionAtUtc = now;
+            banRow.AdminDecisionBy = admin;
+            banRow.AdminDecisionReason = reason;
+            banRow.State = SecurityLockReportStates.Banned;
+            // banRow.HardwareId is canonical upper-case; historical ban rows may use any case.
+            var alreadyBanned = await db.BannedHardwareIds.AnyAsync(ban =>
+                ban.HardwareId.ToUpper() == banRow.HardwareId && ban.IsActive
+                && (ban.ProductId == null || ban.ProductId == banRow.ProductId)
+                && (ban.ExpiresAt == null || ban.ExpiresAt > now), cancellationToken);
+            if (!alreadyBanned)
+            {
+                await SecurityLockBans.StagePermanentBanAsync(db, banRow.HardwareId, banRow.ProductId,
+                    "security-lock-admin:" + banRow.Cause + ":" + banRow.LockId,
+                    SecurityLockCauseCatalog.IsIrreversibleCandidate(banRow.Level)
+                        ? SecurityLockVerdictPolicy.BanCategoryFor(banRow.Level)
+                        : BannedHardwareId.Categories.Manual,
+                    now, cancellationToken);
+            }
+            if (banRow.LinkLicenseSeatId.HasValue)
+            {
+                var seat = await db.LicenseSeats.AsNoTracking()
+                    .SingleOrDefaultAsync(candidate => candidate.Id == banRow.LinkLicenseSeatId.Value,
+                        cancellationToken);
+                if (seat is not null)
+                {
+                    var remembered = await SecurityLockRememberedReleaseStore.FindActiveAsync(
+                        db, banRow.ProductId, seat.LicenseId, seat.HardwareId, banRow.Cause,
+                        cancellationToken);
+                    if (remembered is not null)
+                        SecurityLockRememberedReleaseStore.Revoke(remembered, admin, now);
+                }
+            }
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return new(SecurityLockAdminOutcomes.Ok, banRow);
         }
-        // RELEASE never waits for the hardware advisory while holding the report row.
+
+        await using var lease = await _authority.AcquireAsync(db, preflight.BindingId, cancellationToken);
+        // The clicked report is a stable administrative handle. Recovery authority instead belongs to the
+        // current ACTIVE credential, so a report from an earlier installation generation remains actionable.
+        var scopedEnrollments = await db.RuntimeEnrollments.FromSqlInterpolated($"""
+            SELECT * FROM public."RuntimeEnrollments"
+            WHERE "BindingId" = {preflight.BindingId}
+              AND "InstallationId" = {preflight.InstallationId}
+              AND "ProductId" = {preflight.ProductId}
+            ORDER BY "Id" FOR UPDATE
+            """).ToListAsync(cancellationToken);
+        var activeEnrollments = scopedEnrollments
+            .Where(candidate => string.Equals(candidate.State, "ACTIVE", StringComparison.Ordinal))
+            .ToList();
+        if (activeEnrollments.Count > 1 || scopedEnrollments.Count == 0)
+        {
+            return new(SecurityLockAdminOutcomes.RecoveryConflict, null, "release_enrollment_scope_changed");
+        }
+        var activeEnrollment = activeEnrollments.SingleOrDefault();
+        // When no credential is active, keep closure auditable on the most advanced historical generation.
+        // Its inactive state prevents client refetch, while choosing the maximum epoch avoids a false conflict.
+        var recoveryEnrollment = activeEnrollment ?? scopedEnrollments
+            .OrderByDescending(candidate => candidate.SecurityEpoch)
+            .ThenByDescending(candidate => candidate.Id)
+            .First();
+        await RuntimeCommercialEligibilityValidator.AcquireReadBarrierAsync(db, cancellationToken);
         var row = await db.SecurityLockReports.FromSqlInterpolated($"""
             SELECT * FROM public."SecurityLockReports" WHERE "Id" = {id} FOR UPDATE
             """).SingleOrDefaultAsync(cancellationToken);
         if (row is null) return new(SecurityLockAdminOutcomes.NotFound, null);
         if (scopedProductId.HasValue && scopedProductId.Value != row.ProductId)
             return new(SecurityLockAdminOutcomes.Forbidden, null);
-        if (decision == SecurityLockAdminDecisions.Release
-            && row.State == SecurityLockReportStates.Banned)
+        if (row.State == SecurityLockReportStates.Banned)
             return new(SecurityLockAdminOutcomes.LockBannedIrreversible, null);
-        if (decision == SecurityLockAdminDecisions.Ban)
+        if (row.EnrollmentId != preflight.EnrollmentId
+            || row.BindingId != preflight.BindingId
+            || row.InstallationId != preflight.InstallationId
+            || row.ProductId != preflight.ProductId)
         {
-            if (!string.Equals(row.HardwareId, preflight.HardwareId, StringComparison.Ordinal)
-                || !IsCanonicalHardwareId(row.HardwareId))
-                return Unlinked("report_hardware_changed");
-            if (row.LinkStatus is not (SecurityLockReportLinkStatuses.VerifiedSeat
-                or SecurityLockReportLinkStatuses.VerifiedAlias))
-                return Unlinked(row.LinkStatus == SecurityLockReportLinkStatuses.UnknownLegacy
-                    ? "report_link_legacy_unknown" : row.LinkReasonCode ?? "report_hardware_unlinked");
-
-            var now = DateTime.UtcNow;
-            row.AdminDecision = decision;
-            row.AdminDecisionAtUtc = now;
-            row.AdminDecisionBy = admin;
-            row.AdminDecisionReason = reason;
-            row.State = SecurityLockReportStates.Banned;
-            // row.HardwareId is the validated canonical upper-case value; historical ban rows may use any case.
-            var alreadyBanned = await db.BannedHardwareIds.AnyAsync(ban =>
-                ban.HardwareId.ToUpper() == row.HardwareId && ban.IsActive
-                && (ban.ProductId == null || ban.ProductId == row.ProductId)
-                && (ban.ExpiresAt == null || ban.ExpiresAt > now), cancellationToken);
-            if (!alreadyBanned)
-            {
-                await SecurityLockBans.StagePermanentBanAsync(db, row.HardwareId, row.ProductId,
-                    "security-lock-admin:" + row.Cause + ":" + row.LockId,
-                    SecurityLockCauseCatalog.IsIrreversibleCandidate(row.Level)
-                        ? SecurityLockVerdictPolicy.BanCategoryFor(row.Level)
-                        : BannedHardwareId.Categories.Manual,
-                    now, cancellationToken);
-            }
-            await db.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-            return new(SecurityLockAdminOutcomes.Ok, row);
+            return new(SecurityLockAdminOutcomes.RecoveryConflict, null, "release_report_scope_changed");
         }
+
         var releaseTime = DateTime.UtcNow;
+        string? releaseDiagnosticCode = null;
         row.AdminDecision = decision;
         row.AdminDecisionAtUtc = releaseTime;
         row.AdminDecisionBy = admin;
         row.AdminDecisionReason = reason;
+        row.State = SecurityLockReportStates.Released;
+        row.LastVerdict = SecurityLockVerdicts.Release;
+        try
+        {
+            await RuntimeCriticalRecoveryTransition.StageAsync(
+                db, recoveryEnrollment, lease.AuthorityEpoch, releaseTime, recoveryEnrollment.ClientId, "admin-release",
+                RuntimeCriticalRecoverySources.AdminRelease, null, row.Id, admin, cancellationToken);
+            if (activeEnrollment is null)
+                releaseDiagnosticCode = SecurityLockAdminOutcomes.ReleaseNoActiveEnrollment;
+            if (row.LinkStatus is SecurityLockReportLinkStatuses.VerifiedSeat
+                    or SecurityLockReportLinkStatuses.VerifiedAlias
+                && row.LinkLicenseSeatId.HasValue)
+            {
+                var seat = await db.LicenseSeats.AsNoTracking()
+                    .SingleOrDefaultAsync(candidate => candidate.Id == row.LinkLicenseSeatId.Value,
+                        cancellationToken);
+                if (seat is not null
+                    && string.Equals(seat.HardwareId, row.HardwareId, StringComparison.Ordinal))
+                {
+                    var remembered = await SecurityLockRememberedReleaseStore.CreateOrReactivateAsync(
+                        db, row.ProductId, seat.LicenseId, row.HardwareId, row.Cause, row.Id,
+                        admin, releaseTime, cancellationToken);
+                    row.RememberedReleaseDecisionId = remembered.Id;
+                }
+                else if (seat is not null)
+                {
+                    releaseDiagnosticCode ??= SecurityLockAdminOutcomes.RememberedReleaseHardwareChanged;
+                }
+            }
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (InvalidOperationException exception)
+            when (exception.Message == "critical_recovery_generation_conflict")
+        {
+            return new(SecurityLockAdminOutcomes.RecoveryConflict, null, "release_generation_conflict");
+        }
+        await lease.CommitAsync(cancellationToken);
+        return new(SecurityLockAdminOutcomes.Ok, row, releaseDiagnosticCode);
+    }
+
+    /// <summary>
+    /// Explicitly reverses one BANNED lock, closes matching open incidents through the shared recovery transition,
+    /// and deactivates every applicable active hardware ban in the same authority transaction. This operation does
+    /// not create or reactivate a remembered RELEASE decision.
+    /// </summary>
+    /// <param name="id">Exact security-lock report row identifier.</param>
+    /// <param name="reason">Required human reason.</param>
+    /// <param name="auditReference">Required named audit reference.</param>
+    /// <param name="decidedBy">Named administrator.</param>
+    /// <param name="scopedProductId">Product scope, or null for a global administrator.</param>
+    /// <param name="cancellationToken">Cancellation.</param>
+    /// <returns>The closed outcome, updated row, and mutation counts.</returns>
+    public async Task<SecurityLockAdminDecisionResult> UnbanAsync(
+        Guid id,
+        string? reason,
+        string? auditReference,
+        string? decidedBy,
+        Guid? scopedProductId,
+        CancellationToken cancellationToken = default)
+    {
+        var admin = decidedBy?.Trim();
+        if (string.IsNullOrEmpty(admin) || admin.Length > 100)
+            return new(SecurityLockAdminOutcomes.DecidedByInvalid, null);
+        if (string.IsNullOrWhiteSpace(reason))
+            return new(SecurityLockAdminOutcomes.ReasonRequired, null);
+        if (string.IsNullOrWhiteSpace(auditReference) || auditReference.Length > 100
+            || auditReference.Any(char.IsControl))
+            return new(SecurityLockAdminOutcomes.AuditReferenceInvalid, null);
+        var auditedReason = $"{reason.Trim()} | auditRef={auditReference.Trim()}";
+        if (auditedReason.Length > 500)
+            return new(SecurityLockAdminOutcomes.ReasonTooLong, null);
+
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        var preflight = await db.SecurityLockReports.AsNoTracking()
+            .SingleOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
+        if (preflight == null)
+            return new(SecurityLockAdminOutcomes.NotFound, null);
+        if (scopedProductId.HasValue && scopedProductId.Value != preflight.ProductId)
+            return new(SecurityLockAdminOutcomes.Forbidden, null);
+        if (!IsCanonicalHardwareId(preflight.HardwareId))
+            return Unlinked("report_hardware_noncanonical");
+
+        await using var lease = await _authority.AcquireMutationAsync(db, preflight.BindingId, cancellationToken);
+        await SecurityService.AcquireHardwareBanMutationAsync(db, preflight.HardwareId);
+        var scopedEnrollments = await db.RuntimeEnrollments.FromSqlInterpolated($"""
+            SELECT * FROM public."RuntimeEnrollments"
+            WHERE "BindingId" = {preflight.BindingId}
+              AND "InstallationId" = {preflight.InstallationId}
+              AND "ProductId" = {preflight.ProductId}
+            ORDER BY "Id" FOR UPDATE
+            """).ToListAsync(cancellationToken);
+        var activeEnrollments = scopedEnrollments
+            .Where(candidate => string.Equals(candidate.State, "ACTIVE", StringComparison.Ordinal))
+            .ToList();
+        if (activeEnrollments.Count > 1 || scopedEnrollments.Count == 0)
+            return new(SecurityLockAdminOutcomes.RecoveryConflict, null, "unban_enrollment_scope_changed");
+        var activeEnrollment = activeEnrollments.SingleOrDefault();
+        var recoveryEnrollment = activeEnrollment ?? scopedEnrollments
+            .OrderByDescending(candidate => candidate.SecurityEpoch)
+            .ThenByDescending(candidate => candidate.Id)
+            .First();
+
+        await RuntimeCommercialEligibilityValidator.AcquireReadBarrierAsync(db, cancellationToken);
+        var row = await db.SecurityLockReports.FromSqlInterpolated($"""
+            SELECT * FROM public."SecurityLockReports" WHERE "Id" = {id} FOR UPDATE
+            """).SingleOrDefaultAsync(cancellationToken);
+        if (row == null)
+            return new(SecurityLockAdminOutcomes.NotFound, null);
+        if (scopedProductId.HasValue && scopedProductId.Value != row.ProductId)
+            return new(SecurityLockAdminOutcomes.Forbidden, null);
+        if (row.State != SecurityLockReportStates.Banned)
+            return new(SecurityLockAdminOutcomes.LockNotBanned, null);
+        if (row.EnrollmentId != preflight.EnrollmentId
+            || row.BindingId != preflight.BindingId
+            || row.InstallationId != preflight.InstallationId
+            || row.ProductId != preflight.ProductId
+            || !string.Equals(row.HardwareId, preflight.HardwareId, StringComparison.Ordinal))
+            return new(SecurityLockAdminOutcomes.RecoveryConflict, null, "unban_report_scope_changed");
+
+        var now = DateTime.UtcNow;
+        row.AdminDecision = SecurityLockAdminDecisions.Unban;
+        row.AdminDecisionAtUtc = now;
+        row.AdminDecisionBy = admin;
+        row.AdminDecisionReason = auditedReason;
+        row.State = SecurityLockReportStates.Released;
+        row.LastVerdict = SecurityLockVerdicts.Release;
+        row.RememberedReleaseDecisionId = null;
+        try
+        {
+            var recovery = await RuntimeCriticalRecoveryTransition.StageAsync(
+                db, recoveryEnrollment, lease.AuthorityEpoch, now, recoveryEnrollment.ClientId, "admin-unban",
+                RuntimeCriticalRecoverySources.AdminUnban, null, row.Id, admin, cancellationToken);
+            var deactivatedBanCount = await SecurityLockBans.StageUnbanAsync(
+                db, row.HardwareId, row.ProductId, admin, auditedReason, now, cancellationToken);
+            await db.SaveChangesAsync(cancellationToken);
+            await lease.CommitAsync(cancellationToken);
+            return new(SecurityLockAdminOutcomes.Ok, row,
+                activeEnrollment is null ? SecurityLockAdminOutcomes.ReleaseNoActiveEnrollment : null,
+                recovery.Incidents.Count, deactivatedBanCount);
+        }
+        catch (InvalidOperationException exception)
+            when (exception.Message == "critical_recovery_generation_conflict")
+        {
+            return new(SecurityLockAdminOutcomes.RecoveryConflict, null, "unban_generation_conflict");
+        }
+    }
+
+    /// <summary>Revokes one remembered RELEASE for future detections without reopening historical evidence.</summary>
+    public async Task<string> RevokeRememberedReleaseAsync(
+        Guid id,
+        string? revokedBy,
+        Guid? scopedProductId,
+        CancellationToken cancellationToken = default)
+    {
+        var admin = revokedBy?.Trim();
+        if (string.IsNullOrEmpty(admin) || admin.Length > 100)
+            return SecurityLockAdminOutcomes.DecidedByInvalid;
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+        var preflight = await db.SecurityLockReleaseDecisions.AsNoTracking()
+            .SingleOrDefaultAsync(candidate => candidate.Id == id, cancellationToken);
+        if (preflight is null)
+            return SecurityLockAdminOutcomes.NotFound;
+        if (scopedProductId.HasValue && scopedProductId.Value != preflight.ProductId)
+            return SecurityLockAdminOutcomes.Forbidden;
+
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        await SecurityLockRememberedReleaseStore.AcquireScopeLockAsync(
+            db, preflight.ProductId, preflight.LicenseId, preflight.HardwareId, preflight.Cause,
+            cancellationToken);
+        var decision = await db.SecurityLockReleaseDecisions.FromSqlInterpolated($"""
+            SELECT * FROM public."SecurityLockReleaseDecisions" WHERE "Id" = {id} FOR UPDATE
+            """).SingleOrDefaultAsync(cancellationToken);
+        if (decision is null)
+            return SecurityLockAdminOutcomes.NotFound;
+        if (scopedProductId.HasValue && scopedProductId.Value != decision.ProductId)
+            return SecurityLockAdminOutcomes.Forbidden;
+        SecurityLockRememberedReleaseStore.Revoke(decision, admin, DateTime.UtcNow);
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
-        return new(SecurityLockAdminOutcomes.Ok, row);
+        return SecurityLockAdminOutcomes.Ok;
     }
 
     /// <summary>Returns a stable public refusal with a bounded internal diagnostic and no hardware value.</summary>

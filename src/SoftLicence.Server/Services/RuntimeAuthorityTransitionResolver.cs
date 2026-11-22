@@ -5,7 +5,7 @@ namespace SoftLicence.Server.Services;
 
 /// <summary>
 /// Classifies persisted Runtime authority history before a new installation generation is created.
-/// See DevBrain DOC-324 for the complete transition matrix and its fail-closed invariants.
+/// See internal design note DOC-324 for the complete transition matrix and its fail-closed invariants.
 /// </summary>
 internal static class RuntimeAuthorityTransitionResolver
 {
